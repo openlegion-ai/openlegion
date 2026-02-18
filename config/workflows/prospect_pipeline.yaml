@@ -1,0 +1,31 @@
+name: prospect_pipeline
+trigger: new_lead
+timeout: 600
+
+steps:
+  - id: research
+    agent: research
+    task_type: research_prospect
+    input_from: trigger.payload
+    timeout: 120
+    on_failure: retry
+    max_retries: 3
+
+  - id: qualify
+    agent: qualify
+    task_type: score_lead
+    input_from: "blackboard://context/prospect_{lead_id}"
+    depends_on: [research]
+    timeout: 60
+    on_failure: skip
+
+  - id: outreach
+    agent: outreach
+    task_type: draft_sequence
+    input_from: "blackboard://context/prospect_{lead_id}"
+    depends_on: [qualify]
+    condition: "qualify.result.score > 0.7"
+    timeout: 90
+    on_failure: abort
+
+on_complete: pipeline_complete

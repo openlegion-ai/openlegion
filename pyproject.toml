@@ -1,0 +1,43 @@
+[project]
+name = "openlegion"
+version = "0.1.0"
+description = "A lean, container-isolated, memory-aware multi-agent runtime"
+requires-python = ">=3.12"
+
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "httpx>=0.28.0",
+    "pydantic>=2.10.0",
+    "litellm>=1.60.0",
+    "sqlite-vec>=0.1.6",
+    "pyyaml>=6.0",
+    "click>=8.1.0",
+    "docker>=7.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8.0",
+]
+
+channels = [
+    "python-telegram-bot>=21.0",
+]
+
+[project.scripts]
+openlegion = "src.cli:cli"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

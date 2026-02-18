@@ -1,0 +1,14 @@
+FROM python:3.12-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
+COPY pyproject.toml .
+RUN pip install --no-cache-dir \
+    fastapi uvicorn httpx pydantic litellm sqlite-vec pyyaml click docker
+COPY src/host/ /app/src/host/
+COPY src/shared/ /app/src/shared/
+COPY src/channels/ /app/src/channels/
+COPY src/cli.py /app/src/cli.py
+COPY src/__init__.py /app/src/__init__.py
+COPY config/ /app/config/
+EXPOSE 8420
+CMD ["python", "-m", "src.cli", "start", "--config", "/app/config/mesh.yaml"]

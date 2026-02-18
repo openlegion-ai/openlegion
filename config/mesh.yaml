@@ -1,0 +1,46 @@
+mesh:
+  host: "0.0.0.0"
+  port: 8420
+
+llm:
+  default_model: "openai/gpt-4o-mini"
+  embedding_model: "text-embedding-3-small"
+  max_tokens: 4096
+  temperature: 0.7
+
+agents:
+  research:
+    role: "research"
+    model: "openai/gpt-4o-mini"
+    skills_dir: "./skills/research"
+    system_prompt: |
+      You are a research specialist. Your job is to gather comprehensive
+      information about companies and people using available tools.
+      Focus on: company size, revenue, tech stack, recent news, key contacts.
+    resources:
+      memory_limit: "512m"
+      cpu_limit: 0.5
+
+  qualify:
+    role: "qualify"
+    model: "openai/gpt-4o-mini"
+    skills_dir: "./skills/qualify"
+    system_prompt: |
+      You are a lead qualification specialist. Score leads based on
+      ICP fit, budget signals, timing indicators, and engagement potential.
+      Return a score from 0.0 to 1.0 with reasoning.
+    resources:
+      memory_limit: "256m"
+      cpu_limit: 0.25
+
+  outreach:
+    role: "outreach"
+    model: "openai/gpt-4o-mini"
+    skills_dir: "./skills/outreach"
+    system_prompt: |
+      You are an outreach specialist. Draft personalized email sequences
+      based on prospect research. Reference specific details about their
+      company, tech stack, and recent activities.
+    resources:
+      memory_limit: "256m"
+      cpu_limit: 0.25

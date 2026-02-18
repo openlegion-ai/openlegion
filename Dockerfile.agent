@@ -1,0 +1,35 @@
+FROM python:3.12-slim
+
+# System tools useful for agent operations
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl wget git jq vim-tiny procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user (created early so /data ownership is correct)
+RUN useradd --create-home --uid 1000 --shell /bin/bash agent
+
+WORKDIR /app
+
+# Python dependencies
+COPY pyproject.toml .
+RUN pip install --no-cache-dir \
+    fastapi uvicorn httpx pydantic litellm sqlite-vec pyyaml playwright
+
+# Install Chromium for browser automation
+RUN playwright install chromium --with-deps
+
+# Application code
+COPY src/agent/ /app/src/agent/
+COPY src/shared/ /app/src/shared/
+COPY src/__init__.py /app/src/__init__.py
+
+# Data volume mount point -- owned by agent user
+RUN mkdir -p /data && chown agent:agent /data
+VOLUME /data
+
+RUN chown -R agent:agent /app
+
+USER agent
+
+EXPOSE 8400
+CMD ["python", "-m", "src.agent"]
