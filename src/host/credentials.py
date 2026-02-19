@@ -10,6 +10,7 @@ Env var format: OPENLEGION_CRED_<SERVICE>_<KEY_NAME>
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable
 
@@ -28,8 +29,18 @@ class CredentialVault:
         self.credentials: dict[str, str] = {}
         self.service_handlers: dict[str, Callable] = {}
         self.cost_tracker = cost_tracker
+        self._http_client: httpx.AsyncClient | None = None
         self._load_credentials()
         self._register_handlers()
+
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=30)
+        return self._http_client
+
+    async def close(self) -> None:
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
 
     def _load_credentials(self) -> None:
         """Load credentials from environment variables."""
@@ -153,6 +164,73 @@ class CredentialVault:
 
         return APIProxyResponse(success=False, error=f"Unknown action: {request.action}")
 
+    async def stream_llm(self, request: APIProxyRequest, agent_id: str = ""):
+        """Streaming LLM handler. Yields SSE-formatted chunks.
+
+        Each yielded string is a complete SSE line: ``data: <json>\\n\\n``.
+        The final chunk has ``"done": true``.
+        """
+        import litellm
+
+        if self.cost_tracker and agent_id and request.service in ("llm", "anthropic", "openai"):
+            budget = self.cost_tracker.check_budget(agent_id)
+            if not budget["allowed"]:
+                yield f"data: {json.dumps({'error': 'Budget exceeded'})}\n\n"
+                return
+
+        model = request.params.get("model", "")
+        api_key = self._get_api_key_for_model(model)
+        if not api_key:
+            yield f"data: {json.dumps({'error': f'No API key for model: {model}'})}\n\n"
+            return
+
+        try:
+            response = await litellm.acompletion(
+                model=model,
+                messages=request.params.get("messages", []),
+                api_key=api_key,
+                stream=True,
+                **{k: v for k, v in request.params.items() if k not in ("model", "messages")},
+            )
+
+            collected_content = ""
+            collected_tool_calls: list[dict] = []
+
+            async for chunk in response:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta is None:
+                    continue
+
+                if delta.content:
+                    collected_content += delta.content
+                    yield f"data: {json.dumps({'type': 'text_delta', 'content': delta.content})}\n\n"
+
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index if hasattr(tc, 'index') else 0
+                        while len(collected_tool_calls) <= idx:
+                            collected_tool_calls.append({"name": "", "arguments": ""})
+                        if tc.function and tc.function.name:
+                            collected_tool_calls[idx]["name"] = tc.function.name
+                        if tc.function and tc.function.arguments:
+                            collected_tool_calls[idx]["arguments"] += tc.function.arguments
+
+            # Emit final summary
+            tokens_used = 0
+            if hasattr(response, 'usage') and response.usage:
+                tokens_used = response.usage.total_tokens
+
+            yield f"data: {json.dumps({'type': 'done', 'content': collected_content, 'tool_calls': collected_tool_calls, 'tokens_used': tokens_used})}\n\n"
+
+            if self.cost_tracker and agent_id and tokens_used:
+                prompt_tokens = int(tokens_used * 0.7)
+                completion_tokens = tokens_used - prompt_tokens
+                self.cost_tracker.track(agent_id, model, prompt_tokens, completion_tokens)
+
+        except Exception as e:
+            logger.error(f"Streaming LLM call failed: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
     async def _handle_anthropic(self, request: APIProxyRequest) -> APIProxyResponse:
         """Handle Anthropic API calls (LLM completions, embeddings) via LiteLLM."""
         api_key = self.credentials.get("anthropic_api_key")
@@ -219,20 +297,20 @@ class CredentialVault:
         if not api_key:
             return APIProxyResponse(success=False, error="Apollo API key not configured")
 
-        async with httpx.AsyncClient() as client:
-            if request.action == "search_people":
-                response = await client.post(
-                    "https://api.apollo.io/api/v1/mixed_people/search",
-                    headers={"X-Api-Key": api_key},
-                    json=request.params,
-                    timeout=request.timeout,
-                )
-                return APIProxyResponse(
-                    success=response.is_success,
-                    data=response.json() if response.is_success else None,
-                    error=response.text if not response.is_success else None,
-                    status_code=response.status_code,
-                )
+        client = await self._get_http_client()
+        if request.action == "search_people":
+            response = await client.post(
+                "https://api.apollo.io/api/v1/mixed_people/search",
+                headers={"X-Api-Key": api_key},
+                json=request.params,
+                timeout=request.timeout,
+            )
+            return APIProxyResponse(
+                success=response.is_success,
+                data=response.json() if response.is_success else None,
+                error=response.text if not response.is_success else None,
+                status_code=response.status_code,
+            )
 
         return APIProxyResponse(success=False, error=f"Unknown action: {request.action}")
 
@@ -242,19 +320,19 @@ class CredentialVault:
         if not api_key:
             return APIProxyResponse(success=False, error="Hunter API key not configured")
 
-        async with httpx.AsyncClient() as client:
-            if request.action == "domain_search":
-                response = await client.get(
-                    "https://api.hunter.io/v2/domain-search",
-                    params={"domain": request.params.get("domain"), "api_key": api_key},
-                    timeout=request.timeout,
-                )
-                return APIProxyResponse(
-                    success=response.is_success,
-                    data=response.json() if response.is_success else None,
-                    error=response.text if not response.is_success else None,
-                    status_code=response.status_code,
-                )
+        client = await self._get_http_client()
+        if request.action == "domain_search":
+            response = await client.get(
+                "https://api.hunter.io/v2/domain-search",
+                params={"domain": request.params.get("domain"), "api_key": api_key},
+                timeout=request.timeout,
+            )
+            return APIProxyResponse(
+                success=response.is_success,
+                data=response.json() if response.is_success else None,
+                error=response.text if not response.is_success else None,
+                status_code=response.status_code,
+            )
 
         return APIProxyResponse(success=False, error=f"Unknown action: {request.action}")
 
@@ -264,16 +342,16 @@ class CredentialVault:
         if not api_key:
             return APIProxyResponse(success=False, error="Brave Search API key not configured")
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                "https://api.search.brave.com/res/v1/web/search",
-                headers={"X-Subscription-Token": api_key},
-                params=request.params,
-                timeout=request.timeout,
-            )
-            return APIProxyResponse(
-                success=response.is_success,
-                data=response.json() if response.is_success else None,
-                error=response.text if not response.is_success else None,
-                status_code=response.status_code,
-            )
+        client = await self._get_http_client()
+        response = await client.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            headers={"X-Subscription-Token": api_key},
+            params=request.params,
+            timeout=request.timeout,
+        )
+        return APIProxyResponse(
+            success=response.is_success,
+            data=response.json() if response.is_success else None,
+            error=response.text if not response.is_success else None,
+            status_code=response.status_code,
+        )

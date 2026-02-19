@@ -197,3 +197,105 @@ def test_orchestrator_execution_status():
     assert status["workflow"] == "test"
 
     assert orch.get_execution_status("nonexistent") is None
+
+
+# === Push-Based Task Resolution ===
+
+
+def test_resolve_task_result():
+    """resolve_task_result resolves a pending future."""
+    import asyncio
+
+    orch = Orchestrator(mesh_url="http://localhost:8420", workflows_dir="/nonexistent")
+    loop = asyncio.new_event_loop()
+
+    future = loop.create_future()
+    orch._pending_results["task_1"] = future
+
+    result = TaskResult(task_id="task_1", status="complete", result={"data": "ok"})
+    assert orch.resolve_task_result("task_1", result) is True
+    assert future.done()
+    assert future.result() is result
+    assert "task_1" not in orch._pending_results
+
+    loop.close()
+
+
+def test_resolve_unknown_task_id():
+    """resolve_task_result returns False for unknown task IDs."""
+    orch = Orchestrator(mesh_url="http://localhost:8420", workflows_dir="/nonexistent")
+    result = TaskResult(task_id="unknown", status="complete")
+    assert orch.resolve_task_result("unknown", result) is False
+
+
+@pytest.mark.asyncio
+async def test_execute_step_uses_future():
+    """_execute_step creates a future and resolves via resolve_task_result."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    orch = Orchestrator(mesh_url="http://localhost:8420", workflows_dir="/nonexistent")
+    orch.container_manager = MagicMock()
+    orch.container_manager.get_agent_url = MagicMock(return_value="http://localhost:8401")
+
+    # Mock the HTTP client to simulate agent accepting the task
+    mock_client = AsyncMock()
+    mock_client.is_closed = False
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"accepted": True}
+    mock_client.post = AsyncMock(return_value=mock_response)
+    orch._client = mock_client
+
+    wf = WorkflowDefinition(
+        name="test", trigger="test",
+        steps=[WorkflowStep(id="s1", task_type="research", agent="alpha")],
+    )
+    execution = WorkflowExecution(wf, {"query": "test"})
+
+    # Run _execute_step in background; it will await the future
+    step_task = asyncio.create_task(orch._execute_step(execution, wf.steps[0]))
+
+    # Give the task a moment to register the future
+    await asyncio.sleep(0.05)
+
+    # Find the pending task_id and resolve it
+    assert len(orch._pending_results) == 1
+    task_id = next(iter(orch._pending_results))
+    push_result = TaskResult(task_id=task_id, status="complete", result={"found": True})
+    orch.resolve_task_result(task_id, push_result)
+
+    result = await step_task
+    assert result.status == "complete"
+    assert result.result == {"found": True}
+
+
+@pytest.mark.asyncio
+async def test_execute_step_timeout():
+    """_execute_step times out if no result is pushed and no polling fallback."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    orch = Orchestrator(mesh_url="http://localhost:8420", workflows_dir="/nonexistent")
+    orch.container_manager = MagicMock()
+    orch.container_manager.get_agent_url = MagicMock(return_value="http://localhost:8401")
+
+    # Mock client
+    mock_client = AsyncMock()
+    mock_client.is_closed = False
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"accepted": True}
+    mock_client.post = AsyncMock(return_value=mock_response)
+    # Mock polling to also timeout (return timeout result)
+    mock_status_resp = MagicMock()
+    mock_status_resp.json.return_value = {"state": "working"}
+    mock_client.get = AsyncMock(return_value=mock_status_resp)
+    orch._client = mock_client
+
+    wf = WorkflowDefinition(
+        name="test", trigger="test",
+        steps=[WorkflowStep(id="s1", task_type="research", agent="alpha", timeout=1)],
+    )
+    execution = WorkflowExecution(wf, {})
+
+    result = await orch._execute_step(execution, wf.steps[0])
+    assert result.status == "timeout"

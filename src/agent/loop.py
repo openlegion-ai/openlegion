@@ -11,6 +11,8 @@ import json
 import time
 from typing import TYPE_CHECKING, Any, Optional
 
+import httpx
+
 from src.shared.types import AgentStatus, TaskAssignment, TaskResult
 from src.shared.utils import format_dict, generate_id, setup_logging, truncate
 
@@ -23,6 +25,51 @@ if TYPE_CHECKING:
     from src.agent.workspace import WorkspaceManager
 
 logger = setup_logging("agent.loop")
+
+# Status codes that indicate transient server-side errors worth retrying
+_RETRYABLE_STATUS_CODES = {429, 502, 503}
+_MAX_RETRIES = 3
+_BACKOFF_BASE = 1  # seconds: 1, 2, 4
+
+
+async def _llm_call_with_retry(llm_chat_fn, *, system, messages, tools):
+    """Call the LLM with exponential backoff on transient errors.
+
+    Retries on: connection errors, timeouts, 429/502/503 status codes.
+    Does NOT retry on: budget exceeded (RuntimeError), permanent errors.
+    """
+    last_exc = None
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            return await llm_chat_fn(system=system, messages=messages, tools=tools)
+        except RuntimeError:
+            # Budget exceeded or permanent LLM errors — don't retry
+            raise
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in _RETRYABLE_STATUS_CODES:
+                last_exc = e
+                if attempt < _MAX_RETRIES:
+                    wait = _BACKOFF_BASE * (2 ** attempt)
+                    logger.warning(
+                        f"LLM call returned {e.response.status_code}, retrying in {wait}s "
+                        f"(attempt {attempt + 1}/{_MAX_RETRIES})"
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+            raise
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            last_exc = e
+            if attempt < _MAX_RETRIES:
+                wait = _BACKOFF_BASE * (2 ** attempt)
+                logger.warning(
+                    f"LLM call failed ({type(e).__name__}), retrying in {wait}s "
+                    f"(attempt {attempt + 1}/{_MAX_RETRIES})"
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
+    # Should not reach here, but just in case
+    raise last_exc  # type: ignore[misc]
 
 
 class AgentLoop:
@@ -116,7 +163,8 @@ class AgentLoop:
                     return result
 
                 # === DECIDE (LLM call) ===
-                llm_response = await self.llm.chat(
+                llm_response = await _llm_call_with_retry(
+                    self.llm.chat,
                     system=system_prompt,
                     messages=messages,
                     tools=self.skills.get_tool_definitions() or None,
@@ -393,7 +441,7 @@ class AgentLoop:
 
     # ── Chat mode ──────────────────────────────────────────────
 
-    CHAT_MAX_TOOL_ROUNDS = 10
+    CHAT_MAX_TOOL_ROUNDS = 30
 
     async def chat(self, user_message: str) -> dict:
         """Handle a single chat turn with persistent conversation history.
@@ -453,7 +501,8 @@ class AgentLoop:
             system = self._build_chat_system_prompt(goals=goals)
 
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
-                llm_response = await self.llm.chat(
+                llm_response = await _llm_call_with_retry(
+                    self.llm.chat,
                     system=system,
                     messages=self._chat_messages,
                     tools=self.skills.get_tool_definitions() or None,
@@ -524,10 +573,14 @@ class AgentLoop:
                 else:
                     self._chat_messages = self._trim_context(self._chat_messages, max_tokens=100_000)
 
-            llm_response = await self.llm.chat(
+            # Max tool rounds exhausted — force final text response.
+            # Must still pass tools= when tool messages are in history
+            # (Anthropic requires it).
+            llm_response = await _llm_call_with_retry(
+                self.llm.chat,
                 system=system,
                 messages=self._chat_messages,
-                tools=None,
+                tools=self.skills.get_tool_definitions() or None,
             )
             total_tokens += llm_response.tokens_used
             self._chat_messages.append({"role": "assistant", "content": llm_response.content})
@@ -591,6 +644,13 @@ class AgentLoop:
             f"## OPERATING RULES (non-negotiable)\n\n"
             f"You are an autonomous execution agent. Your job is to DO things, "
             f"not describe how to do them.\n\n"
+            f"CRITICAL: Do NOT narrate routine tool calls. Just call the tool. "
+            f"Wrong: 'Let me navigate to the page now.' then tool call. "
+            f"Right: just call browser_navigate directly with no text. "
+            f"Only include text when reporting final results or asking a "
+            f"genuinely needed clarification. Between tool calls, NEVER output "
+            f"text like 'Now let me...' or 'Let me check...' — it wastes a "
+            f"round. Call the next tool immediately.\n\n"
             f"1. ACT FIRST. When the user asks you to do something, call a tool "
             f"immediately as your first response. Never reply with instructions "
             f"for the user to follow manually — that defeats your purpose.\n\n"
@@ -614,11 +674,22 @@ class AgentLoop:
             f"(create an account, fill a form, look something up, sign up for a "
             f"service, etc.), your FIRST action must be:\n"
             f"   a) browser_navigate to the relevant URL\n"
-            f"   b) Read the returned page content\n"
+            f"   b) Read the returned page content to find form fields and buttons\n"
             f"   c) browser_type / browser_click to fill forms and click buttons\n"
-            f"   d) browser_screenshot if you need to see the visual layout\n"
+            f"   d) browser_screenshot ONLY if text content is insufficient\n"
             f"   e) Continue until done or until you hit an insurmountable blocker\n"
             f"   f) Only THEN report results to the user\n\n"
+            f"4b. BROWSER EFFICIENCY (critical):\n"
+            f"   - Do NOT re-navigate to a URL you are already on.\n"
+            f"   - Prefer browser_click/browser_type with CSS selectors over "
+            f"browser_evaluate with JavaScript. Use evaluate only when selectors "
+            f"cannot reach the element (e.g. shadow DOM, dynamic IDs).\n"
+            f"   - Call multiple tool actions per turn when possible instead of "
+            f"one action per turn.\n"
+            f"   - After filling a form, click submit immediately in the same "
+            f"sequence — do not stop to describe what you did.\n"
+            f"   - If a page has not changed after a click, try a different "
+            f"selector or approach — do not repeat the same action.\n\n"
             f"5. MAKE DECISIONS. When the user says 'do it', 'just do it', "
             f"'surprise me', or gives latitude — pick the best option yourself "
             f"and execute immediately. Do not ask for confirmation.\n\n"
@@ -649,3 +720,172 @@ class AgentLoop:
             tasks_completed=self.tasks_completed,
             tasks_failed=self.tasks_failed,
         )
+
+    # ── Streaming chat ────────────────────────────────────────
+
+    async def chat_stream(self, user_message: str):
+        """Streaming chat that yields SSE events as they happen.
+
+        Events yielded (as dicts, caller serialises to SSE):
+          {"type": "tool_start", "name": str, "input": dict}
+          {"type": "tool_result", "name": str, "output": any}
+          {"type": "text_delta", "content": str}
+          {"type": "done", "response": str, "tool_outputs": list, "tokens_used": int}
+        """
+        async with self._chat_lock:
+            async for event in self._chat_stream_inner(user_message):
+                yield event
+
+    async def _chat_stream_inner(self, user_message: str):
+        self.state = "working"
+        total_tokens = 0
+        tool_outputs: list[dict] = []
+
+        try:
+            if not hasattr(self, "_chat_messages"):
+                self._chat_messages: list[dict] = []
+
+            goals = await self._fetch_goals()
+
+            if (
+                self.workspace
+                and self._chat_messages
+                and self.workspace.looks_like_correction(user_message)
+            ):
+                prev_assistant = next(
+                    (m["content"] for m in reversed(self._chat_messages) if m.get("role") == "assistant"),
+                    None,
+                )
+                if prev_assistant:
+                    self.workspace.record_correction(
+                        original=truncate(prev_assistant, 200),
+                        correction=user_message,
+                    )
+
+            if not self._chat_messages and self.workspace:
+                memory_hits = self.workspace.search(user_message, max_results=3)
+                if memory_hits:
+                    memory_context = "\n".join(
+                        f"- [{h['file']}] {h['snippet']}" for h in memory_hits
+                    )
+                    user_message = (
+                        f"{user_message}\n\n"
+                        f"[Relevant memory auto-loaded]\n{memory_context}"
+                    )
+
+            self._chat_messages.append({"role": "user", "content": user_message})
+            system = self._build_chat_system_prompt(goals=goals)
+
+            for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
+                llm_response = await _llm_call_with_retry(
+                    self.llm.chat,
+                    system=system,
+                    messages=self._chat_messages,
+                    tools=self.skills.get_tool_definitions() or None,
+                )
+                total_tokens += llm_response.tokens_used
+
+                if not llm_response.tool_calls:
+                    # Stream the final text
+                    if llm_response.content:
+                        yield {"type": "text_delta", "content": llm_response.content}
+                    self._chat_messages.append({"role": "assistant", "content": llm_response.content})
+                    self._log_chat_turn(user_message, llm_response.content)
+                    self.state = "idle"
+                    yield {
+                        "type": "done",
+                        "response": llm_response.content,
+                        "tool_outputs": tool_outputs,
+                        "tokens_used": total_tokens,
+                    }
+                    return
+
+                tool_call_entries = [
+                    {
+                        "id": f"call_{generate_id('tc')}",
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments),
+                        },
+                    }
+                    for tc in llm_response.tool_calls
+                ]
+                self._chat_messages.append({
+                    "role": "assistant",
+                    "content": llm_response.content or "",
+                    "tool_calls": tool_call_entries,
+                })
+
+                for i, tool_call in enumerate(llm_response.tool_calls):
+                    yield {"type": "tool_start", "name": tool_call.name, "input": tool_call.arguments}
+                    try:
+                        result = await self.skills.execute(
+                            tool_call.name,
+                            tool_call.arguments,
+                            mesh_client=self.mesh_client,
+                            workspace_manager=self.workspace,
+                        )
+                        result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+                    except Exception as e:
+                        result_str = json.dumps({"error": str(e)})
+                        result = {"error": str(e)}
+                        logger.error(f"Chat tool {tool_call.name} failed: {e}")
+                        self._record_failure(
+                            tool_call.name, str(e),
+                            truncate(str(tool_call.arguments), 200),
+                        )
+
+                    self._chat_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call_entries[i]["id"],
+                        "content": result_str,
+                    })
+                    tool_outputs.append({
+                        "tool": tool_call.name,
+                        "input": tool_call.arguments,
+                        "output": result,
+                    })
+                    yield {"type": "tool_result", "name": tool_call.name, "output": result}
+                    self._maybe_reload_skills(result)
+
+                if self.context_manager:
+                    self._chat_messages = await self.context_manager.maybe_compact(
+                        system, self._chat_messages,
+                    )
+                else:
+                    self._chat_messages = self._trim_context(self._chat_messages, max_tokens=100_000)
+
+            # Max tool rounds exhausted — force final response.
+            # Must still pass tools= when tool messages are in history.
+            llm_response = await _llm_call_with_retry(
+                self.llm.chat,
+                system=system,
+                messages=self._chat_messages,
+                tools=self.skills.get_tool_definitions() or None,
+            )
+            total_tokens += llm_response.tokens_used
+            if llm_response.content:
+                yield {"type": "text_delta", "content": llm_response.content}
+            self._chat_messages.append({"role": "assistant", "content": llm_response.content})
+            self._log_chat_turn(user_message, llm_response.content)
+            self.state = "idle"
+            yield {
+                "type": "done",
+                "response": llm_response.content,
+                "tool_outputs": tool_outputs,
+                "tokens_used": total_tokens,
+            }
+
+        except asyncio.CancelledError:
+            self.state = "idle"
+            raise
+        except Exception as e:
+            self.state = "idle"
+            logger.error(f"Streaming chat failed: {e}", exc_info=True)
+            yield {
+                "type": "done",
+                "response": f"Error: {e}",
+                "tool_outputs": tool_outputs,
+                "tokens_used": total_tokens,
+            }

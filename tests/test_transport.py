@@ -159,3 +159,36 @@ class TestSandboxTransport:
             result = t.request_sync("alpha", "GET", "/status", timeout=5)
 
         assert "error" in result
+
+
+# ── HttpTransport Client Lifecycle ───────────────────────────
+
+class TestHttpTransportClientLifecycle:
+    @pytest.mark.asyncio
+    async def test_client_reuse(self):
+        """_get_client returns the same instance on repeated calls."""
+        t = HttpTransport()
+        c1 = await t._get_client()
+        c2 = await t._get_client()
+        assert c1 is c2
+        await t.close()
+
+    @pytest.mark.asyncio
+    async def test_close_and_recreate(self):
+        """After close(), _get_client creates a new instance."""
+        t = HttpTransport()
+        c1 = await t._get_client()
+        await t.close()
+        assert c1.is_closed
+        c2 = await t._get_client()
+        assert c2 is not c1
+        assert not c2.is_closed
+        await t.close()
+
+    @pytest.mark.asyncio
+    async def test_close_idempotent(self):
+        """Calling close() twice does not raise."""
+        t = HttpTransport()
+        await t._get_client()
+        await t.close()
+        await t.close()  # should not raise

@@ -17,14 +17,14 @@ from src.shared.utils import setup_logging
 logger = setup_logging("agent.skills")
 
 # Global registry populated by the @skill decorator
-_skill_registry: dict[str, dict] = {}
+_skill_staging: dict[str, dict] = {}
 
 
 def skill(name: str, description: str, parameters: dict):
     """Decorator to register a function as an agent skill."""
 
     def decorator(func):
-        _skill_registry[name] = {
+        _skill_staging[name] = {
             "name": name,
             "description": description,
             "parameters": parameters,
@@ -45,10 +45,9 @@ class SkillRegistry:
     def __init__(self, skills_dir: str):
         self.skills_dir = skills_dir
         self.skills: dict[str, dict] = {}
-        _skill_registry.clear()
         self._discover_builtins()
         self._discover(skills_dir)
-        self.skills = dict(_skill_registry)
+        self.skills = dict(_skill_staging)
 
     def _discover_builtins(self) -> None:
         """Load all tool modules from the builtins package."""
@@ -80,10 +79,10 @@ class SkillRegistry:
 
     def reload(self) -> int:
         """Re-discover skills from builtins and skills_dir. Returns new skill count."""
-        _skill_registry.clear()
+        _skill_staging.clear()
         self._discover_builtins()
         self._discover(self.skills_dir)
-        self.skills = dict(_skill_registry)
+        self.skills = dict(_skill_staging)
         logger.info(f"Reloaded {len(self.skills)} skills")
         return len(self.skills)
 

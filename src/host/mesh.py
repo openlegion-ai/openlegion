@@ -174,25 +174,89 @@ class Blackboard:
 
 
 class PubSub:
-    """Simple in-process pub/sub for agent events.
+    """In-process pub/sub for agent events with optional SQLite persistence.
 
     Agents subscribe to topics. When an event is published,
     all subscribers are notified via their container HTTP API.
+
+    When ``db_path`` is provided, subscriptions and events are persisted
+    to SQLite so they survive restarts.  Without ``db_path``, behaviour
+    is identical to the original in-memory-only implementation.
     """
 
-    def __init__(self) -> None:
+    _EVENT_GC_THRESHOLD = 10_000
+    _EVENT_GC_KEEP = 5_000
+
+    def __init__(self, db_path: str | None = None) -> None:
         self.subscriptions: dict[str, list[str]] = {}
         self.event_log: list[dict] = []
+        self._db: sqlite3.Connection | None = None
+
+        if db_path is not None:
+            self._db = sqlite3.connect(db_path, check_same_thread=False)
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA busy_timeout=5000")
+            self._init_schema()
+            self._load_subscriptions()
+            self._load_events()
+
+    def _init_schema(self) -> None:
+        assert self._db is not None
+        self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                topic TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                PRIMARY KEY (topic, agent_id)
+            );
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic TEXT NOT NULL,
+                data TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_topic ON events(topic);
+        """)
+        self._db.commit()
+
+    def _load_subscriptions(self) -> None:
+        assert self._db is not None
+        rows = self._db.execute("SELECT topic, agent_id FROM subscriptions").fetchall()
+        for topic, agent_id in rows:
+            self.subscriptions.setdefault(topic, [])
+            if agent_id not in self.subscriptions[topic]:
+                self.subscriptions[topic].append(agent_id)
+
+    def _load_events(self) -> None:
+        assert self._db is not None
+        rows = self._db.execute("SELECT topic, data FROM events ORDER BY id").fetchall()
+        for topic, data in rows:
+            try:
+                event = json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                event = data
+            self.event_log.append({"topic": topic, "event": event})
 
     def subscribe(self, topic: str, agent_id: str) -> None:
         if topic not in self.subscriptions:
             self.subscriptions[topic] = []
         if agent_id not in self.subscriptions[topic]:
             self.subscriptions[topic].append(agent_id)
+            if self._db is not None:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO subscriptions (topic, agent_id) VALUES (?, ?)",
+                    (topic, agent_id),
+                )
+                self._db.commit()
 
     def unsubscribe(self, topic: str, agent_id: str) -> None:
         if topic in self.subscriptions:
             self.subscriptions[topic] = [a for a in self.subscriptions[topic] if a != agent_id]
+            if self._db is not None:
+                self._db.execute(
+                    "DELETE FROM subscriptions WHERE topic = ? AND agent_id = ?",
+                    (topic, agent_id),
+                )
+                self._db.commit()
 
     def get_subscribers(self, topic: str) -> list[str]:
         return self.subscriptions.get(topic, [])
@@ -200,7 +264,31 @@ class PubSub:
     def publish(self, topic: str, event: Any) -> list[str]:
         """Record an event and return the list of subscribers for it."""
         self.event_log.append({"topic": topic, "event": event})
+        if self._db is not None:
+            self._db.execute(
+                "INSERT INTO events (topic, data) VALUES (?, ?)",
+                (topic, json.dumps(event, default=str)),
+            )
+            self._db.commit()
+            self._maybe_gc_events()
         return self.get_subscribers(topic)
+
+    def _maybe_gc_events(self) -> None:
+        """Garbage-collect old events when the table exceeds the threshold."""
+        if self._db is None:
+            return
+        count = self._db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        if count > self._EVENT_GC_THRESHOLD:
+            self._db.execute(
+                "DELETE FROM events WHERE id NOT IN "
+                "(SELECT id FROM events ORDER BY id DESC LIMIT ?)",
+                (self._EVENT_GC_KEEP,),
+            )
+            self._db.commit()
+
+    def close(self) -> None:
+        if self._db is not None:
+            self._db.close()
 
 
 class MessageRouter:
@@ -211,6 +299,16 @@ class MessageRouter:
         self.agent_registry: dict[str, str] = agent_registry
         self.message_log: list[dict] = []
         self._capabilities_cache: dict[str, list[str]] = {}
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=30)
+        return self._client
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
 
     async def route(self, message: AgentMessage) -> dict:
         """Route a message. Resolves capability-based addressing. Enforces permissions."""
@@ -233,12 +331,13 @@ class MessageRouter:
             self.message_log = self.message_log[-5_000:]
 
         try:
-            async with httpx.AsyncClient(timeout=message.ttl) as client:
-                response = await client.post(
-                    f"{target_url}/message",
-                    json=message.model_dump(mode="json"),
-                )
-                return response.json()
+            client = await self._get_client()
+            response = await client.post(
+                f"{target_url}/message",
+                json=message.model_dump(mode="json"),
+                timeout=message.ttl,
+            )
+            return response.json()
         except httpx.HTTPError as e:
             logger.error(f"Failed to route message to {message.to}: {e}")
             return {"error": f"Delivery failed: {e}"}

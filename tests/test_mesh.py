@@ -102,6 +102,88 @@ def test_pubsub_empty_topic():
     assert ps.get_subscribers("nonexistent") == []
 
 
+# === PubSub Persistence Tests ===
+
+
+def test_pubsub_persistence_survives_restart(tmp_path):
+    """Subscriptions survive a PubSub restart when db_path is set."""
+    db = str(tmp_path / "pubsub.db")
+    ps1 = PubSub(db_path=db)
+    ps1.subscribe("alerts", "agent1")
+    ps1.subscribe("alerts", "agent2")
+    ps1.subscribe("updates", "agent3")
+    ps1.close()
+
+    ps2 = PubSub(db_path=db)
+    assert ps2.get_subscribers("alerts") == ["agent1", "agent2"]
+    assert ps2.get_subscribers("updates") == ["agent3"]
+    ps2.close()
+
+
+def test_pubsub_event_persistence(tmp_path):
+    """Published events are written to SQLite."""
+    import sqlite3
+    db = str(tmp_path / "pubsub.db")
+    ps = PubSub(db_path=db)
+    ps.subscribe("topic", "a1")
+    ps.publish("topic", {"data": "hello"})
+    ps.close()
+
+    conn = sqlite3.connect(db)
+    count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    assert count == 1
+    row = conn.execute("SELECT topic, data FROM events").fetchone()
+    assert row[0] == "topic"
+    assert "hello" in row[1]
+    conn.close()
+
+
+def test_pubsub_gc_events(tmp_path):
+    """Events are garbage-collected when exceeding the threshold."""
+    db = str(tmp_path / "pubsub.db")
+    ps = PubSub(db_path=db)
+    # Lower the threshold for testing
+    ps._EVENT_GC_THRESHOLD = 10
+    ps._EVENT_GC_KEEP = 5
+
+    # Insert enough events to trigger GC at least once
+    for i in range(20):
+        ps.publish("topic", {"i": i})
+
+    import sqlite3
+    conn = sqlite3.connect(db)
+    count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    # GC triggers when count > 10, keeping 5; more events may accumulate
+    # after GC until the next threshold crossing. Count should be bounded.
+    assert count <= ps._EVENT_GC_THRESHOLD
+    conn.close()
+    ps.close()
+
+
+def test_pubsub_unsubscribe_persistence(tmp_path):
+    """Unsubscribe is persisted across restarts."""
+    db = str(tmp_path / "pubsub.db")
+    ps1 = PubSub(db_path=db)
+    ps1.subscribe("topic", "a1")
+    ps1.subscribe("topic", "a2")
+    ps1.unsubscribe("topic", "a1")
+    ps1.close()
+
+    ps2 = PubSub(db_path=db)
+    assert ps2.get_subscribers("topic") == ["a2"]
+    ps2.close()
+
+
+def test_pubsub_no_db_backward_compat():
+    """PubSub without db_path works identically to original behavior."""
+    ps = PubSub()
+    ps.subscribe("t", "a1")
+    ps.publish("t", {"x": 1})
+    assert ps.get_subscribers("t") == ["a1"]
+    assert len(ps.event_log) == 1
+    ps.close()  # should not raise
+
+
 # === Permission Tests ===
 
 

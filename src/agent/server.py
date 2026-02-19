@@ -13,7 +13,10 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+import json as json_module
+
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 
 from src.shared.types import AgentMessage, AgentStatus, ChatMessage, ChatResponse, TaskAssignment, TaskResult
 from src.shared.utils import setup_logging
@@ -95,6 +98,14 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         """Interactive chat with the agent. Supports tool use."""
         result = await loop.chat(msg.message)
         return ChatResponse(**result)
+
+    @app.post("/chat/stream")
+    async def chat_stream(msg: ChatMessage) -> StreamingResponse:
+        """Streaming chat. Returns SSE events for tool use and text deltas."""
+        async def event_generator():
+            async for event in loop.chat_stream(msg.message):
+                yield f"data: {json_module.dumps(event, default=str)}\n\n"
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @app.post("/chat/reset")
     async def chat_reset() -> dict:

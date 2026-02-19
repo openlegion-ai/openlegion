@@ -353,14 +353,17 @@ def _start_channels(
     status_fn=None,
     costs_fn=None,
     reset_fn=None,
-) -> None:
+) -> list[str]:
     """Start configured messaging channels (Telegram, Discord) in background threads.
 
     Channels receive the same callbacks as the CLI REPL so they present
     a unified multi-agent chat interface.
+
+    Returns a list of pairing instruction strings to display to the user.
     """
     import threading
 
+    pairing_instructions: list[str] = []
     channels_cfg = cfg.get("channels", {})
     all_agents = cfg.get("agents", {})
     first_agent = next(iter(all_agents), "")
@@ -403,8 +406,9 @@ def _start_channels(
         active_channels.append(tg)
 
         if tg_code:
-            click.echo("  Telegram channel active (awaiting pairing)")
-            click.echo(f"    Send to your bot:  /start {tg_code}")
+            pairing_instructions.append(
+                f"  Telegram: send to your bot →  /start {tg_code}"
+            )
         else:
             click.echo("  Telegram channel active (paired)")
 
@@ -435,10 +439,13 @@ def _start_channels(
         active_channels.append(dc)
 
         if dc_code:
-            click.echo("  Discord channel active (awaiting pairing)")
-            click.echo(f"    DM your bot:  !start {dc_code}")
+            pairing_instructions.append(
+                f"  Discord: DM your bot →  !start {dc_code}"
+            )
         else:
             click.echo("  Discord channel active (paired)")
+
+    return pairing_instructions
 
 
 def _stop_channels(active_channels: list) -> None:
@@ -891,7 +898,7 @@ def _start_interactive(config_path: str) -> None:
         )
 
     blackboard = Blackboard()
-    pubsub = PubSub()
+    pubsub = PubSub(db_path="pubsub.db")
     permissions = PermissionMatrix()
     cost_tracker = CostTracker()
     credential_vault = CredentialVault(cost_tracker=cost_tracker)
@@ -946,14 +953,37 @@ def _start_interactive(config_path: str) -> None:
 
     lane_manager = LaneManager(dispatch_fn=_direct_dispatch)
 
+    # Dedicated event loop for dispatching — all asyncio primitives
+    # (lane queues, futures, tasks) live here. Thread-safe from any caller.
+    _dispatch_loop = asyncio.new_event_loop()
+
+    def _run_dispatch_loop():
+        asyncio.set_event_loop(_dispatch_loop)
+        _dispatch_loop.run_forever()
+
+    _dispatch_thread = threading.Thread(target=_run_dispatch_loop, daemon=True)
+    _dispatch_thread.start()
+
     async def dispatch_to_agent(agent_name: str, message: str) -> str:
-        return await lane_manager.enqueue(agent_name, message)
+        """Thread-safe dispatch: schedules onto the dedicated dispatch loop."""
+        future = asyncio.run_coroutine_threadsafe(
+            lane_manager.enqueue(agent_name, message), _dispatch_loop,
+        )
+        # If we're already in an event loop (Telegram, cron), await via a
+        # thread-pool so we don't block the caller's loop.
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is not None:
+            return await running_loop.run_in_executor(None, future.result)
+        return future.result()
 
     active_channels: list = []
 
     async def cron_dispatch(agent_name: str, message: str) -> str:
         """Dispatch for cron -- prints the response to the REPL and channels."""
-        result = await lane_manager.enqueue(agent_name, message)
+        result = await dispatch_to_agent(agent_name, message)
         if result and result.strip():
             notification = f"[cron -> {agent_name}] {result}"
             sys.stdout.write(f"\n{notification}\nYou> ")
@@ -981,7 +1011,7 @@ def _start_interactive(config_path: str) -> None:
 
     app = create_mesh_app(
         blackboard, pubsub, router, permissions, credential_vault,
-        cron_scheduler, runtime, transport,
+        cron_scheduler, runtime, transport, orchestrator,
     )
     app.include_router(create_webhook_router(orchestrator))
     app.include_router(webhook_manager.create_router())
@@ -1014,9 +1044,15 @@ def _start_interactive(config_path: str) -> None:
     click.echo(f"  Mesh host ready on port {mesh_port}")
     click.echo(f"  Isolation: {backend_label}")
 
-    # Wait for agents to be ready
-    for agent_id in agents_cfg:
-        ready = asyncio.run(runtime.wait_for_agent(agent_id, timeout=60))
+    # Wait for agents to be ready (concurrently)
+    async def _wait_all_agents():
+        async def _wait_one(aid):
+            ready = await runtime.wait_for_agent(aid, timeout=60)
+            return aid, ready
+        return await asyncio.gather(*[_wait_one(aid) for aid in agents_cfg])
+
+    agent_results = asyncio.run(_wait_all_agents())
+    for agent_id, ready in agent_results:
         if ready:
             click.echo(f"  Agent '{agent_id}' ready")
         else:
@@ -1061,7 +1097,7 @@ def _start_interactive(config_path: str) -> None:
             return False
 
     # Start messaging channels (Telegram, Discord) if configured
-    _start_channels(
+    pairing_instructions = _start_channels(
         cfg, dispatch_to_agent, router.agent_registry, active_channels,
         status_fn=_channel_status,
         costs_fn=_channel_costs,
@@ -1074,15 +1110,22 @@ def _start_interactive(config_path: str) -> None:
 
     click.echo(f"\nChatting with '{active_agent}'.", nl=False)
     if len(active_agents) > 1:
-        click.echo(" Use @agent to direct messages. /help for commands.\n")
+        click.echo(" Use @agent to direct messages. /help for commands.")
     else:
-        click.echo(" /help for commands.\n")
+        click.echo(" /help for commands.")
+
+    # Pairing instructions last — right above the prompt where the user looks
+    if pairing_instructions:
+        click.echo("")
+        for instruction in pairing_instructions:
+            click.echo(instruction)
+    click.echo("")
 
     # Interactive REPL
     try:
         _multi_agent_repl(
             active_agent, agent_urls, router, cost_tracker, runtime, cfg,
-            transport=transport,
+            transport=transport, dispatch_loop=_dispatch_loop,
         )
     except KeyboardInterrupt:
         click.echo("")
@@ -1093,6 +1136,25 @@ def _start_interactive(config_path: str) -> None:
         cron_scheduler.stop()
         runtime.stop_all()
         cost_tracker.close()
+        pubsub.close()
+        blackboard.close()
+        # Close shared httpx clients on the dispatch loop (where they were created)
+        import asyncio as _asyncio
+        async def _close_clients():
+            for closeable in [transport, router, orchestrator, credential_vault]:
+                if hasattr(closeable, 'close') and callable(closeable.close):
+                    try:
+                        result = closeable.close()
+                        if hasattr(result, '__await__'):
+                            await result
+                    except Exception:
+                        pass
+        try:
+            future = _asyncio.run_coroutine_threadsafe(_close_clients(), _dispatch_loop)
+            future.result(timeout=5)
+        except Exception:
+            pass
+        _dispatch_loop.call_soon_threadsafe(_dispatch_loop.stop)
         server.should_exit = True
         click.echo("Stopped.")
 
@@ -1250,6 +1312,100 @@ def stop():
     click.echo(f"Stopped {len(containers)} container(s).")
 
 
+# ── Streaming message helper ──────────────────────────────────
+
+def _send_message_streaming(
+    transport, target: str, message: str,
+    dispatch_loop=None,
+) -> None:
+    """Send a message via streaming endpoint, falling back to non-streaming.
+
+    When *dispatch_loop* is provided, the async work runs on that loop
+    (via ``run_coroutine_threadsafe``) so the httpx client is shared with
+    the lane-manager dispatch path.  Otherwise falls back to ``asyncio.run()``.
+    """
+    import asyncio
+
+    from src.host.transport import HttpTransport
+
+    if isinstance(transport, HttpTransport):
+        # Use streaming path
+        async def _stream():
+            response_text = ""
+            try:
+                async for event in transport.stream_request(
+                    target, "POST", "/chat/stream",
+                    json={"message": message}, timeout=120,
+                ):
+                    if isinstance(event, dict):
+                        etype = event.get("type", "")
+                        if etype == "tool_start":
+                            name = event.get("name", "?")
+                            click.echo(f"  [{name}] ...", nl=False)
+                            sys.stdout.flush()
+                        elif etype == "tool_result":
+                            name = event.get("name", "?")
+                            output = event.get("output", {})
+                            inp = {}  # input not available in this event
+                            click.echo(f" {_format_tool_summary(name, inp, output if isinstance(output, dict) else {})}")
+                        elif etype == "text_delta":
+                            # Progressive text rendering
+                            content = event.get("content", "")
+                            if not response_text:
+                                sys.stdout.write(f"\n{target}> ")
+                            sys.stdout.write(content)
+                            sys.stdout.flush()
+                            response_text += content
+                        elif etype == "done":
+                            if not response_text:
+                                resp = event.get("response", "(no response)")
+                                click.echo(f"\n{target}> {resp}")
+                            else:
+                                click.echo("")  # newline after streamed text
+                            return
+                        elif "error" in event:
+                            click.echo(f"Error: {event['error']}")
+                            return
+            except Exception:
+                # Fallback to non-streaming on any stream error
+                data = await transport.request(
+                    target, "POST", "/chat",
+                    json={"message": message}, timeout=120,
+                )
+                if "error" in data and "response" not in data:
+                    click.echo(f"Error: {data['error']}")
+                    return
+                for tool_out in data.get("tool_outputs", []):
+                    tool_name = tool_out.get("tool", "unknown")
+                    tool_input = tool_out.get("input", {})
+                    tool_result = tool_out.get("output", {})
+                    click.echo(f"  [{tool_name}] {_format_tool_summary(tool_name, tool_input, tool_result)}")
+                click.echo(f"\n{target}> {data.get('response', '(no response)')}")
+
+            click.echo("")
+
+        if dispatch_loop is not None:
+            future = asyncio.run_coroutine_threadsafe(_stream(), dispatch_loop)
+            future.result()  # blocks until done (main thread has no loop)
+        else:
+            asyncio.run(_stream())
+    else:
+        # Non-streaming fallback for SandboxTransport
+        data = transport.request_sync(
+            target, "POST", "/chat",
+            json={"message": message}, timeout=120,
+        )
+        if "error" in data and "response" not in data:
+            click.echo(f"Error: {data['error']}")
+            return
+        for tool_out in data.get("tool_outputs", []):
+            tool_name = tool_out.get("tool", "unknown")
+            tool_input = tool_out.get("input", {})
+            tool_result = tool_out.get("output", {})
+            click.echo(f"  [{tool_name}] {_format_tool_summary(tool_name, tool_input, tool_result)}")
+        click.echo(f"\n{target}> {data.get('response', '(no response)')}\n")
+
+
 # ── Multi-agent REPL (used by `start`) ───────────────────────
 
 def _multi_agent_repl(
@@ -1260,6 +1416,7 @@ def _multi_agent_repl(
     container_manager: object,
     cfg: dict,
     transport: object | None = None,
+    dispatch_loop=None,
 ) -> None:
     """Interactive REPL supporting multiple agents, @mentions, and slash commands."""
     import concurrent.futures
@@ -1435,23 +1592,7 @@ def _multi_agent_repl(
             continue
 
         try:
-            data = transport.request_sync(
-                target, "POST", "/chat",
-                json={"message": message}, timeout=120,
-            )
-
-            if "error" in data and "response" not in data:
-                click.echo(f"Error: {data['error']}")
-                continue
-
-            for tool_out in data.get("tool_outputs", []):
-                tool_name = tool_out.get("tool", "unknown")
-                tool_input = tool_out.get("input", {})
-                tool_result = tool_out.get("output", {})
-                click.echo(f"  [{tool_name}] {_format_tool_summary(tool_name, tool_input, tool_result)}")
-
-            click.echo(f"\n{target}> {data.get('response', '(no response)')}\n")
-
+            _send_message_streaming(transport, target, message, dispatch_loop)
         except Exception as e:
             click.echo(f"Error: {e}")
 

@@ -214,3 +214,44 @@ def test_webhook_unknown_workflow(tmp_path):
 
     response = client.post("/webhook/trigger/nonexistent", json={})
     assert response.status_code == 404
+
+
+def test_mesh_message_to_orchestrator(tmp_path):
+    """Messages to 'orchestrator' with type 'task_result' resolve pending futures."""
+    import asyncio
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "research": AgentPermissions(
+            agent_id="research",
+            can_message=["orchestrator"],
+            blackboard_read=["context/*"],
+            blackboard_write=[],
+            allowed_apis=[],
+        ),
+    }
+    router = MessageRouter(permissions=perms, agent_registry={})
+    orch = Orchestrator(mesh_url="http://localhost:8420", workflows_dir="/nonexistent")
+
+    # Create a pending future
+    loop = asyncio.new_event_loop()
+    future = loop.create_future()
+    orch._pending_results["task_123"] = future
+
+    app = create_mesh_app(bb, pubsub, router, perms, orchestrator=orch)
+    client = TestClient(app)
+
+    response = client.post("/mesh/message", json={
+        "from_agent": "research",
+        "to": "orchestrator",
+        "type": "task_result",
+        "payload": {"task_id": "task_123", "status": "complete", "result": {"data": "ok"}},
+    })
+    assert response.status_code == 200
+    data = response.json()
+    assert data["delivered"] is True
+    assert future.done()
+
+    loop.close()
