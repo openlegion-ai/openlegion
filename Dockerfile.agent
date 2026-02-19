@@ -15,8 +15,10 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir \
     fastapi uvicorn httpx pydantic litellm sqlite-vec pyyaml playwright
 
-# Install Chromium for browser automation
-RUN playwright install chromium --with-deps
+# Install Chromium for browser automation — shared path so non-root agent can access it
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN playwright install chromium --with-deps \
+    && chmod -R o+rx /opt/pw-browsers
 
 # Application code
 COPY src/agent/ /app/src/agent/

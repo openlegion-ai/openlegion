@@ -142,7 +142,26 @@ class Orchestrator:
         self.blackboard = blackboard
         self.pubsub = pubsub
         self.container_manager = container_manager
+        self._client: httpx.AsyncClient | None = None
+        self._pending_results: dict[str, asyncio.Future] = {}
         self._load_workflows(workflows_dir)
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=120)
+        return self._client
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+
+    def resolve_task_result(self, task_id: str, result: TaskResult) -> bool:
+        """Resolve a pending future for a task. Returns True if matched."""
+        future = self._pending_results.pop(task_id, None)
+        if future is None or future.done():
+            return False
+        future.set_result(result)
+        return True
 
     def _load_workflows(self, workflows_dir: str) -> None:
         """Load all workflow YAML files."""
@@ -284,17 +303,26 @@ class Orchestrator:
             )
 
         try:
-            async with httpx.AsyncClient(timeout=step.timeout) as client:
-                response = await client.post(
-                    f"{agent_url}/task",
-                    json=assignment.model_dump(mode="json"),
-                )
-                resp_data = response.json()
+            client = await self._get_client()
+            response = await client.post(
+                f"{agent_url}/task",
+                json=assignment.model_dump(mode="json"),
+                timeout=step.timeout,
+            )
+            resp_data = response.json()
 
             if resp_data.get("accepted"):
-                # Agent accepted -- poll for result via mesh message
-                # For now, wait for the task to complete via status polling
-                return await self._wait_for_task_result(agent_url, assignment, step.timeout)
+                # Push-based: create a future and wait for the agent to post
+                # its result back via mesh /mesh/message to="orchestrator".
+                loop = asyncio.get_running_loop()
+                future = loop.create_future()
+                self._pending_results[assignment.task_id] = future
+                try:
+                    return await asyncio.wait_for(future, timeout=step.timeout)
+                except asyncio.TimeoutError:
+                    self._pending_results.pop(assignment.task_id, None)
+                    # Fallback to polling as a last resort
+                    return await self._wait_for_task_result(agent_url, assignment, step.timeout)
             else:
                 return TaskResult(
                     task_id=assignment.task_id,
@@ -309,28 +337,32 @@ class Orchestrator:
             )
 
     async def _wait_for_task_result(self, agent_url: str, assignment: TaskAssignment, timeout: int) -> TaskResult:
-        """Poll agent status until task completes, then fetch the real result."""
+        """Poll agent status until task completes, then fetch the real result.
+
+        Deprecated: prefer push-based resolve_task_result() via _pending_results.
+        Kept as fallback for cases where the push path is unavailable.
+        """
         start = time.time()
         while time.time() - start < timeout:
             try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    response = await client.get(f"{agent_url}/status")
-                    status = response.json()
-                    agent_state = status.get("state")
-                    if agent_state != "working":
-                        result_resp = await client.get(f"{agent_url}/result")
-                        if result_resp.status_code == 200:
-                            result_data = result_resp.json()
-                            logger.info(f"Got result from agent: status={result_data.get('status')}")
-                            return TaskResult(**result_data)
-                        logger.warning(
-                            f"Agent state={agent_state} but /result returned {result_resp.status_code}"
-                        )
-                        return TaskResult(
-                            task_id=assignment.task_id,
-                            status="failed",
-                            error=f"Agent state={agent_state}, no result (HTTP {result_resp.status_code})",
-                        )
+                client = await self._get_client()
+                response = await client.get(f"{agent_url}/status", timeout=10)
+                status = response.json()
+                agent_state = status.get("state")
+                if agent_state != "working":
+                    result_resp = await client.get(f"{agent_url}/result", timeout=10)
+                    if result_resp.status_code == 200:
+                        result_data = result_resp.json()
+                        logger.info(f"Got result from agent: status={result_data.get('status')}")
+                        return TaskResult(**result_data)
+                    logger.warning(
+                        f"Agent state={agent_state} but /result returned {result_resp.status_code}"
+                    )
+                    return TaskResult(
+                        task_id=assignment.task_id,
+                        status="failed",
+                        error=f"Agent state={agent_state}, no result (HTTP {result_resp.status_code})",
+                    )
             except Exception as e:
                 logger.warning(f"Polling agent at {agent_url}: {e}")
             await asyncio.sleep(1)

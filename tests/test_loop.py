@@ -181,3 +181,110 @@ def test_get_status():
     assert status.agent_id == "test_agent"
     assert status.role == "research"
     assert status.state == "idle"
+
+
+# === LLM Retry Logic ===
+
+from unittest.mock import patch
+
+import httpx
+
+from src.agent.loop import _llm_call_with_retry
+
+
+@pytest.mark.asyncio
+async def test_llm_retry_on_connect_error():
+    """Retry on httpx.ConnectError, succeed on second attempt."""
+    success = LLMResponse(content='{"result": {}}', tokens_used=50)
+    mock_fn = AsyncMock(side_effect=[httpx.ConnectError("refused"), success])
+
+    with patch("src.agent.loop.asyncio.sleep", new_callable=AsyncMock):
+        result = await _llm_call_with_retry(mock_fn, system="s", messages=[], tools=None)
+
+    assert result.content == '{"result": {}}'
+    assert mock_fn.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_llm_retry_on_timeout():
+    """Retry on httpx.TimeoutException."""
+    success = LLMResponse(content='{"result": {}}', tokens_used=50)
+    mock_fn = AsyncMock(side_effect=[httpx.ReadTimeout("timeout"), success])
+
+    with patch("src.agent.loop.asyncio.sleep", new_callable=AsyncMock):
+        result = await _llm_call_with_retry(mock_fn, system="s", messages=[], tools=None)
+
+    assert result.tokens_used == 50
+    assert mock_fn.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_llm_retry_on_429():
+    """Retry on HTTP 429 status."""
+    mock_response = MagicMock()
+    mock_response.status_code = 429
+    mock_request = MagicMock()
+    error_429 = httpx.HTTPStatusError("rate limited", request=mock_request, response=mock_response)
+    success = LLMResponse(content='{"result": {}}', tokens_used=50)
+    mock_fn = AsyncMock(side_effect=[error_429, success])
+
+    with patch("src.agent.loop.asyncio.sleep", new_callable=AsyncMock):
+        result = await _llm_call_with_retry(mock_fn, system="s", messages=[], tools=None)
+
+    assert result.tokens_used == 50
+
+
+@pytest.mark.asyncio
+async def test_llm_no_retry_on_permanent_error():
+    """RuntimeError (budget exceeded) should not be retried."""
+    mock_fn = AsyncMock(side_effect=RuntimeError("Budget exceeded"))
+
+    with pytest.raises(RuntimeError, match="Budget exceeded"):
+        await _llm_call_with_retry(mock_fn, system="s", messages=[], tools=None)
+
+    assert mock_fn.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_llm_no_retry_on_non_retryable_status():
+    """HTTP 400 should not be retried."""
+    mock_response = MagicMock()
+    mock_response.status_code = 400
+    mock_request = MagicMock()
+    error_400 = httpx.HTTPStatusError("bad request", request=mock_request, response=mock_response)
+    mock_fn = AsyncMock(side_effect=error_400)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _llm_call_with_retry(mock_fn, system="s", messages=[], tools=None)
+
+    assert mock_fn.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_llm_retry_exhausted():
+    """After MAX_RETRIES, the exception is raised."""
+    mock_fn = AsyncMock(side_effect=httpx.ConnectError("refused"))
+
+    with patch("src.agent.loop.asyncio.sleep", new_callable=AsyncMock):
+        with pytest.raises(httpx.ConnectError):
+            await _llm_call_with_retry(mock_fn, system="s", messages=[], tools=None)
+
+    assert mock_fn.call_count == 4  # 1 initial + 3 retries
+
+
+@pytest.mark.asyncio
+async def test_llm_retry_in_chat_mode():
+    """Chat mode LLM calls also benefit from retry."""
+    connect_err = httpx.ConnectError("refused")
+    success = LLMResponse(content="Hello!", tokens_used=50)
+    responses = [connect_err, success]
+
+    loop = _make_loop()
+    loop.llm.chat = AsyncMock(side_effect=responses)
+    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+
+    with patch("src.agent.loop.asyncio.sleep", new_callable=AsyncMock):
+        result = await loop.chat("Hi")
+
+    assert result["response"] == "Hello!"
+    assert loop.llm.chat.call_count == 2

@@ -33,6 +33,32 @@ from src.shared.utils import setup_logging
 logger = setup_logging("channels.telegram")
 
 MAX_TG_LEN = 4000
+
+
+def _md_to_html(text: str) -> str:
+    """Best-effort conversion of common Markdown to Telegram-safe HTML.
+
+    Handles: bold, italic, inline code, code blocks, headers.
+    Anything that fails parsing is sent as plain text by the caller.
+    """
+    import re as _re
+
+    # Fenced code blocks: ```lang\n...\n``` → <pre>...</pre>
+    text = _re.sub(
+        r"```(?:\w+)?\n(.*?)```",
+        lambda m: f"<pre>{m.group(1).rstrip()}</pre>",
+        text,
+        flags=_re.DOTALL,
+    )
+    # Inline code: `...` → <code>...</code>
+    text = _re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    # Bold: **...** → <b>...</b>
+    text = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    # Italic: *...* → <i>...</i>  (but not inside <b> tags)
+    text = _re.sub(r"(?<!</b)\*(.+?)\*", r"<i>\1</i>", text)
+    # Headers: # ... → <b>...</b> (Telegram has no header tag)
+    text = _re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=_re.MULTILINE)
+    return text
 _PAIRING_FILE = Path("config/telegram_paired.json")
 
 
@@ -99,6 +125,11 @@ class TelegramChannel(Channel):
         self._app.add_handler(CommandHandler("allow", self._cmd_allow))
         self._app.add_handler(CommandHandler("revoke", self._cmd_revoke))
         self._app.add_handler(CommandHandler("paired", self._cmd_paired))
+        # Route OpenLegion REPL commands (/status, /agents, /costs, etc.)
+        # through the base Channel.handle_message() handler.
+        _repl_cmds = ("use", "agents", "status", "broadcast", "costs", "reset", "help")
+        for cmd in _repl_cmds:
+            self._app.add_handler(CommandHandler(cmd, self._on_repl_command))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
         )
@@ -252,6 +283,25 @@ class TelegramChannel(Channel):
             lines.append("No additional users allowed.")
         await update.message.reply_text("\n".join(lines))
 
+    async def _on_repl_command(self, update, context) -> None:
+        """Handle OpenLegion REPL commands (/status, /agents, /costs, etc.)."""
+        if not self._is_allowed(update.effective_user.id):
+            return
+        self._chat_ids.add(update.effective_chat.id)
+        user_id = str(update.effective_user.id)
+        # Reconstruct the /command [args] text from Telegram's parsed command
+        cmd = update.message.text or ""
+        if not cmd.strip():
+            return
+        chat_id = update.effective_chat.id
+        try:
+            response = await self.handle_message(user_id, cmd)
+        except Exception as e:
+            logger.error(f"REPL command failed for user {user_id}: {e}")
+            response = f"Error: {e}"
+        if response:
+            await self._send_reply(chat_id, response)
+
     async def _on_message(self, update, context) -> None:
         if not self._is_allowed(update.effective_user.id):
             return
@@ -280,7 +330,17 @@ class TelegramChannel(Channel):
             except asyncio.CancelledError:
                 pass
         if response:
-            for chunk in chunk_text(response, MAX_TG_LEN):
+            await self._send_reply(chat_id, response)
+
+    async def _send_reply(self, chat_id: int, text: str) -> None:
+        """Send a response, trying HTML formatting first, then plain text."""
+        for chunk in chunk_text(text, MAX_TG_LEN):
+            try:
+                await self._app.bot.send_message(
+                    chat_id=chat_id, text=_md_to_html(chunk), parse_mode="HTML",
+                )
+            except Exception:
+                # HTML parse failed — send as plain text
                 try:
                     await self._app.bot.send_message(chat_id=chat_id, text=chunk)
                 except Exception as e:

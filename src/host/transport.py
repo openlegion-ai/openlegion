@@ -39,6 +39,21 @@ class Transport(abc.ABC):
     async def is_reachable(self, agent_id: str, timeout: int = 5) -> bool:
         """Quick check whether the agent responds to /status."""
 
+    async def stream_request(
+        self,
+        agent_id: str,
+        method: str,
+        path: str,
+        json: dict | None = None,
+        timeout: int = 120,
+    ):
+        """Streaming HTTP request. Yields SSE lines as they arrive.
+
+        Default implementation falls back to non-streaming request.
+        """
+        result = await self.request(agent_id, method, path, json=json, timeout=timeout)
+        yield result
+
     @abc.abstractmethod
     def request_sync(
         self,
@@ -56,6 +71,16 @@ class HttpTransport(Transport):
 
     def __init__(self) -> None:
         self._urls: dict[str, str] = {}
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=120)
+        return self._client
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
 
     def register(self, agent_id: str, url: str) -> None:
         self._urls[agent_id] = url
@@ -74,21 +99,44 @@ class HttpTransport(Transport):
         url = self._urls.get(agent_id)
         if not url:
             return {"error": f"Agent '{agent_id}' not registered in transport"}
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.request(method, f"{url}{path}", json=json)
-            resp.raise_for_status()
-            return resp.json()
+        client = await self._get_client()
+        resp = await client.request(method, f"{url}{path}", json=json, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
 
     async def is_reachable(self, agent_id: str, timeout: int = 5) -> bool:
         url = self._urls.get(agent_id)
         if not url:
             return False
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.get(f"{url}/status")
-                return resp.status_code == 200
+            client = await self._get_client()
+            resp = await client.get(f"{url}/status", timeout=timeout)
+            return resp.status_code == 200
         except Exception:
             return False
+
+    async def stream_request(
+        self,
+        agent_id: str,
+        method: str,
+        path: str,
+        json: dict | None = None,
+        timeout: int = 120,
+    ):
+        """Streaming HTTP request. Yields parsed SSE data lines."""
+        url = self._urls.get(agent_id)
+        if not url:
+            yield {"error": f"Agent '{agent_id}' not registered in transport"}
+            return
+        client = await self._get_client()
+        async with client.stream(method, f"{url}{path}", json=json, timeout=timeout) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if line.startswith("data: "):
+                    try:
+                        yield json_module.loads(line[6:])
+                    except json_module.JSONDecodeError:
+                        yield {"raw": line[6:]}
 
     def request_sync(
         self,

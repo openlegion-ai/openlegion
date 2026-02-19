@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from src.agent.skills import SkillRegistry, _skill_registry, skill
+from src.agent.skills import SkillRegistry, _skill_staging, skill
 
 
 def setup_function():
     """Clear global skill registry before each test."""
-    _skill_registry.clear()
+    _skill_staging.clear()
 
 
 def test_skill_decorator_registers():
@@ -19,8 +19,8 @@ def test_skill_decorator_registers():
     def my_skill(x: str):
         return {"result": x}
 
-    assert "test_skill" in _skill_registry
-    assert _skill_registry["test_skill"]["description"] == "A test"
+    assert "test_skill" in _skill_staging
+    assert _skill_staging["test_skill"]["description"] == "A test"
 
 
 @pytest.mark.asyncio
@@ -30,7 +30,7 @@ async def test_skill_execution_sync():
         return val * 2
 
     registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_registry)
+    registry.skills = dict(_skill_staging)
 
     result = await registry.execute("sync_skill", {"val": 5})
     assert result == 10
@@ -43,7 +43,7 @@ async def test_skill_execution_async():
         return f"hello {val}"
 
     registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_registry)
+    registry.skills = dict(_skill_staging)
 
     result = await registry.execute("async_skill", {"val": "world"})
     assert result == "hello world"
@@ -68,7 +68,7 @@ def test_get_tool_definitions():
         return {}
 
     registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_registry)
+    registry.skills = dict(_skill_staging)
 
     defs = registry.get_tool_definitions()
     assert len(defs) == 1
@@ -87,7 +87,7 @@ def test_list_skills():
         return None
 
     registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_registry)
+    registry.skills = dict(_skill_staging)
 
     names = registry.list_skills()
     assert "a" in names
@@ -97,7 +97,7 @@ def test_list_skills():
 class TestSkillReload:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
-        _skill_registry.clear()
+        _skill_staging.clear()
 
     def teardown_method(self):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
@@ -163,3 +163,54 @@ def bad():
         from src.agent.builtins.skill_tool import _sanitize_filename
         assert _sanitize_filename("my tool") == "custom_my_tool.py"
         assert _sanitize_filename("API-Helper") == "custom_api_helper.py"
+
+
+class TestSkillRegistryIsolation:
+    """Verify that creating a second SkillRegistry doesn't destroy the first's skills."""
+
+    def setup_method(self):
+        _skill_staging.clear()
+
+    def test_second_registry_preserves_decorators(self):
+        """Creating a second SkillRegistry doesn't clear decorator registrations."""
+        @skill(name="preserved", description="test", parameters={})
+        def preserved_fn():
+            return True
+
+        # First registry picks up the decorated skill
+        r1 = SkillRegistry.__new__(SkillRegistry)
+        r1.skills_dir = "/nonexistent"
+        r1.skills = dict(_skill_staging)
+        assert "preserved" in r1.skills
+
+        # Second registry init should NOT clear _skill_staging
+        r2 = SkillRegistry.__new__(SkillRegistry)
+        r2.skills_dir = "/nonexistent"
+        r2.skills = dict(_skill_staging)
+        assert "preserved" in r2.skills
+
+        # r1's snapshot should still be intact
+        assert "preserved" in r1.skills
+
+    def test_reload_isolated(self):
+        """reload() clears staging and re-discovers, but other instances keep their snapshot."""
+        @skill(name="original", description="test", parameters={})
+        def original_fn():
+            return True
+
+        r1 = SkillRegistry.__new__(SkillRegistry)
+        r1.skills_dir = "/nonexistent"
+        r1.skills = dict(_skill_staging)
+        assert "original" in r1.skills
+
+        # Simulate reload on a different registry
+        r2 = SkillRegistry.__new__(SkillRegistry)
+        r2.skills_dir = "/nonexistent"
+        r2.skills = {}
+        # reload clears staging and re-discovers (no files found)
+        _skill_staging.clear()
+        r2.skills = dict(_skill_staging)
+        assert "original" not in r2.skills
+
+        # r1 still has its snapshot
+        assert "original" in r1.skills

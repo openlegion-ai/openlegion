@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 
 from src.shared.types import AgentMessage, APIProxyRequest, APIProxyResponse, MeshEvent
 
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from src.host.credentials import CredentialVault
     from src.host.cron import CronScheduler
     from src.host.mesh import Blackboard, MessageRouter, PubSub
+    from src.host.orchestrator import Orchestrator
     from src.host.permissions import PermissionMatrix
     from src.host.runtime import RuntimeBackend
     from src.host.transport import Transport
@@ -34,6 +36,7 @@ def create_mesh_app(
     cron_scheduler: CronScheduler | None = None,
     container_manager: RuntimeBackend | None = None,
     transport: Transport | None = None,
+    orchestrator: Orchestrator | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
@@ -42,7 +45,20 @@ def create_mesh_app(
 
     @app.post("/mesh/message")
     async def send_message(msg: AgentMessage) -> dict:
-        """Route a system message to an agent (task results, orchestrator commands)."""
+        """Route a system message to an agent (task results, orchestrator commands).
+
+        Special case: messages addressed to "orchestrator" with type "task_result"
+        are intercepted and resolved against the orchestrator's pending futures
+        instead of being routed to an agent container.
+        """
+        if msg.to == "orchestrator" and msg.type == "task_result" and orchestrator is not None:
+            from src.shared.types import TaskResult
+            try:
+                result = TaskResult(**msg.payload)
+                resolved = orchestrator.resolve_task_result(result.task_id, result)
+                return {"delivered": resolved, "target": "orchestrator"}
+            except Exception as e:
+                return {"error": f"Failed to resolve task result: {e}"}
         return await router.route(msg)
 
     # === Blackboard ===
@@ -111,6 +127,18 @@ def create_mesh_app(
         if credential_vault is None:
             return APIProxyResponse(success=False, error="No credential vault configured")
         return await credential_vault.execute_api_call(request, agent_id=agent_id)
+
+    @app.post("/mesh/api/stream")
+    async def proxy_api_stream(request: APIProxyRequest, agent_id: str) -> StreamingResponse:
+        """Streaming API proxy. Returns SSE stream for LLM completions."""
+        if not permissions.can_use_api(agent_id, request.service):
+            raise HTTPException(403, f"Agent {agent_id} cannot access {request.service}")
+        if credential_vault is None:
+            raise HTTPException(503, "No credential vault configured")
+        return StreamingResponse(
+            credential_vault.stream_llm(request, agent_id=agent_id),
+            media_type="text/event-stream",
+        )
 
     # === Agent Registry ===
 
@@ -221,11 +249,12 @@ def create_mesh_app(
         # Fallback: direct HTTP if no transport provided
         agent_url = agent_entry.get("url", agent_entry) if isinstance(agent_entry, dict) else agent_entry
         import httpx
+        if not hasattr(get_agent_history, "_fallback_client") or get_agent_history._fallback_client.is_closed:
+            get_agent_history._fallback_client = httpx.AsyncClient(timeout=10)
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(f"{agent_url}/history")
-                resp.raise_for_status()
-                return resp.json()
+            resp = await get_agent_history._fallback_client.get(f"{agent_url}/history")
+            resp.raise_for_status()
+            return resp.json()
         except Exception as e:
             raise HTTPException(502, f"Failed to fetch history from {agent_id}: {e}") from e
 
