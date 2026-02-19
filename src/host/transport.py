@@ -71,16 +71,25 @@ class HttpTransport(Transport):
 
     def __init__(self) -> None:
         self._urls: dict[str, str] = {}
-        self._client: httpx.AsyncClient | None = None
+        # One httpx.AsyncClient per event loop — each loop's client has
+        # asyncio internals bound to that loop.  Keyed by id(loop).
+        self._clients: dict[int, httpx.AsyncClient] = {}
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=120)
-        return self._client
+        loop = asyncio.get_running_loop()
+        key = id(loop)
+        client = self._clients.get(key)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(timeout=120)
+            self._clients[key] = client
+        return client
 
     async def close(self) -> None:
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
+        loop = asyncio.get_running_loop()
+        key = id(loop)
+        client = self._clients.pop(key, None)
+        if client and not client.is_closed:
+            await client.aclose()
 
     def register(self, agent_id: str, url: str) -> None:
         self._urls[agent_id] = url

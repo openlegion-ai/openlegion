@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import abc
 import re
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import Any
 
 from src.shared.utils import setup_logging
@@ -18,6 +18,7 @@ from src.shared.utils import setup_logging
 logger = setup_logging("channels.base")
 
 DispatchFn = Callable[[str, str], Coroutine[Any, Any, str]]
+StreamDispatchFn = Callable[[str, str], AsyncIterator[dict]]
 ListAgentsFn = Callable[[], dict]
 StatusFn = Callable[[str], dict | None]
 CostsFn = Callable[[], list[dict]]
@@ -43,6 +44,7 @@ class Channel(abc.ABC):
         status_fn: StatusFn | None = None,
         costs_fn: CostsFn | None = None,
         reset_fn: ResetFn | None = None,
+        stream_dispatch_fn: StreamDispatchFn | None = None,
     ):
         self.dispatch_fn = dispatch_fn
         self.default_agent = default_agent
@@ -50,6 +52,7 @@ class Channel(abc.ABC):
         self.status_fn = status_fn
         self.costs_fn = costs_fn
         self.reset_fn = reset_fn
+        self.stream_dispatch_fn = stream_dispatch_fn
         self._active_agent: dict[str, str] = {}  # user_id -> agent_name
         self._notify_targets: list[Any] = []
 
@@ -176,6 +179,12 @@ class Channel(abc.ABC):
                 return "Cost tracking not available."
             try:
                 spend = self.costs_fn()
+                if not spend:
+                    return "No usage recorded today."
+                # Filter to active agents only (ignore stale DB entries)
+                active = set(agents) if agents else None
+                if active:
+                    spend = [a for a in spend if a["agent"] in active]
                 if not spend:
                     return "No usage recorded today."
                 total = sum(a["cost"] for a in spend)

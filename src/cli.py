@@ -353,6 +353,7 @@ def _start_channels(
     status_fn=None,
     costs_fn=None,
     reset_fn=None,
+    stream_dispatch_fn=None,
 ) -> list[str]:
     """Start configured messaging channels (Telegram, Discord) in background threads.
 
@@ -377,6 +378,7 @@ def _start_channels(
         "status_fn": status_fn,
         "costs_fn": costs_fn,
         "reset_fn": reset_fn,
+        "stream_dispatch_fn": stream_dispatch_fn,
     }
 
     # Telegram
@@ -1096,12 +1098,21 @@ def _start_interactive(config_path: str) -> None:
         except Exception:
             return False
 
+    async def stream_dispatch_to_agent(agent_name: str, message: str):
+        """Streaming dispatch for channels — yields SSE events."""
+        async for event in transport.stream_request(
+            agent_name, "POST", "/chat/stream",
+            json={"message": message}, timeout=120,
+        ):
+            yield event
+
     # Start messaging channels (Telegram, Discord) if configured
     pairing_instructions = _start_channels(
         cfg, dispatch_to_agent, router.agent_registry, active_channels,
         status_fn=_channel_status,
         costs_fn=_channel_costs,
         reset_fn=_channel_reset,
+        stream_dispatch_fn=stream_dispatch_to_agent,
     )
 
     # Pick the first agent as the default active one
@@ -1570,6 +1581,8 @@ def _multi_agent_repl(
             elif cmd == "/costs":
                 try:
                     agents_spend = cost_tracker.get_all_agents_spend("today")
+                    # Filter to active agents only
+                    agents_spend = [a for a in agents_spend if a["agent"] in agent_urls]
                     if not agents_spend:
                         click.echo("No usage recorded today.")
                     else:
