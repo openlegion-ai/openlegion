@@ -53,7 +53,7 @@
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/openlegion/openlegion.git && cd openlegion
+git clone https://github.com/openlegion-ai/openlegion.git && cd openlegion
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 

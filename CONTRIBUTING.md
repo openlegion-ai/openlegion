@@ -5,7 +5,7 @@ Thanks for your interest in OpenLegion. This guide covers everything you need to
 ## Quick Start
 
 ```bash
-git clone https://github.com/openlegion/openlegion.git && cd openlegion
+git clone https://github.com/openlegion-ai/openlegion.git && cd openlegion
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest tests/ --ignore=tests/test_e2e.py --ignore=tests/test_e2e_chat.py \
@@ -36,7 +36,7 @@ When in doubt, open an issue first.
 
 ### 1. Pick or create an issue
 
-- Check [open issues](https://github.com/openlegion/openlegion/issues) for something you'd like to work on
+- Check [open issues](https://github.com/openlegion-ai/openlegion/issues) for something you'd like to work on
 - Comment on the issue to claim it — prevents duplicate effort
 - For new features, open an issue describing your proposed change before writing code
 
