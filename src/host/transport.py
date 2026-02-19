@@ -190,6 +190,7 @@ class SandboxTransport(Transport):
         if json is not None:
             cmd.extend(["-d", json_module.dumps(json)])
 
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -205,6 +206,12 @@ class SandboxTransport(Transport):
                 return {"error": err or f"exit code {proc.returncode}"}
             return json_module.loads(stdout.decode(errors="replace"))
         except asyncio.TimeoutError:
+            if proc is not None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
             logger.warning(f"sandbox exec timed out for '{agent_id}' ({path})")
             return {"error": f"Timeout after {timeout}s"}
         except json_module.JSONDecodeError as e:

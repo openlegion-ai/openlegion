@@ -608,9 +608,11 @@ class AgentLoop:
         assistant_summary = truncate(assistant_msg.split("\n")[0], 80)
         self.workspace.append_daily_log(f"User: {user_summary} → Agent: {assistant_summary}")
 
-    def reset_chat(self) -> None:
-        """Clear conversation history."""
-        self._chat_messages = []
+    async def reset_chat(self) -> None:
+        """Clear conversation history. Acquires the chat lock to avoid
+        corrupting state during an active chat turn."""
+        async with self._chat_lock:
+            self._chat_messages = []
 
     def _build_chat_system_prompt(self, goals: dict | None = None) -> str:
         tools_desc = self.skills.get_descriptions()

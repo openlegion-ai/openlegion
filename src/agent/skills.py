@@ -104,7 +104,7 @@ class SkillRegistry:
 
         if inspect.iscoroutinefunction(func):
             return await func(**call_args)
-        return await asyncio.get_event_loop().run_in_executor(None, lambda: func(**call_args))
+        return await asyncio.get_running_loop().run_in_executor(None, lambda: func(**call_args))
 
     def list_skills(self) -> list[str]:
         """Return list of available skill names."""

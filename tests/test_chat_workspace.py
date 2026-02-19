@@ -164,7 +164,7 @@ class TestChatWithWorkspace:
         loop.workspace.append_daily_log("Important fact from session 1")
 
         await loop.chat("Hello")
-        loop.reset_chat()
+        await loop.reset_chat()
 
         # Workspace files persist after reset
         assert loop.workspace.load_daily_logs(days=1) != ""
