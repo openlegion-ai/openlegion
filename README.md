@@ -49,15 +49,30 @@
 
 ---
 
+## Requirements
+
+| Requirement | Version | Check |
+|---|---|---|
+| **Python** | 3.12 or higher | `python3 --version` |
+| **pip** | Any recent version | `pip3 --version` |
+| **Docker Engine** | Running and accessible | `docker info` |
+| **LLM API key** | At least one provider | [OpenAI](https://platform.openai.com/api-keys), [Anthropic](https://console.anthropic.com/), or [Groq](https://console.groq.com/) |
+| **Git** | Any recent version | `git --version` |
+
+> **Note:** On some systems, `python` and `pip` may not be available — use `python3` and `pip3` instead.
+
 ## Quick Start
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/openlegion-ai/openlegion.git && cd openlegion
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+git clone https://github.com/openlegion-ai/openlegion.git
+cd openlegion
+python3 -m venv .venv
+source .venv/bin/activate
+pip3 install -e ".[dev]"
 
-# 2. Guided setup: API key, project description, first agent, Docker image
+# 2. Guided setup — walks you through API key, project description,
+#    team template, and Docker image build
 openlegion setup
 
 # 3. Start the runtime and chat with your agents
@@ -78,12 +93,6 @@ openlegion start -d
 openlegion chat researcher   # connect from another terminal
 openlegion stop              # clean shutdown
 ```
-
-### Requirements
-
-- Python 3.12+
-- Docker Engine running and accessible
-- An LLM API key (OpenAI, Anthropic, or Groq)
 
 ---
 

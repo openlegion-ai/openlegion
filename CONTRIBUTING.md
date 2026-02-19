@@ -6,8 +6,8 @@ Thanks for your interest in OpenLegion. This guide covers everything you need to
 
 ```bash
 git clone https://github.com/openlegion-ai/openlegion.git && cd openlegion
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+python3 -m venv .venv && source .venv/bin/activate
+pip3 install -e ".[dev]"
 pytest tests/ --ignore=tests/test_e2e.py --ignore=tests/test_e2e_chat.py \
   --ignore=tests/test_e2e_memory.py --ignore=tests/test_e2e_triggering.py -x
 ```
