@@ -50,16 +50,19 @@ class TestMemorySave:
     def teardown_method(self):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_save_writes_to_daily_log(self):
-        result = memory_save("User prefers dark mode", workspace_manager=self.ws)
+    @pytest.mark.asyncio
+    async def test_save_writes_to_daily_log(self):
+        result = await memory_save("User prefers dark mode", workspace_manager=self.ws)
         assert result["saved"] is True
+        assert result["saved_workspace"] is True
         log_files = list((Path(self._tmpdir) / "memory").glob("*.md"))
         assert len(log_files) == 1
         content = log_files[0].read_text()
         assert "dark mode" in content
 
-    def test_save_without_workspace_returns_error(self):
-        result = memory_save("anything")
+    @pytest.mark.asyncio
+    async def test_save_without_workspace_returns_error(self):
+        result = await memory_save("anything")
         assert "error" in result
 
 

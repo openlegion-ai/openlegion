@@ -6,6 +6,7 @@ A single browser instance is lazily initialized per agent process and reused.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from src.agent.skills import skill
@@ -29,6 +30,14 @@ _CONTEXT_ROLES = frozenset({
 })
 
 _MAX_SNAPSHOT_ELEMENTS = 200
+
+# Regex to parse aria_snapshot() YAML lines: `- role "name" [attr=val]`
+_ARIA_LINE_RE = re.compile(
+    r"^\s*-\s+"            # indent + bullet
+    r"(\w+)"               # role
+    r'(?:\s+"([^"]*)")?'   # optional "name"
+    r"(?:\s+\[([^\]]*)\])?"  # optional [attributes]
+)
 
 
 async def _get_page():
@@ -125,6 +134,33 @@ async def browser_navigate(url: str, wait_ms: int = 1000) -> dict:
         return {"error": str(e), "url": url}
 
 
+def _parse_aria_snapshot(yaml_text: str) -> list[dict]:
+    """Parse Playwright aria_snapshot() YAML into a flat list of elements."""
+    elements: list[dict] = []
+    for line in yaml_text.strip().splitlines():
+        m = _ARIA_LINE_RE.match(line)
+        if not m:
+            continue
+        role = m.group(1)
+        name = m.group(2) or ""
+        attrs_str = m.group(3) or ""
+
+        if role not in _ACTIONABLE_ROLES | _CONTEXT_ROLES:
+            continue
+        if not name:
+            continue
+
+        entry: dict = {"role": role, "name": name}
+        if attrs_str:
+            for attr in attrs_str.split(","):
+                attr = attr.strip()
+                if "=" in attr:
+                    k, v = attr.split("=", 1)
+                    entry[k.strip()] = v.strip()
+        elements.append(entry)
+    return elements
+
+
 @skill(
     name="browser_snapshot",
     description=(
@@ -140,11 +176,24 @@ async def browser_snapshot() -> dict:
     """Return an accessibility tree snapshot with element refs."""
     try:
         page = await _get_page()
-        tree = await page.accessibility.snapshot()
-        if not tree:
+
+        # Modern Playwright (1.49+): aria_snapshot() returns YAML text
+        # Legacy Playwright: page.accessibility.snapshot() returns dict tree
+        flat: list[dict] = []
+        try:
+            yaml_text = await page.locator("body").aria_snapshot()
+            if not isinstance(yaml_text, str):
+                raise TypeError("aria_snapshot did not return a string")
+            flat = _parse_aria_snapshot(yaml_text)
+        except (AttributeError, TypeError):
+            # Fallback for older Playwright versions
+            tree = await page.accessibility.snapshot()
+            if tree:
+                flat = _flatten_tree(tree)
+
+        if not flat:
             return {"url": page.url, "title": await page.title(), "element_count": 0, "elements": []}
 
-        flat = _flatten_tree(tree)
         truncated = len(flat) > _MAX_SNAPSHOT_ELEMENTS
         flat = flat[:_MAX_SNAPSHOT_ELEMENTS]
 

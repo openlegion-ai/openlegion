@@ -12,6 +12,26 @@ from src.shared.utils import setup_logging
 logger = setup_logging("agent.builtins.memory_tool")
 
 
+def _parse_fact(content: str) -> tuple[str, str]:
+    """Parse free-text content into a (key, value) pair for structured storage.
+
+    Heuristic: if content has a colon or dash separator, split there.
+    Otherwise use the first ~60 chars as the key and full text as value.
+    """
+    content = content.strip()
+    # Try "key: value" format
+    for sep in [":", " - ", " — "]:
+        if sep in content:
+            parts = content.split(sep, 1)
+            if len(parts[0]) <= 80 and parts[1].strip():
+                return parts[0].strip(), parts[1].strip()
+    # Fallback: truncate for key, full text for value
+    key = content[:60].rstrip()
+    if len(content) > 60:
+        key = key.rsplit(" ", 1)[0] if " " in key else key
+    return key, content
+
+
 @skill(
     name="memory_search",
     description=(
@@ -75,8 +95,9 @@ async def memory_search(query: str, max_results: int = 5, *, workspace_manager=N
 @skill(
     name="memory_save",
     description=(
-        "Save an important fact or note to your daily session log. "
-        "Use this to remember things for future sessions. "
+        "Save an important fact or note to long-term memory. "
+        "Saved to both the daily session log and the structured fact database, "
+        "so it can be recalled later with memory_recall or memory_search. "
         "Examples: user preferences, decisions made, key findings."
     ),
     parameters={
@@ -86,12 +107,32 @@ async def memory_search(query: str, max_results: int = 5, *, workspace_manager=N
         },
     },
 )
-def memory_save(content: str, *, workspace_manager=None) -> dict:
-    """Append an entry to today's daily log."""
-    if workspace_manager is None:
-        return {"error": "No workspace_manager available"}
-    workspace_manager.append_daily_log(content)
-    return {"saved": True, "content": content}
+async def memory_save(content: str, *, workspace_manager=None, memory_store=None) -> dict:
+    """Save a fact to both the daily log and structured memory DB."""
+    saved_workspace = False
+    saved_db = False
+
+    # 1. Workspace daily log (human-readable markdown)
+    if workspace_manager is not None:
+        workspace_manager.append_daily_log(content)
+        saved_workspace = True
+
+    # 2. Structured memory DB (searchable via memory_recall)
+    if memory_store is not None:
+        try:
+            # Parse content into key/value — use first sentence or clause as key
+            key, value = _parse_fact(content)
+            await memory_store.store_fact(
+                key=key, value=value, source="memory_save", confidence=0.9,
+            )
+            saved_db = True
+        except Exception as e:
+            logger.warning(f"Failed to store fact in memory DB: {e}")
+
+    if not saved_workspace and not saved_db:
+        return {"error": "No memory backends available"}
+
+    return {"saved": True, "saved_workspace": saved_workspace, "saved_db": saved_db, "content": content}
 
 
 @skill(

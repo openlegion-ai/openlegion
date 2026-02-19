@@ -1,10 +1,31 @@
 """Tests for built-in agent tools: exec, file, http, browser."""
 
+import math
 import shutil
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+def _make_embedding(seed: float = 0.1) -> list[float]:
+    """Create a deterministic 1536-dim embedding for testing."""
+    return [math.sin(seed * (i + 1)) for i in range(1536)]
+
+
+async def _mock_embed(text: str) -> list[float]:
+    """Mock embed function that returns deterministic embeddings based on text hash."""
+    seed = sum(ord(c) for c in text) / 100.0
+    return _make_embedding(seed)
+
+
+async def _mock_categorize(key: str, value: str) -> str:
+    """Mock categorize function that returns a category based on key prefix."""
+    if "user" in key.lower():
+        return "preferences"
+    if "project" in key.lower():
+        return "project_info"
+    return "general"
 
 # ── exec_tool ────────────────────────────────────────────────
 
@@ -276,6 +297,68 @@ class TestBrowserSnapshot:
         assert len(bt._page_refs) == 200
 
 
+class TestParseAriaSnapshot:
+    def test_parse_basic_elements(self):
+        from src.agent.builtins.browser_tool import _parse_aria_snapshot
+
+        yaml_text = '''- heading "Welcome to Example" [level=1]
+- navigation "Main":
+  - list:
+    - listitem:
+      - link "Home"
+    - listitem:
+      - link "About"
+- main:
+  - textbox "Search"
+  - button "Submit"
+  - checkbox "Remember me"'''
+
+        elements = _parse_aria_snapshot(yaml_text)
+        roles = [e["role"] for e in elements]
+        assert "heading" in roles
+        assert "link" in roles
+        assert "textbox" in roles
+        assert "button" in roles
+        assert "checkbox" in roles
+
+    def test_parse_extracts_names(self):
+        from src.agent.builtins.browser_tool import _parse_aria_snapshot
+
+        yaml_text = '- button "Click Me"\n- link "Go Home"'
+        elements = _parse_aria_snapshot(yaml_text)
+        assert elements[0]["name"] == "Click Me"
+        assert elements[1]["name"] == "Go Home"
+
+    def test_parse_extracts_attributes(self):
+        from src.agent.builtins.browser_tool import _parse_aria_snapshot
+
+        yaml_text = '- heading "Title" [level=2]'
+        elements = _parse_aria_snapshot(yaml_text)
+        assert elements[0]["level"] == "2"
+
+    def test_parse_skips_non_actionable_roles(self):
+        from src.agent.builtins.browser_tool import _parse_aria_snapshot
+
+        yaml_text = '- paragraph "Some text"\n- button "OK"'
+        elements = _parse_aria_snapshot(yaml_text)
+        assert len(elements) == 1
+        assert elements[0]["role"] == "button"
+
+    def test_parse_skips_unnamed_elements(self):
+        from src.agent.builtins.browser_tool import _parse_aria_snapshot
+
+        yaml_text = '- button\n- button "Named"'
+        elements = _parse_aria_snapshot(yaml_text)
+        assert len(elements) == 1
+        assert elements[0]["name"] == "Named"
+
+    def test_parse_empty_input(self):
+        from src.agent.builtins.browser_tool import _parse_aria_snapshot
+
+        assert _parse_aria_snapshot("") == []
+        assert _parse_aria_snapshot("  \n  ") == []
+
+
 class TestBrowserClickRef:
     @pytest.mark.asyncio
     async def test_click_with_ref(self):
@@ -414,7 +497,7 @@ class TestMemoryRecall:
 
     @pytest.mark.asyncio
     async def test_memory_recall_with_category_filter(self, tmp_path):
-        """category param filters results."""
+        """category param filters results (without embeddings, uses text field)."""
         from src.agent.builtins.memory_tool import memory_recall
         from src.agent.memory import MemoryStore
 
@@ -425,6 +508,28 @@ class TestMemoryRecall:
         result = await memory_recall("Python", category="preference", max_results=5, memory_store=store)
         for r in result["results"]:
             assert r["category"] == "preference"
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_memory_recall_category_filter_with_auto_categorize(self, tmp_path):
+        """category filter works with auto-categorized facts (embed_fn + categorize_fn)."""
+        from src.agent.builtins.memory_tool import memory_recall
+        from src.agent.memory import MemoryStore
+
+        store = MemoryStore(
+            db_path=str(tmp_path / "recall_autocat.db"),
+            embed_fn=_mock_embed,
+            categorize_fn=_mock_categorize,
+        )
+        await store.store_fact("user_lang", "Python is my preferred language")
+        await store.store_fact("user_editor", "Vim is my editor of choice")
+        await store.store_fact("project_name", "OpenLegion is the project")
+
+        # Filter by auto-assigned category
+        result = await memory_recall("Python", category="preferences", max_results=5, memory_store=store)
+        assert result["count"] >= 1, "Should find preference-categorized facts"
+        for r in result["results"]:
+            assert r["category"] == "preferences"
         store.close()
 
     @pytest.mark.asyncio
@@ -452,4 +557,112 @@ class TestMemoryRecall:
         assert "workspace" in sources
         # DB results may or may not match depending on keyword search
         assert result["count"] >= 1
+        store.close()
+
+
+class TestParseFact:
+    def test_colon_separator(self):
+        from src.agent.builtins.memory_tool import _parse_fact
+
+        key, value = _parse_fact("favorite color: blue")
+        assert key == "favorite color"
+        assert value == "blue"
+
+    def test_dash_separator(self):
+        from src.agent.builtins.memory_tool import _parse_fact
+
+        key, value = _parse_fact("User preference - dark mode enabled")
+        assert key == "User preference"
+        assert value == "dark mode enabled"
+
+    def test_no_separator_short(self):
+        from src.agent.builtins.memory_tool import _parse_fact
+
+        key, value = _parse_fact("likes pizza")
+        assert key == "likes pizza"
+        assert value == "likes pizza"
+
+    def test_no_separator_long(self):
+        from src.agent.builtins.memory_tool import _parse_fact
+
+        long_text = "The user mentioned they prefer to work late at night and want all notifications disabled after 10pm"
+        key, value = _parse_fact(long_text)
+        assert len(key) <= 60
+        assert value == long_text
+
+    def test_strips_whitespace(self):
+        from src.agent.builtins.memory_tool import _parse_fact
+
+        key, value = _parse_fact("  name : Alice  ")
+        assert key == "name"
+        assert value == "Alice"
+
+
+class TestMemorySave:
+    @pytest.mark.asyncio
+    async def test_save_workspace_only(self):
+        """memory_save with only workspace_manager stores to daily log."""
+        from src.agent.builtins.memory_tool import memory_save
+
+        mock_ws = MagicMock()
+        result = await memory_save("user likes Python", workspace_manager=mock_ws)
+        assert result["saved"] is True
+        assert result["saved_workspace"] is True
+        assert result["saved_db"] is False
+        mock_ws.append_daily_log.assert_called_once_with("user likes Python")
+
+    @pytest.mark.asyncio
+    async def test_save_db_only(self, tmp_path):
+        """memory_save with only memory_store stores to structured DB."""
+        from src.agent.builtins.memory_tool import memory_save
+        from src.agent.memory import MemoryStore
+
+        store = MemoryStore(db_path=str(tmp_path / "save_db.db"))
+        result = await memory_save("favorite color: blue", memory_store=store)
+        assert result["saved"] is True
+        assert result["saved_workspace"] is False
+        assert result["saved_db"] is True
+
+        # Verify fact is in DB
+        facts = await store.search("favorite color", top_k=5)
+        assert len(facts) >= 1
+        assert any("blue" in f.value for f in facts)
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_save_both_backends(self, tmp_path):
+        """memory_save stores to both workspace and DB when both available."""
+        from src.agent.builtins.memory_tool import memory_save
+        from src.agent.memory import MemoryStore
+
+        mock_ws = MagicMock()
+        store = MemoryStore(db_path=str(tmp_path / "save_both.db"))
+
+        result = await memory_save("project name: OpenLegion", workspace_manager=mock_ws, memory_store=store)
+        assert result["saved"] is True
+        assert result["saved_workspace"] is True
+        assert result["saved_db"] is True
+        mock_ws.append_daily_log.assert_called_once()
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_save_no_backends(self):
+        """memory_save with no backends returns error."""
+        from src.agent.builtins.memory_tool import memory_save
+
+        result = await memory_save("anything")
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_save_then_recall(self, tmp_path):
+        """Facts saved via memory_save are findable via memory_recall."""
+        from src.agent.builtins.memory_tool import memory_recall, memory_save
+        from src.agent.memory import MemoryStore
+
+        store = MemoryStore(db_path=str(tmp_path / "save_recall.db"))
+
+        await memory_save("user timezone: America/New_York", memory_store=store)
+        result = await memory_recall("timezone", max_results=5, memory_store=store)
+        assert result["count"] >= 1
+        assert any("New_York" in r["value"] for r in result["results"])
         store.close()

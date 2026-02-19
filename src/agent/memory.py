@@ -245,18 +245,22 @@ class MemoryStore:
 
     def _get_fact(self, fact_id: str) -> Optional[MemoryFact]:
         row = self.db.execute(
-            "SELECT id, key, value, category, source, confidence, "
-            "access_count, last_accessed, created_at, decay_score "
-            "FROM facts WHERE id = ?",
+            "SELECT f.id, f.key, f.value, f.category, f.source, f.confidence, "
+            "f.access_count, f.last_accessed, f.created_at, f.decay_score, "
+            "c.name "
+            "FROM facts f LEFT JOIN categories c ON f.category_id = c.id "
+            "WHERE f.id = ?",
             (fact_id,),
         ).fetchone()
         if not row:
             return None
+        # Use category name from categories table if assigned, else text field
+        category = row[10] if row[10] else row[3]
         return MemoryFact(
             id=row[0],
             key=row[1],
             value=row[2],
-            category=row[3],
+            category=category,
             source=row[4],
             confidence=row[5],
             access_count=row[6],
