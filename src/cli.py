@@ -1204,35 +1204,46 @@ def _start_interactive(config_path: str) -> None:
 
 def _start_detached(config_path: str) -> None:
     """Start the runtime in a background subprocess."""
-    import subprocess
+    import threading
 
     cmd = [sys.executable, "-m", "src.cli", "start", "--config", config_path]
-    proc = subprocess.Popen(
-        cmd,
+
+    # Platform-specific process detachment
+    popen_kwargs: dict = dict(
         cwd=str(PROJECT_ROOT),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        start_new_session=True,
     )
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
 
-    # Read output until agents are ready or timeout
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+
+    # Read output until agents are ready or timeout.
+    # Use a thread to read stdout (cross-platform, unlike select.select on fds).
     started_lines: list[str] = []
-    import select
-    deadline = time.time() + 90
-    while time.time() < deadline:
-        ready_fds, _, _ = select.select([proc.stdout], [], [], 1.0)
-        if ready_fds:
-            line = proc.stdout.readline()
-            if not line:
-                break
+    ready_event = threading.Event()
+
+    def _reader() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
             line = line.rstrip()
             started_lines.append(line)
             click.echo(line)
             if "Chatting with" in line:
-                break
-        if proc.poll() is not None:
-            break
+                ready_event.set()
+                return
+        ready_event.set()  # EOF — unblock main thread
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
+    ready_event.wait(timeout=90)
+
+    if proc.poll() is not None:
+        reader_thread.join(timeout=2)
 
     if proc.poll() is not None:
         click.echo("Runtime failed to start. Check logs.", err=True)

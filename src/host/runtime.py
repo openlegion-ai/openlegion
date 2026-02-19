@@ -196,10 +196,16 @@ class DockerBackend(RuntimeBackend):
             f"openlegion_data_{agent_id}": {"bind": "/data", "mode": "rw"},
         }
         if skills_dir:
-            volumes[skills_dir] = {"bind": "/app/skills", "mode": "ro"}
+            # docker-py on Windows needs forward-slash or POSIX paths for bind mounts
+            volumes[str(Path(skills_dir).as_posix() if platform.system() == "Windows" else skills_dir)] = {
+                "bind": "/app/skills", "mode": "ro",
+            }
         project_md = self.project_root / "PROJECT.md"
         if project_md.exists():
-            volumes[str(project_md)] = {"bind": "/app/PROJECT.md", "mode": "ro"}
+            host_path = str(project_md)
+            if platform.system() == "Windows":
+                host_path = project_md.as_posix()
+            volumes[host_path] = {"bind": "/app/PROJECT.md", "mode": "ro"}
 
         run_kwargs: dict[str, Any] = {
             "detach": True,

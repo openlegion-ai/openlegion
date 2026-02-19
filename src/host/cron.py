@@ -19,6 +19,7 @@ import asyncio
 import json
 import re
 import shutil
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -216,7 +217,7 @@ class CronScheduler:
 
         # Probe 1: Disk usage on agent data volume
         try:
-            data_dir = Path(f"/tmp/openlegion_data_{agent}")
+            data_dir = Path(tempfile.gettempdir()) / f"openlegion_data_{agent}"
             if not data_dir.exists():
                 data_dir = Path(".")
             usage = shutil.disk_usage(str(data_dir))
