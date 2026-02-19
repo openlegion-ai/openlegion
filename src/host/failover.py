@@ -26,7 +26,7 @@ _TRANSIENT_MAX_COOLDOWN = 1500  # Cap for exponential backoff
 # Status codes by category
 _BILLING_CODES = {402, 429}
 _AUTH_CODES = {401, 403}
-_TRANSIENT_CODES = {500, 502, 503}
+_TRANSIENT_CODES = {408, 500, 502, 503, 504}
 _TRANSIENT_KEYWORDS = {"connection", "timeout", "connecterror", "readtimeout"}
 
 
