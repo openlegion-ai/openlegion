@@ -12,7 +12,7 @@
 
 **The AI agent framework built for builders who can't afford a security incident.**
 
-[Quick Start](#quick-start) · [Why Not OpenClaw?](#why-not-openclaw) · [Demo](#demo) · [Docs](#architecture)
+[Quick Start](#quick-start) · [Full Setup Guide](QUICKSTART.md) · [Why Not OpenClaw?](#why-not-openclaw) · [Docs](#architecture)
 
 ---
 
@@ -49,43 +49,31 @@
 
 ---
 
-## Requirements
-
-| Requirement | Version | Check | Install |
-|---|---|---|---|
-| **Python** | 3.12 or higher | `python3 --version` | [python.org](https://www.python.org/downloads/) |
-| **pip** | Any recent version | `pip3 --version` | Included with Python |
-| **Docker** | Running and accessible | `docker info` | [docs.docker.com](https://docs.docker.com/get-docker/) |
-| **LLM API key** | At least one provider | — | [OpenAI](https://platform.openai.com/api-keys), [Anthropic](https://console.anthropic.com/), or [Groq](https://console.groq.com/) |
-| **Git** | Any recent version | `git --version` | [git-scm.com](https://git-scm.com/) |
-
-> **Note:** On some systems, `python` and `pip` may not be available — use `python3` and `pip3` instead.
-
 ## Quick Start
+
+> **First time?** See the **[full setup guide](QUICKSTART.md)** with platform-specific instructions for macOS, Linux, and Windows.
+
+**Requirements:** Python 3.12+, Docker (running), an LLM API key ([OpenAI](https://platform.openai.com/api-keys) / [Anthropic](https://console.anthropic.com/) / [Groq](https://console.groq.com/))
 
 ```bash
 # 1. Clone and install
 git clone https://github.com/openlegion-ai/openlegion.git
 cd openlegion
 python3 -m venv .venv
-source .venv/bin/activate
-pip3 install -e ".[dev]"
+source .venv/bin/activate        # Windows: .venv\Scripts\Activate.ps1
+pip3 install -e ".[dev]"         # Windows: pip install -e ".[dev]"
 
-# 2. Make sure Docker is running BEFORE setup
-#    Linux:   sudo systemctl start docker
-#    macOS:   Open Docker Desktop
-#    Windows: Open Docker Desktop
-docker info   # should print server info, not an error
+# 2. Make sure Docker is running
+#    macOS/Windows: Open Docker Desktop
+#    Linux: sudo systemctl start docker
+docker info
 
-# 3. Guided setup — walks you through API key, project description,
-#    team template, and Docker image build
+# 3. Guided setup — API key, project description, team template, Docker build
 openlegion setup
 
 # 4. Start the runtime and chat with your agents
 openlegion start
 ```
-
-`setup` walks you through everything once. `start` launches your agents and drops you into an interactive chat.
 
 ```bash
 # Add more agents later
