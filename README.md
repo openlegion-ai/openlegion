@@ -1,19 +1,37 @@
-# OpenLegion
+# OpenLegion 🪖
 
-An open-source platform for running autonomous LLM agents in isolated Docker containers.
+> **Autonomous AI agent fleets — isolated, auditable, and production-ready.**
+> Every agent runs in its own Docker container. API keys never leave the vault.
+> Chat via Telegram or Discord. Built-in cost controls. 100+ LLM providers.
 
-Each agent gets its own memory, tools, schedule, and budget. You talk to agents directly
-through a CLI, Telegram, or Discord. Agents coordinate through shared state and YAML
-workflows — no routing layer, no framework overhead.
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://python.org)
+[![Tests](https://img.shields.io/badge/tests-424%20passing-brightgreen.svg)]()
+[![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
+[![Docker](https://img.shields.io/badge/isolation-Docker%20%2B%20microVM-blue.svg)]()
 
-**424 tests passing** across **~11,000 lines** of application code.
-Zero framework dependencies. Fully auditable.
+**The AI agent framework built for builders who can't afford a security incident.**
+
+[Quick Start](#quick-start) · [Why Not OpenClaw?](#why-not-openclaw) · [Demo](#demo) · [Docs](#architecture)
 
 ---
+
+> 📹 **[Watch the 90-second demo →](#demo)**
+> *Setup to autonomous agent fleet running in Telegram in under 3 minutes.*
+
+---
+
+## Demo
+
+[INSERT 90-SECOND SCREEN RECORDING HERE]
+
+> `openlegion setup` → `openlegion start` → agents running in Telegram with
+> live cost tracking. No configuration files edited by hand.
 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Why Not OpenClaw?](#why-not-openclaw)
 - [What It Does](#what-it-does)
 - [Architecture](#architecture)
 - [Mesh Host](#mesh-host)
@@ -69,13 +87,59 @@ openlegion stop              # clean shutdown
 
 ---
 
+## Why Not OpenClaw?
+
+OpenClaw is the most popular personal AI assistant framework — 200K+ GitHub stars,
+brilliant for single-user use. For production workloads and team deployments, it
+has documented problems:
+
+- **42,000+ exposed instances** with no authentication (Bitsight, Feb 2026)
+- **341 malicious skills** found stealing user data (Koi Security / The Hacker News)
+- **CVE-2026-25253**: one-click remote code execution
+- No per-agent cost controls — runaway spend is a real risk
+- No deterministic routing — a CEO agent (LLM) decides what runs next
+- API keys stored directly in agent config
+
+OpenLegion was designed from day one assuming agents will be compromised.
+
+| | OpenClaw | OpenLegion |
+|---|---|---|
+| **API key storage** | Agent config files | Vault proxy — agents never see keys |
+| **Agent isolation** | Process-level | Docker container per agent + microVM option |
+| **Cost controls** | None | Per-agent daily + monthly budget caps |
+| **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
+| **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
+| **Test coverage** | Minimal | 424 tests including full Docker E2E |
+| **Codebase size** | 430,000+ lines | ~11,000 lines — auditable in a day |
+
+---
+
 ## What It Does
 
-1. **Runs agents in isolated Docker containers** — each agent has its own filesystem, memory database, resource limits, and security boundary.
+OpenLegion is an open-source **autonomous AI agent framework** for running multi-agent
+fleets in isolated Docker containers. Each agent gets its own memory, tools, schedule,
+and budget — coordinated through deterministic YAML workflows with no LLM routing layer.
 
-2. **Provides 25+ built-in tools** — shell execution, file I/O, HTTP requests, browser automation (Playwright/Chromium), web search, structured memory, and fleet coordination.
+Chat with your agent fleet via **Telegram**, **Discord**, or CLI. Agents act autonomously
+via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
+prompted.
 
-3. **Remembers across sessions** — hierarchical memory with vector search, BM25 keyword search, auto-categorization, and workspace files. Facts survive resets and restarts.
+**424 tests passing** across **~11,000 lines** of application code.
+No module over 800 lines. **Fully auditable in a day.**
+No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
+
+1. **Security by architecture** — every agent runs in an isolated Docker container
+   (microVM when available). API keys live in the credential vault — agents call
+   through a proxy and never handle credentials directly. Defense-in-depth with
+   5 security layers.
+
+2. **Production-grade cost control** — per-agent LLM token tracking with enforced
+   daily and monthly budget caps at the vault layer. Agents physically cannot spend
+   what you haven't authorized. View live spend with `/costs` in the REPL.
+
+3. **Deterministic multi-agent orchestration** — YAML-defined DAG workflows with
+   step dependencies, conditions, retries, and failure handlers. No LLM decides
+   what runs next. Predictable, debuggable, auditable.
 
 4. **Acts autonomously** — cron schedules, heartbeat probes, webhook triggers, and file watchers let agents work without being prompted.
 
@@ -94,6 +158,12 @@ openlegion stop              # clean shutdown
 ---
 
 ## Architecture
+
+OpenLegion's architecture separates concerns across three trust zones:
+untrusted external input, sandboxed agent containers, and a trusted mesh host
+that holds credentials and coordinates the fleet. All inter-agent communication
+flows through the mesh — no agent has direct network access or peer-to-peer
+connections.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -732,4 +802,28 @@ config/
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+**MIT** — see [LICENSE](LICENSE).
+
+OpenLegion is free and open-source. Self-host it, fork it, build on it.
+
+---
+
+## Related Projects & Comparisons
+
+Looking for alternatives? OpenLegion is often compared to:
+
+- **OpenClaw** — personal AI assistant, 200K+ stars, not designed for production security
+- **nanobot** — ultra-lightweight Python agent (~4K lines), limited multi-agent support
+- **ZeroClaw** — Rust-based AI agent runtime, extreme resource efficiency, early-stage
+- **NanoClaw** — container-isolated, Claude-only, no cost tracking
+- **LangChain Agents** — feature-rich but complex, heavy framework overhead
+- **CrewAI** — multi-agent framework, no built-in container isolation or cost controls
+- **AutoGen** — Microsoft's multi-agent framework, requires Azure/OpenAI, no self-hosting
+
+OpenLegion differs from all of these in combining **fleet orchestration,
+Docker isolation, credential vaulting, and cost enforcement** in a single
+~11,000 line auditable codebase.
+
+**Keywords:** autonomous AI agents, multi-agent framework, LLM agent orchestration,
+self-hosted AI agents, Docker AI agents, OpenClaw alternative, AI agent security,
+agent cost tracking, Telegram AI bot, Python AI agent framework
