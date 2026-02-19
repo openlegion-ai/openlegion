@@ -403,13 +403,14 @@ class SandboxBackend(RuntimeBackend):
         ws = self._prepare_workspace(agent_id, role, skills_dir, system_prompt, model)
 
         # Create sandbox with the shell agent type and workspace
+        # First creation can be slow (microVM init), allow up to 120s
         create_cmd = [
             "docker", "sandbox", "create",
             "--name", sandbox_name,
             "shell", str(ws),
         ]
         result = subprocess.run(
-            create_cmd, capture_output=True, text=True, timeout=30,
+            create_cmd, capture_output=True, text=True, timeout=120,
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -426,7 +427,7 @@ class SandboxBackend(RuntimeBackend):
             "python", "-m", "src.agent",
         ]
         result = subprocess.run(
-            start_cmd, capture_output=True, text=True, timeout=30,
+            start_cmd, capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:
             logger.warning(

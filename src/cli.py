@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -858,7 +859,7 @@ def _start_interactive(config_path: str) -> None:
     from src.host.mesh import Blackboard, MessageRouter, PubSub
     from src.host.orchestrator import Orchestrator
     from src.host.permissions import PermissionMatrix
-    from src.host.runtime import SandboxBackend, select_backend
+    from src.host.runtime import DockerBackend, SandboxBackend, select_backend
     from src.host.server import create_mesh_app
     from src.host.transport import HttpTransport, SandboxTransport
     from src.host.webhooks import WebhookManager
@@ -930,13 +931,37 @@ def _start_interactive(config_path: str) -> None:
             )
         skills_dir = os.path.abspath(agent_cfg.get("skills_dir", ""))
         agent_model = agent_cfg.get("model", default_model)
-        url = runtime.start_agent(
-            agent_id=agent_id,
-            role=agent_cfg["role"],
-            skills_dir=skills_dir,
-            system_prompt=agent_cfg.get("system_prompt", ""),
-            model=agent_model,
-        )
+        try:
+            url = runtime.start_agent(
+                agent_id=agent_id,
+                role=agent_cfg["role"],
+                skills_dir=skills_dir,
+                system_prompt=agent_cfg.get("system_prompt", ""),
+                model=agent_model,
+            )
+        except (subprocess.TimeoutExpired, RuntimeError) as exc:
+            if isinstance(runtime, SandboxBackend):
+                click.echo(
+                    f"\n  Sandbox failed for '{agent_id}': {exc}\n"
+                    "  Falling back to Docker container isolation...\n",
+                    err=True,
+                )
+                runtime = DockerBackend(
+                    mesh_host_port=mesh_port,
+                    use_host_network=True,
+                    project_root=str(PROJECT_ROOT),
+                )
+                transport = HttpTransport()
+                _ensure_docker_image()
+                url = runtime.start_agent(
+                    agent_id=agent_id,
+                    role=agent_cfg["role"],
+                    skills_dir=skills_dir,
+                    system_prompt=agent_cfg.get("system_prompt", ""),
+                    model=agent_model,
+                )
+            else:
+                raise
         router.register_agent(agent_id, url)
         agent_urls[agent_id] = url
         if isinstance(transport, HttpTransport):
