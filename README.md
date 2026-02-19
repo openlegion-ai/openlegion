@@ -53,7 +53,7 @@
 
 > **First time?** See the **[full setup guide](QUICKSTART.md)** with platform-specific instructions for macOS, Linux, and Windows.
 
-**Requirements:** Python 3.12+, Docker (running), an LLM API key ([OpenAI](https://platform.openai.com/api-keys) / [Anthropic](https://console.anthropic.com/) / [Groq](https://console.groq.com/))
+**Requirements:** Python 3.12+, Docker (running), an LLM API key ([Anthropic](https://console.anthropic.com/) / [Moonshot](https://platform.moonshot.cn/) / [OpenAI](https://platform.openai.com/api-keys))
 
 ```bash
 # 1. Clone and install
@@ -649,8 +649,9 @@ retry policies, and failure handlers.
 ### `.env` — API Keys
 
 ```bash
-OPENLEGION_CRED_OPENAI_API_KEY=sk-...
 OPENLEGION_CRED_ANTHROPIC_API_KEY=sk-ant-...
+OPENLEGION_CRED_MOONSHOT_API_KEY=sk-...
+OPENLEGION_CRED_OPENAI_API_KEY=sk-...
 OPENLEGION_CRED_BRAVE_SEARCH_API_KEY=BSA...
 
 # Log format: "json" (default) or "text" (human-readable)

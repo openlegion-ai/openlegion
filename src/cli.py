@@ -38,12 +38,12 @@ PROJECT_FILE = PROJECT_ROOT / "PROJECT.md"
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 _PROVIDERS = [
+    {"name": "anthropic", "label": "Anthropic (recommended)"},
+    {"name": "moonshot", "label": "Moonshot / Kimi (recommended)"},
+    {"name": "deepseek", "label": "DeepSeek"},
     {"name": "openai", "label": "OpenAI"},
-    {"name": "anthropic", "label": "Anthropic"},
     {"name": "gemini", "label": "Google Gemini"},
     {"name": "xai", "label": "xAI (Grok)"},
-    {"name": "deepseek", "label": "DeepSeek"},
-    {"name": "moonshot", "label": "Moonshot (Kimi)"},
     {"name": "groq", "label": "Groq"},
 ]
 
@@ -564,9 +564,9 @@ def setup():
     for i, p in enumerate(_PROVIDERS, 1):
         click.echo(f"  {i}. {p['label']}")
     click.echo(
-        "\n  Tip: Anthropic Claude models are recommended for agentic tasks\n"
-        "  (browser automation, web interaction). Claude has built-in computer\n"
-        "  use training. GPT models may refuse some autonomous actions.\n"
+        "\n  Tip: Anthropic Claude and Moonshot Kimi are recommended for agentic\n"
+        "  tasks (browser automation, web interaction, tool use). They have\n"
+        "  built-in computer use training and strong tool-calling support.\n"
     )
     choice = click.prompt("  Select provider", type=click.IntRange(1, len(_PROVIDERS)), default=1)
     provider = _PROVIDERS[choice - 1]["name"]
