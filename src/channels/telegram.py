@@ -26,6 +26,7 @@ from src.channels.base import (
     ListAgentsFn,
     ResetFn,
     StatusFn,
+    StreamDispatchFn,
     chunk_text,
 )
 from src.shared.utils import setup_logging
@@ -90,6 +91,7 @@ class TelegramChannel(Channel):
         status_fn: StatusFn | None = None,
         costs_fn: CostsFn | None = None,
         reset_fn: ResetFn | None = None,
+        stream_dispatch_fn: StreamDispatchFn | None = None,
     ):
         super().__init__(
             dispatch_fn=dispatch_fn,
@@ -98,6 +100,7 @@ class TelegramChannel(Channel):
             status_fn=status_fn,
             costs_fn=costs_fn,
             reset_fn=reset_fn,
+            stream_dispatch_fn=stream_dispatch_fn,
         )
         self.token = token
         self._explicit_allowed = set(allowed_users) if allowed_users else None
@@ -316,7 +319,24 @@ class TelegramChannel(Channel):
     async def _dispatch_and_reply(
         self, chat_id: int, user_id: str, text: str,
     ) -> None:
-        """Process a message in the background with a typing indicator."""
+        """Process a message in the background with tool progress updates."""
+        current = self._get_active_agent(user_id)
+        target = current
+
+        # Check for @agent mention
+        import re as _re
+        match = _re.match(r"^@(\w+)\s+(.+)$", text, _re.DOTALL)
+        if match:
+            agents = self._get_agent_names()
+            if match.group(1) in agents:
+                target = match.group(1)
+
+        # Use streaming dispatch if available for tool progress
+        if self.stream_dispatch_fn and target:
+            await self._stream_dispatch_and_reply(chat_id, user_id, target, text)
+            return
+
+        # Fallback: non-streaming with typing indicator
         typing_task = asyncio.create_task(self._typing_loop(chat_id))
         try:
             response = await self.handle_message(user_id, text)
@@ -331,6 +351,84 @@ class TelegramChannel(Channel):
                 pass
         if response:
             await self._send_reply(chat_id, response)
+
+    async def _stream_dispatch_and_reply(
+        self, chat_id: int, user_id: str, target: str, text: str,
+    ) -> None:
+        """Dispatch with streaming — shows tool progress via an editable message."""
+        progress_msg = None
+        tool_lines: list[str] = []
+        response_text = ""
+        tool_count = 0
+
+        try:
+            async for event in self.stream_dispatch_fn(target, text):
+                if not isinstance(event, dict):
+                    continue
+                etype = event.get("type", "")
+
+                if etype == "tool_start":
+                    tool_count += 1
+                    name = event.get("name", "?")
+                    tool_lines.append(f"{tool_count}. {name}")
+                    progress = f"Working...\n" + "\n".join(tool_lines)
+                    try:
+                        if progress_msg is None:
+                            progress_msg = await self._app.bot.send_message(
+                                chat_id=chat_id, text=progress,
+                            )
+                        else:
+                            await self._app.bot.edit_message_text(
+                                chat_id=chat_id,
+                                message_id=progress_msg.message_id,
+                                text=progress,
+                            )
+                    except Exception:
+                        pass  # edit may fail if text unchanged
+
+                elif etype == "tool_result":
+                    name = event.get("name", "?")
+                    output = event.get("output", {})
+                    # Update last tool line with a checkmark
+                    if tool_lines:
+                        hint = ""
+                        if isinstance(output, dict) and output.get("error"):
+                            hint = " ✗"
+                        else:
+                            hint = " ✓"
+                        tool_lines[-1] += hint
+                        progress = f"Working...\n" + "\n".join(tool_lines)
+                        try:
+                            if progress_msg:
+                                await self._app.bot.edit_message_text(
+                                    chat_id=chat_id,
+                                    message_id=progress_msg.message_id,
+                                    text=progress,
+                                )
+                        except Exception:
+                            pass
+
+                elif etype == "text_delta":
+                    response_text += event.get("content", "")
+
+                elif etype == "done":
+                    response_text = event.get("response", response_text)
+
+        except Exception as e:
+            logger.error(f"Stream dispatch failed for user {user_id}: {e}")
+            response_text = f"Error: {e}"
+
+        # Delete progress message and send final response
+        if progress_msg:
+            try:
+                await self._app.bot.delete_message(
+                    chat_id=chat_id, message_id=progress_msg.message_id,
+                )
+            except Exception:
+                pass
+
+        if response_text:
+            await self._send_reply(chat_id, f"[{target}] {response_text}")
 
     async def _send_reply(self, chat_id: int, text: str) -> None:
         """Send a response, trying HTML formatting first, then plain text."""
