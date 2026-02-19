@@ -81,8 +81,10 @@ Docker isolates each agent in its own container. It must be **running** before s
 <summary><strong>macOS</strong></summary>
 
 1. Download [Docker Desktop for Mac](https://www.docker.com/products/docker-desktop/)
-2. Drag to Applications and launch it
-3. Wait for the whale icon in the menu bar to stop animating
+2. Open the `.dmg` and drag Docker to Applications
+3. Launch Docker Desktop from Applications
+4. **Skip the sign-in** — you do not need a Docker account. Click "Continue without signing in" or close the login prompt.
+5. Wait for the whale icon in the menu bar to stop animating (daemon is ready)
 
 Verify:
 
@@ -90,7 +92,7 @@ Verify:
 docker info   # should print server info
 ```
 
-> **"Cannot connect to the Docker daemon"** = Docker Desktop isn't running. Open it from Applications and wait.
+> **"Cannot connect to the Docker daemon"** = Docker Desktop isn't open yet. Launch it from Applications and wait for the whale icon to settle.
 
 </details>
 
@@ -134,7 +136,8 @@ sudo usermod -aG docker $USER
 1. Download [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/)
 2. Run the installer — **enable WSL 2 backend** when prompted
 3. Restart if prompted
-4. Launch Docker Desktop and wait for "Docker Desktop is running"
+4. Launch Docker Desktop — **skip the sign-in** (no account needed)
+5. Wait for "Docker Desktop is running" in the system tray
 
 Verify (PowerShell):
 
