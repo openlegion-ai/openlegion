@@ -51,13 +51,13 @@
 
 ## Requirements
 
-| Requirement | Version | Check |
-|---|---|---|
-| **Python** | 3.12 or higher | `python3 --version` |
-| **pip** | Any recent version | `pip3 --version` |
-| **Docker Engine** | Running and accessible | `docker info` |
-| **LLM API key** | At least one provider | [OpenAI](https://platform.openai.com/api-keys), [Anthropic](https://console.anthropic.com/), or [Groq](https://console.groq.com/) |
-| **Git** | Any recent version | `git --version` |
+| Requirement | Version | Check | Install |
+|---|---|---|---|
+| **Python** | 3.12 or higher | `python3 --version` | [python.org](https://www.python.org/downloads/) |
+| **pip** | Any recent version | `pip3 --version` | Included with Python |
+| **Docker** | Running and accessible | `docker info` | [docs.docker.com](https://docs.docker.com/get-docker/) |
+| **LLM API key** | At least one provider | — | [OpenAI](https://platform.openai.com/api-keys), [Anthropic](https://console.anthropic.com/), or [Groq](https://console.groq.com/) |
+| **Git** | Any recent version | `git --version` | [git-scm.com](https://git-scm.com/) |
 
 > **Note:** On some systems, `python` and `pip` may not be available — use `python3` and `pip3` instead.
 
@@ -71,11 +71,17 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip3 install -e ".[dev]"
 
-# 2. Guided setup — walks you through API key, project description,
+# 2. Make sure Docker is running BEFORE setup
+#    Linux:   sudo systemctl start docker
+#    macOS:   Open Docker Desktop
+#    Windows: Open Docker Desktop
+docker info   # should print server info, not an error
+
+# 3. Guided setup — walks you through API key, project description,
 #    team template, and Docker image build
 openlegion setup
 
-# 3. Start the runtime and chat with your agents
+# 4. Start the runtime and chat with your agents
 openlegion start
 ```
 
