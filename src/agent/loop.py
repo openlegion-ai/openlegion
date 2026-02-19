@@ -622,17 +622,9 @@ class AgentLoop:
             parts.append(f"## Your Current Goals\n\n{format_dict(goals)}")
 
         if self.workspace:
-            workspace_context = self.workspace.load_prompt_context()
-            if workspace_context:
-                parts.append(workspace_context)
-
-            memory_content = self.workspace.load_memory()
-            if memory_content.strip():
-                parts.append(f"## Your Long-Term Memory\n\n{truncate(memory_content, 4000)}")
-
-            daily_logs = self.workspace.load_daily_logs(days=2)
-            if daily_logs.strip():
-                parts.append(f"## Recent Session Logs\n\n{truncate(daily_logs, 2000)}")
+            bootstrap = self.workspace.get_bootstrap_content()
+            if bootstrap:
+                parts.append(bootstrap)
 
             learnings = self.workspace.get_learnings_context()
             if learnings:

@@ -97,7 +97,8 @@ class TestChatWithWorkspace:
         assert "Python" in system_prompt
 
     @pytest.mark.asyncio
-    async def test_system_prompt_includes_daily_logs(self):
+    async def test_daily_logs_not_in_system_prompt(self):
+        """Daily logs are accessed via memory_search, not injected into prompt."""
         ws = WorkspaceManager(workspace_dir=self._tmpdir)
         ws.append_daily_log("Discussed API design")
         loop = _make_loop_with_workspace(self._tmpdir)
@@ -106,7 +107,7 @@ class TestChatWithWorkspace:
 
         call_args = loop.llm.chat.call_args
         system_prompt = call_args.kwargs.get("system") or call_args[1].get("system", "")
-        assert "API design" in system_prompt
+        assert "API design" not in system_prompt
 
     @pytest.mark.asyncio
     async def test_first_message_preloads_relevant_memory(self):
@@ -202,17 +203,22 @@ class TestCrossSessionMemory:
         assert "Biscuit" in system_prompt
 
     @pytest.mark.asyncio
-    async def test_daily_log_visible_next_session(self):
-        """Session 1 writes daily log. Session 2 sees it."""
+    async def test_daily_log_accessible_via_search(self):
+        """Daily logs are searchable via workspace search, not in system prompt."""
         ws = WorkspaceManager(workspace_dir=self._tmpdir)
         ws.append_daily_log("Deployed v2.3 to production")
 
+        # Daily log should be findable via search
+        results = ws.search("v2.3 production")
+        assert len(results) > 0
+
+        # But NOT in system prompt
         loop = _make_loop_with_workspace(self._tmpdir)
         await loop.chat("What did we do today?")
 
         call_args = loop.llm.chat.call_args
         system_prompt = call_args.kwargs.get("system") or call_args[1].get("system", "")
-        assert "v2.3" in system_prompt
+        assert "v2.3" not in system_prompt
 
     @pytest.mark.asyncio
     async def test_memory_search_finds_old_session_data(self):

@@ -142,6 +142,110 @@ class TestCompaction:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestProactiveFlush:
+    @pytest.mark.asyncio
+    async def test_proactive_flush_triggers_at_60_pct(self):
+        """Proactive flush should trigger between 60-70% and return messages unchanged."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            llm = MagicMock()
+            llm.chat = AsyncMock(
+                return_value=LLMResponse(
+                    content='[{"key": "user_pref", "value": "likes Python", "category": "preference"}]',
+                    tokens_used=30,
+                )
+            )
+
+            # max_tokens=470 with 5 messages => ~65% usage (in the 60-70% window)
+            cm = ContextManager(max_tokens=470, llm=llm, workspace=workspace)
+            msgs = _make_messages(5, chars_each=200)
+            result = await cm.maybe_compact("system", msgs)
+
+            # Messages returned unchanged (no compaction yet)
+            assert result == msgs
+            # LLM was called for extraction
+            assert llm.chat.call_count == 1
+            # Facts written to MEMORY.md
+            memory = workspace.load_memory()
+            assert "user_pref" in memory
+            assert "likes Python" in memory
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_proactive_flush_does_not_retrigger(self):
+        """Once triggered, proactive flush should not run again."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            llm = MagicMock()
+            llm.chat = AsyncMock(
+                return_value=LLMResponse(
+                    content='[{"key": "fact1", "value": "val1", "category": "fact"}]',
+                    tokens_used=30,
+                )
+            )
+
+            cm = ContextManager(max_tokens=470, llm=llm, workspace=workspace)
+            msgs = _make_messages(5, chars_each=200)
+            await cm.maybe_compact("system", msgs)
+            assert llm.chat.call_count == 1
+
+            # Second call at same usage — should NOT flush again
+            await cm.maybe_compact("system", msgs)
+            assert llm.chat.call_count == 1  # still 1
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_proactive_flush_handles_llm_failure(self):
+        """If LLM fails during proactive flush, no crash."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            llm = MagicMock()
+            llm.chat = AsyncMock(side_effect=RuntimeError("LLM down"))
+
+            cm = ContextManager(max_tokens=470, llm=llm, workspace=workspace)
+            msgs = _make_messages(5, chars_each=200)
+            result = await cm.maybe_compact("system", msgs)
+
+            # Should return messages unchanged (no crash)
+            assert result == msgs
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_proactive_flush_stores_to_memory_db(self):
+        """Proactive flush should store facts in memory DB when available."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            from src.agent.memory import MemoryStore
+
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            memory_store = MemoryStore(db_path=":memory:")
+            llm = MagicMock()
+            llm.chat = AsyncMock(
+                return_value=LLMResponse(
+                    content='[{"key": "tool_pref", "value": "uses vim", "category": "preference"}]',
+                    tokens_used=30,
+                )
+            )
+
+            cm = ContextManager(max_tokens=470, llm=llm, workspace=workspace, memory=memory_store)
+            msgs = _make_messages(5, chars_each=200)
+            await cm.maybe_compact("system", msgs)
+
+            # Fact should be in memory DB
+            fact = memory_store._get_fact_by_key("tool_pref")
+            assert fact is not None
+            assert fact.value == "uses vim"
+            memory_store.close()
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 class TestHardPrune:
     def test_prune_keeps_first_and_last(self):
         cm = ContextManager(max_tokens=100)
