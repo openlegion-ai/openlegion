@@ -1332,6 +1332,8 @@ def _send_message_streaming(
         # Use streaming path
         async def _stream():
             response_text = ""
+            tool_count = 0
+            last_tool_input = {}
             try:
                 async for event in transport.stream_request(
                     target, "POST", "/chat/stream",
@@ -1340,14 +1342,22 @@ def _send_message_streaming(
                     if isinstance(event, dict):
                         etype = event.get("type", "")
                         if etype == "tool_start":
+                            tool_count += 1
                             name = event.get("name", "?")
-                            click.echo(f"  [{name}] ...", nl=False)
+                            last_tool_input = event.get("input", {})
+                            summary = _format_tool_summary(name, last_tool_input, {})
+                            click.echo(f"  [{tool_count}] {name}: {summary}", nl=False)
                             sys.stdout.flush()
                         elif etype == "tool_result":
                             name = event.get("name", "?")
                             output = event.get("output", {})
-                            inp = {}  # input not available in this event
-                            click.echo(f" {_format_tool_summary(name, inp, output if isinstance(output, dict) else {})}")
+                            out = output if isinstance(output, dict) else {}
+                            # Show concise result after the tool line
+                            result_hint = _format_tool_result_hint(name, out)
+                            if result_hint:
+                                click.echo(f" → {result_hint}")
+                            else:
+                                click.echo(" ✓")
                         elif etype == "text_delta":
                             # Progressive text rendering
                             content = event.get("content", "")
@@ -1379,7 +1389,12 @@ def _send_message_streaming(
                     tool_name = tool_out.get("tool", "unknown")
                     tool_input = tool_out.get("input", {})
                     tool_result = tool_out.get("output", {})
-                    click.echo(f"  [{tool_name}] {_format_tool_summary(tool_name, tool_input, tool_result)}")
+                    summary = _format_tool_summary(tool_name, tool_input, {})
+                    result_hint = _format_tool_result_hint(tool_name, tool_result if isinstance(tool_result, dict) else {})
+                    line = f"  {tool_name}: {summary}"
+                    if result_hint:
+                        line += f" → {result_hint}"
+                    click.echo(line)
                 click.echo(f"\n{target}> {data.get('response', '(no response)')}")
 
             click.echo("")
@@ -1402,7 +1417,12 @@ def _send_message_streaming(
             tool_name = tool_out.get("tool", "unknown")
             tool_input = tool_out.get("input", {})
             tool_result = tool_out.get("output", {})
-            click.echo(f"  [{tool_name}] {_format_tool_summary(tool_name, tool_input, tool_result)}")
+            summary = _format_tool_summary(tool_name, tool_input, {})
+            result_hint = _format_tool_result_hint(tool_name, tool_result if isinstance(tool_result, dict) else {})
+            line = f"  {tool_name}: {summary}"
+            if result_hint:
+                line += f" → {result_hint}"
+            click.echo(line)
         click.echo(f"\n{target}> {data.get('response', '(no response)')}\n")
 
 
@@ -1661,7 +1681,12 @@ def _single_agent_repl(agent_url: str) -> None:
                 tool_name = tool_out.get("tool", "unknown")
                 tool_input = tool_out.get("input", {})
                 tool_result = tool_out.get("output", {})
-                click.echo(f"  [{tool_name}] {_format_tool_summary(tool_name, tool_input, tool_result)}")
+                summary = _format_tool_summary(tool_name, tool_input, {})
+                result_hint = _format_tool_result_hint(tool_name, tool_result if isinstance(tool_result, dict) else {})
+                line = f"  {tool_name}: {summary}"
+                if result_hint:
+                    line += f" → {result_hint}"
+                click.echo(line)
 
             click.echo(f"\nAgent> {data.get('response', '(no response)')}\n")
 
@@ -1672,19 +1697,75 @@ def _single_agent_repl(agent_url: str) -> None:
 
 
 def _format_tool_summary(name: str, inp: dict, out: dict) -> str:
-    """One-line summary of a tool invocation for the REPL."""
+    """One-line summary of tool INPUT for the REPL."""
     if name == "exec":
         cmd = inp.get("command", "")
-        code = out.get("exit_code", "?")
-        return f"`{cmd}` -> exit {code}"
-    elif name in ("read_file", "write_file"):
-        return inp.get("path", "")
+        if len(cmd) > 60:
+            cmd = cmd[:57] + "..."
+        return f"`{cmd}`"
+    elif name in ("read_file", "write_file", "list_files"):
+        return inp.get("path", inp.get("directory", ""))
     elif name == "http_request":
         return f"{inp.get('method', 'GET')} {inp.get('url', '')}"
     elif name == "browser_navigate":
         return inp.get("url", "")
+    elif name == "browser_click":
+        return inp.get("selector", "")
+    elif name == "browser_type":
+        sel = inp.get("selector", "")
+        text = inp.get("text", "")
+        if len(text) > 30:
+            text = text[:27] + "..."
+        return f"{sel} ← \"{text}\""
+    elif name == "browser_evaluate":
+        script = inp.get("script", "")
+        # Show first meaningful line of JS
+        for line in script.strip().splitlines():
+            line = line.strip()
+            if line and not line.startswith("//"):
+                if len(line) > 60:
+                    line = line[:57] + "..."
+                return line
+        return script[:60]
+    elif name == "browser_screenshot":
+        return inp.get("filename", "screenshot.png")
+    elif name == "web_search":
+        return inp.get("query", "")
+    elif name == "memory_save":
+        return inp.get("key", inp.get("content", ""))[:60]
+    elif name == "memory_search":
+        return inp.get("query", "")
     else:
-        return json.dumps(inp, default=str)[:80]
+        text = json.dumps(inp, default=str)
+        if len(text) > 80:
+            text = text[:77] + "..."
+        return text
+
+
+def _format_tool_result_hint(name: str, out: dict) -> str:
+    """Concise result hint shown after tool completion."""
+    if "error" in out:
+        err = str(out["error"])
+        if len(err) > 60:
+            err = err[:57] + "..."
+        return f"error: {err}"
+    if name == "exec":
+        code = out.get("exit_code", 0)
+        return f"exit {code}" if code != 0 else ""
+    elif name == "browser_navigate":
+        title = out.get("title", "")
+        status = out.get("status", "")
+        return f"{status} {title}".strip()[:60] if title else ""
+    elif name == "browser_click":
+        return out.get("url", "")[:60] if out.get("url") else ""
+    elif name == "browser_type":
+        return ""  # success is implicit
+    elif name == "browser_screenshot":
+        return out.get("path", "")
+    elif name == "web_search":
+        results = out.get("results", [])
+        return f"{len(results)} results" if results else ""
+    return ""
 
 
 if __name__ == "__main__":
