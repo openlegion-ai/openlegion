@@ -157,57 +157,6 @@ Open an issue with:
 
 **Do not open a public issue for security vulnerabilities.** Email security@openlegion.dev with details. We'll coordinate a fix and disclosure timeline.
 
-## Developer Certificate of Origin
+## Contributor License Agreement
 
-By contributing to OpenLegion, you agree that your contributions are submitted under the project's MIT License and that you have the right to submit them.
-
-Every commit must be signed off with your real name and email, certifying the [Developer Certificate of Origin (DCO)](https://developercertificate.org/):
-
-```
-Developer Certificate of Origin
-Version 1.1
-
-Copyright (C) 2004, 2006 The Linux Foundation and its contributors.
-
-Everyone is permitted to copy and distribute verbatim copies of this
-license document, but changing it is not allowed.
-
-Developer's Certificate of Origin 1.1
-
-By making a contribution to this project, I certify that:
-
-(a) The contribution was created in whole or in part by me and I
-    have the right to submit it under the open source license
-    indicated in the file; or
-
-(b) The contribution is based upon previous work that, to the best
-    of my knowledge, is covered under an appropriate open source
-    license and I have the right under that license to submit that
-    work with modifications, whether created in whole or in part
-    by me, under the same open source license (unless I am
-    permitted to submit under a different license), as indicated
-    in the file; or
-
-(c) The contribution was provided directly to me by some other
-    person who certified (a), (b) or (c) and I have not modified
-    it.
-
-(d) I understand and agree that this project and the contribution
-    are public and that a record of the contribution (including all
-    personal information I submit with it, including my sign-off) is
-    maintained indefinitely and may be redistributed consistent with
-    this project or the open source license(s) involved.
-```
-
-Add `Signed-off-by` to your commits:
-
-```bash
-git commit -s -m "Add new feature"
-# Produces: Signed-off-by: Your Name <your@email.com>
-```
-
-## License
-
-All contributions are licensed under the [MIT License](LICENSE). By submitting a pull request, you agree that your contribution falls under this license.
-
-The OpenLegion maintainers reserve the right to offer commercial products and services built on top of this open-source project. Your contributions to the open-source project will always remain available under the MIT License.
+By submitting a pull request to this repository, you agree that your contribution may be relicensed by the project maintainers under any open-source license, including future license changes.
