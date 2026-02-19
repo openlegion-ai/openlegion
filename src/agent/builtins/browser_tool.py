@@ -47,7 +47,11 @@ async def _get_page():
 
 @skill(
     name="browser_navigate",
-    description="Open a URL in the browser and return the page text content.",
+    description=(
+        "Navigate your Chromium browser to a URL and return the page text. "
+        "Use this to visit any website: sign-up pages, dashboards, search engines, "
+        "web apps. You can then use browser_click and browser_type to interact."
+    ),
     parameters={
         "url": {"type": "string", "description": "URL to navigate to"},
         "wait_ms": {
@@ -107,7 +111,10 @@ async def browser_screenshot(
 
 @skill(
     name="browser_click",
-    description="Click an element on the page by CSS selector.",
+    description=(
+        "Click an element on the current page. Use CSS selectors like "
+        "'button[type=submit]', 'a.signup-link', '#next-btn', or 'input[name=email]'."
+    ),
     parameters={
         "selector": {"type": "string", "description": "CSS selector of the element to click"},
     },
@@ -125,7 +132,10 @@ async def browser_click(selector: str) -> dict:
 
 @skill(
     name="browser_type",
-    description="Type text into an input element on the page.",
+    description=(
+        "Type text into a form field on the current page. Clears the field first, "
+        "then enters the new text. Use with browser_click to fill out forms."
+    ),
     parameters={
         "selector": {"type": "string", "description": "CSS selector of the input element"},
         "text": {"type": "string", "description": "Text to type"},
@@ -143,7 +153,11 @@ async def browser_type(selector: str, text: str) -> dict:
 
 @skill(
     name="browser_evaluate",
-    description="Run JavaScript in the browser page and return the result.",
+    description=(
+        "Execute JavaScript in the browser page and return the result. "
+        "Use for DOM inspection, extracting data, or triggering page actions "
+        "that CSS selectors can't reach."
+    ),
     parameters={
         "script": {"type": "string", "description": "JavaScript code to evaluate"},
     },

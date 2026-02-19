@@ -52,23 +52,22 @@ class PermissionMatrix:
         return AgentPermissions(agent_id=agent_id)
 
     def can_message(self, from_agent: str, to_agent: str) -> bool:
-        # Mesh and orchestrator are always allowed
         if from_agent in ("mesh", "orchestrator"):
             return True
         perms = self.get_permissions(from_agent)
-        return to_agent in perms.can_message
+        return "*" in perms.can_message or to_agent in perms.can_message
 
     def can_publish(self, agent_id: str, topic: str) -> bool:
         if agent_id in ("mesh", "orchestrator"):
             return True
         perms = self.get_permissions(agent_id)
-        return topic in perms.can_publish
+        return "*" in perms.can_publish or topic in perms.can_publish
 
     def can_subscribe(self, agent_id: str, topic: str) -> bool:
         if agent_id in ("mesh", "orchestrator"):
             return True
         perms = self.get_permissions(agent_id)
-        return topic in perms.can_subscribe
+        return "*" in perms.can_subscribe or topic in perms.can_subscribe
 
     def can_read_blackboard(self, agent_id: str, key: str) -> bool:
         if agent_id in ("mesh", "orchestrator"):

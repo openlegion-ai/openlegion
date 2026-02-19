@@ -1,7 +1,5 @@
 """Unit tests for the orchestrator: condition parser, DAG resolution, failure modes."""
 
-import asyncio
-
 import pytest
 
 from src.host.orchestrator import (
@@ -152,10 +150,11 @@ def test_orchestrator_loads_workflows(tmp_path):
     assert "test_wf" in orch.workflows
 
 
-def test_orchestrator_trigger_unknown_workflow():
+@pytest.mark.asyncio
+async def test_orchestrator_trigger_unknown_workflow():
     orch = Orchestrator(mesh_url="http://localhost:8420", workflows_dir="/nonexistent")
     with pytest.raises(ValueError, match="Unknown workflow"):
-        asyncio.get_event_loop().run_until_complete(orch.trigger_workflow("nonexistent", {}))
+        await orch.trigger_workflow("nonexistent", {})
 
 
 def test_orchestrator_resolve_input_trigger():

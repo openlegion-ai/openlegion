@@ -1,7 +1,5 @@
 """Unit tests for agent memory store."""
 
-import asyncio
-
 import pytest
 
 from src.agent.memory import MemoryStore
@@ -14,47 +12,52 @@ def memory(tmp_path):
     store.close()
 
 
-def test_store_and_retrieve_fact(memory):
-    fact_id = asyncio.get_event_loop().run_until_complete(memory.store_fact("test_key", "test_value"))
+@pytest.mark.asyncio
+async def test_store_and_retrieve_fact(memory):
+    fact_id = await memory.store_fact("test_key", "test_value")
     assert fact_id.startswith("fact_")
-    facts = asyncio.get_event_loop().run_until_complete(memory.search("test"))
+    facts = await memory.search("test")
     assert len(facts) > 0
     assert facts[0].key == "test_key"
 
 
-def test_update_existing_fact(memory):
-    asyncio.get_event_loop().run_until_complete(memory.store_fact("key1", "old_value"))
-    asyncio.get_event_loop().run_until_complete(memory.store_fact("key1", "new_value"))
+@pytest.mark.asyncio
+async def test_update_existing_fact(memory):
+    await memory.store_fact("key1", "old_value")
+    await memory.store_fact("key1", "new_value")
     fact = memory._get_fact_by_key("key1")
     assert fact is not None
     assert fact.value == "new_value"
     assert fact.access_count >= 1
 
 
-def test_keyword_search_returns_results(memory):
-    asyncio.get_event_loop().run_until_complete(memory.store_fact("company_name", "Acme Corporation"))
-    asyncio.get_event_loop().run_until_complete(memory.store_fact("company_size", "500 employees"))
-    results = asyncio.get_event_loop().run_until_complete(memory.search("Acme"))
+@pytest.mark.asyncio
+async def test_keyword_search_returns_results(memory):
+    await memory.store_fact("company_name", "Acme Corporation")
+    await memory.store_fact("company_size", "500 employees")
+    results = await memory.search("Acme")
     assert len(results) >= 1
     assert any(f.key == "company_name" for f in results)
 
 
-def test_salience_boost_on_access(memory):
-    asyncio.get_event_loop().run_until_complete(memory.store_fact("key1", "value1"))
+@pytest.mark.asyncio
+async def test_salience_boost_on_access(memory):
+    await memory.store_fact("key1", "value1")
     initial = memory._get_fact_by_key("key1")
     assert initial is not None
     initial_score = initial.decay_score
 
     for _ in range(3):
-        asyncio.get_event_loop().run_until_complete(memory.search("key1"))
+        await memory.search("key1")
 
     boosted = memory._get_fact_by_key("key1")
     assert boosted is not None
     assert boosted.decay_score > initial_score
 
 
-def test_decay_reduces_scores(memory):
-    asyncio.get_event_loop().run_until_complete(memory.store_fact("key1", "value1"))
+@pytest.mark.asyncio
+async def test_decay_reduces_scores(memory):
+    await memory.store_fact("key1", "value1")
     initial = memory._get_fact_by_key("key1")
     assert initial is not None
     initial_score = initial.decay_score
@@ -66,23 +69,24 @@ def test_decay_reduces_scores(memory):
     assert decayed.decay_score < initial_score
 
 
-def test_high_salience_facts(memory):
+@pytest.mark.asyncio
+async def test_high_salience_facts(memory):
     for i in range(5):
-        asyncio.get_event_loop().run_until_complete(memory.store_fact(f"key_{i}", f"value_{i}"))
+        await memory.store_fact(f"key_{i}", f"value_{i}")
 
     high = memory.get_high_salience_facts(top_k=3)
     assert len(high) == 3
 
 
-def test_log_action(memory):
-    asyncio.get_event_loop().run_until_complete(
-        memory.log_action(action="test_action", input_summary="input", output_summary="output")
-    )
+@pytest.mark.asyncio
+async def test_log_action(memory):
+    await memory.log_action(action="test_action", input_summary="input", output_summary="output")
     logs = memory.get_recent_logs(limit=10)
     assert len(logs) == 1
     assert logs[0].action == "test_action"
 
 
-def test_empty_search_returns_empty(memory):
-    results = asyncio.get_event_loop().run_until_complete(memory.search("nonexistent"))
+@pytest.mark.asyncio
+async def test_empty_search_returns_empty(memory):
+    results = await memory.search("nonexistent")
     assert results == []

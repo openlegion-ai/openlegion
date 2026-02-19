@@ -16,9 +16,10 @@ _MAX_OUTPUT = 100_000
 @skill(
     name="exec",
     description=(
-        "Execute a shell command. The output (stdout+stderr) is returned. "
-        "Use this for installing packages, running scripts, processing data, "
-        "or any system operation."
+        "Run a shell command and return stdout+stderr. You have a full Linux "
+        "environment with Python, Node.js, curl, git, and standard tools. "
+        "Use for: installing packages, running scripts, processing data, "
+        "downloading files, or any system operation."
     ),
     parameters={
         "command": {"type": "string", "description": "Shell command to execute"},

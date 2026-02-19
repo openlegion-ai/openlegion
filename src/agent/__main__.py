@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -25,8 +27,16 @@ from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.main")
 
+_MAX_REGISTRATION_ATTEMPTS = 10
+_REGISTRATION_BACKOFF_SECONDS = 1
+
 
 def main() -> None:
+    for var in ("AGENT_ID", "AGENT_ROLE", "MESH_URL"):
+        if var not in os.environ:
+            logger.error(f"Missing required environment variable: {var}")
+            sys.exit(1)
+
     agent_id = os.environ["AGENT_ID"]
     role = os.environ["AGENT_ROLE"]
     mesh_url = os.environ["MESH_URL"]
@@ -39,6 +49,17 @@ def main() -> None:
     memory = MemoryStore(db_path=f"/data/{agent_id}.db", embed_fn=llm.embed)
     skills = SkillRegistry(skills_dir=skills_dir)
     workspace = WorkspaceManager(workspace_dir="/data/workspace")
+
+    # Copy host-mounted PROJECT.md into workspace (mounted at /app to avoid
+    # Docker creating /data/workspace as root and breaking permissions)
+    host_project = Path("/app/PROJECT.md")
+    ws_project = Path("/data/workspace/PROJECT.md")
+    if host_project.exists() and host_project.is_file():
+        try:
+            ws_project.write_text(host_project.read_text())
+        except OSError:
+            logger.debug("Could not copy PROJECT.md into workspace")
+
     context_mgr = ContextManager(max_tokens=128_000, llm=llm, workspace=workspace)
 
     loop = AgentLoop(
@@ -57,8 +78,21 @@ def main() -> None:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        await mesh_client.register(capabilities=skills.list_skills(), port=agent_port)
-        logger.info(f"Agent '{agent_id}' registered with mesh")
+        registered = False
+        for attempt in range(1, _MAX_REGISTRATION_ATTEMPTS + 1):
+            try:
+                await mesh_client.register(capabilities=skills.list_skills(), port=agent_port)
+                logger.info(f"Agent '{agent_id}' registered with mesh")
+                registered = True
+                break
+            except Exception as e:
+                if attempt == _MAX_REGISTRATION_ATTEMPTS:
+                    logger.error(f"Failed to register with mesh after {attempt} attempts: {e}")
+                else:
+                    logger.debug(f"Mesh registration attempt {attempt} failed, retrying...")
+                    await asyncio.sleep(_REGISTRATION_BACKOFF_SECONDS)
+        if not registered:
+            logger.warning(f"Agent '{agent_id}' started without mesh registration")
         yield
         if loop.state == "working":
             loop._cancel_requested = True
@@ -79,4 +113,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.error(f"Agent failed to start: {e}")
+        sys.exit(1)

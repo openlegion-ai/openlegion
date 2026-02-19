@@ -1,0 +1,13 @@
+name: starter
+description: Single general-purpose assistant agent
+agents:
+  assistant:
+    role: assistant
+    model: "{default_model}"
+    system_prompt: >
+      You are a general-purpose assistant. You can run commands,
+      read and write files, browse the web, and make HTTP requests.
+      Help the user accomplish their goals.
+    resources:
+      memory_limit: "512m"
+      cpu_limit: 0.5

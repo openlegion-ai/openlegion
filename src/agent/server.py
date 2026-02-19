@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException
 
-from src.shared.types import AgentStatus, ChatMessage, ChatResponse, TaskAssignment, TaskResult
+from src.shared.types import AgentMessage, AgentStatus, ChatMessage, ChatResponse, TaskAssignment, TaskResult
 from src.shared.utils import setup_logging
 
 if TYPE_CHECKING:
@@ -42,7 +42,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         async def run() -> None:
             result = await loop.execute_task(assignment)
             try:
-                await loop.mesh_client.send_message(
+                await loop.mesh_client.send_system_message(
                     to="orchestrator",
                     msg_type="task_result",
                     payload=result.model_dump(mode="json"),
@@ -102,7 +102,43 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         loop.reset_chat()
         return {"status": "ok"}
 
+    @app.get("/history")
+    async def get_history(days: int = 3) -> dict:
+        """Return this agent's daily logs for inter-agent context sharing."""
+        if not loop.workspace:
+            return {"agent_id": loop.agent_id, "logs": [], "memory": ""}
+        daily = loop.workspace.load_daily_logs(days=days)
+        memory = loop.workspace.load_memory()
+        return {
+            "agent_id": loop.agent_id,
+            "role": loop.role,
+            "logs": daily,
+            "memory": memory[:5000] if memory else "",
+        }
+
+    @app.post("/message")
+    async def receive_message(msg: AgentMessage) -> dict:
+        """Receive an async message from another agent via mesh routing.
+
+        Stores the message in the agent's memory so it has context on
+        the next task, chat, or heartbeat activation.
+        """
+        content = (
+            f"Message from {msg.from_agent} ({msg.type}): "
+            f"{_summarize_payload(msg.payload)}"
+        )
+        loop.workspace.append_daily_log(content)
+        logger.info(f"Received message from {msg.from_agent}: {msg.type}")
+        return {"received": True, "from": msg.from_agent, "type": msg.type}
+
     return app
+
+
+def _summarize_payload(payload: dict, max_len: int = 500) -> str:
+    """Compact a message payload for memory storage."""
+    import json
+    text = json.dumps(payload, default=str)
+    return text[:max_len] + "..." if len(text) > max_len else text
 
 
 def _log_task_exception(task: asyncio.Task) -> None:

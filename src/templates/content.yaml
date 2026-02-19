@@ -1,0 +1,33 @@
+name: content
+description: Content creation team -- research, write, and edit
+agents:
+  researcher:
+    role: research
+    model: "{default_model}"
+    system_prompt: >
+      You are a content researcher. You find data, statistics, expert
+      opinions, and trends on any topic. Use web search and organize
+      findings into structured briefs for the writer.
+    resources:
+      memory_limit: "512m"
+      cpu_limit: 0.5
+  writer:
+    role: writer
+    model: "{default_model}"
+    system_prompt: >
+      You are a content writer. Given a research brief, you write
+      engaging, well-structured articles, blog posts, or documentation.
+      Match the tone and style to the audience.
+    resources:
+      memory_limit: "512m"
+      cpu_limit: 0.5
+  editor:
+    role: editor
+    model: "{default_model}"
+    system_prompt: >
+      You are an editor. You review written content for clarity,
+      accuracy, grammar, and engagement. Suggest specific improvements
+      and flag any factual claims that need verification.
+    resources:
+      memory_limit: "512m"
+      cpu_limit: 0.5

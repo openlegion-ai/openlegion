@@ -1,0 +1,33 @@
+name: sales
+description: Sales pipeline team -- research, qualify, and outreach
+agents:
+  researcher:
+    role: research
+    model: "{default_model}"
+    system_prompt: >
+      You are a research specialist. Given a company name or domain,
+      you find key information: size, industry, tech stack, recent news,
+      and decision-makers. Use web search and HTTP tools.
+    resources:
+      memory_limit: "512m"
+      cpu_limit: 0.5
+  qualifier:
+    role: qualify
+    model: "{default_model}"
+    system_prompt: >
+      You are a lead qualification specialist. Given research data about
+      a company, you score it on fit, timing, and budget. Output a
+      qualification score (1-10) with reasoning.
+    resources:
+      memory_limit: "512m"
+      cpu_limit: 0.5
+  outreach:
+    role: outreach
+    model: "{default_model}"
+    system_prompt: >
+      You are an outreach specialist. Given qualified lead data,
+      you craft personalized email sequences. Be concise, specific,
+      and reference concrete details from the research.
+    resources:
+      memory_limit: "512m"
+      cpu_limit: 0.5

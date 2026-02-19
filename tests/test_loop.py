@@ -8,8 +8,9 @@ Uses mock LLM to verify:
 - Final output parsing
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from src.agent.loop import AgentLoop
 from src.shared.types import LLMResponse, TaskAssignment, TokenBudget, ToolCallInfo
@@ -36,7 +37,8 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None) -> AgentLoop:
     llm.default_model = "test-model"
 
     mesh_client = MagicMock()
-    mesh_client.send_message = AsyncMock(return_value={})
+    mesh_client.send_system_message = AsyncMock(return_value={})
+    mesh_client.read_blackboard = AsyncMock(return_value=None)
 
     loop = AgentLoop(
         agent_id="test_agent",
@@ -49,14 +51,15 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None) -> AgentLoop:
     return loop
 
 
-def test_simple_task_completes():
+@pytest.mark.asyncio
+async def test_simple_task_completes():
     """LLM returns final answer immediately (no tool calls)."""
     loop = _make_loop()
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research", input_data={"query": "test"}
     )
 
-    result = asyncio.get_event_loop().run_until_complete(loop.execute_task(assignment))
+    result = await loop.execute_task(assignment)
     assert result.status == "complete"
     assert result.result == {"answer": "42"}
     assert result.tokens_used == 100
@@ -64,7 +67,8 @@ def test_simple_task_completes():
     assert loop.state == "idle"
 
 
-def test_tool_calling_message_roles():
+@pytest.mark.asyncio
+async def test_tool_calling_message_roles():
     """Verify proper message role alternation: user -> assistant(tool_calls) -> tool -> assistant."""
     captured_messages = []
 
@@ -92,12 +96,11 @@ def test_tool_calling_message_roles():
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research", input_data={"q": "test"}
     )
-    result = asyncio.get_event_loop().run_until_complete(loop.execute_task(assignment))
+    result = await loop.execute_task(assignment)
 
     assert result.status == "complete"
     assert len(captured_messages) == 2
 
-    # Second call should have: user, assistant(tool_calls), tool
     second_call_msgs = captured_messages[1]
     assert second_call_msgs[0]["role"] == "user"
     assert second_call_msgs[1]["role"] == "assistant"
@@ -105,7 +108,8 @@ def test_tool_calling_message_roles():
     assert second_call_msgs[2]["role"] == "tool"
 
 
-def test_max_iterations_reached():
+@pytest.mark.asyncio
+async def test_max_iterations_reached():
     """Loop should fail after MAX_ITERATIONS of tool calls."""
     always_tool = LLMResponse(
         content="",
@@ -121,14 +125,15 @@ def test_max_iterations_reached():
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research", input_data={}
     )
-    result = asyncio.get_event_loop().run_until_complete(loop.execute_task(assignment))
+    result = await loop.execute_task(assignment)
 
     assert result.status == "failed"
     assert "Max iterations" in result.error
     assert loop.tasks_failed == 1
 
 
-def test_token_budget_exhausted():
+@pytest.mark.asyncio
+async def test_token_budget_exhausted():
     """Loop should stop when token budget is exceeded."""
     loop = _make_loop()
     budget = TokenBudget(max_tokens=100, used_tokens=99)
@@ -136,12 +141,13 @@ def test_token_budget_exhausted():
         workflow_id="wf1", step_id="s1", task_type="research", input_data={}, token_budget=budget
     )
 
-    result = asyncio.get_event_loop().run_until_complete(loop.execute_task(assignment))
+    result = await loop.execute_task(assignment)
     assert result.status == "failed"
     assert "budget" in result.error.lower()
 
 
-def test_cancellation():
+@pytest.mark.asyncio
+async def test_cancellation():
     """Loop should respect cancellation flag."""
     loop = _make_loop()
     loop._cancel_requested = True
@@ -149,7 +155,7 @@ def test_cancellation():
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research", input_data={}
     )
-    result = asyncio.get_event_loop().run_until_complete(loop.execute_task(assignment))
+    result = await loop.execute_task(assignment)
     assert result.status == "cancelled"
 
 

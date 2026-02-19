@@ -1,11 +1,11 @@
-"""Mesh HTTP server -- the central API for all agent communication.
+"""Mesh HTTP server -- the central API for fleet coordination.
 
 Provides endpoints for:
-  - Agent-to-agent messaging
-  - Blackboard CRUD
-  - Pub/Sub
+  - Blackboard CRUD (shared state)
+  - Pub/Sub (event signals)
   - API proxy (agents call external services through mesh)
   - Agent registration
+  - System messaging (orchestrator-to-agent)
 """
 
 from __future__ import annotations
@@ -18,8 +18,11 @@ from src.shared.types import AgentMessage, APIProxyRequest, APIProxyResponse, Me
 
 if TYPE_CHECKING:
     from src.host.credentials import CredentialVault
+    from src.host.cron import CronScheduler
     from src.host.mesh import Blackboard, MessageRouter, PubSub
     from src.host.permissions import PermissionMatrix
+    from src.host.runtime import RuntimeBackend
+    from src.host.transport import Transport
 
 
 def create_mesh_app(
@@ -28,15 +31,18 @@ def create_mesh_app(
     router: MessageRouter,
     permissions: PermissionMatrix,
     credential_vault: CredentialVault | None = None,
+    cron_scheduler: CronScheduler | None = None,
+    container_manager: RuntimeBackend | None = None,
+    transport: Transport | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
 
-    # === Agent-to-Agent Messaging ===
+    # === System Messaging (orchestrator/mesh → agent) ===
 
     @app.post("/mesh/message")
     async def send_message(msg: AgentMessage) -> dict:
-        """Route a message from one agent to another."""
+        """Route a system message to an agent (task results, orchestrator commands)."""
         return await router.route(msg)
 
     # === Blackboard ===
@@ -114,7 +120,13 @@ def create_mesh_app(
         agent_id = data["agent_id"]
         capabilities = data.get("capabilities", [])
         port = data.get("port", 8400)
-        url = f"http://{agent_id}:{port}"
+
+        existing = router.agent_registry.get(agent_id)
+        if existing:
+            url = existing.get("url", existing) if isinstance(existing, dict) else existing
+        else:
+            url = f"http://localhost:{port}"
+
         router.register_agent(agent_id, url, capabilities)
         agent_perms = permissions.get_permissions(agent_id)
         for topic in agent_perms.can_subscribe:
@@ -125,5 +137,96 @@ def create_mesh_app(
     async def list_agents() -> dict:
         """List all registered agents and their URLs."""
         return dict(router.agent_registry)
+
+    # === Cron CRUD ===
+
+    @app.post("/mesh/cron")
+    async def create_cron_job(data: dict) -> dict:
+        """Create a cron job. Body: {agent_id, schedule, message, heartbeat?}."""
+        if cron_scheduler is None:
+            raise HTTPException(503, "Cron scheduler not available")
+        agent_id = data.get("agent_id")
+        schedule = data.get("schedule")
+        message = data.get("message", "")
+        heartbeat = data.get("heartbeat", False)
+        if not agent_id or not schedule:
+            raise HTTPException(400, "agent_id and schedule are required")
+        job = cron_scheduler.add_job(
+            agent=agent_id, schedule=schedule, message=message, heartbeat=heartbeat,
+        )
+        return {"id": job.id, "agent": job.agent, "schedule": job.schedule, "heartbeat": job.heartbeat}
+
+    @app.get("/mesh/cron")
+    async def list_cron_jobs(agent_id: str | None = None) -> list[dict]:
+        """List cron jobs, optionally filtered by agent_id."""
+        if cron_scheduler is None:
+            raise HTTPException(503, "Cron scheduler not available")
+        jobs = cron_scheduler.list_jobs()
+        if agent_id:
+            jobs = [j for j in jobs if j["agent"] == agent_id]
+        return jobs
+
+    @app.delete("/mesh/cron/{job_id}")
+    async def delete_cron_job(job_id: str) -> dict:
+        """Remove a cron job by ID."""
+        if cron_scheduler is None:
+            raise HTTPException(503, "Cron scheduler not available")
+        if cron_scheduler.remove_job(job_id):
+            return {"removed": True, "id": job_id}
+        raise HTTPException(404, f"Job not found: {job_id}")
+
+    # === Dynamic Agent Spawning ===
+
+    @app.post("/mesh/spawn")
+    async def spawn_agent(data: dict) -> dict:
+        """Spawn an ephemeral agent. Body: {role, system_prompt?, model?, ttl?}."""
+        if container_manager is None:
+            raise HTTPException(503, "Container manager not available")
+        role = data.get("role", "assistant")
+        spawned_by = data.get("spawned_by", "unknown")
+        model = data.get("model", "")
+        ttl = data.get("ttl", 3600)
+        system_prompt = data.get("system_prompt", f"You are a '{role}' agent.")
+        from src.shared.utils import generate_id
+        agent_id = generate_id("spawn")
+        try:
+            url = container_manager.spawn_agent(
+                agent_id=agent_id, role=role, system_prompt=system_prompt,
+                model=model, ttl=ttl,
+            )
+            router.register_agent(agent_id, url)
+            ready = await container_manager.wait_for_agent(agent_id, timeout=60)
+            return {
+                "agent_id": agent_id, "url": url, "role": role,
+                "ready": ready, "spawned_by": spawned_by, "ttl": ttl,
+            }
+        except Exception as e:
+            raise HTTPException(500, f"Failed to spawn agent: {e}") from e
+
+    # === Agent History Access ===
+
+    @app.get("/mesh/agents/{agent_id}/history")
+    async def get_agent_history(agent_id: str, requesting_agent: str = "") -> dict:
+        """Retrieve an agent's daily logs. Permission-checked."""
+        if requesting_agent and not permissions.can_message(requesting_agent, agent_id):
+            raise HTTPException(403, f"Agent {requesting_agent} cannot read history of {agent_id}")
+        agent_entry = router.agent_registry.get(agent_id)
+        if not agent_entry:
+            raise HTTPException(404, f"Agent not found: {agent_id}")
+        if transport is not None:
+            try:
+                return await transport.request(agent_id, "GET", "/history", timeout=10)
+            except Exception as e:
+                raise HTTPException(502, f"Failed to fetch history from {agent_id}: {e}") from e
+        # Fallback: direct HTTP if no transport provided
+        agent_url = agent_entry.get("url", agent_entry) if isinstance(agent_entry, dict) else agent_entry
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(f"{agent_url}/history")
+                resp.raise_for_status()
+                return resp.json()
+        except Exception as e:
+            raise HTTPException(502, f"Failed to fetch history from {agent_id}: {e}") from e
 
     return app

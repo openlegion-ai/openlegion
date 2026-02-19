@@ -1,6 +1,10 @@
-"""Unit tests for agent skill registry."""
+"""Unit tests for agent skill registry and skill authoring."""
 
-import asyncio
+import shutil
+import tempfile
+from pathlib import Path
+
+import pytest
 
 from src.agent.skills import SkillRegistry, _skill_registry, skill
 
@@ -19,7 +23,8 @@ def test_skill_decorator_registers():
     assert _skill_registry["test_skill"]["description"] == "A test"
 
 
-def test_skill_execution_sync():
+@pytest.mark.asyncio
+async def test_skill_execution_sync():
     @skill(name="sync_skill", description="sync test", parameters={"val": {"type": "integer"}})
     def sync_fn(val: int):
         return val * 2
@@ -27,11 +32,12 @@ def test_skill_execution_sync():
     registry = SkillRegistry.__new__(SkillRegistry)
     registry.skills = dict(_skill_registry)
 
-    result = asyncio.get_event_loop().run_until_complete(registry.execute("sync_skill", {"val": 5}))
+    result = await registry.execute("sync_skill", {"val": 5})
     assert result == 10
 
 
-def test_skill_execution_async():
+@pytest.mark.asyncio
+async def test_skill_execution_async():
     @skill(name="async_skill", description="async test", parameters={"val": {"type": "string"}})
     async def async_fn(val: str):
         return f"hello {val}"
@@ -39,19 +45,17 @@ def test_skill_execution_async():
     registry = SkillRegistry.__new__(SkillRegistry)
     registry.skills = dict(_skill_registry)
 
-    result = asyncio.get_event_loop().run_until_complete(registry.execute("async_skill", {"val": "world"}))
+    result = await registry.execute("async_skill", {"val": "world"})
     assert result == "hello world"
 
 
-def test_unknown_skill_raises():
+@pytest.mark.asyncio
+async def test_unknown_skill_raises():
     registry = SkillRegistry.__new__(SkillRegistry)
     registry.skills = {}
 
-    try:
-        asyncio.get_event_loop().run_until_complete(registry.execute("nonexistent", {}))
-        assert False, "Should have raised ValueError"
-    except ValueError as e:
-        assert "Unknown skill" in str(e)
+    with pytest.raises(ValueError, match="Unknown skill"):
+        await registry.execute("nonexistent", {})
 
 
 def test_get_tool_definitions():
@@ -88,3 +92,74 @@ def test_list_skills():
     names = registry.list_skills()
     assert "a" in names
     assert "b" in names
+
+
+class TestSkillReload:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        _skill_registry.clear()
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_reload_picks_up_new_file(self):
+        registry = SkillRegistry.__new__(SkillRegistry)
+        registry.skills_dir = self._tmpdir
+        registry.skills = {}
+
+        # Write a new skill file
+        skill_code = '''
+from src.agent.skills import skill
+
+@skill(name="dynamic_test", description="dynamic", parameters={"x": {"type": "string"}})
+def dynamic_test(x: str):
+    return {"echo": x}
+'''
+        (Path(self._tmpdir) / "dynamic.py").write_text(skill_code)
+
+        count = registry.reload()
+        assert count > 0
+        assert "dynamic_test" in registry.skills
+
+
+class TestSkillValidation:
+    def test_validate_valid_code(self):
+        from src.agent.builtins.skill_tool import _validate_skill_code
+        code = '''
+from src.agent.skills import skill
+
+@skill(name="test", description="test", parameters={})
+def test():
+    return {"ok": True}
+'''
+        assert _validate_skill_code(code) is None
+
+    def test_validate_syntax_error(self):
+        from src.agent.builtins.skill_tool import _validate_skill_code
+        assert _validate_skill_code("def broken(") is not None
+
+    def test_validate_missing_decorator(self):
+        from src.agent.builtins.skill_tool import _validate_skill_code
+        code = "def plain():\n    return 1\n"
+        error = _validate_skill_code(code)
+        assert error is not None
+        assert "decorator" in error.lower()
+
+    def test_validate_forbidden_import(self):
+        from src.agent.builtins.skill_tool import _validate_skill_code
+        code = '''
+import subprocess
+from src.agent.skills import skill
+
+@skill(name="bad", description="bad", parameters={})
+def bad():
+    subprocess.run(["rm", "-rf", "/"])
+'''
+        error = _validate_skill_code(code)
+        assert error is not None
+        assert "Forbidden" in error
+
+    def test_sanitize_filename(self):
+        from src.agent.builtins.skill_tool import _sanitize_filename
+        assert _sanitize_filename("my tool") == "custom_my_tool.py"
+        assert _sanitize_filename("API-Helper") == "custom_api_helper.py"

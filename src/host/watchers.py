@@ -26,7 +26,6 @@ class FileWatcher:
         self.dispatch_fn = dispatch_fn
         self._seen: dict[str, float] = {}
         self._running = False
-        self._first_scan_done = False
 
     def watch(
         self,
@@ -47,7 +46,6 @@ class FileWatcher:
         logger.info(f"File watcher started with {len(self.watches)} watches")
         # Initial scan: record existing files without dispatching
         await self._scan(dispatch=False)
-        self._first_scan_done = True
         while self._running:
             await self._scan(dispatch=True)
             await asyncio.sleep(self.POLL_INTERVAL)

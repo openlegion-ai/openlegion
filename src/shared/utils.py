@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import UTC, datetime
@@ -46,13 +47,32 @@ class StructuredFormatter(logging.Formatter):
         return json.dumps(log_entry)
 
 
+class TextFormatter(logging.Formatter):
+    """Human-readable log formatter for development."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = datetime.now(UTC).strftime("%H:%M:%S")
+        msg = record.getMessage()
+        return f"{ts} [{record.levelname:<5}] {record.name}: {msg}"
+
+
 def setup_logging(name: str, level: str = "INFO") -> logging.Logger:
-    """Configure structured JSON logging for a named logger."""
+    """Configure logging for a named logger.
+
+    Format controlled by OPENLEGION_LOG_FORMAT env var:
+      - "json" (default): structured JSON lines
+      - "text": human-readable single-line format
+    """
     logger = logging.getLogger(name)
     if not logger.handlers:
-        logger.setLevel(getattr(logging, level.upper()))
+        if logger.level == logging.NOTSET:
+            logger.setLevel(getattr(logging, level.upper()))
         handler = logging.StreamHandler()
-        handler.setFormatter(StructuredFormatter())
+        log_format = os.environ.get("OPENLEGION_LOG_FORMAT", "json").lower()
+        if log_format == "text":
+            handler.setFormatter(TextFormatter())
+        else:
+            handler.setFormatter(StructuredFormatter())
         logger.addHandler(handler)
     return logger
 

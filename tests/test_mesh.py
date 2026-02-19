@@ -206,3 +206,32 @@ def test_router_register_and_unregister():
 
     router.unregister_agent("a1")
     assert "a1" not in router.agent_registry
+
+
+def test_permissions_wildcard_messaging(tmp_path):
+    """Wildcard can_message: ['*'] still works for system/orchestrator use."""
+    config = {
+        "permissions": {
+            "ceo": {
+                "can_message": ["*"],
+                "blackboard_read": ["context/*", "goals/*"],
+                "blackboard_write": ["context/*", "goals/*"],
+                "allowed_apis": ["llm"],
+            },
+            "worker": {
+                "can_message": ["orchestrator"],
+                "blackboard_read": ["context/*"],
+                "blackboard_write": [],
+                "allowed_apis": ["llm"],
+            },
+        }
+    }
+    config_path = tmp_path / "permissions.json"
+    config_path.write_text(json.dumps(config))
+    pm = PermissionMatrix(config_path=str(config_path))
+
+    assert pm.can_message("ceo", "worker")
+    assert pm.can_message("ceo", "engineer")
+    assert pm.can_message("ceo", "anyone")
+    assert not pm.can_message("worker", "ceo")
+    assert pm.can_message("worker", "orchestrator")
