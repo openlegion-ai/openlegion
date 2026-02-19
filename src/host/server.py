@@ -249,12 +249,11 @@ def create_mesh_app(
         # Fallback: direct HTTP if no transport provided
         agent_url = agent_entry.get("url", agent_entry) if isinstance(agent_entry, dict) else agent_entry
         import httpx
-        if not hasattr(get_agent_history, "_fallback_client") or get_agent_history._fallback_client.is_closed:
-            get_agent_history._fallback_client = httpx.AsyncClient(timeout=10)
         try:
-            resp = await get_agent_history._fallback_client.get(f"{agent_url}/history")
-            resp.raise_for_status()
-            return resp.json()
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(f"{agent_url}/history")
+                resp.raise_for_status()
+                return resp.json()
         except Exception as e:
             raise HTTPException(502, f"Failed to fetch history from {agent_id}: {e}") from e
 

@@ -29,3 +29,4 @@ config/webhooks.json
 config/telegram_paired.json
 config/discord_paired.json
 benchmark_report.md
+ROADMAP.md

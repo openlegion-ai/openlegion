@@ -360,6 +360,8 @@ class MessageRouter:
         self.agent_registry[agent_id] = url
         if capabilities:
             self._capabilities_cache[agent_id] = capabilities
+        else:
+            self._capabilities_cache.pop(agent_id, None)
 
     def unregister_agent(self, agent_id: str) -> None:
         """Remove an agent from the registry."""

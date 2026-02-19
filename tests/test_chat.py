@@ -97,7 +97,7 @@ class TestChatMode:
         loop = _make_loop()
         await loop.chat("Hello")
         assert len(loop._chat_messages) > 0
-        loop.reset_chat()
+        await loop.reset_chat()
         assert len(loop._chat_messages) == 0
 
     @pytest.mark.asyncio

@@ -110,7 +110,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     @app.post("/chat/reset")
     async def chat_reset() -> dict:
         """Clear conversation history."""
-        loop.reset_chat()
+        await loop.reset_chat()
         return {"status": "ok"}
 
     @app.get("/history")

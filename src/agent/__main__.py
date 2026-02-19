@@ -60,7 +60,7 @@ def main() -> None:
         except OSError:
             logger.debug("Could not copy PROJECT.md into workspace")
 
-    context_mgr = ContextManager(max_tokens=128_000, llm=llm, workspace=workspace)
+    context_mgr = ContextManager(max_tokens=128_000, llm=llm, workspace=workspace, memory=memory)
 
     loop = AgentLoop(
         agent_id=agent_id,

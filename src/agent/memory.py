@@ -250,6 +250,26 @@ class MemoryStore:
                 facts.append(fact)
         return facts
 
+    async def store_facts_batch(self, facts: list[dict]) -> int:
+        """Store multiple structured facts at once.
+
+        Each dict should have 'key' and 'value', with optional 'category'.
+        Returns the count of facts successfully stored.
+        """
+        stored = 0
+        for fact in facts:
+            key = fact.get("key")
+            value = fact.get("value")
+            if not key or not value:
+                continue
+            category = fact.get("category", "general")
+            try:
+                await self.store_fact(key=key, value=value, category=category, source="context_flush")
+                stored += 1
+            except Exception as e:
+                logger.warning(f"Failed to store fact '{key}': {e}")
+        return stored
+
     async def log_action(
         self,
         action: str,

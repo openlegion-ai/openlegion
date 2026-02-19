@@ -62,6 +62,13 @@ _SCAFFOLD_FILES: dict[str, str] = {
 
 _MAX_FILE_SIZE = 200_000
 
+# Bootstrap capping — limits for system prompt injection
+_MAX_BOOTSTRAP = 40_000
+_MAX_AGENTS = 8_000
+_MAX_SOUL = 4_000
+_MAX_USER = 4_000
+_MAX_MEMORY = 16_000
+
 
 _CORRECTION_SIGNALS = frozenset({
     "no,", "no.", "wrong", "incorrect", "that's not", "that is not",
@@ -125,6 +132,50 @@ class WorkspaceManager:
             if content and content.strip():
                 parts.append(f"## Session Log: {date.isoformat()}\n\n{content.strip()}")
         return "\n\n".join(parts) if parts else ""
+
+    def get_bootstrap_content(self) -> str:
+        """Load workspace files for system prompt with per-file and total caps.
+
+        Loads AGENTS.md, SOUL.md, USER.md, MEMORY.md with individual size
+        limits. Appends truncation notice when a file is capped. Enforces
+        a total cap across all files.
+
+        Daily logs are NOT included — agents access them via memory_search.
+        """
+        caps = {
+            "AGENTS.md": _MAX_AGENTS,
+            "SOUL.md": _MAX_SOUL,
+            "USER.md": _MAX_USER,
+            "MEMORY.md": _MAX_MEMORY,
+        }
+
+        parts: list[str] = []
+        total = 0
+
+        # PROJECT.md has no individual cap but counts toward total
+        project = self._read_file("PROJECT.md")
+        if project and project.strip():
+            parts.append(project.strip())
+            total += len(parts[-1])
+
+        for filename, cap in caps.items():
+            content = self._read_file(filename)
+            if not content or not content.strip():
+                continue
+            content = content.strip()
+            if len(content) > cap:
+                content = content[:cap] + (
+                    "\n\n... (truncated, use memory_search for full content)"
+                )
+            parts.append(content)
+            total += len(content)
+
+        combined = "\n\n---\n\n".join(parts)
+        if len(combined) > _MAX_BOOTSTRAP:
+            combined = combined[:_MAX_BOOTSTRAP] + (
+                "\n\n... (bootstrap truncated, use memory_search for full content)"
+            )
+        return combined
 
     def _read_file(self, relative_path: str) -> str | None:
         path = self.root / relative_path

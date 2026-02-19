@@ -37,6 +37,14 @@ _MAX_OUTPUT = 100_000
 )
 async def exec_command(command: str, timeout: int = 30, workdir: str = "/data") -> dict:
     """Run a shell command and return exit code + output."""
+    import os
+    # Inside the container, confine workdir to /data to prevent directory escape.
+    # Outside containers (dev/test), /data won't exist — skip the check.
+    if os.path.isdir("/data"):
+        resolved = os.path.realpath(workdir)
+        if not resolved.startswith("/data"):
+            return {"exit_code": -1, "stdout": "", "stderr": f"workdir must be under /data, got: {workdir}"}
+        workdir = resolved
     try:
         proc = await asyncio.create_subprocess_shell(
             command,

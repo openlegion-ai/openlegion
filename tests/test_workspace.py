@@ -70,6 +70,76 @@ class TestWorkspaceScaffold:
         assert "Agent Instructions" in context
 
 
+class TestBootstrapContent:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.ws = WorkspaceManager(workspace_dir=self._tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_bootstrap_includes_all_workspace_files(self):
+        root = Path(self._tmpdir)
+        (root / "AGENTS.md").write_text("Agent instructions here")
+        (root / "SOUL.md").write_text("Soul content")
+        (root / "USER.md").write_text("User prefs")
+        (root / "MEMORY.md").write_text("Important memory")
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        content = ws.get_bootstrap_content()
+        assert "Agent instructions" in content
+        assert "Soul content" in content
+        assert "User prefs" in content
+        assert "Important memory" in content
+
+    def test_bootstrap_truncates_large_files(self):
+        root = Path(self._tmpdir)
+        # Write a MEMORY.md larger than _MAX_MEMORY (16000 chars)
+        (root / "MEMORY.md").write_text("x" * 20_000)
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        content = ws.get_bootstrap_content()
+        assert "truncated" in content
+        assert "memory_search" in content
+
+    def test_bootstrap_enforces_total_cap(self):
+        root = Path(self._tmpdir)
+        # Fill every file close to its per-file cap to exceed total
+        (root / "AGENTS.md").write_text("A" * 8_000)
+        (root / "SOUL.md").write_text("S" * 4_000)
+        (root / "USER.md").write_text("U" * 4_000)
+        (root / "MEMORY.md").write_text("M" * 16_000)
+        (root / "PROJECT.md").write_text("P" * 15_000)
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        content = ws.get_bootstrap_content()
+        assert len(content) <= 40_000 + 100  # small margin for truncation text
+
+    def test_bootstrap_skips_empty_files(self):
+        root = Path(self._tmpdir)
+        (root / "AGENTS.md").write_text("")
+        (root / "SOUL.md").write_text("")
+        (root / "USER.md").write_text("User info")
+        (root / "MEMORY.md").write_text("")
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        content = ws.get_bootstrap_content()
+        assert "User info" in content
+        assert content.count("---") == 0  # only one file, no separators
+
+    def test_bootstrap_does_not_include_daily_logs(self):
+        root = Path(self._tmpdir)
+        memory_dir = root / "memory"
+        memory_dir.mkdir(exist_ok=True)
+        (memory_dir / "2026-02-19.md").write_text("Daily log entry here")
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        content = ws.get_bootstrap_content()
+        assert "Daily log entry here" not in content
+
+    def test_bootstrap_includes_project_md(self):
+        root = Path(self._tmpdir)
+        (root / "PROJECT.md").write_text("## Project\nWe are building X.")
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        content = ws.get_bootstrap_content()
+        assert "We are building X" in content
+
+
 class TestDailyLogs:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()

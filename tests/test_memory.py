@@ -90,3 +90,36 @@ async def test_log_action(memory):
 async def test_empty_search_returns_empty(memory):
     results = await memory.search("nonexistent")
     assert results == []
+
+
+@pytest.mark.asyncio
+async def test_store_facts_batch(memory):
+    facts = [
+        {"key": "user_lang", "value": "Python", "category": "preference"},
+        {"key": "user_editor", "value": "Vim", "category": "preference"},
+        {"key": "project_name", "value": "OpenLegion", "category": "fact"},
+    ]
+    stored = await memory.store_facts_batch(facts)
+    assert stored == 3
+    assert memory._get_fact_by_key("user_lang").value == "Python"
+    assert memory._get_fact_by_key("user_editor").value == "Vim"
+    assert memory._get_fact_by_key("project_name").value == "OpenLegion"
+
+
+@pytest.mark.asyncio
+async def test_store_facts_batch_skips_invalid(memory):
+    facts = [
+        {"key": "valid_key", "value": "valid_value"},
+        {"key": "", "value": "no key"},  # empty key
+        {"value": "missing key"},  # no key at all
+        {"key": "no_value"},  # no value
+    ]
+    stored = await memory.store_facts_batch(facts)
+    assert stored == 1
+    assert memory._get_fact_by_key("valid_key") is not None
+
+
+@pytest.mark.asyncio
+async def test_store_facts_batch_empty(memory):
+    stored = await memory.store_facts_batch([])
+    assert stored == 0
