@@ -1,5 +1,7 @@
 """Unit tests for credential vault."""
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 from src.host.credentials import CredentialVault
@@ -77,3 +79,196 @@ async def test_unknown_action_returns_error(monkeypatch):
     result = await v.execute_api_call(req)
     assert not result.success
     assert "Unknown action" in result.error
+
+
+# ── Failover integration tests ────────────────────────────────
+
+
+def test_vault_with_failover_config(monkeypatch):
+    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    v = CredentialVault(
+        failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
+    )
+    models = v._failover_chain.get_models_to_try("anthropic/claude-haiku-4-5-20251001")
+    assert models == ["anthropic/claude-haiku-4-5-20251001", "openai/gpt-4o-mini"]
+
+
+async def test_handle_llm_failover_on_rate_limit(monkeypatch):
+    """First model rate-limited, second succeeds."""
+    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    v = CredentialVault(
+        failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
+    )
+
+    import litellm
+
+    call_count = 0
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if model.startswith("anthropic/"):
+            raise litellm.RateLimitError(
+                message="rate limited", model=model, llm_provider="anthropic",
+            )
+        # OpenAI succeeds
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = "hello from fallback"
+        resp.choices[0].message.tool_calls = None
+        resp.usage = MagicMock()
+        resp.usage.total_tokens = 42
+        return resp
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "anthropic/claude-haiku-4-5-20251001", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        result = await v.execute_api_call(req)
+
+    assert result.success
+    assert result.data["content"] == "hello from fallback"
+    assert result.data["model"] == "openai/gpt-4o-mini"
+    assert call_count == 2
+
+
+async def test_handle_llm_no_failover_on_bad_request(monkeypatch):
+    """400 BadRequestError doesn't cascade — it's a permanent error."""
+    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    v = CredentialVault(
+        failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
+    )
+
+    import litellm
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        raise litellm.BadRequestError(
+            message="invalid request", model=model, llm_provider="anthropic",
+        )
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "anthropic/claude-haiku-4-5-20251001", "messages": []},
+        )
+        result = await v.execute_api_call(req)
+
+    assert not result.success
+    assert "invalid request" in result.error
+
+
+async def test_handle_llm_all_models_exhausted(monkeypatch):
+    """All models fail → error returned."""
+    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    v = CredentialVault(
+        failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
+    )
+
+    import litellm
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        raise litellm.ServiceUnavailableError(
+            message=f"{model} down", model=model, llm_provider="test",
+        )
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "anthropic/claude-haiku-4-5-20251001", "messages": []},
+        )
+        result = await v.execute_api_call(req)
+
+    assert not result.success
+    assert "down" in result.error
+
+
+async def test_stream_failover(monkeypatch):
+    """Streaming: first model fails on connection, second streams OK."""
+    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    v = CredentialVault(
+        failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
+    )
+
+    import litellm
+
+    async def mock_chunk_generator():
+        chunk = MagicMock()
+        chunk.choices = [MagicMock()]
+        chunk.choices[0].delta.content = "streamed"
+        chunk.choices[0].delta.tool_calls = None
+        yield chunk
+
+    call_count = 0
+
+    async def mock_acompletion(model, messages, api_key, stream=False, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if model.startswith("anthropic/"):
+            raise litellm.ServiceUnavailableError(
+                message="down", model=model, llm_provider="anthropic",
+            )
+        # Return an async generator for streaming
+        return mock_chunk_generator()
+
+    import json
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "anthropic/claude-haiku-4-5-20251001", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        events = []
+        async for event in v.stream_llm(req):
+            events.append(event)
+
+    assert call_count == 2
+    # Should have text_delta and done events
+    assert any("streamed" in e for e in events)
+    assert any("done" in e for e in events)
+
+
+async def test_cost_tracking_uses_actual_model(monkeypatch):
+    """Cost is attributed to the model that actually responded."""
+    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+
+    cost_tracker = MagicMock()
+    cost_tracker.check_budget.return_value = {"allowed": True}
+    v = CredentialVault(
+        cost_tracker=cost_tracker,
+        failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
+    )
+
+    import litellm
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        if model.startswith("anthropic/"):
+            raise litellm.RateLimitError(
+                message="rate limited", model=model, llm_provider="anthropic",
+            )
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = "ok"
+        resp.choices[0].message.tool_calls = None
+        resp.usage = MagicMock()
+        resp.usage.total_tokens = 100
+        return resp
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "anthropic/claude-haiku-4-5-20251001", "messages": []},
+        )
+        result = await v.execute_api_call(req, agent_id="test-agent")
+
+    assert result.success
+    # Cost should be tracked against actual model (openai/gpt-4o-mini)
+    cost_tracker.track.assert_called_once()
+    call_args = cost_tracker.track.call_args
+    assert call_args[0][0] == "test-agent"
+    assert call_args[0][1] == "openai/gpt-4o-mini"

@@ -903,7 +903,11 @@ def _start_interactive(config_path: str) -> None:
     pubsub = PubSub(db_path="pubsub.db")
     permissions = PermissionMatrix()
     cost_tracker = CostTracker()
-    credential_vault = CredentialVault(cost_tracker=cost_tracker)
+    failover_config = cfg.get("llm", {}).get("failover", {})
+    credential_vault = CredentialVault(
+        cost_tracker=cost_tracker,
+        failover_config=failover_config or None,
+    )
     router = MessageRouter(permissions, {})
 
     orchestrator = Orchestrator(
@@ -1590,6 +1594,16 @@ def _multi_agent_repl(
                         click.echo(f"Today's spend: ${total:.4f}\n")
                         for a in agents_spend:
                             click.echo(f"  {a['agent']:<16} {a['tokens']:>8,} tokens  ${a['cost']:.4f}")
+                    # Model health summary
+                    model_health = credential_vault.get_model_health()
+                    if model_health:
+                        click.echo(f"\nModel health:")
+                        for mh in model_health:
+                            status = "ok" if mh["available"] else f"cooldown {mh['cooldown_remaining']:.0f}s"
+                            click.echo(
+                                f"  {mh['model']:<40} {status:<20} "
+                                f"{mh['success_count']} ok / {mh['failure_count']} fail"
+                            )
                 except Exception as e:
                     click.echo(f"Error: {e}")
                 continue

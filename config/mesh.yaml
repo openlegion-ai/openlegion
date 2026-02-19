@@ -6,6 +6,11 @@ llm:
   embedding_model: text-embedding-3-small
   max_tokens: 4096
   temperature: 0.7
+  # failover:
+  #   anthropic/claude-haiku-4-5-20251001:
+  #     - openai/gpt-4o-mini
+  #   anthropic/claude-sonnet-4-5-20250929:
+  #     - openai/gpt-4o
 channels:
   telegram:
     enabled: true
