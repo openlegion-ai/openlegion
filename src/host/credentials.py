@@ -133,11 +133,15 @@ class CredentialVault:
 
     @staticmethod
     def _is_permanent_error(error: Exception) -> bool:
-        """Return True if the error should NOT cascade to fallback models."""
+        """Return True if the error should NOT cascade to fallback models.
+
+        BadRequestError covers its subclasses: ContentPolicyViolationError,
+        ContextWindowExceededError, UnsupportedParamsError, etc.
+        NotFoundError means the model name itself is invalid — cascading
+        would silently mask bad config.
+        """
         import litellm
-        if isinstance(error, litellm.BadRequestError):
-            return True
-        if isinstance(error, litellm.ContentPolicyViolationError):
+        if isinstance(error, (litellm.BadRequestError, litellm.NotFoundError)):
             return True
         return False
 
@@ -171,12 +175,12 @@ class CredentialVault:
                     )
                 return result, model
             except Exception as e:
-                if self._is_permanent_error(e):
-                    raise
                 status_code = self._get_status_code(e)
                 self._health_tracker.record_failure(
                     model, type(e).__name__, status_code,
                 )
+                if self._is_permanent_error(e):
+                    raise
                 last_error = e
 
         if last_error is not None:
@@ -278,11 +282,11 @@ class CredentialVault:
                     logger.info(f"Stream failover: '{requested_model}' → '{model}'")
                 break
             except Exception as e:
+                status_code = self._get_status_code(e)
+                self._health_tracker.record_failure(model, type(e).__name__, status_code)
                 if self._is_permanent_error(e):
                     yield f"data: {json.dumps({'error': str(e)})}\n\n"
                     return
-                status_code = self._get_status_code(e)
-                self._health_tracker.record_failure(model, type(e).__name__, status_code)
                 last_error = e
 
         if response is None:
@@ -328,6 +332,9 @@ class CredentialVault:
 
         except Exception as e:
             logger.error(f"Streaming LLM call failed: {e}")
+            self._health_tracker.record_failure(
+                used_model, type(e).__name__, self._get_status_code(e),
+            )
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     async def _handle_anthropic(self, request: APIProxyRequest) -> APIProxyResponse:

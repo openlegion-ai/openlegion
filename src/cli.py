@@ -1141,6 +1141,7 @@ def _start_interactive(config_path: str) -> None:
         _multi_agent_repl(
             active_agent, agent_urls, router, cost_tracker, runtime, cfg,
             transport=transport, dispatch_loop=_dispatch_loop,
+            credential_vault=credential_vault,
         )
     except KeyboardInterrupt:
         click.echo("")
@@ -1452,6 +1453,7 @@ def _multi_agent_repl(
     cfg: dict,
     transport: object | None = None,
     dispatch_loop=None,
+    credential_vault: object | None = None,
 ) -> None:
     """Interactive REPL supporting multiple agents, @mentions, and slash commands."""
     import concurrent.futures
@@ -1595,9 +1597,9 @@ def _multi_agent_repl(
                         for a in agents_spend:
                             click.echo(f"  {a['agent']:<16} {a['tokens']:>8,} tokens  ${a['cost']:.4f}")
                     # Model health summary
-                    model_health = credential_vault.get_model_health()
+                    model_health = credential_vault.get_model_health() if credential_vault else []
                     if model_health:
-                        click.echo(f"\nModel health:")
+                        click.echo("\nModel health:")
                         for mh in model_health:
                             status = "ok" if mh["available"] else f"cooldown {mh['cooldown_remaining']:.0f}s"
                             click.echo(
