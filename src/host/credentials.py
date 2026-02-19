@@ -25,13 +25,23 @@ logger = setup_logging("host.credentials")
 class CredentialVault:
     """Stores API credentials and executes proxied API calls."""
 
-    def __init__(self, cost_tracker: object | None = None) -> None:
+    def __init__(
+        self,
+        cost_tracker: object | None = None,
+        failover_config: dict[str, list[str]] | None = None,
+    ) -> None:
         self.credentials: dict[str, str] = {}
         self.service_handlers: dict[str, Callable] = {}
         self.cost_tracker = cost_tracker
         self._http_client: httpx.AsyncClient | None = None
         self._load_credentials()
         self._register_handlers()
+
+        from src.host.failover import FailoverChain, ModelHealthTracker
+        self._health_tracker = ModelHealthTracker()
+        self._failover_chain = FailoverChain(
+            chains=failover_config or {}, health=self._health_tracker,
+        )
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
@@ -88,7 +98,9 @@ class CredentialVault:
             if self.cost_tracker and agent_id and response.success and response.data:
                 tokens_used = response.data.get("tokens_used", 0)
                 if tokens_used:
-                    model = request.params.get("model", "unknown")
+                    model = response.data.get(
+                        "model", request.params.get("model", "unknown"),
+                    )
                     prompt_tokens = int(tokens_used * 0.7)
                     completion_tokens = tokens_used - prompt_tokens
                     self.cost_tracker.track(agent_id, model, prompt_tokens, completion_tokens)
@@ -119,24 +131,79 @@ class CredentialVault:
                 return self.credentials.get(key_name)
         return None
 
+    @staticmethod
+    def _is_permanent_error(error: Exception) -> bool:
+        """Return True if the error should NOT cascade to fallback models."""
+        import litellm
+        if isinstance(error, litellm.BadRequestError):
+            return True
+        if isinstance(error, litellm.ContentPolicyViolationError):
+            return True
+        return False
+
+    @staticmethod
+    def _get_status_code(error: Exception) -> int:
+        """Extract HTTP status code from a litellm exception."""
+        return getattr(error, "status_code", 0)
+
+    async def _call_llm_with_failover(
+        self, requested_model: str, call_fn,
+    ) -> tuple:
+        """Try *call_fn(model, api_key)* across the failover chain.
+
+        Returns ``(result, used_model)`` on success.
+        Raises the last exception if all models are exhausted.
+        """
+        models = self._failover_chain.get_models_to_try(requested_model)
+        last_error: Exception | None = None
+
+        for model in models:
+            api_key = self._get_api_key_for_model(model)
+            if not api_key:
+                logger.debug(f"No API key for failover candidate '{model}', skipping")
+                continue
+            try:
+                result = await call_fn(model, api_key)
+                self._health_tracker.record_success(model)
+                if model != requested_model:
+                    logger.info(
+                        f"Failover: '{requested_model}' → '{model}' succeeded",
+                    )
+                return result, model
+            except Exception as e:
+                if self._is_permanent_error(e):
+                    raise
+                status_code = self._get_status_code(e)
+                self._health_tracker.record_failure(
+                    model, type(e).__name__, status_code,
+                )
+                last_error = e
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"No API key configured for model: {requested_model}")
+
+    def get_model_health(self) -> list[dict]:
+        """Return diagnostic model-health data."""
+        return self._health_tracker.get_status()
+
     async def _handle_llm(self, request: APIProxyRequest) -> APIProxyResponse:
         """Unified LLM handler. Auto-detects provider from model prefix via LiteLLM."""
         import litellm
 
-        model = request.params.get("model", "")
-        api_key = self._get_api_key_for_model(model)
-        if not api_key:
-            return APIProxyResponse(
-                success=False,
-                error=f"No API key configured for model: {model}",
-            )
+        requested_model = request.params.get("model", "")
 
         if request.action == "chat":
-            response = await litellm.acompletion(
-                model=model,
-                messages=request.params.get("messages", []),
-                api_key=api_key,
-                **{k: v for k, v in request.params.items() if k not in ("model", "messages")},
+            async def _chat(model: str, api_key: str):
+                return await litellm.acompletion(
+                    model=model,
+                    messages=request.params.get("messages", []),
+                    api_key=api_key,
+                    **{k: v for k, v in request.params.items() if k not in ("model", "messages")},
+                )
+
+            response, used_model = await self._call_llm_with_failover(
+                requested_model, _chat,
             )
             msg = response.choices[0].message
             return APIProxyResponse(
@@ -144,7 +211,7 @@ class CredentialVault:
                 data={
                     "content": msg.content or "",
                     "tokens_used": response.usage.total_tokens if response.usage else 0,
-                    "model": model,
+                    "model": used_model,
                     "tool_calls": [
                         {"name": tc.function.name, "arguments": tc.function.arguments}
                         for tc in (msg.tool_calls or [])
@@ -153,6 +220,13 @@ class CredentialVault:
             )
 
         elif request.action == "embed":
+            # Embedding models produce incompatible vector spaces — no failover
+            api_key = self._get_api_key_for_model(requested_model)
+            if not api_key:
+                return APIProxyResponse(
+                    success=False,
+                    error=f"No API key configured for model: {requested_model}",
+                )
             response = await litellm.aembedding(
                 model=request.params.get("model", "text-embedding-3-small"),
                 input=request.params.get("text", ""),
@@ -169,6 +243,8 @@ class CredentialVault:
 
         Each yielded string is a complete SSE line: ``data: <json>\\n\\n``.
         The final chunk has ``"done": true``.
+        Supports failover: if connection setup fails for one model, the next
+        model in the chain is tried. Once streaming starts, we stay on that model.
         """
         import litellm
 
@@ -178,21 +254,43 @@ class CredentialVault:
                 yield f"data: {json.dumps({'error': 'Budget exceeded'})}\n\n"
                 return
 
-        model = request.params.get("model", "")
-        api_key = self._get_api_key_for_model(model)
-        if not api_key:
-            yield f"data: {json.dumps({'error': f'No API key for model: {model}'})}\n\n"
+        requested_model = request.params.get("model", "")
+        models_to_try = self._failover_chain.get_models_to_try(requested_model)
+
+        response = None
+        used_model = requested_model
+        last_error: Exception | None = None
+
+        for model in models_to_try:
+            api_key = self._get_api_key_for_model(model)
+            if not api_key:
+                continue
+            try:
+                response = await litellm.acompletion(
+                    model=model,
+                    messages=request.params.get("messages", []),
+                    api_key=api_key,
+                    stream=True,
+                    **{k: v for k, v in request.params.items() if k not in ("model", "messages")},
+                )
+                used_model = model
+                if model != requested_model:
+                    logger.info(f"Stream failover: '{requested_model}' → '{model}'")
+                break
+            except Exception as e:
+                if self._is_permanent_error(e):
+                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                    return
+                status_code = self._get_status_code(e)
+                self._health_tracker.record_failure(model, type(e).__name__, status_code)
+                last_error = e
+
+        if response is None:
+            error_msg = str(last_error) if last_error else f"No API key for model: {requested_model}"
+            yield f"data: {json.dumps({'error': error_msg})}\n\n"
             return
 
         try:
-            response = await litellm.acompletion(
-                model=model,
-                messages=request.params.get("messages", []),
-                api_key=api_key,
-                stream=True,
-                **{k: v for k, v in request.params.items() if k not in ("model", "messages")},
-            )
-
             collected_content = ""
             collected_tool_calls: list[dict] = []
 
@@ -220,12 +318,13 @@ class CredentialVault:
             if hasattr(response, 'usage') and response.usage:
                 tokens_used = response.usage.total_tokens
 
+            self._health_tracker.record_success(used_model)
             yield f"data: {json.dumps({'type': 'done', 'content': collected_content, 'tool_calls': collected_tool_calls, 'tokens_used': tokens_used})}\n\n"
 
             if self.cost_tracker and agent_id and tokens_used:
                 prompt_tokens = int(tokens_used * 0.7)
                 completion_tokens = tokens_used - prompt_tokens
-                self.cost_tracker.track(agent_id, model, prompt_tokens, completion_tokens)
+                self.cost_tracker.track(agent_id, used_model, prompt_tokens, completion_tokens)
 
         except Exception as e:
             logger.error(f"Streaming LLM call failed: {e}")

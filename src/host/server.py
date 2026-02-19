@@ -140,6 +140,15 @@ def create_mesh_app(
             media_type="text/event-stream",
         )
 
+    # === Model Health Diagnostic ===
+
+    @app.get("/mesh/model-health")
+    async def model_health() -> list[dict]:
+        """Return model failover health status. Mesh-internal diagnostic."""
+        if credential_vault is None:
+            return []
+        return credential_vault.get_model_health()
+
     # === Agent Registry ===
 
     @app.post("/mesh/register")
