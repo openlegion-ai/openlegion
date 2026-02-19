@@ -87,7 +87,12 @@ class SkillRegistry:
         return len(self.skills)
 
     async def execute(
-        self, name: str, arguments: dict, mesh_client: Any = None, workspace_manager: Any = None,
+        self,
+        name: str,
+        arguments: dict,
+        mesh_client: Any = None,
+        workspace_manager: Any = None,
+        memory_store: Any = None,
     ) -> Any:
         """Execute a skill by name with given arguments."""
         if name not in self.skills:
@@ -101,6 +106,8 @@ class SkillRegistry:
             call_args["mesh_client"] = mesh_client
         if "workspace_manager" in sig.parameters:
             call_args["workspace_manager"] = workspace_manager
+        if "memory_store" in sig.parameters:
+            call_args["memory_store"] = memory_store
 
         if inspect.iscoroutinefunction(func):
             return await func(**call_args)

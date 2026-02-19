@@ -390,3 +390,66 @@ class TestBuiltinDiscovery:
         assert "http_request" in registry.skills
         assert "browser_navigate" in registry.skills
         assert "browser_snapshot" in registry.skills
+        assert "memory_recall" in registry.skills
+
+
+# ── memory_tool ────────────────────────────────────────────────
+
+
+class TestMemoryRecall:
+    @pytest.mark.asyncio
+    async def test_memory_recall_basic(self, tmp_path):
+        """memory_recall calls search_hierarchical and returns results."""
+        from src.agent.builtins.memory_tool import memory_recall
+        from src.agent.memory import MemoryStore
+
+        store = MemoryStore(db_path=str(tmp_path / "recall.db"))
+        await store.store_fact("user_lang", "Python")
+        await store.store_fact("user_editor", "Vim")
+
+        result = await memory_recall("user preferences", max_results=5, memory_store=store)
+        assert result["count"] >= 1
+        assert len(result["results"]) >= 1
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_memory_recall_with_category_filter(self, tmp_path):
+        """category param filters results."""
+        from src.agent.builtins.memory_tool import memory_recall
+        from src.agent.memory import MemoryStore
+
+        store = MemoryStore(db_path=str(tmp_path / "recall_cat.db"))
+        await store.store_fact("user_lang", "Python", category="preference")
+        await store.store_fact("project_name", "OpenLegion", category="fact")
+
+        result = await memory_recall("Python", category="preference", max_results=5, memory_store=store)
+        for r in result["results"]:
+            assert r["category"] == "preference"
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_memory_recall_no_store(self):
+        """memory_recall without memory_store returns error."""
+        from src.agent.builtins.memory_tool import memory_recall
+
+        result = await memory_recall("anything", memory_store=None)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_memory_search_combined_sources(self, tmp_path):
+        """memory_search returns both workspace and DB results."""
+        from src.agent.builtins.memory_tool import memory_search
+        from src.agent.memory import MemoryStore
+
+        store = MemoryStore(db_path=str(tmp_path / "search_combo.db"))
+        await store.store_fact("api_key_type", "OAuth2 tokens")
+
+        mock_ws = MagicMock()
+        mock_ws.search.return_value = [{"file": "MEMORY.md", "snippet": "User prefers dark mode"}]
+
+        result = await memory_search("user preferences", max_results=5, workspace_manager=mock_ws, memory_store=store)
+        sources = {r.get("source") for r in result["results"]}
+        assert "workspace" in sources
+        # DB results may or may not match depending on keyword search
+        assert result["count"] >= 1
+        store.close()

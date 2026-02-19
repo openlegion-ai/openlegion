@@ -201,6 +201,7 @@ class AgentLoop:
                                 tool_call.arguments,
                                 mesh_client=self.mesh_client,
                                 workspace_manager=self.workspace,
+                                memory_store=self.memory,
                             )
                             result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
                             await self._learn(tool_call.name, tool_call.arguments, result)
@@ -314,7 +315,7 @@ class AgentLoop:
             parts.append(f"## Your Memory (most relevant)\n{memory_text}")
 
         query = f"{assignment.task_type} {format_dict(assignment.input_data)}"
-        relevant = await self.memory.search(query, top_k=10)
+        relevant = await self.memory.search_hierarchical(query, top_k=10)
         seen_ids = {f.id for f in high_salience}
         novel = [f for f in relevant if f.id not in seen_ids]
         if novel:
@@ -543,6 +544,7 @@ class AgentLoop:
                             tool_call.arguments,
                             mesh_client=self.mesh_client,
                             workspace_manager=self.workspace,
+                            memory_store=self.memory,
                         )
                         result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
                     except Exception as e:
@@ -697,7 +699,9 @@ class AgentLoop:
             f"yourself when the user tells you to decide.\n\n"
             f"## Memory & coordination\n"
             f"- memory_save: remember important facts for future sessions.\n"
-            f"- memory_search: recall information from past sessions.\n"
+            f"- memory_search: recall information from workspace files and memory DB.\n"
+            f"- memory_recall: search structured fact database by semantic similarity "
+            f"(better for specific facts, supports category filtering).\n"
             f"- read/write/list_shared_state: coordinate via the shared blackboard.\n"
             f"- save_artifact: publish deliverables other agents can find.\n"
             f"- Refer to PROJECT.md for current priorities and constraints.\n"
@@ -824,6 +828,7 @@ class AgentLoop:
                             tool_call.arguments,
                             mesh_client=self.mesh_client,
                             workspace_manager=self.workspace,
+                            memory_store=self.memory,
                         )
                         result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
                     except Exception as e:
