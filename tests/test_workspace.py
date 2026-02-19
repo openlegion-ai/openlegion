@@ -1,4 +1,4 @@
-"""Tests for WorkspaceManager: file scaffold, loading, search, daily logs."""
+"""Tests for WorkspaceManager: file scaffold, loading, search, daily logs, learnings."""
 
 from __future__ import annotations
 
@@ -23,7 +23,9 @@ class TestWorkspaceScaffold:
         assert (root / "SOUL.md").exists()
         assert (root / "USER.md").exists()
         assert (root / "MEMORY.md").exists()
+        assert (root / "HEARTBEAT.md").exists()
         assert (root / "memory").is_dir()
+        assert (root / "learnings").is_dir()
 
     def test_scaffold_preserves_existing_files(self):
         root = Path(self._tmpdir)
@@ -51,6 +53,21 @@ class TestWorkspaceScaffold:
         context = ws.load_prompt_context()
         assert "Identity" in context
         assert "---" not in context  # no separator for single file
+
+    def test_load_prompt_context_includes_project_md(self):
+        root = Path(self._tmpdir)
+        (root / "PROJECT.md").write_text("## What We're Building\nA lead gen tool.")
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        context = ws.load_prompt_context()
+        assert "lead gen tool" in context
+
+    def test_load_prompt_context_without_project_md(self):
+        """PROJECT.md is optional -- no error if missing."""
+        root = Path(self._tmpdir)
+        (root / "PROJECT.md").unlink(missing_ok=True)
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        context = ws.load_prompt_context()
+        assert "Agent Instructions" in context
 
 
 class TestDailyLogs:
@@ -217,3 +234,89 @@ class TestBM25Core:
             assert files[0].startswith("memory/")
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestLearnings:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.ws = WorkspaceManager(workspace_dir=self._tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_record_error_creates_file(self):
+        self.ws.record_error("exec", "Command not found: foo", "Tried to run foo")
+        path = Path(self._tmpdir) / "learnings" / "errors.md"
+        assert path.exists()
+        content = path.read_text()
+        assert "exec" in content
+        assert "Command not found" in content
+        assert "Context: Tried to run foo" in content
+
+    def test_record_correction_creates_file(self):
+        self.ws.record_correction("I used JSON format", "No, please use YAML instead")
+        path = Path(self._tmpdir) / "learnings" / "corrections.md"
+        assert path.exists()
+        content = path.read_text()
+        assert "JSON format" in content
+        assert "YAML instead" in content
+
+    def test_get_learnings_context_empty_when_no_learnings(self):
+        context = self.ws.get_learnings_context()
+        assert context == ""
+
+    def test_get_learnings_context_includes_errors(self):
+        self.ws.record_error("http_request", "Timeout", "url=https://example.com")
+        context = self.ws.get_learnings_context()
+        assert "Timeout" in context
+        assert "Recent Errors" in context
+
+    def test_get_learnings_context_includes_corrections(self):
+        self.ws.record_correction("Said hello", "Actually say 'hi'")
+        context = self.ws.get_learnings_context()
+        assert "Corrections" in context
+
+    def test_looks_like_correction(self):
+        assert self.ws.looks_like_correction("No, I meant something else")
+        assert self.ws.looks_like_correction("Wrong, that's not right")
+        assert self.ws.looks_like_correction("Actually, use YAML")
+        assert not self.ws.looks_like_correction("What's the weather?")
+        assert not self.ws.looks_like_correction("Tell me about Python")
+
+    def test_rotate_large_file(self):
+        path = Path(self._tmpdir) / "learnings" / "errors.md"
+        # Write a large file
+        with path.open("w") as f:
+            for i in range(5000):
+                f.write(f"- Error {i}: something went wrong\n")
+        original_lines = len(path.read_text().splitlines())
+        self.ws._rotate_if_large(path)
+        new_lines = len(path.read_text().splitlines())
+        assert new_lines < original_lines
+
+    def test_load_heartbeat_rules(self):
+        rules = self.ws.load_heartbeat_rules()
+        assert "Heartbeat Rules" in rules
+        assert "pending tasks" in rules
+
+
+class TestHeartbeatFile:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.ws = WorkspaceManager(workspace_dir=self._tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_heartbeat_scaffold(self):
+        root = Path(self._tmpdir)
+        assert (root / "HEARTBEAT.md").exists()
+        content = (root / "HEARTBEAT.md").read_text()
+        assert "Heartbeat Rules" in content
+
+    def test_custom_heartbeat_rules(self):
+        root = Path(self._tmpdir)
+        (root / "HEARTBEAT.md").write_text("# Custom\n- Check email\n- Monitor API")
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        rules = ws.load_heartbeat_rules()
+        assert "Check email" in rules

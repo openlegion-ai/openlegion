@@ -39,9 +39,11 @@ class SkillRegistry:
     """Auto-discovers and manages agent skills from a directory.
 
     Loads built-in tools first, then custom skills (which can override builtins).
+    Supports hot-reload when agents create new skills at runtime.
     """
 
     def __init__(self, skills_dir: str):
+        self.skills_dir = skills_dir
         self.skills: dict[str, dict] = {}
         _skill_registry.clear()
         self._discover_builtins()
@@ -75,6 +77,15 @@ class SkillRegistry:
                     spec.loader.exec_module(module)
             except Exception as e:
                 logger.warning(f"Failed to load {label} {py_file}: {e}")
+
+    def reload(self) -> int:
+        """Re-discover skills from builtins and skills_dir. Returns new skill count."""
+        _skill_registry.clear()
+        self._discover_builtins()
+        self._discover(self.skills_dir)
+        self.skills = dict(_skill_registry)
+        logger.info(f"Reloaded {len(self.skills)} skills")
+        return len(self.skills)
 
     async def execute(
         self, name: str, arguments: dict, mesh_client: Any = None, workspace_manager: Any = None,

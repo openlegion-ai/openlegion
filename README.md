@@ -1,15 +1,15 @@
 # OpenLegion
 
-A container-isolated, memory-aware multi-agent runtime in Python.
+A fleet platform for autonomous LLM agents in Python.
 
-OpenLegion orchestrates LLM-powered agents that run in isolated Docker containers,
-coordinate through a central mesh host, persist memory across sessions, and act
-autonomously via scheduled triggers. It is built for production workloads where
-multiple agents collaborate on multi-step tasks — such as turning a CSV of companies
-into a pipeline of qualified leads — without human intervention.
+OpenLegion runs LLM-powered agents in isolated Docker containers. Each agent is
+an independent worker with its own memory, skills, schedule, and budget. The user
+manages the fleet directly — there is no CEO agent or centralized router. Agents
+coordinate through shared state (blackboard + PROJECT.md) and deterministic YAML
+workflows, not through conversations with each other.
 
-**237 tests passing** (220 unit/integration + 17 end-to-end) across **~5,400 lines**
-of application code. Zero framework dependencies. Fully auditable.
+**318 tests passing** across **~9,200 lines** of application code.
+Zero framework dependencies. Fully auditable.
 
 ---
 
@@ -38,27 +38,30 @@ of application code. Zero framework dependencies. Fully auditable.
 
 ```bash
 # 1. Clone and install
-git clone <repo-url> && cd openlegion
+git clone https://github.com/openlegion/openlegion.git && cd openlegion
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. Set your API key
-openlegion config set-key openai sk-your-key-here
+# 2. Guided setup: API key, project description, first agent, Docker image
+openlegion setup
 
-# 3. One-command setup: creates agent, builds Docker image, starts chatting
-openlegion quickstart
+# 3. Start the runtime and chat with your agents
+openlegion start
 ```
 
-Or step by step:
+That's it. `setup` walks you through everything once. `start` launches your agents and drops you into an interactive chat.
 
 ```bash
-# Create an agent
-openlegion agent create researcher
+# Add more agents later
+openlegion agent add researcher
 
-# Build the Docker image (first time only)
-docker build -t openlegion-agent:latest -f Dockerfile.agent .
+# Check status
+openlegion status
 
-# Start chatting
-openlegion agent chat researcher
+# Run in background (e.g. for servers)
+openlegion start -d
+openlegion chat researcher   # connect from another terminal
+openlegion stop              # clean shutdown
 ```
 
 ### Requirements
@@ -74,23 +77,60 @@ openlegion agent chat researcher
 1. **Runs LLM agents in isolated Docker containers** — each agent has its own
    filesystem, memory database, resource limits, and security boundary.
 
-2. **Coordinates multi-agent workflows** — a shared blackboard, pub/sub messaging,
-   and DAG-based workflow orchestration are built in from day one.
+2. **Fleet model, not hierarchy** — each agent is independently useful. No CEO
+   agent routes tasks. The user talks to agents directly via the interactive REPL.
 
-3. **Provides built-in tools** — shell execution, file I/O, HTTP requests, browser
-   automation (Playwright/Chromium), and persistent memory.
+3. **Shared alignment via PROJECT.md** — a single document loaded into every
+   agent's system prompt defines what the fleet is building, the current priority,
+   and hard constraints. Alignment without centralized control.
 
-4. **Persists memory across sessions** — workspace files, BM25 search, context
+4. **Provides built-in tools** — shell execution, file I/O, HTTP requests, browser
+   automation (Playwright/Chromium), web search, and persistent memory.
+
+5. **Persists memory across sessions** — workspace files, BM25 search, context
    compaction, and daily session logs ensure agents remember.
 
-5. **Acts autonomously** — cron schedules, webhook triggers, and file watchers
-   let agents work without being prompted.
+6. **Acts autonomously** — cron schedules, heartbeat probes (cheap deterministic
+   checks before LLM escalation), webhook triggers, and file watchers let agents
+   work without being prompted.
 
-6. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly
+7. **Self-improving** — agents learn from tool failures and user corrections,
+   injecting past learnings into future sessions to avoid repeating mistakes.
+
+8. **Self-extending** — agents can write their own Python skills at runtime and
+   hot-reload them. Agents can also spawn ephemeral sub-agents for specialized work.
+
+9. **Multi-channel** — connect agents to Telegram and Discord so users can chat
+   from any device. Agents are also accessible via CLI and API.
+
+7. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly
    budget enforcement.
 
-7. **Enforces permissions** — per-agent ACLs for messaging, blackboard access,
-   pub/sub topics, and API access. Default deny.
+8. **Deterministic workflows** — YAML-defined DAG workflows chain agents in
+   sequence. No LLM decides the flow — the user defines it.
+
+---
+
+## Why No CEO Agent
+
+OpenLegion uses a **fleet model**, not a hierarchy. There is no CEO agent
+that routes tasks to sub-agents.
+
+| Aspect | CEO Agent Model | Fleet Model |
+|--------|----------------|-------------|
+| Routing cost | $0.01-0.05 per task (LLM call) | $0 (direct command or YAML) |
+| Routing reliability | Probabilistic (LLM can hallucinate) | Deterministic (user or workflow) |
+| Failure mode | CEO down = fleet down | One agent down = one agent down |
+| User visibility | Opaque (user talks to CEO) | Direct (user talks to workers) |
+| Adding agents | Update CEO prompt + agent config | Just agent config |
+| Scaling | CEO prompt grows with every agent | Each agent is independent |
+
+Agents coordinate through four patterns:
+
+1. **Blackboard handoff** — Agent A writes data, Agent B reads it later. No conversation.
+2. **YAML workflows** — Steps run in defined order. Deterministic. No LLM routing.
+3. **Broadcast** — User sends one message to all agents (`/broadcast` in REPL). Each processes independently.
+4. **Pub/Sub signals** — Agent publishes an event. Subscribed agents react on next heartbeat.
 
 ---
 
@@ -101,10 +141,10 @@ openlegion agent chat researcher
 │                           User Interface                                │
 │                                                                         │
 │   CLI (click)          Webhooks            Cron Scheduler               │
-│   - quickstart         - POST /webhook/    - "0 9 * * 1-5"             │
-│   - agent chat           hook/{id}         - "every 30m"               │
-│   - start/stop         - Trigger agents    - Heartbeat pattern          │
-│   - cron/webhook/costs                                                  │
+│   - setup              - POST /webhook/    - "0 9 * * 1-5"             │
+│   - start (REPL)         hook/{id}         - "every 30m"               │
+│   - stop / status      - Trigger agents    - Heartbeat pattern          │
+│   - agent add/list                                                      │
 └──────────────┬──────────────────┬──────────────────┬────────────────────┘
                │                  │                  │
                ▼                  ▼                  ▼
@@ -295,25 +335,49 @@ and logs the turn to the daily session log.
 | `browser_evaluate` | Run JavaScript in page |
 | `memory_search` | BM25 search over workspace files |
 | `memory_save` | Append entry to daily session log |
+| `list_agents` | Discover other agents in the fleet |
+| `read_shared_state` | Read from the shared blackboard |
+| `write_shared_state` | Write to the shared blackboard |
+| `list_shared_state` | Browse blackboard entries by prefix |
+| `publish_event` | Publish event to mesh pub/sub |
+| `save_artifact` | Save deliverable file and register on blackboard |
+| `set_cron` | Schedule a recurring job for the agent |
+| `set_heartbeat` | Enable cost-efficient autonomous monitoring with probes |
+| `list_cron` | List the agent's scheduled cron jobs |
+| `remove_cron` | Remove a scheduled cron job |
+| `create_skill` | Write a new Python skill at runtime (self-extending) |
+| `reload_skills` | Hot-reload all skills including newly created ones |
+| `list_custom_skills` | List custom skills the agent has created |
+| `spawn_agent` | Spawn an ephemeral sub-agent for specialized work |
+| `read_agent_history` | Read another agent's conversation logs |
+| `web_search` | Search the web via DuckDuckGo (no API key) |
 
 Custom skills are Python functions decorated with `@skill`, auto-discovered
-from the agent's `skills_dir` at startup.
+from the agent's `skills_dir` at startup. Agents can also create new skills
+at runtime using `create_skill` and hot-reload them.
 
 ---
 
 ## Memory System
 
-Three layers give agents persistent memory across sessions:
+Four layers give agents persistent, self-improving memory:
 
 ```
-Layer 3: Context Manager          ← Manages the LLM's context window
+Layer 4: Context Manager          ← Manages the LLM's context window
   │  Monitors token usage
   │  Auto-compacts at 70% capacity
   │  Flushes extracted facts to MEMORY.md before discarding
   │
+Layer 3: Learnings                ← Self-improvement through failure tracking
+  │  learnings/errors.md         (tool failures with context)
+  │  learnings/corrections.md   (user corrections and preferences)
+  │  Auto-injected into system prompt each session
+  │  Auto-rotation when files grow large
+  │
 Layer 2: Workspace Files          ← Durable, human-readable storage
   │  AGENTS.md, SOUL.md, USER.md  (loaded into system prompt)
   │  MEMORY.md                    (curated long-term facts)
+  │  HEARTBEAT.md                 (autonomous monitoring rules)
   │  memory/YYYY-MM-DD.md         (daily session logs)
   │  BM25 search across all files (zero dependencies, ~60 lines)
   │
@@ -358,30 +422,31 @@ mesh host (not inside containers, so they survive container restarts):
 
 ### Cron Scheduler
 
-Persistent cron jobs that dispatch messages to agents on a schedule.
-
-```bash
-# Standard cron expression
-openlegion cron add researcher -s "0 9 * * 1-5" -m "Morning research check"
-
-# Interval shorthand
-openlegion cron add researcher -s "every 2h" -m "Check HEARTBEAT.md and execute pending tasks"
-```
+Persistent cron jobs that dispatch messages to agents on a schedule. Agents
+can schedule their own cron jobs autonomously using the `set_cron` tool, or
+you can manage them via the mesh API (`POST /mesh/cron`).
 
 Supports 5-field cron expressions (`minute hour dom month dow`), interval
-shorthand (`every 30m`, `every 2h`, `every 1d`), and the heartbeat pattern
-where an agent checks a `HEARTBEAT.md` file and `OK`-only responses are
-suppressed. State is persisted to `config/cron.json`.
+shorthand (`every 30m`, `every 2h`, `every 1d`), and state persisted to
+`config/cron.json`.
+
+### Heartbeat System
+
+Cost-efficient autonomous monitoring. Heartbeat jobs (`set_heartbeat` tool)
+run cheap deterministic probes first — disk usage, pending blackboard signals,
+pending tasks — and only dispatch to the agent (costing LLM tokens) when
+probes detect something actionable. Define autonomous rules in `HEARTBEAT.md`.
+
+This 5-stage architecture (scheduler → probes → policy → escalation → action)
+makes always-on agents economically viable.
 
 ### Webhook Endpoints
 
-Named webhook URLs that dispatch payloads to agents:
+Named webhook URLs that dispatch payloads to agents. Managed via the mesh
+API or `config/webhooks.json`:
 
 ```bash
-openlegion webhook add --agent researcher --name github-push
-# Output: URL: http://localhost:8420/webhook/hook/hook_a1b2c3d4
-
-# External services POST to it, agent processes the payload
+# External services POST to webhook URLs, agent processes the payload
 curl -X POST http://localhost:8420/webhook/hook/hook_a1b2c3d4 \
   -H "Content-Type: application/json" \
   -d '{"event": "push", "repo": "myproject"}'
@@ -407,14 +472,10 @@ watchers:
 ## Cost Tracking & Budgets
 
 Every LLM call is tracked at the Credential Vault layer. Per-agent budgets
-prevent runaway spend.
+prevent runaway spend. View costs from the interactive REPL (`/costs`) or
+configure budgets in `config/agents.yaml`:
 
-```bash
-# View spend
-openlegion costs                                  # All agents, today
-openlegion costs --agent researcher --period month # One agent, monthly
-
-# Budget config in mesh.yaml
+```yaml
 agents:
   researcher:
     budget:
@@ -433,14 +494,24 @@ model, cost per call. Queryable by agent, model, and time period
 
 ## Security Model
 
-Defense-in-depth with four layers:
+Defense-in-depth with five layers:
 
 | Layer | Mechanism | What It Prevents |
 |-------|-----------|-----------------|
-| Container isolation | Docker filesystem, network, resources, no-new-privileges, non-root | Agent escape, resource abuse, privilege escalation |
+| Runtime isolation | **Docker Sandbox microVMs** (hypervisor-level, separate kernel per agent) when available; falls back to Docker containers | Agent escape, kernel exploits, cross-agent compromise |
+| Container hardening | Non-root user, no-new-privileges, memory/CPU limits, filesystem isolation | Privilege escalation, resource abuse |
 | Credential separation | Vault holds keys, agents call via proxy | Key leakage, unauthorized API use |
-| Permission enforcement | Per-agent ACLs for messaging, blackboard, pub/sub, APIs | Unauthorized data access, agent impersonation |
+| Permission enforcement | Per-agent ACLs for messaging, blackboard, pub/sub, APIs; configurable isolation vs. collaboration | Unauthorized data access, agent impersonation |
 | Input validation | Path traversal prevention, safe condition eval (no `eval()`), token budgets, iteration limits | Injection, runaway loops, context overflow |
+
+### Dual Runtime Backend
+
+OpenLegion auto-detects the best isolation available:
+
+- **Docker Sandbox (microVM)**: Each agent runs in its own virtual machine with a separate kernel. Even if an agent is compromised via internet access or code execution, the hypervisor boundary prevents host access. `docker sandbox rm` completely destroys all agent state. Stable on macOS (virtualization.framework) and Windows (Hyper-V); experimental on Linux.
+- **Docker Container (fallback)**: Standard container isolation with hardening. Used when Docker Sandbox is unavailable. Shared host kernel but namespace/cgroup isolation. A startup warning is displayed when this fallback is active.
+
+The runtime backend is detected and selected automatically at startup. The agent code is identical in both modes -- only the transport and lifecycle management differ.
 
 ---
 
@@ -448,40 +519,67 @@ Defense-in-depth with four layers:
 
 ```
 openlegion
-├── quickstart                        # One-command setup wizard
-├── start [--config PATH]             # Start mesh + all agents + cron
-├── stop                              # Stop all containers
-├── trigger <workflow> <payload>      # Trigger workflow
-├── status [--port PORT]              # Agent status
-├── agent
-│   ├── create <name>                 # Interactive agent creation
-│   ├── chat <name> [--port]          # Interactive REPL
-│   └── list                          # List agents + status
-├── config
-│   └── set-key <provider> <key>      # Save API key to .env
-├── cron
-│   ├── add <agent> -s <schedule> -m <message>  # Add scheduled job
-│   ├── list                          # List all jobs
-│   ├── run <job_id>                  # Manual trigger
-│   ├── pause <job_id>                # Pause a job
-│   ├── resume <job_id>               # Resume a paused job
-│   └── remove <job_id>              # Delete a job
-├── webhook
-│   ├── add --agent <name> --name <hook-name>   # Create webhook
-│   ├── list                          # List all webhooks
-│   ├── test <hook_id> [-p <payload>] # Send test payload
-│   └── remove <hook_id>             # Delete webhook
-└── costs
-    [--agent <name>] [--period today|week|month]  # View LLM spend
+├── setup                                # Guided setup wizard (API key, project, agent, Docker)
+├── start [--config PATH] [-d]           # Start runtime + interactive REPL (-d for background)
+├── stop                                 # Stop all containers
+├── chat <name> [--port PORT]            # Connect to a running agent (background mode)
+├── status [--port PORT]                 # Show agent status
+│
+└── agent
+    ├── add [name]                       # Add a new agent (interactive wizard)
+    ├── list                             # List configured agents + status
+    └── remove <name> [--yes]            # Remove an agent
 ```
 
-Chat REPL commands: `/reset`, `/status`, `/quit`, `/help`.
+### Interactive REPL Commands (inside `start`)
+
+```
+@agent <message>     Send message to a specific agent
+/use <agent>         Switch active agent
+/agents              List all running agents
+/add                 Add a new agent (hot-adds to running system)
+/status              Show agent health
+/broadcast <msg>     Send message to all agents
+/costs               Show today's LLM spend
+/reset               Clear conversation with active agent
+/quit                Exit and stop runtime
+```
+
+### Team Templates
+
+Templates are offered during `openlegion setup`:
+
+| Template | Agents | Description |
+|----------|--------|-------------|
+| `starter` | assistant | Single general-purpose agent |
+| `sales` | researcher, qualifier, outreach | Sales pipeline team |
+| `devteam` | pm, engineer, reviewer | Software development team |
+| `content` | researcher, writer, editor | Content creation team |
 
 ---
 
 ## Configuration
 
-### `config/mesh.yaml` — System Configuration
+### `PROJECT.md` — Fleet-Wide Context
+
+Shared across all agents. Loaded into every agent's system prompt.
+Created during `openlegion setup` or edit directly with any text editor.
+
+```markdown
+# PROJECT.md
+
+## What We're Building
+SaaS platform for automated lead qualification
+
+## Current Priority
+Ship the email personalization pipeline this week
+
+## Hard Constraints
+- Budget: $50/day total across all agents
+- No cold outreach to .edu or .gov domains
+```
+
+### `config/mesh.yaml` — Framework Settings (tracked in git)
 
 ```yaml
 mesh:
@@ -493,7 +591,14 @@ llm:
   embedding_model: "text-embedding-3-small"
   max_tokens: 4096
   temperature: 0.7
+```
 
+### `config/agents.yaml` — Agent Definitions (gitignored, per-project)
+
+Created automatically by `openlegion setup` or `openlegion agent add`.
+Each project has its own agents — this file is not tracked in git.
+
+```yaml
 agents:
   researcher:
     role: "research"
@@ -520,18 +625,21 @@ retry policies, and failure handlers.
 
 ### `config/cron.json` — Scheduled Jobs
 
-Persisted cron job definitions. Managed via CLI (`openlegion cron`).
+Persisted cron job definitions. Agents manage their own via the `set_cron` tool.
 
 ### `config/webhooks.json` — Webhook Endpoints
 
-Persisted webhook endpoint definitions. Managed via CLI (`openlegion webhook`).
+Persisted webhook endpoint definitions. Managed via the mesh API.
 
-### `.env` — API Keys
+### `.env` — API Keys and Settings
 
 ```bash
 OPENLEGION_CRED_OPENAI_API_KEY=sk-...
 OPENLEGION_CRED_ANTHROPIC_API_KEY=sk-ant-...
 OPENLEGION_CRED_BRAVE_SEARCH_API_KEY=BSA...
+
+# Log format: "json" (default, structured) or "text" (human-readable)
+OPENLEGION_LOG_FORMAT=text
 ```
 
 ---
@@ -567,16 +675,19 @@ pytest tests/
 | Orchestrator | 10 | Workflows, conditions, retries, failures |
 | Credentials | 8 | Vault, API proxy, provider detection |
 | Integration | 8 | Multi-component mesh operations |
-| CLI | 6 | Agent create/list, config commands |
+| CLI | 6 | Agent add/list/remove, chat, setup |
 | Cron | 18 | Cron expressions, intervals, dispatch, persistence |
 | Cost Tracking | 10 | Usage recording, budgets, vault integration |
+| Transport | 15 | HttpTransport, SandboxTransport, resolve_url |
+| Runtime Backend | 18 | DockerBackend, SandboxBackend, detection, selection |
+| Channels | 21 | Base channel, commands, per-user routing, chunking |
 | Webhooks | 7 | Add/remove, persistence, dispatch |
 | File Watchers | 7 | Polling, dispatch, pattern matching |
 | E2E: Workflow | 4 | Container health, registration, full workflow |
 | E2E: Chat | 5 | Chat, exec tool, file tools, reset |
 | E2E: Memory | 4 | Cross-session recall, workspace, search |
 | E2E: Triggering | 4 | Cron dispatch, webhook dispatch, cost tracking |
-| **Total** | **237** | |
+| **Total** | **318** | |
 
 ---
 
@@ -606,7 +717,7 @@ No LangChain. No Redis. No Kubernetes. No web UI.
 
 ```
 src/
-├── cli.py                              # CLI entry point (730 lines)
+├── cli.py                              # CLI entry point
 ├── agent/
 │   ├── __main__.py                     # Container entry
 │   ├── loop.py                         # Execution loop (task + chat)
@@ -622,32 +733,41 @@ src/
 │       ├── file_tool.py                # File I/O (read, write, list)
 │       ├── http_tool.py                # HTTP requests
 │       ├── browser_tool.py             # Playwright automation
-│       └── memory_tool.py              # Memory search/save
+│       ├── memory_tool.py              # Memory search/save
+│       └── mesh_tool.py               # Shared state, fleet awareness, artifacts
 ├── host/
 │   ├── mesh.py                         # Blackboard, PubSub, MessageRouter
 │   ├── orchestrator.py                 # Workflow DAG executor
 │   ├── permissions.py                  # Permission matrix
 │   ├── credentials.py                  # Credential vault + API proxy + cost integration
-│   ├── containers.py                   # Docker container manager
+│   ├── runtime.py                      # RuntimeBackend ABC + DockerBackend + SandboxBackend
+│   ├── transport.py                    # Transport ABC + HttpTransport + SandboxTransport
+│   ├── containers.py                   # Backward-compat alias (ContainerManager = DockerBackend)
 │   ├── server.py                       # Mesh FastAPI server
 │   ├── cron.py                         # Cron scheduler
 │   ├── webhooks.py                     # Named webhook endpoints
 │   ├── watchers.py                     # File watchers (polling)
-│   └── costs.py                        # Cost tracking + budgets (SQLite)
+│   ├── costs.py                        # Cost tracking + budgets (SQLite)
+│   ├── health.py                       # Health monitor + auto-restart
+│   └── lanes.py                        # Per-agent task queues (serial execution)
 ├── shared/
 │   ├── types.py                        # All Pydantic models
-│   └── utils.py                        # ID generation, logging
-└── channels/
-    └── webhook.py                      # Workflow trigger webhook adapter
+│   └── utils.py                        # ID generation, logging, OPENLEGION_LOG_FORMAT
+├── channels/
+│   └── webhook.py                      # Workflow trigger webhook adapter
+└── templates/
+    ├── starter.yaml                    # Single-agent template
+    ├── sales.yaml                      # Sales pipeline team template
+    ├── devteam.yaml                    # Dev team template
+    └── content.yaml                    # Content creation team template
 
 config/
-├── mesh.yaml                           # System config (agents, models, ports)
+├── mesh.yaml                           # Framework settings (tracked)
+├── agents.yaml                         # Agent definitions (gitignored, per-project)
 ├── permissions.json                    # Per-agent ACLs
-├── cron.json                           # Scheduled jobs
-├── webhooks.json                       # Webhook endpoints
 └── workflows/                          # Workflow YAML definitions
 
-tests/                                  # 25 test files, 237 tests
+skills/                                 # Example custom skills (API proxy stubs)
 ```
 
 ---
@@ -668,7 +788,7 @@ tests/                                  # 25 test files, 237 tests
 
 | Decision | Rationale |
 |----------|-----------|
-| Agents in Docker containers | True isolation. One agent crash doesn't affect others. Resource limits enforced by the kernel. |
+| Dual runtime (sandbox/container) | MicroVM isolation when available (compromised agent = delete and forget). Container fallback on Linux. Agent code unchanged. |
 | Credentials on mesh only | Agents can't leak keys. Single point of credential management and rotation. |
 | Markdown workspace files | Human-readable, git-versionable, editable by hand. No proprietary format lock-in. |
 | BM25 from scratch | Zero dependencies. Works immediately. ~60 lines. Upgradeable to hybrid vector search later. |
@@ -686,9 +806,12 @@ tests/                                  # 25 test files, 237 tests
 | Phase 0: Core Runtime | **Complete** | Agent loop, mesh, orchestrator, containers, tools, CLI |
 | Phase 1: Memory + Context | **Complete** | Workspace files, BM25 search, context compaction, cross-session memory |
 | Phase 2: Triggering + Cost Tracking | **Complete** | Cron scheduler, webhooks, file watchers, cost tracking, budget enforcement |
-| Phase 3: Multi-Agent Pipelines | Planned | Agent-to-agent delegation, team templates, delivery tools, pipeline workflows |
-| Phase 4: Production Hardening | Planned | Lane queues (serial execution), health monitor, auto-restart, structured logging, graceful shutdown |
-| Phase 5: Messaging Channels | Planned | Telegram bot, channel abstraction, per-user session management |
+| Phase 3: Fleet Coordination | **Complete** | Shared state tools, goal awareness, team templates, delivery tools, PROJECT.md alignment |
+| Phase 4: Production Hardening | **Complete** | Graceful shutdown, health monitor + auto-restart, lane queues, structured logging |
+| Phase 5: Fleet Model | **Complete** | Removed CEO/delegation pattern, broadcast, PROJECT.md shared context, simplified CLI (9 commands) |
+| Phase 6: Self-Improving Agents | **Complete** | Failure tracking, correction learning, learnings injection, heartbeat with deterministic probes |
+| Phase 7: Agent Autonomy | **Complete** | Skill authoring (agents write their own tools), hot-reload, dynamic agent spawning, inter-agent history |
+| Phase 8: Messaging Channels | **Complete** | Telegram + Discord channel adapters, @-mention routing, platform-specific chunking |
 
 ---
 

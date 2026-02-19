@@ -11,6 +11,7 @@ Env var format: OPENLEGION_CRED_<SERVICE>_<KEY_NAME>
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 
 import httpx
 
@@ -25,7 +26,7 @@ class CredentialVault:
 
     def __init__(self, cost_tracker: object | None = None) -> None:
         self.credentials: dict[str, str] = {}
-        self.service_handlers: dict[str, callable] = {}
+        self.service_handlers: dict[str, Callable] = {}
         self.cost_tracker = cost_tracker
         self._load_credentials()
         self._register_handlers()
@@ -93,8 +94,13 @@ class CredentialVault:
             "openai/": "openai_api_key",
             "gpt-": "openai_api_key",
             "o1": "openai_api_key",
+            "o3": "openai_api_key",
+            "o4": "openai_api_key",
+            "xai/": "xai_api_key",
             "groq/": "groq_api_key",
             "gemini/": "gemini_api_key",
+            "moonshot/": "moonshot_api_key",
+            "deepseek/": "deepseek_api_key",
             "text-embedding-": "openai_api_key",
         }
         for prefix, key_name in provider_key_map.items():

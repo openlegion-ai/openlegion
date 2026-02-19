@@ -31,7 +31,7 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None) -> AgentLoop:
     llm.default_model = "test-model"
 
     mesh_client = MagicMock()
-    mesh_client.send_message = AsyncMock(return_value={})
+    mesh_client.send_system_message = AsyncMock(return_value={})
 
     return AgentLoop(
         agent_id="test_agent",
@@ -101,11 +101,25 @@ class TestChatMode:
         assert len(loop._chat_messages) == 0
 
     @pytest.mark.asyncio
-    async def test_chat_blocked_while_working(self):
+    async def test_chat_queues_while_locked(self):
+        """Concurrent chat calls queue via lock instead of being rejected."""
+        import asyncio
+
         loop = _make_loop()
-        loop.state = "working"
-        result = await loop.chat("Hello")
-        assert "busy" in result["response"].lower()
+        results = []
+
+        async def delayed_chat(msg: str) -> dict:
+            r = await loop.chat(msg)
+            results.append(r)
+            return r
+
+        r1, r2 = await asyncio.gather(
+            delayed_chat("First"),
+            delayed_chat("Second"),
+        )
+        assert r1["response"] == "Hello!"
+        assert r2["response"] == "Hello!"
+        assert len(results) == 2
 
     @pytest.mark.asyncio
     async def test_chat_error_recovery(self):

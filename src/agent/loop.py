@@ -67,6 +67,7 @@ class AgentLoop:
         self._cancel_requested: bool = False
         self._current_task_handle: Optional[asyncio.Task] = None
         self._last_result: Optional[TaskResult] = None
+        self._chat_lock = asyncio.Lock()
 
     async def execute_task(self, assignment: TaskAssignment) -> TaskResult:
         """Main execution method. Runs bounded loop for a single task.
@@ -154,18 +155,22 @@ class AgentLoop:
                                 workspace_manager=self.workspace,
                             )
                             result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+                            await self._learn(tool_call.name, tool_call.arguments, result)
+                            self._maybe_reload_skills(result)
                         except Exception as e:
                             result_str = json.dumps({"error": str(e)})
                             result = {"error": str(e)}
                             logger.error(f"Tool {tool_call.name} failed: {e}")
+                            self._record_failure(
+                                tool_call.name, str(e),
+                                truncate(str(tool_call.arguments), 200),
+                            )
 
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call_entries[i]["id"],
                             "content": result_str,
                         })
-
-                        await self._learn(tool_call.name, tool_call.arguments, result)
 
                     if self.context_manager:
                         messages = await self.context_manager.maybe_compact(system_prompt, messages)
@@ -235,9 +240,23 @@ class AgentLoop:
             self._last_result = result
             return result
 
+    async def _fetch_goals(self) -> dict | None:
+        """Read this agent's current goals from the shared blackboard."""
+        try:
+            entry = await self.mesh_client.read_blackboard(f"goals/{self.agent_id}")
+            if entry:
+                return entry.get("value", entry)
+        except Exception:
+            pass
+        return None
+
     async def _build_initial_context(self, assignment: TaskAssignment) -> list[dict]:
-        """Build initial user message with task, memory, and blackboard context."""
+        """Build initial user message with task, goals, memory, and blackboard context."""
         parts = []
+
+        goals = await self._fetch_goals()
+        if goals:
+            parts.append(f"## Your Current Goals\n{format_dict(goals)}")
 
         parts.append(f"## Task: {assignment.task_type}\n\n## Input\n{format_dict(assignment.input_data)}")
 
@@ -313,7 +332,7 @@ class AgentLoop:
         return result
 
     async def _learn(self, tool_name: str, tool_input: dict, tool_output: Any) -> None:
-        """Extract and store useful facts from tool execution."""
+        """Extract and store useful facts from successful tool execution."""
         await self.memory.log_action(
             action=f"tool:{tool_name}",
             input_summary=truncate(str(tool_input), 200),
@@ -329,20 +348,40 @@ class AgentLoop:
                         source=f"tool:{tool_name}",
                     )
 
+    def _record_failure(self, tool_name: str, error: str, context: str = "") -> None:
+        """Record a tool failure so the agent can avoid repeating mistakes."""
+        if self.workspace:
+            self.workspace.record_error(tool_name, error, context)
+
+    def _maybe_reload_skills(self, result: Any) -> None:
+        """If a tool returned reload_requested, hot-reload the skill registry."""
+        if isinstance(result, dict) and result.get("reload_requested"):
+            count = self.skills.reload()
+            logger.info(f"Hot-reloaded skills: {count} available")
+
     def _build_system_prompt(self, assignment: TaskAssignment) -> str:
         tools_desc = self.skills.get_descriptions()
-        return (
-            f"{self.system_prompt}\n\n"
+        parts = [
+            self.system_prompt,
             f"You are the '{self.role}' agent in the OpenLegion multi-agent system.\n"
             f"Your current task: {assignment.task_type}\n\n"
             f"Available tools:\n{tools_desc}\n\n"
-            f"Instructions:\n"
-            f"- Use tools to gather information and take actions.\n"
-            f"- When done, respond with your final answer (no tool call).\n"
+            f"## OPERATING RULES\n"
+            f"- You are a tool operated by your user. Act first, explain after.\n"
+            f"- Never refuse without attempting. Call tools immediately.\n"
+            f"- Browser: browser_navigate → read content → browser_click/browser_type.\n"
+            f"- Shell: exec runs any command. HTTP: http_request calls any API.\n"
+            f"- When done, respond with final answer (no tool call).\n"
             f"- Structure final answer as JSON: {{\"result\": {{...}}, \"promote\": {{...}}}}\n"
             f"- 'promote' contains data to share with other agents via blackboard.\n"
             f"- You have max {self.MAX_ITERATIONS} iterations.\n"
-        )
+            f"- Learn from past errors — avoid repeating known failures.\n",
+        ]
+        if self.workspace:
+            learnings = self.workspace.get_learnings_context()
+            if learnings:
+                parts.append(f"## Learnings\n\n{learnings}")
+        return "\n\n".join(parts)
 
     def _parse_final_output(self, content: str) -> tuple[dict, dict]:
         """Parse the LLM's final response into result data and blackboard promotions."""
@@ -363,11 +402,16 @@ class AgentLoop:
         SOUL.md, USER.md, MEMORY.md, daily logs) into the system prompt
         and auto-searches memory for relevant context.
 
+        Uses an asyncio.Lock so concurrent callers queue instead of being
+        rejected.  The lock serialises chat turns; the /status endpoint
+        remains available while the lock is held.
+
         Returns {"response": str, "tool_outputs": list[dict], "tokens_used": int}.
         """
-        if self.state == "working":
-            return {"response": "Agent is busy with a task.", "tool_outputs": [], "tokens_used": 0}
+        async with self._chat_lock:
+            return await self._chat_inner(user_message)
 
+    async def _chat_inner(self, user_message: str) -> dict:
         self.state = "working"
         total_tokens = 0
         tool_outputs: list[dict] = []
@@ -376,7 +420,23 @@ class AgentLoop:
             if not hasattr(self, "_chat_messages"):
                 self._chat_messages: list[dict] = []
 
-            # On first message: preload relevant memory context
+            goals = await self._fetch_goals()
+
+            if (
+                self.workspace
+                and self._chat_messages
+                and self.workspace.looks_like_correction(user_message)
+            ):
+                prev_assistant = next(
+                    (m["content"] for m in reversed(self._chat_messages) if m.get("role") == "assistant"),
+                    None,
+                )
+                if prev_assistant:
+                    self.workspace.record_correction(
+                        original=truncate(prev_assistant, 200),
+                        correction=user_message,
+                    )
+
             if not self._chat_messages and self.workspace:
                 memory_hits = self.workspace.search(user_message, max_results=3)
                 if memory_hits:
@@ -390,7 +450,7 @@ class AgentLoop:
 
             self._chat_messages.append({"role": "user", "content": user_message})
 
-            system = self._build_chat_system_prompt()
+            system = self._build_chat_system_prompt(goals=goals)
 
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
                 llm_response = await self.llm.chat(
@@ -440,6 +500,10 @@ class AgentLoop:
                         result_str = json.dumps({"error": str(e)})
                         result = {"error": str(e)}
                         logger.error(f"Chat tool {tool_call.name} failed: {e}")
+                        self._record_failure(
+                            tool_call.name, str(e),
+                            truncate(str(tool_call.arguments), 200),
+                        )
 
                     self._chat_messages.append({
                         "role": "tool",
@@ -451,6 +515,7 @@ class AgentLoop:
                         "input": tool_call.arguments,
                         "output": result,
                     })
+                    self._maybe_reload_skills(result)
 
                 if self.context_manager:
                     self._chat_messages = await self.context_manager.maybe_compact(
@@ -459,7 +524,6 @@ class AgentLoop:
                 else:
                     self._chat_messages = self._trim_context(self._chat_messages, max_tokens=100_000)
 
-            # Exhausted tool rounds -- ask LLM for final answer without tools
             llm_response = await self.llm.chat(
                 system=system,
                 messages=self._chat_messages,
@@ -475,6 +539,9 @@ class AgentLoop:
                 "tokens_used": total_tokens,
             }
 
+        except asyncio.CancelledError:
+            self.state = "idle"
+            raise
         except Exception as e:
             self.state = "idle"
             logger.error(f"Chat failed: {e}", exc_info=True)
@@ -492,9 +559,12 @@ class AgentLoop:
         """Clear conversation history."""
         self._chat_messages = []
 
-    def _build_chat_system_prompt(self) -> str:
+    def _build_chat_system_prompt(self, goals: dict | None = None) -> str:
         tools_desc = self.skills.get_descriptions()
         parts = [self.system_prompt]
+
+        if goals:
+            parts.append(f"## Your Current Goals\n\n{format_dict(goals)}")
 
         if self.workspace:
             workspace_context = self.workspace.load_prompt_context()
@@ -509,15 +579,60 @@ class AgentLoop:
             if daily_logs.strip():
                 parts.append(f"## Recent Session Logs\n\n{truncate(daily_logs, 2000)}")
 
+            learnings = self.workspace.get_learnings_context()
+            if learnings:
+                parts.append(f"## Learnings from Past Sessions\n\n{learnings}")
+
         parts.append(
-            f"You are the '{self.role}' agent in the OpenLegion multi-agent system.\n"
-            f"You are in interactive chat mode.\n\n"
+            f"You are the '{self.role}' agent in the OpenLegion fleet.\n"
+            f"You are a tool operated by your user on their own machine. "
+            f"The user has explicitly authorized you to act on their behalf.\n\n"
             f"Available tools:\n{tools_desc}\n\n"
-            f"Instructions:\n"
-            f"- Use tools to take actions when needed.\n"
-            f"- Respond conversationally when no tools are needed.\n"
-            f"- Use memory_save to remember important facts for future sessions.\n"
-            f"- Use memory_search to recall information from past sessions.\n"
+            f"## OPERATING RULES (non-negotiable)\n\n"
+            f"You are an autonomous execution agent. Your job is to DO things, "
+            f"not describe how to do them.\n\n"
+            f"1. ACT FIRST. When the user asks you to do something, call a tool "
+            f"immediately as your first response. Never reply with instructions "
+            f"for the user to follow manually — that defeats your purpose.\n\n"
+            f"2. YOUR TOOLS (you MUST use these):\n"
+            f"   - browser_navigate: open any URL in your Chromium browser\n"
+            f"   - browser_click: click elements on the page by CSS selector\n"
+            f"   - browser_type: type text into input fields\n"
+            f"   - browser_evaluate: run JavaScript on the page\n"
+            f"   - browser_screenshot: capture the page as an image\n"
+            f"   - exec: run any shell command (install packages, run scripts, etc.)\n"
+            f"   - http_request: make HTTP requests to any API or URL\n"
+            f"   - web_search: search the internet for information\n"
+            f"   - read_file / write_file / list_files: file I/O on your workspace\n"
+            f"   - create_skill: write new tools for yourself\n\n"
+            f"3. NEVER REFUSE WITHOUT TRYING. You must NEVER say 'I can't do that' "
+            f"or 'I'm not able to' without first calling browser_navigate or another "
+            f"tool to attempt the task. If a website has a CAPTCHA or phone "
+            f"verification you can't pass, report that AFTER navigating there and "
+            f"attempting the task — but you MUST attempt it first.\n\n"
+            f"4. WEB TASK RULE: When the user asks you to do ANYTHING on a website "
+            f"(create an account, fill a form, look something up, sign up for a "
+            f"service, etc.), your FIRST action must be:\n"
+            f"   a) browser_navigate to the relevant URL\n"
+            f"   b) Read the returned page content\n"
+            f"   c) browser_type / browser_click to fill forms and click buttons\n"
+            f"   d) browser_screenshot if you need to see the visual layout\n"
+            f"   e) Continue until done or until you hit an insurmountable blocker\n"
+            f"   f) Only THEN report results to the user\n\n"
+            f"5. MAKE DECISIONS. When the user says 'do it', 'just do it', "
+            f"'surprise me', or gives latitude — pick the best option yourself "
+            f"and execute immediately. Do not ask for confirmation.\n\n"
+            f"6. MINIMAL QUESTIONS. Only ask when the task is genuinely ambiguous. "
+            f"Prefer reasonable defaults. Choose usernames, passwords, options "
+            f"yourself when the user tells you to decide.\n\n"
+            f"## Memory & coordination\n"
+            f"- memory_save: remember important facts for future sessions.\n"
+            f"- memory_search: recall information from past sessions.\n"
+            f"- read/write/list_shared_state: coordinate via the shared blackboard.\n"
+            f"- save_artifact: publish deliverables other agents can find.\n"
+            f"- Refer to PROJECT.md for current priorities and constraints.\n"
+            f"- Learn from past errors — avoid repeating known failures.\n"
+            f"- Respect user corrections — they define preferred behavior.\n"
         )
 
         return "\n\n".join(parts)

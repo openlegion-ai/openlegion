@@ -1,36 +1,32 @@
 {
   "permissions": {
-    "default": {
-      "can_message": ["orchestrator"],
-      "can_publish": [],
-      "can_subscribe": [],
-      "blackboard_read": ["context/*", "tasks/*"],
-      "blackboard_write": [],
-      "allowed_apis": ["llm"]
-    },
-    "research": {
-      "can_message": ["orchestrator"],
-      "can_publish": ["research_complete", "prospect_enriched"],
-      "can_subscribe": ["new_lead", "research_requested"],
-      "blackboard_read": ["tasks/*", "context/*", "signals/*"],
-      "blackboard_write": ["context/prospect_*", "context/research_*"],
-      "allowed_apis": ["llm", "anthropic", "openai", "brave_search", "apollo", "hunter"]
-    },
-    "qualify": {
-      "can_message": ["orchestrator"],
-      "can_publish": ["lead_qualified", "lead_disqualified"],
-      "can_subscribe": ["research_complete"],
-      "blackboard_read": ["context/*", "tasks/*"],
-      "blackboard_write": ["context/qualify_*"],
-      "allowed_apis": ["llm", "anthropic", "openai"]
-    },
-    "outreach": {
-      "can_message": ["orchestrator"],
-      "can_publish": ["email_drafted", "sequence_created"],
-      "can_subscribe": ["lead_qualified"],
-      "blackboard_read": ["context/*"],
-      "blackboard_write": ["context/outreach_*"],
-      "allowed_apis": ["llm", "anthropic", "openai", "hunter"]
+    "assistant": {
+      "can_message": [
+        "orchestrator",
+        "*"
+      ],
+      "can_publish": [
+        "assistant_complete"
+      ],
+      "can_subscribe": [
+        "*"
+      ],
+      "blackboard_read": [
+        "context/*",
+        "tasks/*",
+        "goals/*",
+        "signals/*",
+        "artifacts/*"
+      ],
+      "blackboard_write": [
+        "context/*",
+        "goals/*",
+        "signals/*",
+        "artifacts/*"
+      ],
+      "allowed_apis": [
+        "llm"
+      ]
     }
   }
 }

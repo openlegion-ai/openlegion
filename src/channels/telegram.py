@@ -1,0 +1,302 @@
+"""Telegram channel adapter.
+
+Bridges Telegram to the OpenLegion mesh with the same UX as the CLI REPL:
+  - Per-user active agent tracking
+  - @agent mentions for routing to specific agents
+  - /use, /agents, /status, /broadcast, /costs, /reset, /help commands
+  - Agent name labels on all responses: [agent_name] response
+  - Push notifications for cron/heartbeat results
+  - Pairing: owner must send /start <pairing_code> to claim the bot.
+    Code is generated during `openlegion setup`. Others need /allow.
+
+Requires: pip install python-telegram-bot>=21.0
+Config: TELEGRAM_BOT_TOKEN in .env, channels.telegram in mesh.yaml
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+from src.channels.base import (
+    Channel,
+    CostsFn,
+    DispatchFn,
+    ListAgentsFn,
+    ResetFn,
+    StatusFn,
+    chunk_text,
+)
+from src.shared.utils import setup_logging
+
+logger = setup_logging("channels.telegram")
+
+MAX_TG_LEN = 4000
+_PAIRING_FILE = Path("config/telegram_paired.json")
+
+
+def _load_paired() -> dict:
+    """Load paired users from disk. Returns {"owner": int|null, "allowed": [int]}."""
+    if _PAIRING_FILE.exists():
+        try:
+            return json.loads(_PAIRING_FILE.read_text())
+        except Exception:
+            pass
+    return {"owner": None, "allowed": []}
+
+
+def _save_paired(data: dict) -> None:
+    _PAIRING_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _PAIRING_FILE.write_text(json.dumps(data, indent=2) + "\n")
+
+
+class TelegramChannel(Channel):
+    """Telegram bot adapter for OpenLegion with pairing code security."""
+
+    def __init__(
+        self,
+        token: str,
+        dispatch_fn: DispatchFn,
+        default_agent: str = "",
+        allowed_users: list[int] | None = None,
+        list_agents_fn: ListAgentsFn | None = None,
+        status_fn: StatusFn | None = None,
+        costs_fn: CostsFn | None = None,
+        reset_fn: ResetFn | None = None,
+    ):
+        super().__init__(
+            dispatch_fn=dispatch_fn,
+            default_agent=default_agent,
+            list_agents_fn=list_agents_fn,
+            status_fn=status_fn,
+            costs_fn=costs_fn,
+            reset_fn=reset_fn,
+        )
+        self.token = token
+        self._explicit_allowed = set(allowed_users) if allowed_users else None
+        self._app = None
+        self._chat_ids: set[int] = set()
+        self._paired = _load_paired()
+
+    async def start(self) -> None:
+        try:
+            from telegram.ext import (
+                Application,
+                CommandHandler,
+                MessageHandler,
+                filters,
+            )
+        except ImportError:
+            logger.error(
+                "python-telegram-bot not installed. "
+                "Install with: pip install 'openlegion[channels]'"
+            )
+            return
+
+        self._app = Application.builder().token(self.token).build()
+        self._app.add_handler(CommandHandler("start", self._cmd_start))
+        self._app.add_handler(CommandHandler("allow", self._cmd_allow))
+        self._app.add_handler(CommandHandler("revoke", self._cmd_revoke))
+        self._app.add_handler(CommandHandler("paired", self._cmd_paired))
+        self._app.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
+        )
+
+        await self._app.initialize()
+        await self._app.start()
+        await self._app.updater.start_polling(drop_pending_updates=True)
+        owner = self._paired.get("owner")
+        if owner:
+            logger.info(f"Telegram channel started (owner: {owner})")
+        elif self._paired.get("pairing_code"):
+            logger.info("Telegram channel started (awaiting pairing code)")
+        else:
+            logger.info("Telegram channel started (no pairing code — run setup again)")
+
+    async def stop(self) -> None:
+        if self._app:
+            await self._app.updater.stop()
+            await self._app.stop()
+            await self._app.shutdown()
+            logger.info("Telegram channel stopped")
+
+    async def send_notification(self, text: str) -> None:
+        """Push a cron/heartbeat notification to all known chat IDs."""
+        if not self._app or not self._chat_ids:
+            return
+        for chat_id in self._chat_ids:
+            try:
+                for chunk in chunk_text(text, MAX_TG_LEN):
+                    await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+            except Exception as e:
+                logger.warning(f"Failed to notify chat {chat_id}: {e}")
+
+    def _is_allowed(self, user_id: int) -> bool:
+        if self._explicit_allowed is not None:
+            return user_id in self._explicit_allowed
+        owner = self._paired.get("owner")
+        if owner is None:
+            return False
+        if user_id == owner:
+            return True
+        return user_id in self._paired.get("allowed", [])
+
+    def _is_owner(self, user_id: int) -> bool:
+        return user_id == self._paired.get("owner")
+
+    async def _cmd_start(self, update, context) -> None:
+        user_id = update.effective_user.id
+        username = update.effective_user.username or update.effective_user.first_name
+
+        if self._paired.get("owner") is None:
+            code_arg = context.args[0] if context.args else ""
+            expected = self._paired.get("pairing_code", "")
+            if not expected or code_arg != expected:
+                await update.message.reply_text(
+                    "Pairing required. Send:  /start <pairing_code>\n"
+                    "The code was shown during `openlegion setup`."
+                )
+                logger.warning(
+                    f"Rejected /start without valid pairing code from {username} (id: {user_id})"
+                )
+                return
+            self._paired["owner"] = user_id
+            self._paired.setdefault("allowed", [])
+            self._paired.pop("pairing_code", None)
+            _save_paired(self._paired)
+            logger.info(f"Paired owner via code: {username} (id: {user_id})")
+            self._chat_ids.add(update.effective_chat.id)
+            str_id = str(user_id)
+            response = await self.handle_message(str_id, "/help")
+            welcome = (
+                f"Paired as owner. Your Telegram ID: {user_id}\n"
+                f"Active agent: {self._get_active_agent(str_id) or '(none)'}\n\n"
+                f"Only you can use this bot. Use /allow <user_id> to grant access.\n\n"
+            )
+            await update.message.reply_text(welcome + response)
+            return
+
+        if not self._is_allowed(user_id):
+            await update.message.reply_text(
+                "Access denied. This bot is paired to its owner.\n"
+                f"Your Telegram ID: {user_id}\n"
+                "Ask the owner to run /allow in the bot to grant you access."
+            )
+            logger.warning(f"Rejected /start from unpaired user: {username} (id: {user_id})")
+            return
+
+        self._chat_ids.add(update.effective_chat.id)
+        str_id = str(user_id)
+        response = await self.handle_message(str_id, "/help")
+        welcome = (
+            f"OpenLegion connected. Active agent: "
+            f"{self._get_active_agent(str_id) or '(none)'}\n\n"
+        )
+        await update.message.reply_text(welcome + response)
+
+    async def _cmd_allow(self, update, context) -> None:
+        """Owner-only: /allow <telegram_user_id> to grant access."""
+        if not self._is_owner(update.effective_user.id):
+            await update.message.reply_text("Only the owner can use /allow.")
+            return
+        args = context.args
+        if not args:
+            await update.message.reply_text("Usage: /allow <telegram_user_id>")
+            return
+        try:
+            target_id = int(args[0])
+        except ValueError:
+            await update.message.reply_text("Invalid user ID. Must be a number.")
+            return
+        allowed = self._paired.setdefault("allowed", [])
+        if target_id not in allowed:
+            allowed.append(target_id)
+            _save_paired(self._paired)
+        await update.message.reply_text(f"User {target_id} is now allowed.")
+        logger.info(f"Owner allowed user {target_id}")
+
+    async def _cmd_revoke(self, update, context) -> None:
+        """Owner-only: /revoke <telegram_user_id> to remove access."""
+        if not self._is_owner(update.effective_user.id):
+            await update.message.reply_text("Only the owner can use /revoke.")
+            return
+        args = context.args
+        if not args:
+            await update.message.reply_text("Usage: /revoke <telegram_user_id>")
+            return
+        try:
+            target_id = int(args[0])
+        except ValueError:
+            await update.message.reply_text("Invalid user ID. Must be a number.")
+            return
+        allowed = self._paired.get("allowed", [])
+        if target_id in allowed:
+            allowed.remove(target_id)
+            _save_paired(self._paired)
+            await update.message.reply_text(f"User {target_id} access revoked.")
+        else:
+            await update.message.reply_text(f"User {target_id} was not in the allowed list.")
+
+    async def _cmd_paired(self, update, context) -> None:
+        """Owner-only: show pairing info."""
+        if not self._is_owner(update.effective_user.id):
+            await update.message.reply_text("Only the owner can view pairing info.")
+            return
+        owner = self._paired.get("owner")
+        allowed = self._paired.get("allowed", [])
+        lines = [f"Owner: {owner}"]
+        if allowed:
+            lines.append(f"Allowed users: {', '.join(str(u) for u in allowed)}")
+        else:
+            lines.append("No additional users allowed.")
+        await update.message.reply_text("\n".join(lines))
+
+    async def _on_message(self, update, context) -> None:
+        if not self._is_allowed(update.effective_user.id):
+            return
+        text = update.message.text or ""
+        if not text.strip():
+            return
+        self._chat_ids.add(update.effective_chat.id)
+        user_id = str(update.effective_user.id)
+        chat_id = update.effective_chat.id
+        asyncio.create_task(self._dispatch_and_reply(chat_id, user_id, text))
+
+    async def _dispatch_and_reply(
+        self, chat_id: int, user_id: str, text: str,
+    ) -> None:
+        """Process a message in the background with a typing indicator."""
+        typing_task = asyncio.create_task(self._typing_loop(chat_id))
+        try:
+            response = await self.handle_message(user_id, text)
+        except Exception as e:
+            logger.error(f"Dispatch failed for user {user_id}: {e}")
+            response = f"Error: {e}"
+        finally:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+        if response:
+            for chunk in chunk_text(response, MAX_TG_LEN):
+                try:
+                    await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+                except Exception as e:
+                    logger.warning(f"Failed to send response to {chat_id}: {e}")
+
+    async def _typing_loop(self, chat_id: int) -> None:
+        """Send typing indicator every 4s until cancelled."""
+        try:
+            from telegram.constants import ChatAction
+        except ImportError:
+            return
+        while True:
+            try:
+                await self._app.bot.send_chat_action(
+                    chat_id=chat_id, action=ChatAction.TYPING,
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(4)

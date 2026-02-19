@@ -78,8 +78,8 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    async def send_message(self, to: str, msg_type: str, payload: dict) -> dict:
-        """Send a message to another agent through the mesh."""
+    async def send_system_message(self, to: str, msg_type: str, payload: dict) -> dict:
+        """Send a system-level message to the orchestrator/mesh (not for agent-to-agent use)."""
         message = AgentMessage(from_agent=self.agent_id, to=to, type=msg_type, payload=payload)
         client = await self._get_client()
         response = await client.post(
@@ -96,6 +96,80 @@ class MeshClient:
         response = await client.post(
             f"{self.mesh_url}/mesh/publish",
             json=event.model_dump(mode="json"),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def list_agents(self) -> dict:
+        """List all registered agents and their capabilities."""
+        client = await self._get_client()
+        response = await client.get(f"{self.mesh_url}/mesh/agents")
+        response.raise_for_status()
+        return response.json()
+
+    async def create_cron(
+        self, schedule: str, message: str, heartbeat: bool = False,
+    ) -> dict:
+        """Create a cron job for this agent via the mesh."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/cron",
+            json={
+                "agent_id": self.agent_id,
+                "schedule": schedule,
+                "message": message,
+                "heartbeat": heartbeat,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def list_cron(self) -> list[dict]:
+        """List cron jobs for this agent."""
+        client = await self._get_client()
+        response = await client.get(
+            f"{self.mesh_url}/mesh/cron",
+            params={"agent_id": self.agent_id},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def remove_cron(self, job_id: str) -> dict:
+        """Remove a cron job by ID."""
+        client = await self._get_client()
+        response = await client.delete(f"{self.mesh_url}/mesh/cron/{job_id}")
+        response.raise_for_status()
+        return response.json()
+
+    async def spawn_agent(
+        self,
+        role: str,
+        system_prompt: str = "",
+        model: str = "",
+        ttl: int = 3600,
+    ) -> dict:
+        """Request the mesh to spawn an ephemeral agent."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/spawn",
+            json={
+                "role": role,
+                "spawned_by": self.agent_id,
+                "system_prompt": system_prompt,
+                "model": model,
+                "ttl": ttl,
+            },
+            timeout=90,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_agent_history(self, agent_id: str) -> dict:
+        """Read another agent's daily logs (permission-checked on server)."""
+        client = await self._get_client()
+        response = await client.get(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/history",
+            params={"requesting_agent": self.agent_id},
         )
         response.raise_for_status()
         return response.json()

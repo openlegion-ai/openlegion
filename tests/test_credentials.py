@@ -27,9 +27,12 @@ async def test_unknown_service_returns_error(vault):
     assert "Unknown service" in result.error
 
 
-async def test_missing_api_key_returns_error(vault):
+async def test_missing_api_key_returns_error(monkeypatch):
+    monkeypatch.delenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    v = CredentialVault()
     req = APIProxyRequest(service="anthropic", action="chat")
-    result = await vault.execute_api_call(req)
+    result = await v.execute_api_call(req)
     assert not result.success
     assert "not configured" in result.error
 

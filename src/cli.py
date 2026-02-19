@@ -1,24 +1,24 @@
 """CLI entry point for OpenLegion.
 
-Commands:
-  quickstart         - One-command setup: set API key, create agent, start chatting
-  start              - Start the mesh host process and all configured agents
-  stop               - Stop all agent containers
-  trigger            - Trigger a workflow via the running mesh
-  status             - Show status of all registered agents
-  agent create       - Create a new agent interactively
-  agent chat         - Interactive REPL with an agent
-  agent list         - List configured agents
-  config set-key     - Save an API key to .env
-  cron add/list/run/pause/resume/remove - Manage scheduled jobs
-  webhook add/list/test/remove          - Manage webhook endpoints
-  costs              - View per-agent LLM spend
+Core:
+  setup             One-time setup: API key, project, first agent, Docker image
+  start             Start runtime + interactive chat REPL
+  start -d          Start runtime in background (detached)
+  stop              Stop all agent containers
+  status            Show agent status
+  chat <name>       Connect to a running agent (detached mode)
+
+Agent management:
+  agent add [name]        Add a new agent
+  agent list              List configured agents
+  agent remove <name>     Remove an agent
 """
 
 from __future__ import annotations
 
 import json
 import os
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -32,22 +32,87 @@ load_dotenv()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
 CONFIG_FILE = PROJECT_ROOT / "config" / "mesh.yaml"
+AGENTS_FILE = PROJECT_ROOT / "config" / "agents.yaml"
 PERMISSIONS_FILE = PROJECT_ROOT / "config" / "permissions.json"
+PROJECT_FILE = PROJECT_ROOT / "PROJECT.md"
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+_PROVIDERS = [
+    {"name": "openai", "label": "OpenAI"},
+    {"name": "anthropic", "label": "Anthropic"},
+    {"name": "gemini", "label": "Google Gemini"},
+    {"name": "xai", "label": "xAI (Grok)"},
+    {"name": "deepseek", "label": "DeepSeek"},
+    {"name": "moonshot", "label": "Moonshot (Kimi)"},
+    {"name": "groq", "label": "Groq"},
+]
+
+_PROVIDER_MODELS: dict[str, list[str]] = {
+    "openai": [
+        "openai/gpt-5.2",
+        "openai/gpt-5.2-pro",
+        "openai/gpt-5.1-codex",
+        "openai/gpt-5",
+        "openai/gpt-5-mini",
+        "openai/o3",
+        "openai/o4-mini",
+        "openai/gpt-4.1",
+        "openai/gpt-4.1-mini",
+    ],
+    "anthropic": [
+        "anthropic/claude-opus-4-6",
+        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-sonnet-4-5-20250929",
+        "anthropic/claude-haiku-4-5-20251001",
+    ],
+    "gemini": [
+        "gemini/gemini-3-pro-preview",
+        "gemini/gemini-3-flash-preview",
+        "gemini/gemini-2.5-pro",
+        "gemini/gemini-2.5-flash",
+    ],
+    "xai": [
+        "xai/grok-4-1-fast-reasoning",
+        "xai/grok-4",
+        "xai/grok-3",
+        "xai/grok-3-mini",
+    ],
+    "deepseek": [
+        "deepseek/deepseek-chat",
+        "deepseek/deepseek-reasoner",
+    ],
+    "moonshot": [
+        "moonshot/kimi-k2.5",
+        "moonshot/kimi-k2",
+        "moonshot/moonshot-v1-128k",
+    ],
+    "groq": [
+        "groq/llama-3.3-70b-versatile",
+        "groq/llama-3.1-8b-instant",
+        "groq/llama-3-groq-70b-tool-use",
+    ],
+}
 
 
 # ── Helpers ──────────────────────────────────────────────────
 
-def _load_config() -> dict:
-    if not CONFIG_FILE.exists():
-        return {"mesh": {"host": "0.0.0.0", "port": 8420}, "llm": {"default_model": "openai/gpt-4o-mini"}, "agents": {}}
-    with open(CONFIG_FILE) as f:
-        return yaml.safe_load(f) or {}
-
-
-def _save_config(cfg: dict) -> None:
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+def _load_config(mesh_path: Path | None = None) -> dict:
+    """Load mesh config and merge agent definitions from agents.yaml."""
+    path = mesh_path or CONFIG_FILE
+    cfg: dict = {
+        "mesh": {"host": "0.0.0.0", "port": 8420},
+        "llm": {"default_model": "openai/gpt-4o-mini"},
+        "agents": {},
+    }
+    if path.exists():
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+            cfg.update(data)
+    if AGENTS_FILE.exists():
+        with open(AGENTS_FILE) as f:
+            agents_data = yaml.safe_load(f) or {}
+            cfg.setdefault("agents", {}).update(agents_data.get("agents", {}))
+    return cfg
 
 
 def _load_permissions() -> dict:
@@ -85,6 +150,17 @@ def _set_env_key(name: str, value: str) -> None:
     os.environ[env_key] = value
 
 
+def _check_docker_running() -> bool:
+    """Verify Docker daemon is running and accessible."""
+    try:
+        import docker
+        client = docker.from_env()
+        client.ping()
+        return True
+    except Exception:
+        return False
+
+
 def _check_docker_image() -> bool:
     """Check if the agent Docker image exists."""
     try:
@@ -94,6 +170,47 @@ def _check_docker_image() -> bool:
         return True
     except Exception:
         return False
+
+
+def _docker_image_is_stale() -> bool:
+    """Check if source files are newer than the Docker image."""
+    try:
+        from datetime import datetime, timezone
+
+        import docker
+        client = docker.from_env()
+        image = client.images.get("openlegion-agent:latest")
+        created_str = image.attrs.get("Created", "")
+        if not created_str:
+            return True
+        image_time = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+
+        src_dirs = [PROJECT_ROOT / "src" / "agent", PROJECT_ROOT / "src" / "shared"]
+        for src_dir in src_dirs:
+            if not src_dir.exists():
+                continue
+            for py_file in src_dir.rglob("*.py"):
+                file_mtime = datetime.fromtimestamp(py_file.stat().st_mtime, tz=timezone.utc)
+                if file_mtime > image_time:
+                    return True
+
+        dockerfile = PROJECT_ROOT / "Dockerfile.agent"
+        if dockerfile.exists():
+            df_mtime = datetime.fromtimestamp(dockerfile.stat().st_mtime, tz=timezone.utc)
+            if df_mtime > image_time:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _ensure_docker_image() -> None:
+    """Build the Docker image if missing or stale."""
+    if not _check_docker_image():
+        _build_docker_image()
+    elif _docker_image_is_stale():
+        click.echo("Source code changed since last Docker build.")
+        _build_docker_image()
 
 
 def _build_docker_image() -> None:
@@ -113,148 +230,531 @@ def _build_docker_image() -> None:
 
 
 def _add_agent_to_config(name: str, role: str, model: str, system_prompt: str) -> None:
-    """Add an agent entry to mesh.yaml."""
-    cfg = _load_config()
-    if "agents" not in cfg:
-        cfg["agents"] = {}
+    """Add an agent entry to agents.yaml."""
+    agents_cfg: dict = {"agents": {}}
+    if AGENTS_FILE.exists():
+        with open(AGENTS_FILE) as f:
+            agents_cfg = yaml.safe_load(f) or {"agents": {}}
+    if "agents" not in agents_cfg:
+        agents_cfg["agents"] = {}
 
-    skills_dir = f"./skills/{name}"
-    cfg["agents"][name] = {
+    agents_cfg["agents"][name] = {
         "role": role,
         "model": model,
-        "skills_dir": skills_dir,
+        "skills_dir": f"./skills/{name}",
         "system_prompt": system_prompt,
         "resources": {"memory_limit": "512m", "cpu_limit": 0.5},
     }
-    _save_config(cfg)
+    AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(AGENTS_FILE, "w") as f:
+        yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
 
 
 def _add_agent_permissions(name: str) -> None:
-    """Add default permissions for a new agent."""
+    """Add default permissions for a new agent.
+
+    If collaboration mode is enabled in mesh.yaml, agents can message
+    all other agents. Otherwise they can only message the orchestrator.
+    """
+    cfg = _load_config()
+    collab = cfg.get("collaboration", True)
+
     perms = _load_permissions()
+    if collab:
+        other_agents = [a for a in cfg.get("agents", {}) if a != name]
+        can_message = ["orchestrator", "*"] if other_agents else ["orchestrator"]
+    else:
+        can_message = ["orchestrator"]
+
     perms["permissions"][name] = {
-        "can_message": ["orchestrator"],
+        "can_message": can_message,
         "can_publish": [f"{name}_complete"],
-        "can_subscribe": [],
-        "blackboard_read": ["context/*", "tasks/*"],
-        "blackboard_write": [f"context/{name}_*"],
+        "can_subscribe": ["*"] if collab else [],
+        "blackboard_read": ["context/*", "tasks/*", "goals/*", "signals/*", "artifacts/*"],
+        "blackboard_write": ["context/*", "goals/*", "signals/*", "artifacts/*"],
         "allowed_apis": ["llm"],
     }
     _save_permissions(perms)
+
+
+def _set_collaborative_permissions() -> None:
+    """Update all agent permissions to allow inter-agent messaging."""
+    perms = _load_permissions()
+    for name, p in perms.get("permissions", {}).items():
+        if name == "default":
+            continue
+        if "*" not in p.get("can_message", []):
+            p["can_message"] = list({*p.get("can_message", []), "*"})
+        if "*" not in p.get("can_subscribe", []):
+            p["can_subscribe"] = list({*p.get("can_subscribe", []), "*"})
+    _save_permissions(perms)
+
+
+def _set_isolated_permissions() -> None:
+    """Restrict agent permissions to orchestrator-only messaging."""
+    perms = _load_permissions()
+    for name, p in perms.get("permissions", {}).items():
+        if name == "default":
+            continue
+        p["can_message"] = ["orchestrator"]
+        p["can_subscribe"] = []
+    _save_permissions(perms)
+
+
+def _create_agent(name: str, description: str, model: str) -> None:
+    """Create an agent: config, permissions, skills directory."""
+    system_prompt = (
+        f"You are the '{name}' agent. {description} "
+        "Use your tools and knowledge to accomplish tasks. "
+        "Check PROJECT.md for the current priorities and constraints."
+    )
+    _add_agent_to_config(name, description, model, system_prompt)
+    _add_agent_permissions(name)
+    skills_dir = PROJECT_ROOT / "skills" / name
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _suppress_host_logs() -> None:
+    """Set host-side loggers to WARNING for clean CLI output."""
+    import logging
+    for name in [
+        "host", "host.containers", "host.credentials", "host.orchestrator",
+        "host.mesh", "host.costs", "host.permissions", "host.cron", "host.webhooks",
+        "host.health", "host.lanes", "host.runtime", "host.watchers",
+        "channels", "channels.base", "channels.telegram", "channels.discord",
+    ]:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+def _ensure_pairing_code(pairing_path: Path) -> str | None:
+    """Ensure a pairing file exists with a code. Returns code if unpaired, None if already paired."""
+    data: dict = {}
+    if pairing_path.exists():
+        try:
+            data = json.loads(pairing_path.read_text())
+        except Exception:
+            pass
+    if data.get("owner"):
+        return None
+    code = data.get("pairing_code")
+    if not code:
+        code = secrets.token_hex(8)
+        data = {"owner": None, "allowed": [], "pairing_code": code}
+        pairing_path.parent.mkdir(parents=True, exist_ok=True)
+        pairing_path.write_text(json.dumps(data, indent=2) + "\n")
+    return code
+
+
+def _start_channels(
+    cfg: dict,
+    dispatch_fn,
+    agent_registry: dict,
+    active_channels: list,
+    status_fn=None,
+    costs_fn=None,
+    reset_fn=None,
+) -> None:
+    """Start configured messaging channels (Telegram, Discord) in background threads.
+
+    Channels receive the same callbacks as the CLI REPL so they present
+    a unified multi-agent chat interface.
+    """
+    import threading
+
+    channels_cfg = cfg.get("channels", {})
+    all_agents = cfg.get("agents", {})
+    first_agent = next(iter(all_agents), "")
+
+    def list_agents_fn():
+        return dict(agent_registry)
+
+    common = {
+        "dispatch_fn": dispatch_fn,
+        "list_agents_fn": list_agents_fn,
+        "status_fn": status_fn,
+        "costs_fn": costs_fn,
+        "reset_fn": reset_fn,
+    }
+
+    # Telegram
+    tg_cfg = channels_cfg.get("telegram", {})
+    tg_token = (
+        tg_cfg.get("token")
+        or os.environ.get("OPENLEGION_CRED_TELEGRAM_BOT_TOKEN", "")
+        or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    )
+    if tg_token:
+        tg_code = _ensure_pairing_code(PROJECT_ROOT / "config" / "telegram_paired.json")
+        from src.channels.telegram import TelegramChannel
+        tg = TelegramChannel(
+            token=tg_token,
+            default_agent=tg_cfg.get("default_agent", first_agent),
+            allowed_users=tg_cfg.get("allowed_users"),
+            **common,
+        )
+        def run_tg():
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(tg.start())
+            loop.run_forever()
+        t = threading.Thread(target=run_tg, daemon=True)
+        t.start()
+        active_channels.append(tg)
+
+        if tg_code:
+            click.echo("  Telegram channel active (awaiting pairing)")
+            click.echo(f"    Send to your bot:  /start {tg_code}")
+        else:
+            click.echo("  Telegram channel active (paired)")
+
+    # Discord
+    dc_cfg = channels_cfg.get("discord", {})
+    dc_token = (
+        dc_cfg.get("token")
+        or os.environ.get("OPENLEGION_CRED_DISCORD_BOT_TOKEN", "")
+        or os.environ.get("DISCORD_BOT_TOKEN", "")
+    )
+    if dc_token:
+        dc_code = _ensure_pairing_code(PROJECT_ROOT / "config" / "discord_paired.json")
+        from src.channels.discord import DiscordChannel
+        dc = DiscordChannel(
+            token=dc_token,
+            default_agent=dc_cfg.get("default_agent", first_agent),
+            allowed_guilds=dc_cfg.get("allowed_guilds"),
+            **common,
+        )
+        def run_dc():
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(dc.start())
+            loop.run_forever()
+        t = threading.Thread(target=run_dc, daemon=True)
+        t.start()
+        active_channels.append(dc)
+
+        if dc_code:
+            click.echo("  Discord channel active (awaiting pairing)")
+            click.echo(f"    DM your bot:  !start {dc_code}")
+        else:
+            click.echo("  Discord channel active (paired)")
+
+
+def _stop_channels(active_channels: list) -> None:
+    """Stop all active messaging channels."""
+    import asyncio
+    for ch in active_channels:
+        try:
+            asyncio.run(ch.stop())
+        except Exception:
+            pass
+
+
+def _get_default_model() -> str:
+    cfg = _load_config()
+    return cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+
+
+def _load_templates() -> dict[str, dict]:
+    """Load available team templates from src/templates/."""
+    available: dict[str, dict] = {}
+    if not TEMPLATES_DIR.exists():
+        return available
+    for tpl_file in sorted(TEMPLATES_DIR.glob("*.yaml")):
+        with open(tpl_file) as f:
+            tpl = yaml.safe_load(f) or {}
+        name = tpl.get("name", tpl_file.stem)
+        available[name] = tpl
+    return available
+
+
+def _apply_template(template_name: str, tpl: dict) -> list[str]:
+    """Apply a team template, creating all agents. Returns list of agent names."""
+    cfg = _load_config()
+    default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+    tpl_agents = tpl.get("agents", {})
+    created: list[str] = []
+
+    for agent_name, agent_def in tpl_agents.items():
+        model = agent_def.get("model", default_model).replace("{default_model}", default_model)
+        _add_agent_to_config(
+            name=agent_name,
+            role=agent_def.get("role", agent_name),
+            model=model,
+            system_prompt=agent_def.get("system_prompt", ""),
+        )
+        if "resources" in agent_def:
+            agents_cfg: dict = {"agents": {}}
+            if AGENTS_FILE.exists():
+                with open(AGENTS_FILE) as f:
+                    agents_cfg = yaml.safe_load(f) or {"agents": {}}
+            if agent_name in agents_cfg.get("agents", {}):
+                agents_cfg["agents"][agent_name]["resources"] = agent_def["resources"]
+                with open(AGENTS_FILE, "w") as f:
+                    yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+        _add_agent_permissions(agent_name)
+        skills_dir = PROJECT_ROOT / "skills" / agent_name
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        created.append(agent_name)
+
+    return created
+
+
+def _discover_workflows() -> list[dict]:
+    """Discover workflow definitions from config/workflows/."""
+    wf_dir = PROJECT_ROOT / "config" / "workflows"
+    if not wf_dir.exists():
+        return []
+    workflows = []
+    for wf_file in sorted(wf_dir.glob("*.yaml")):
+        with open(wf_file) as f:
+            wf = yaml.safe_load(f) or {}
+        if "name" not in wf or "steps" not in wf:
+            continue
+        agents_used = sorted({s["agent"] for s in wf["steps"] if "agent" in s})
+        workflows.append({
+            "name": wf["name"],
+            "file": wf_file.name,
+            "agents": agents_used,
+            "label": wf["name"].replace("_", " ").title(),
+        })
+    return workflows
 
 
 # ── Main group ───────────────────────────────────────────────
 
 @click.group()
 def cli():
-    """OpenLegion -- Secure multi-agent runtime."""
-    pass
+    """OpenLegion -- Autonomous AI agent fleet."""
+    _suppress_host_logs()
 
 
-# ── quickstart ───────────────────────────────────────────────
+# ── setup ────────────────────────────────────────────────────
 
 @cli.command()
-def quickstart():
-    """One-command setup: set API key, create agent, start chatting."""
+def setup():
+    """One-time setup: API key, project definition, first agent, Docker image."""
 
-    click.echo("=== OpenLegion Quickstart ===\n")
+    click.echo("=== OpenLegion Setup ===\n")
 
-    # 1. API key
-    provider = click.prompt(
-        "LLM provider",
-        type=click.Choice(["openai", "anthropic", "groq"], case_sensitive=False),
-        default="openai",
+    # 0. Docker pre-flight
+    if not _check_docker_running():
+        click.echo(
+            "Docker is not running or not accessible.\n"
+            "Please start Docker and ensure your user has permission to use it.\n"
+            "  - Linux: sudo systemctl start docker && sudo usermod -aG docker $USER\n"
+            "  - macOS/Windows: Start Docker Desktop",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Step 1: LLM provider + model + API key
+    click.echo("Step 1: LLM Provider\n")
+
+    for i, p in enumerate(_PROVIDERS, 1):
+        click.echo(f"  {i}. {p['label']}")
+    click.echo(
+        "\n  Tip: Anthropic Claude models are recommended for agentic tasks\n"
+        "  (browser automation, web interaction). Claude has built-in computer\n"
+        "  use training. GPT models may refuse some autonomous actions.\n"
     )
+    choice = click.prompt("  Select provider", type=click.IntRange(1, len(_PROVIDERS)), default=1)
+    provider = _PROVIDERS[choice - 1]["name"]
+    click.echo(f"  Selected: {_PROVIDERS[choice - 1]['label']}\n")
+
+    # Model selection
+    models = _PROVIDER_MODELS[provider]
+    click.echo("  Available models:")
+    for i, m in enumerate(models, 1):
+        click.echo(f"  {i}. {m}")
+    model_choice = click.prompt("\n  Select model", type=click.IntRange(1, len(models)), default=1)
+    selected_model = models[model_choice - 1]
+    click.echo(f"  Selected: {selected_model}\n")
+
+    # API key
     key_name = f"{provider}_api_key"
-    existing = os.environ.get(f"OPENLEGION_CRED_{key_name.upper()}", "")
-    if existing:
-        click.echo(f"API key already set for {provider}.")
-        if not click.confirm("Replace it?", default=False):
-            click.echo("Keeping existing key.")
-        else:
-            api_key = click.prompt("API key", hide_input=True)
+    existing_key = os.environ.get(f"OPENLEGION_CRED_{key_name.upper()}", "")
+    if existing_key:
+        click.echo(f"  API key already set for {provider}.")
+        if click.confirm("  Replace it?", default=False):
+            api_key = click.prompt("  API key", hide_input=True)
             _set_env_key(key_name, api_key)
     else:
-        api_key = click.prompt(f"{provider.upper()} API key", hide_input=True)
+        api_key = click.prompt(f"  {_PROVIDERS[choice - 1]['label']} API key", hide_input=True)
         _set_env_key(key_name, api_key)
 
-    # 2. Create default agent if none exist
-    cfg = _load_config()
-    agent_name = "assistant"
-    if not cfg.get("agents"):
-        model_default = f"{provider}/gpt-4o-mini" if provider == "openai" else f"{provider}/claude-sonnet-4-5-20250929"
-        model = click.prompt("Default model", default=model_default)
-        _add_agent_to_config(
-            name=agent_name,
-            role="assistant",
-            model=model,
-            system_prompt=(
-                "You are a general-purpose assistant. You can run commands, "
-                "read and write files, browse the web, and make HTTP requests. "
-                "Help the user accomplish their goals."
-            ),
+    # Update default model in mesh config
+    mesh_cfg = {}
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            mesh_cfg = yaml.safe_load(f) or {}
+    mesh_cfg.setdefault("llm", {})["default_model"] = selected_model
+    with open(CONFIG_FILE, "w") as f:
+        yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+
+    # Step 2: Project definition (optional north star)
+    click.echo("\nStep 2: Your Project (optional)\n")
+
+    project_desc = click.prompt(
+        "  What are you building? (press Enter to skip)",
+        default="",
+        show_default=False,
+    )
+    if project_desc:
+        PROJECT_FILE.write_text(
+            f"# PROJECT.md\n\n"
+            f"## What We're Building\n{project_desc}\n\n"
+            f"## Current Priority\n[Define your current focus]\n\n"
+            f"## Hard Constraints\n[Budget limits, deadlines, compliance rules]\n"
         )
-        skills_dir = PROJECT_ROOT / "skills" / agent_name
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        _add_agent_permissions(agent_name)
-        click.echo(f"Created agent '{agent_name}'.")
+        click.echo("  Saved to PROJECT.md. Every agent will see this as their north star.")
+    elif not PROJECT_FILE.exists():
+        click.echo("  Skipped. You can define it later by editing PROJECT.md.")
+
+    # Step 3: First agent (or team template)
+    click.echo("\nStep 3: Your Agents\n")
+
+    cfg = _load_config()
+    existing_agents = list(cfg.get("agents", {}).keys())
+
+    if existing_agents:
+        click.echo(f"  Existing agents: {', '.join(existing_agents)}")
+        if not click.confirm("  Add another agent?", default=False):
+            click.echo("  Keeping existing agents.")
+        else:
+            _setup_agent_wizard(selected_model)
     else:
-        agent_name = next(iter(cfg["agents"]))
-        click.echo(f"Using existing agent '{agent_name}'.")
+        templates = _load_templates()
+        if templates:
+            tpl_names = list(templates.keys())
+            tpl_display = ", ".join(tpl_names)
+            use_template = click.prompt(
+                f"  Start from a template? ({tpl_display}) or 'none' for custom",
+                default="none",
+            )
+            if use_template != "none" and use_template in templates:
+                created = _apply_template(use_template, templates[use_template])
+                click.echo(f"  Created agents: {', '.join(created)}")
+            else:
+                _setup_agent_wizard(selected_model)
+        else:
+            _setup_agent_wizard(selected_model)
 
-    # 3. Build Docker image if needed
-    if not _check_docker_image():
-        _build_docker_image()
+    # Step 4: Messaging channels (optional)
+    click.echo("\nStep 4: Messaging Channels (optional)\n")
 
-    # 4. Start mesh + agent + drop into chat
-    click.echo("\nStarting OpenLegion...")
-    _start_runtime_and_chat(agent_name)
+    if click.confirm("  Connect a Telegram bot?", default=False):
+        tg_token = click.prompt("  Telegram bot token", hide_input=True)
+        _set_env_key("telegram_bot_token", tg_token)
+        mesh_cfg = {}
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE) as f:
+                mesh_cfg = yaml.safe_load(f) or {}
+        mesh_cfg.setdefault("channels", {}).setdefault("telegram", {})
+        mesh_cfg["channels"]["telegram"]["enabled"] = True
+        with open(CONFIG_FILE, "w") as f:
+            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+        click.echo("  Telegram configured. Pairing code will appear when you run `openlegion start`.")
+
+    if click.confirm("  Connect a Discord bot?", default=False):
+        dc_token = click.prompt("  Discord bot token", hide_input=True)
+        _set_env_key("discord_bot_token", dc_token)
+        mesh_cfg = {}
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE) as f:
+                mesh_cfg = yaml.safe_load(f) or {}
+        mesh_cfg.setdefault("channels", {}).setdefault("discord", {})
+        mesh_cfg["channels"]["discord"]["enabled"] = True
+        with open(CONFIG_FILE, "w") as f:
+            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+        click.echo("  Discord configured. Pairing code will appear when you run `openlegion start`.")
+
+    has_tg = os.environ.get("OPENLEGION_CRED_TELEGRAM_BOT_TOKEN")
+    has_dc = os.environ.get("OPENLEGION_CRED_DISCORD_BOT_TOKEN")
+    if not has_tg and not has_dc:
+        click.echo("  Skipped. Add channels later during setup or by setting tokens in .env.")
+
+    # Step 5: Agent collaboration mode
+    click.echo("\nStep 5: Agent Collaboration\n")
+    click.echo("  Isolated:      Agents work independently, no shared context or messaging.")
+    click.echo("  Collaborative: Agents can message each other, share blackboard data.\n")
+
+    collab = click.confirm("  Enable agent collaboration?", default=True)
+    mesh_cfg = {}
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            mesh_cfg = yaml.safe_load(f) or {}
+    mesh_cfg["collaboration"] = collab
+    with open(CONFIG_FILE, "w") as f:
+        yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+
+    if collab:
+        # Update permissions so agents can message each other
+        _set_collaborative_permissions()
+        click.echo("  Collaboration enabled. Agents can communicate via the mesh.")
+    else:
+        _set_isolated_permissions()
+        click.echo("  Isolation mode. Agents operate independently.")
+
+    # Step 6: Docker image
+    _ensure_docker_image()
+
+    # Done
+    click.echo("\nSetup complete.")
+    click.echo("  Start the runtime:  openlegion start")
+    click.echo("  Add more agents:    openlegion agent add")
+
+
+def _setup_agent_wizard(model: str) -> str:
+    """Interactive agent creation for setup. Returns agent name."""
+    agent_name = click.prompt("  Agent name", default="assistant")
+    description = click.prompt(
+        "  What should this agent do?",
+        default="General-purpose assistant",
+    )
+    _create_agent(agent_name, description, model)
+    click.echo(f"  Created agent '{agent_name}'.")
+    return agent_name
 
 
 # ── agent subgroup ───────────────────────────────────────────
 
 @cli.group()
 def agent():
-    """Manage agents."""
+    """Add, list, or remove agents."""
     pass
 
 
-@agent.command("create")
-@click.argument("name")
-def agent_create(name: str):
-    """Create a new agent interactively."""
+@agent.command("add")
+@click.argument("name", required=False, default=None)
+def agent_add(name: str | None):
+    """Add a new agent.
+
+    Examples:
+      openlegion agent add researcher
+      openlegion agent add              # interactive mode
+    """
     cfg = _load_config()
+
+    if name is None:
+        name = click.prompt("Agent name")
+
     if name in cfg.get("agents", {}):
         click.echo(f"Agent '{name}' already exists.")
         return
 
-    role = click.prompt("Role description (becomes agent identity)", default=name)
-    model = click.prompt("Model", default=cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini"))
-    system_prompt = click.prompt(
-        "System prompt",
-        default=f"You are the '{role}' agent. Help the user by using your tools and knowledge.",
+    description = click.prompt(
+        "What should this agent do?",
+        default=f"General-purpose {name} assistant",
     )
+    model = _get_default_model()
+    _create_agent(name, description, model)
 
-    skills_dir = PROJECT_ROOT / "skills" / name
-    skills_dir.mkdir(parents=True, exist_ok=True)
-
-    _add_agent_to_config(name, role, model, system_prompt)
-    _add_agent_permissions(name)
-    click.echo(f"Agent '{name}' created. Skills directory: skills/{name}/")
-    click.echo(f"Start chatting: openlegion agent chat {name}")
-
-
-@agent.command("chat")
-@click.argument("name")
-@click.option("--port", default=None, type=int, help="Mesh port override")
-def agent_chat(name: str, port: int | None):
-    """Interactive REPL with an agent."""
-    cfg = _load_config()
-    if name not in cfg.get("agents", {}):
-        click.echo(f"Agent '{name}' not found. Create it first: openlegion agent create {name}")
-        return
-
-    _start_runtime_and_chat(name, mesh_port_override=port)
+    click.echo(f"\nAgent '{name}' created.")
+    click.echo(f"  Role:  {description}")
+    click.echo(f"  Model: {model}")
+    click.echo("\nStart chatting: openlegion start")
 
 
 @agent.command("list")
@@ -263,10 +763,9 @@ def agent_list():
     cfg = _load_config()
     agents = cfg.get("agents", {})
     if not agents:
-        click.echo("No agents configured. Create one: openlegion agent create <name>")
+        click.echo("No agents configured. Add one: openlegion agent add")
         return
 
-    # Check if any containers are running
     running = set()
     try:
         import docker
@@ -278,36 +777,63 @@ def agent_list():
     except Exception:
         pass
 
-    click.echo(f"{'Name':<16} {'Role':<16} {'Model':<28} {'Status':<10}")
-    click.echo("-" * 70)
+    click.echo(f"{'Name':<16} {'Role':<24} {'Status':<10}")
+    click.echo("-" * 50)
     for name, info in agents.items():
         status = "running" if name in running else "stopped"
-        click.echo(f"{name:<16} {info.get('role', 'n/a'):<16} {info.get('model', 'default'):<28} {status:<10}")
+        click.echo(f"{name:<16} {info.get('role', 'n/a'):<24} {status:<10}")
 
 
-# ── config subgroup ──────────────────────────────────────────
+@agent.command("remove")
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def agent_remove(name: str, yes: bool):
+    """Remove an agent from configuration."""
+    cfg = _load_config()
+    if name not in cfg.get("agents", {}):
+        click.echo(f"Agent '{name}' not found.")
+        return
+    if not yes:
+        click.confirm(f"Remove agent '{name}'? This deletes its config and permissions.", abort=True)
 
-@cli.group()
-def config():
-    """Configuration commands."""
-    pass
+    if AGENTS_FILE.exists():
+        with open(AGENTS_FILE) as f:
+            agents_cfg = yaml.safe_load(f) or {}
+        agents_cfg.get("agents", {}).pop(name, None)
+        with open(AGENTS_FILE, "w") as f:
+            yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+
+    perms = _load_permissions()
+    perms.get("permissions", {}).pop(name, None)
+    _save_permissions(perms)
+
+    click.echo(f"Removed agent '{name}'.")
 
 
-@config.command("set-key")
-@click.argument("provider")
-@click.argument("key")
-def config_set_key(provider: str, key: str):
-    """Save an API key. Usage: openlegion config set-key openai sk-..."""
-    _set_env_key(f"{provider}_api_key", key)
-    click.echo(f"Saved {provider} API key to .env")
-
-
-# ── start / stop / trigger / status (preserved) ─────────────
+# ── start ────────────────────────────────────────────────────
 
 @cli.command()
 @click.option("--config", "config_path", default="config/mesh.yaml", help="Path to mesh config")
-def start(config_path: str):
-    """Start the OpenLegion runtime (mesh + all configured agents + cron + webhooks)."""
+@click.option("--detach", "-d", is_flag=True, help="Run in background (no interactive REPL)")
+def start(config_path: str, detach: bool):
+    """Start the runtime and chat with your agents.
+
+    By default, starts the mesh and all agents then drops into an interactive
+    REPL. Use -d to run in the background instead.
+
+    \b
+    Examples:
+      openlegion start          # interactive mode
+      openlegion start -d       # background mode
+    """
+    if detach:
+        _start_detached(config_path)
+    else:
+        _start_interactive(config_path)
+
+
+def _start_interactive(config_path: str) -> None:
+    """Start mesh + agents in background threads, then drop into REPL."""
     import asyncio
     import threading
 
@@ -315,40 +841,73 @@ def start(config_path: str):
     import uvicorn
 
     from src.channels.webhook import create_webhook_router
-    from src.host.containers import ContainerManager
     from src.host.costs import CostTracker
     from src.host.credentials import CredentialVault
     from src.host.cron import CronScheduler
+    from src.host.health import HealthMonitor
+    from src.host.lanes import LaneManager
     from src.host.mesh import Blackboard, MessageRouter, PubSub
     from src.host.orchestrator import Orchestrator
     from src.host.permissions import PermissionMatrix
+    from src.host.runtime import SandboxBackend, select_backend
     from src.host.server import create_mesh_app
+    from src.host.transport import HttpTransport, SandboxTransport
     from src.host.webhooks import WebhookManager
 
-    with open(config_path) as f:
-        cfg = yaml.safe_load(f)
-
+    cfg = _load_config(Path(config_path))
     mesh_port = cfg["mesh"]["port"]
+    agents_cfg = cfg.get("agents", {})
+
+    if not agents_cfg:
+        click.echo("No agents configured. Run: openlegion setup", err=True)
+        return
+
+    if not _check_docker_running():
+        click.echo("Docker is not running. Please start Docker first.", err=True)
+        sys.exit(1)
+
+    # Select runtime backend (sandbox microVM if available, else containers)
+    runtime = select_backend(
+        mesh_host_port=mesh_port, project_root=str(PROJECT_ROOT),
+    )
+    backend_label = runtime.backend_name()
+    is_sandbox = isinstance(runtime, SandboxBackend)
+
+    if is_sandbox:
+        transport = SandboxTransport()
+        click.echo("Starting OpenLegion (microVM isolation)...\n")
+    else:
+        transport = HttpTransport()
+        _ensure_docker_image()
+        click.echo("Starting OpenLegion (container isolation)...\n")
+        click.echo(
+            "  WARNING: Docker Sandbox not detected. Agents are running in "
+            "standard containers\n"
+            "  (shared host kernel). For hypervisor-level isolation, install "
+            "Docker Desktop 4.58+\n"
+            "  and enable Docker Sandbox. See: "
+            "https://docs.docker.com/sandbox/\n",
+            err=True,
+        )
 
     blackboard = Blackboard()
     pubsub = PubSub()
     permissions = PermissionMatrix()
     cost_tracker = CostTracker()
     credential_vault = CredentialVault(cost_tracker=cost_tracker)
-    container_manager = ContainerManager(mesh_host_port=mesh_port)
-
     router = MessageRouter(permissions, {})
 
     orchestrator = Orchestrator(
         mesh_url=f"http://localhost:{mesh_port}",
         blackboard=blackboard,
         pubsub=pubsub,
-        container_manager=container_manager,
+        container_manager=runtime,
     )
 
-    # Load per-agent budgets from config
     default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-    for agent_id, agent_cfg in cfg.get("agents", {}).items():
+    agent_urls: dict[str, str] = {}
+
+    for agent_id, agent_cfg in agents_cfg.items():
         budget = agent_cfg.get("budget", {})
         if budget:
             cost_tracker.set_budget(
@@ -356,10 +915,9 @@ def start(config_path: str):
                 daily_usd=budget.get("daily_usd", 10.0),
                 monthly_usd=budget.get("monthly_usd", 200.0),
             )
-
         skills_dir = os.path.abspath(agent_cfg.get("skills_dir", ""))
         agent_model = agent_cfg.get("model", default_model)
-        url = container_manager.start_agent(
+        url = runtime.start_agent(
             agent_id=agent_id,
             role=agent_cfg["role"],
             skills_dir=skills_dir,
@@ -367,75 +925,313 @@ def start(config_path: str):
             model=agent_model,
         )
         router.register_agent(agent_id, url)
-        click.echo(f"Started agent '{agent_id}' at {url}")
+        agent_urls[agent_id] = url
+        if isinstance(transport, HttpTransport):
+            transport.register(agent_id, url)
 
-    # Dispatch function: sends a chat message to an agent
+    health_monitor = HealthMonitor(
+        runtime=runtime, transport=transport, router=router,
+    )
+    for agent_id in agents_cfg:
+        health_monitor.register(agent_id)
+
+    async def _direct_dispatch(agent_name: str, message: str) -> str:
+        try:
+            result = await transport.request(
+                agent_name, "POST", "/chat", json={"message": message},
+            )
+            return result.get("response", "(no response)")
+        except Exception as e:
+            return f"Error: {e}"
+
+    lane_manager = LaneManager(dispatch_fn=_direct_dispatch)
+
     async def dispatch_to_agent(agent_name: str, message: str) -> str:
-        agent_info = router.agent_registry.get(agent_name)
-        if not agent_info:
-            return f"Agent '{agent_name}' not found"
-        agent_url = agent_info.get("url", agent_info) if isinstance(agent_info, dict) else agent_info
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(f"{agent_url}/chat", json={"message": message})
-            return r.json().get("response", "(no response)")
+        return await lane_manager.enqueue(agent_name, message)
 
-    # Wire cron scheduler
-    cron_scheduler = CronScheduler(dispatch_fn=dispatch_to_agent)
+    active_channels: list = []
+
+    async def cron_dispatch(agent_name: str, message: str) -> str:
+        """Dispatch for cron -- prints the response to the REPL and channels."""
+        result = await lane_manager.enqueue(agent_name, message)
+        if result and result.strip():
+            notification = f"[cron -> {agent_name}] {result}"
+            sys.stdout.write(f"\n{notification}\nYou> ")
+            sys.stdout.flush()
+            for ch in active_channels:
+                try:
+                    await ch.send_notification(notification)
+                except Exception:
+                    pass
+        return result
+
+    async def trigger_workflow(workflow_name: str, payload: dict) -> str:
+        exec_id = await orchestrator.trigger_workflow(workflow_name, payload)
+        return f"workflow:{exec_id}"
+
+    cron_scheduler = CronScheduler(
+        dispatch_fn=cron_dispatch,
+        workflow_trigger_fn=trigger_workflow,
+        blackboard=blackboard,
+    )
     if cron_scheduler.jobs:
-        click.echo(f"Cron scheduler: {len(cron_scheduler.jobs)} jobs loaded")
+        click.echo(f"  Cron scheduler: {len(cron_scheduler.jobs)} jobs loaded")
 
-    # Wire webhook manager
     webhook_manager = WebhookManager(dispatch_fn=dispatch_to_agent)
 
-    app = create_mesh_app(blackboard, pubsub, router, permissions, credential_vault)
+    app = create_mesh_app(
+        blackboard, pubsub, router, permissions, credential_vault,
+        cron_scheduler, runtime, transport,
+    )
     app.include_router(create_webhook_router(orchestrator))
     app.include_router(webhook_manager.create_router())
 
-    # Start cron in background
-    async def start_cron():
-        await cron_scheduler.start()
+    # Start mesh server in background
+    server_config = uvicorn.Config(app, host="0.0.0.0", port=mesh_port, log_level="warning")
+    server = uvicorn.Server(server_config)
+    mesh_thread = threading.Thread(target=server.run, daemon=True)
+    mesh_thread.start()
 
+    # Wait for mesh to be ready
+    mesh_ready = False
+    for _ in range(30):
+        try:
+            httpx.get(f"http://localhost:{mesh_port}/mesh/agents", timeout=1)
+            mesh_ready = True
+            break
+        except Exception:
+            time.sleep(0.5)
+
+    if not mesh_ready:
+        click.echo(
+            f"Mesh server failed to start on port {mesh_port}. "
+            f"Port may be in use. Try: openlegion stop",
+            err=True,
+        )
+        runtime.stop_all()
+        return
+
+    click.echo(f"  Mesh host ready on port {mesh_port}")
+    click.echo(f"  Isolation: {backend_label}")
+
+    # Wait for agents to be ready
+    for agent_id in agents_cfg:
+        ready = asyncio.run(runtime.wait_for_agent(agent_id, timeout=60))
+        if ready:
+            click.echo(f"  Agent '{agent_id}' ready")
+        else:
+            logs = runtime.get_logs(agent_id, tail=15)
+            click.echo(f"  Agent '{agent_id}' failed to start", err=True)
+            if logs:
+                click.echo(logs, err=True)
+
+    # Start cron in background
     def run_cron():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(start_cron())
+        loop.run_until_complete(cron_scheduler.start())
 
     cron_thread = threading.Thread(target=run_cron, daemon=True)
     cron_thread.start()
 
-    click.echo(f"OpenLegion running on port {mesh_port}")
-    uvicorn.run(app, host=cfg["mesh"]["host"], port=mesh_port)
+    # Start health monitor in background
+    def run_health():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(health_monitor.start())
+
+    health_thread = threading.Thread(target=run_health, daemon=True)
+    health_thread.start()
+
+    # Channel callback helpers (mirror REPL capabilities)
+    def _channel_status(agent_name: str) -> dict | None:
+        try:
+            return transport.request_sync(agent_name, "GET", "/status", timeout=3)
+        except Exception:
+            return None
+
+    def _channel_costs() -> list[dict]:
+        return cost_tracker.get_all_agents_spend("today")
+
+    def _channel_reset(agent_name: str) -> bool:
+        try:
+            transport.request_sync(agent_name, "POST", "/chat/reset", timeout=5)
+            return True
+        except Exception:
+            return False
+
+    # Start messaging channels (Telegram, Discord) if configured
+    _start_channels(
+        cfg, dispatch_to_agent, router.agent_registry, active_channels,
+        status_fn=_channel_status,
+        costs_fn=_channel_costs,
+        reset_fn=_channel_reset,
+    )
+
+    # Pick the first agent as the default active one
+    active_agents = list(agents_cfg.keys())
+    active_agent = active_agents[0]
+
+    click.echo(f"\nChatting with '{active_agent}'.", nl=False)
+    if len(active_agents) > 1:
+        click.echo(" Use @agent to direct messages. /help for commands.\n")
+    else:
+        click.echo(" /help for commands.\n")
+
+    # Interactive REPL
+    try:
+        _multi_agent_repl(
+            active_agent, agent_urls, router, cost_tracker, runtime, cfg,
+            transport=transport,
+        )
+    except KeyboardInterrupt:
+        click.echo("")
+    finally:
+        click.echo("Stopping OpenLegion...")
+        _stop_channels(active_channels)
+        health_monitor.stop()
+        cron_scheduler.stop()
+        runtime.stop_all()
+        cost_tracker.close()
+        server.should_exit = True
+        click.echo("Stopped.")
 
 
-@cli.command()
-@click.argument("workflow_name")
-@click.argument("payload", type=str)
-@click.option("--port", default=8420, help="Mesh port")
-def trigger(workflow_name: str, payload: str, port: int):
-    """Trigger a workflow via CLI."""
+def _start_detached(config_path: str) -> None:
+    """Start the runtime in a background subprocess."""
+    import subprocess
+
+    cmd = [sys.executable, "-m", "src.cli", "start", "--config", config_path]
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(PROJECT_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+
+    # Read output until agents are ready or timeout
+    started_lines: list[str] = []
+    import select
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        ready_fds, _, _ = select.select([proc.stdout], [], [], 1.0)
+        if ready_fds:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            line = line.rstrip()
+            started_lines.append(line)
+            click.echo(line)
+            if "Chatting with" in line:
+                break
+        if proc.poll() is not None:
+            break
+
+    if proc.poll() is not None:
+        click.echo("Runtime failed to start. Check logs.", err=True)
+        for line in started_lines:
+            click.echo(f"  {line}", err=True)
+        return
+
+    click.echo(f"\nOpenLegion running in background (PID {proc.pid}).")
+    click.echo("  Chat with an agent:  openlegion chat <name>")
+    click.echo("  Stop the runtime:    openlegion stop")
+
+
+# ── chat (for detached mode) ─────────────────────────────────
+
+@cli.command("chat")
+@click.argument("name")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+def chat(name: str, port: int):
+    """Connect to a running agent and start chatting.
+
+    The runtime must already be running (openlegion start -d).
+    """
     import httpx
 
-    response = httpx.post(
-        f"http://localhost:{port}/webhook/trigger/{workflow_name}",
-        json=json.loads(payload),
-    )
-    click.echo(json.dumps(response.json(), indent=2))
+    try:
+        resp = httpx.get(f"http://localhost:{port}/mesh/agents", timeout=5)
+        agents = resp.json()
+    except httpx.ConnectError:
+        click.echo("Mesh is not running. Start it first: openlegion start", err=True)
+        return
+    except Exception as e:
+        click.echo(f"Error contacting mesh: {e}", err=True)
+        return
 
+    agent_info = agents.get(name)
+    if not agent_info:
+        available = ", ".join(agents.keys()) if agents else "(none)"
+        click.echo(f"Agent '{name}' is not running. Running agents: {available}", err=True)
+        return
+
+    agent_url = agent_info.get("url", agent_info) if isinstance(agent_info, dict) else agent_info
+    click.echo(f"Connected to '{name}' at {agent_url}")
+    click.echo("Type a message to chat. /help for commands.\n")
+
+    try:
+        _single_agent_repl(agent_url)
+    except KeyboardInterrupt:
+        click.echo("\nDisconnected.")
+
+
+# ── status ───────────────────────────────────────────────────
 
 @cli.command("status")
-@click.option("--port", default=8420, help="Mesh port")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
 def status(port: int):
     """Show status of all agents."""
     import httpx
 
-    response = httpx.get(f"http://localhost:{port}/mesh/agents")
-    agents = response.json()
-    if not agents:
-        click.echo("No agents registered.")
-        return
-    for agent_id, info in agents.items():
-        click.echo(f"  {agent_id}: {info}")
+    cfg = _load_config()
+    configured = cfg.get("agents", {})
 
+    mesh_agents: dict = {}
+    mesh_online = False
+    try:
+        resp = httpx.get(f"http://localhost:{port}/mesh/agents", timeout=5)
+        mesh_agents = resp.json()
+        mesh_online = True
+    except httpx.ConnectError:
+        pass
+    except Exception:
+        pass
+
+    if not configured and not mesh_agents:
+        click.echo("No agents configured. Run: openlegion setup")
+        return
+
+    all_names = sorted(set(list(configured.keys()) + list(mesh_agents.keys())))
+
+    click.echo(f"{'Agent':<16} {'Role':<20} {'Status':<12}")
+    click.echo("-" * 48)
+    for name in all_names:
+        role = configured.get(name, {}).get("role", "n/a")
+
+        if name in mesh_agents:
+            agent_url = mesh_agents[name]
+            if isinstance(agent_url, dict):
+                agent_url = agent_url.get("url", "")
+            try:
+                sr = httpx.get(f"{agent_url}/status", timeout=3)
+                state = sr.json().get("state", "running")
+            except Exception:
+                state = "unreachable"
+        elif mesh_online:
+            state = "stopped"
+        else:
+            state = "unknown"
+
+        click.echo(f"{name:<16} {role:<20} {state:<12}")
+
+    if not mesh_online:
+        click.echo("\nMesh is not running. Start with: openlegion start")
+
+
+# ── stop ─────────────────────────────────────────────────────
 
 @cli.command()
 def stop():
@@ -454,306 +1250,221 @@ def stop():
     click.echo(f"Stopped {len(containers)} container(s).")
 
 
-# ── cron subgroup ────────────────────────────────────────────
+# ── Multi-agent REPL (used by `start`) ───────────────────────
 
-@cli.group()
-def cron():
-    """Manage scheduled jobs."""
-    pass
+def _multi_agent_repl(
+    active_agent: str,
+    agent_urls: dict[str, str],
+    router: object,
+    cost_tracker: object,
+    container_manager: object,
+    cfg: dict,
+    transport: object | None = None,
+) -> None:
+    """Interactive REPL supporting multiple agents, @mentions, and slash commands."""
+    import concurrent.futures
 
+    from src.host.transport import HttpTransport, resolve_url
 
-@cron.command("add")
-@click.argument("agent_name")
-@click.option("--schedule", "-s", required=True, help='Cron expression or "every 30m"')
-@click.option("--message", "-m", required=True, help="Message to send to agent")
-@click.option("--tz", default="UTC", help="Timezone (default UTC)")
-def cron_add(agent_name: str, schedule: str, message: str, tz: str):
-    """Add a scheduled job. Example: openlegion cron add researcher -s '0 9 * * 1-5' -m 'Morning check'"""
-    from src.host.cron import CronScheduler
+    def _resolve_url(agent_id: str) -> str | None:
+        return resolve_url(router.agent_registry, agent_id)
 
-    scheduler = CronScheduler()
-    job = scheduler.add_job(agent=agent_name, schedule=schedule, message=message, timezone=tz)
-    click.echo(f"Created job {job.id}: agent={agent_name} schedule='{schedule}'")
+    current = active_agent
 
-
-@cron.command("list")
-def cron_list():
-    """List all scheduled jobs."""
-    from src.host.cron import CronScheduler
-
-    scheduler = CronScheduler()
-    jobs = scheduler.list_jobs()
-    if not jobs:
-        click.echo("No cron jobs configured.")
-        return
-    click.echo(f"{'ID':<22} {'Agent':<14} {'Schedule':<18} {'Enabled':<8} {'Runs':<6} {'Last Run'}")
-    click.echo("-" * 90)
-    for j in jobs:
-        last = j.get("last_run", "never")
-        if last and last != "never":
-            last = last[:19]
-        click.echo(
-            f"{j['id']:<22} {j['agent']:<14} {j['schedule']:<18} "
-            f"{'yes' if j['enabled'] else 'no':<8} {j['run_count']:<6} {last}"
-        )
-
-
-@cron.command("run")
-@click.argument("job_id")
-@click.option("--port", default=8420, type=int, help="Mesh port")
-def cron_run(job_id: str, port: int):
-    """Manually trigger a cron job."""
-    import asyncio
-
-    import httpx
-
-    from src.host.cron import CronScheduler
-
-    async def dispatch(agent: str, message: str) -> str:
-        r = httpx.post(
-            f"http://localhost:{port}/mesh/agents",
-            timeout=5,
-        )
-        agents = r.json()
-        agent_url = agents.get(agent, {}).get("url")
-        if not agent_url:
-            return f"Agent '{agent}' not found in mesh"
-        r = httpx.post(f"{agent_url}/chat", json={"message": message}, timeout=120)
-        return r.json().get("response", "(no response)")
-
-    scheduler = CronScheduler(dispatch_fn=dispatch)
-    result = asyncio.run(scheduler.run_job(job_id))
-    if result is None:
-        click.echo(f"Job '{job_id}' not found.")
-    else:
-        click.echo(f"Response: {result}")
-
-
-@cron.command("pause")
-@click.argument("job_id")
-def cron_pause(job_id: str):
-    """Pause a cron job."""
-    from src.host.cron import CronScheduler
-
-    scheduler = CronScheduler()
-    if scheduler.pause_job(job_id):
-        click.echo(f"Paused job {job_id}")
-    else:
-        click.echo(f"Job '{job_id}' not found.")
-
-
-@cron.command("resume")
-@click.argument("job_id")
-def cron_resume(job_id: str):
-    """Resume a paused cron job."""
-    from src.host.cron import CronScheduler
-
-    scheduler = CronScheduler()
-    if scheduler.resume_job(job_id):
-        click.echo(f"Resumed job {job_id}")
-    else:
-        click.echo(f"Job '{job_id}' not found.")
-
-
-@cron.command("remove")
-@click.argument("job_id")
-def cron_remove(job_id: str):
-    """Remove a cron job."""
-    from src.host.cron import CronScheduler
-
-    scheduler = CronScheduler()
-    if scheduler.remove_job(job_id):
-        click.echo(f"Removed job {job_id}")
-    else:
-        click.echo(f"Job '{job_id}' not found.")
-
-
-# ── webhook subgroup ─────────────────────────────────────────
-
-@cli.group()
-def webhook():
-    """Manage webhook endpoints."""
-    pass
-
-
-@webhook.command("add")
-@click.option("--agent", "-a", required=True, help="Target agent")
-@click.option("--name", "-n", required=True, help="Webhook name")
-@click.option("--port", default=8420, type=int, help="Mesh port")
-def webhook_add(agent: str, name: str, port: int):
-    """Create a new webhook endpoint."""
-    from src.host.webhooks import WebhookManager
-
-    mgr = WebhookManager()
-    hook = mgr.add_hook(agent=agent, name=name)
-    click.echo(f"Created webhook: {hook['id']}")
-    click.echo(f"URL: http://localhost:{port}/webhook/hook/{hook['id']}")
-
-
-@webhook.command("list")
-def webhook_list():
-    """List all webhook endpoints."""
-    from src.host.webhooks import WebhookManager
-
-    mgr = WebhookManager()
-    hooks = mgr.list_hooks()
-    if not hooks:
-        click.echo("No webhooks configured.")
-        return
-    click.echo(f"{'ID':<18} {'Agent':<14} {'Name':<20} {'Calls':<6}")
-    click.echo("-" * 60)
-    for h in hooks:
-        click.echo(f"{h['id']:<18} {h['agent']:<14} {h['name']:<20} {h.get('call_count', 0):<6}")
-
-
-@webhook.command("test")
-@click.argument("hook_id")
-@click.option("--payload", "-p", default='{"event": "test"}', help="JSON payload")
-@click.option("--port", default=8420, type=int, help="Mesh port")
-def webhook_test(hook_id: str, payload: str, port: int):
-    """Send a test payload to a webhook."""
-    import httpx
-
-    r = httpx.post(
-        f"http://localhost:{port}/webhook/hook/{hook_id}",
-        json=json.loads(payload),
-        timeout=120,
-    )
-    click.echo(json.dumps(r.json(), indent=2))
-
-
-@webhook.command("remove")
-@click.argument("hook_id")
-def webhook_remove(hook_id: str):
-    """Remove a webhook endpoint."""
-    from src.host.webhooks import WebhookManager
-
-    mgr = WebhookManager()
-    if mgr.remove_hook(hook_id):
-        click.echo(f"Removed webhook {hook_id}")
-    else:
-        click.echo(f"Webhook '{hook_id}' not found.")
-
-
-# ── costs command ────────────────────────────────────────────
-
-@cli.command("costs")
-@click.option("--agent", "-a", default=None, help="Filter by agent")
-@click.option("--period", "-p", default="today", type=click.Choice(["today", "week", "month"]))
-def costs(agent: str | None, period: str):
-    """Show LLM spend per agent."""
-    from src.host.costs import CostTracker
-
-    tracker = CostTracker()
-    if agent:
-        spend = tracker.get_spend(agent, period)
-        click.echo(f"Agent: {agent}  Period: {period}")
-        click.echo(f"Total: ${spend['total_cost']:.4f}  Tokens: {spend['total_tokens']:,}")
-        if spend["by_model"]:
-            click.echo(f"\n{'Model':<32} {'Tokens':>10} {'Cost':>10}")
-            click.echo("-" * 55)
-            for model, info in spend["by_model"].items():
-                click.echo(f"{model:<32} {info['total']:>10,} ${info['cost']:>9.4f}")
-    else:
-        agents = tracker.get_all_agents_spend(period)
-        if not agents:
-            click.echo(f"No usage recorded for period: {period}")
-            return
-        total = sum(a["cost"] for a in agents)
-        click.echo(f"Period: {period}  Total: ${total:.4f}\n")
-        click.echo(f"{'Agent':<16} {'Tokens':>12} {'Cost':>10}")
-        click.echo("-" * 40)
-        for a in agents:
-            click.echo(f"{a['agent']:<16} {a['tokens']:>12,} ${a['cost']:>9.4f}")
-    tracker.close()
-
-
-# ── Runtime + Chat REPL ──────────────────────────────────────
-
-def _start_runtime_and_chat(agent_name: str, mesh_port_override: int | None = None) -> None:
-    """Start mesh + agent container, then enter interactive chat REPL."""
-    import threading
-
-    import httpx
-    import uvicorn
-
-    from src.host.containers import ContainerManager
-    from src.host.credentials import CredentialVault
-    from src.host.mesh import Blackboard, MessageRouter, PubSub
-    from src.host.permissions import PermissionMatrix
-    from src.host.server import create_mesh_app
-
-    cfg = _load_config()
-    mesh_port = mesh_port_override or cfg.get("mesh", {}).get("port", 8420)
-    default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-    agent_cfg = cfg["agents"][agent_name]
-
-    blackboard = Blackboard()
-    pubsub = PubSub()
-    permissions = PermissionMatrix()
-    credential_vault = CredentialVault()
-    container_manager = ContainerManager(mesh_host_port=mesh_port)
-
-    router = MessageRouter(permissions, {})
-
-    app = create_mesh_app(blackboard, pubsub, router, permissions, credential_vault)
-
-    # Start mesh in background thread
-    server_config = uvicorn.Config(app, host="0.0.0.0", port=mesh_port, log_level="warning")
-    server = uvicorn.Server(server_config)
-    mesh_thread = threading.Thread(target=server.run, daemon=True)
-    mesh_thread.start()
-
-    # Wait for mesh to be ready
-    for _ in range(30):
+    while True:
         try:
-            httpx.get(f"http://localhost:{mesh_port}/mesh/agents", timeout=1)
+            user_input = input("You> ").strip()
+        except EOFError:
             break
-        except Exception:
-            time.sleep(0.5)
 
-    # Start agent container
-    skills_dir = os.path.abspath(agent_cfg.get("skills_dir", ""))
-    agent_model = agent_cfg.get("model", default_model)
-    agent_url = container_manager.start_agent(
-        agent_id=agent_name,
-        role=agent_cfg["role"],
-        skills_dir=skills_dir,
-        system_prompt=agent_cfg.get("system_prompt", ""),
-        model=agent_model,
-    )
-    router.register_agent(agent_name, agent_url)
-    click.echo(f"Agent '{agent_name}' starting at {agent_url}...")
+        if not user_input:
+            continue
 
-    # Wait for agent to be ready
-    import asyncio
-    ready = asyncio.run(container_manager.wait_for_agent(agent_name, timeout=60))
-    if not ready:
-        click.echo("Agent failed to start. Check Docker logs.", err=True)
-        container_manager.stop_all()
-        return
+        # @agent prefix: send to a specific agent
+        target = current
+        message = user_input
+        if user_input.startswith("@"):
+            parts = user_input.split(None, 1)
+            mentioned = parts[0][1:]
+            if mentioned in agent_urls:
+                target = mentioned
+                message = parts[1] if len(parts) > 1 else ""
+                if not message:
+                    click.echo(f"Usage: @{mentioned} <message>")
+                    continue
+            else:
+                click.echo(f"Unknown agent: '{mentioned}'. Type /agents to list.")
+                continue
 
-    click.echo(f"Agent '{agent_name}' is ready.\n")
-    click.echo("Type a message to chat. Commands: /reset /status /quit /help\n")
+        # Slash commands
+        if message.startswith("/"):
+            cmd_parts = message.split(None, 1)
+            cmd = cmd_parts[0].lower()
 
-    # REPL
-    try:
-        _chat_repl(agent_url)
-    except KeyboardInterrupt:
-        click.echo("\nExiting...")
-    finally:
-        click.echo("Stopping agent container...")
-        container_manager.stop_all()
-        server.should_exit = True
+            if cmd in ("/quit", "/exit"):
+                break
+
+            elif cmd == "/agents":
+                for name in agent_urls:
+                    marker = " (active)" if name == current else ""
+                    click.echo(f"  {name}{marker}")
+                continue
+
+            elif cmd == "/use":
+                if len(cmd_parts) < 2:
+                    click.echo(f"Usage: /use <agent>  (current: {current})")
+                    continue
+                new_agent = cmd_parts[1].strip()
+                if new_agent not in agent_urls:
+                    click.echo(f"Unknown agent: '{new_agent}'. Type /agents to list.")
+                    continue
+                current = new_agent
+                click.echo(f"Now chatting with '{current}'.")
+                continue
+
+            elif cmd == "/add":
+                new_name = click.prompt("Agent name")
+                if new_name in agent_urls:
+                    click.echo(f"Agent '{new_name}' already exists.")
+                    continue
+                new_desc = click.prompt(
+                    "What should this agent do?",
+                    default=f"General-purpose {new_name} assistant",
+                )
+                model = _get_default_model()
+                _create_agent(new_name, new_desc, model)
+                agent_cfg_data = _load_config().get("agents", {}).get(new_name, {})
+                skills_dir = os.path.abspath(agent_cfg_data.get("skills_dir", ""))
+                import asyncio
+                url = container_manager.start_agent(
+                    agent_id=new_name,
+                    role=new_desc,
+                    skills_dir=skills_dir,
+                    system_prompt=agent_cfg_data.get("system_prompt", ""),
+                    model=agent_cfg_data.get("model", model),
+                )
+                router.register_agent(new_name, url)
+                agent_urls[new_name] = url
+                if isinstance(transport, HttpTransport):
+                    transport.register(new_name, url)
+                click.echo(f"Starting '{new_name}'...")
+                ready = asyncio.run(container_manager.wait_for_agent(new_name, timeout=60))
+                if ready:
+                    click.echo(f"Agent '{new_name}' ready.")
+                else:
+                    click.echo(f"Agent '{new_name}' failed to start.", err=True)
+                continue
+
+            elif cmd == "/status":
+                for name in agent_urls:
+                    try:
+                        data = transport.request_sync(name, "GET", "/status", timeout=3)
+                        state = data.get("state", "unknown")
+                        tasks = data.get("tasks_completed", 0)
+                        click.echo(f"  {name}: {state} ({tasks} tasks completed)")
+                    except Exception:
+                        click.echo(f"  {name}: unreachable")
+                continue
+
+            elif cmd == "/broadcast":
+                if len(cmd_parts) < 2:
+                    click.echo("Usage: /broadcast <message>")
+                    continue
+                bc_msg = cmd_parts[1]
+                click.echo(f"Broadcasting to {len(agent_urls)} agent(s)...\n")
+
+                def _send(aid: str) -> tuple[str, str]:
+                    try:
+                        data = transport.request_sync(
+                            aid, "POST", "/chat",
+                            json={"message": bc_msg}, timeout=120,
+                        )
+                        return aid, data.get("response", "(no response)")
+                    except Exception as e:
+                        return aid, f"(error: {e})"
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(agent_urls)) as pool:
+                    futures = {pool.submit(_send, aid): aid for aid in agent_urls}
+                    for future in concurrent.futures.as_completed(futures):
+                        aid, response = future.result()
+                        click.echo(f"[{aid}] {response}\n")
+                continue
+
+            elif cmd == "/costs":
+                try:
+                    agents_spend = cost_tracker.get_all_agents_spend("today")
+                    if not agents_spend:
+                        click.echo("No usage recorded today.")
+                    else:
+                        total = sum(a["cost"] for a in agents_spend)
+                        click.echo(f"Today's spend: ${total:.4f}\n")
+                        for a in agents_spend:
+                            click.echo(f"  {a['agent']:<16} {a['tokens']:>8,} tokens  ${a['cost']:.4f}")
+                except Exception as e:
+                    click.echo(f"Error: {e}")
+                continue
+
+            elif cmd == "/reset":
+                try:
+                    transport.request_sync(current, "POST", "/chat/reset", timeout=5)
+                    click.echo(f"Conversation with '{current}' reset.")
+                except Exception as e:
+                    click.echo(f"Error: {e}")
+                continue
+
+            elif cmd == "/help":
+                click.echo("Commands:")
+                click.echo("  @agent <msg>      Send message to a specific agent")
+                click.echo("  /use <agent>      Switch active agent")
+                click.echo("  /agents           List all agents")
+                click.echo("  /add              Add a new agent")
+                click.echo("  /status           Show agent health")
+                click.echo("  /broadcast <msg>  Send to all agents")
+                click.echo("  /costs            Show today's LLM spend")
+                click.echo("  /reset            Clear conversation with active agent")
+                click.echo("  /quit             Exit and stop runtime")
+                continue
+
+            else:
+                click.echo(f"Unknown command: {cmd}. Type /help for commands.")
+                continue
+
+        # Send message to the target agent
+        if target not in agent_urls:
+            click.echo(f"Agent '{target}' not found.")
+            continue
+
+        try:
+            data = transport.request_sync(
+                target, "POST", "/chat",
+                json={"message": message}, timeout=120,
+            )
+
+            if "error" in data and "response" not in data:
+                click.echo(f"Error: {data['error']}")
+                continue
+
+            for tool_out in data.get("tool_outputs", []):
+                tool_name = tool_out.get("tool", "unknown")
+                tool_input = tool_out.get("input", {})
+                tool_result = tool_out.get("output", {})
+                click.echo(f"  [{tool_name}] {_format_tool_summary(tool_name, tool_input, tool_result)}")
+
+            click.echo(f"\n{target}> {data.get('response', '(no response)')}\n")
+
+        except Exception as e:
+            click.echo(f"Error: {e}")
 
 
-def _chat_repl(agent_url: str) -> None:
-    """Interactive chat REPL with an agent."""
+# ── Single-agent REPL (used by `chat`) ───────────────────────
+
+def _single_agent_repl(agent_url: str) -> None:
+    """Interactive chat REPL with a single agent (for detached mode)."""
     import httpx
 
     while True:
         try:
-            user_input = input("You: ").strip()
+            user_input = input("You> ").strip()
         except EOFError:
             break
 
@@ -762,7 +1473,7 @@ def _chat_repl(agent_url: str) -> None:
 
         if user_input.startswith("/"):
             cmd = user_input.lower()
-            if cmd == "/quit" or cmd == "/exit":
+            if cmd in ("/quit", "/exit"):
                 break
             elif cmd == "/reset":
                 try:
@@ -805,14 +1516,13 @@ def _chat_repl(agent_url: str) -> None:
 
             data = resp.json()
 
-            # Show tool usage
             for tool_out in data.get("tool_outputs", []):
                 tool_name = tool_out.get("tool", "unknown")
                 tool_input = tool_out.get("input", {})
                 tool_result = tool_out.get("output", {})
                 click.echo(f"  [{tool_name}] {_format_tool_summary(tool_name, tool_input, tool_result)}")
 
-            click.echo(f"\nAgent: {data.get('response', '(no response)')}\n")
+            click.echo(f"\nAgent> {data.get('response', '(no response)')}\n")
 
         except httpx.TimeoutException:
             click.echo("Request timed out. The agent may still be processing.")

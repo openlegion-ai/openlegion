@@ -192,13 +192,14 @@ def test_agent_registered_with_mesh(e2e_stack):
 @skip_no_docker
 @skip_no_key
 def test_agent_has_capabilities(e2e_stack):
-    """Verify the agent exposes its skill definitions."""
+    """Verify the agent exposes its built-in skill definitions."""
     url = e2e_stack["agent_url"]
     r = httpx.get(f"{url}/capabilities", timeout=5)
     assert r.status_code == 200
     caps = r.json()
-    assert "web_search" in caps["skills"]
-    assert "company_lookup" in caps["skills"]
+    assert "read_file" in caps["skills"]
+    assert "exec" in caps["skills"]
+    assert "http_request" in caps["skills"]
 
 
 @skip_no_docker

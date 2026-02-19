@@ -1,11 +1,11 @@
-"""Tests for CronScheduler: scheduling, intervals, dispatch, persistence."""
+"""Tests for CronScheduler: scheduling, intervals, dispatch, persistence, heartbeat."""
 
 from __future__ import annotations
 
 import shutil
 import tempfile
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -162,3 +162,74 @@ class TestCronDispatch:
         sched = CronScheduler(config_path=self.config_path)
         result = await sched.run_job("nonexistent")
         assert result is None
+
+
+class TestHeartbeat:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_add_heartbeat_job(self):
+        sched = CronScheduler(config_path=self.config_path)
+        job = sched.add_job(agent="test", schedule="every 15m", message="heartbeat", heartbeat=True)
+        assert job.heartbeat is True
+
+    def test_heartbeat_persists(self):
+        sched = CronScheduler(config_path=self.config_path)
+        sched.add_job(agent="test", schedule="every 15m", message="heartbeat", heartbeat=True)
+        sched2 = CronScheduler(config_path=self.config_path)
+        job = list(sched2.jobs.values())[0]
+        assert job.heartbeat is True
+
+    def test_heartbeat_probes_no_blackboard(self):
+        sched = CronScheduler(config_path=self.config_path)
+        results = sched._run_heartbeat_probes("test")
+        # Should still return disk usage probe
+        assert any(r.name == "disk_usage" for r in results)
+
+    def test_heartbeat_probes_with_signals(self):
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = [MagicMock()]
+        sched = CronScheduler(config_path=self.config_path, blackboard=mock_bb)
+        results = sched._run_heartbeat_probes("test")
+        signal_probes = [r for r in results if r.name == "pending_signals"]
+        assert len(signal_probes) == 1
+        assert signal_probes[0].triggered is True
+
+    def test_heartbeat_probes_no_signals(self):
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        sched = CronScheduler(config_path=self.config_path, blackboard=mock_bb)
+        results = sched._run_heartbeat_probes("test")
+        signal_probes = [r for r in results if r.name == "pending_signals"]
+        assert len(signal_probes) == 1
+        assert signal_probes[0].triggered is False
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_skips_dispatch_when_clean(self):
+        dispatch = AsyncMock(return_value="should not be called")
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch, blackboard=mock_bb,
+        )
+        job = sched.add_job(agent="test", schedule="every 15m", message="heartbeat", heartbeat=True)
+        result = await sched._execute_job(job)
+        dispatch.assert_not_called()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_dispatches_when_triggered(self):
+        dispatch = AsyncMock(return_value="Taking action")
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.side_effect = lambda prefix: [MagicMock()] if "signals" in prefix else []
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch, blackboard=mock_bb,
+        )
+        job = sched.add_job(agent="test", schedule="every 15m", message="heartbeat", heartbeat=True)
+        result = await sched._execute_job(job)
+        dispatch.assert_called_once()
+        assert result == "Taking action"

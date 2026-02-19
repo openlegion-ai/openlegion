@@ -6,7 +6,9 @@ container restarts. Dispatches messages to agents via POST /chat.
 Supports:
   - Standard 5-field cron expressions: "0 9 * * 1-5"
   - Interval shorthand: "every 30m", "every 2h", "every 1d"
-  - Heartbeat pattern: sends "Check HEARTBEAT.md", suppresses OK replies
+  - Heartbeat pattern: runs deterministic probes first, only
+    dispatches to agent (costing LLM tokens) when probes find
+    actionable items.
 
 State persisted to config/cron.json, hot-reloadable.
 """
@@ -16,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +32,14 @@ _EMPTY_RESPONSES = frozenset({"", "ok", "heartbeat_ok", "nothing to do", "no upd
 
 
 @dataclass
+class HeartbeatProbeResult:
+    """Result of a single deterministic probe."""
+    name: str
+    triggered: bool
+    detail: str = ""
+
+
+@dataclass
 class CronJob:
     id: str
     agent: str
@@ -37,6 +48,9 @@ class CronJob:
     timezone: str = "UTC"
     enabled: bool = True
     suppress_empty: bool = True
+    heartbeat: bool = False
+    workflow: Optional[str] = None
+    workflow_payload: Optional[str] = None
     last_run: Optional[str] = None
     next_run: Optional[str] = None
     run_count: int = 0
@@ -44,7 +58,12 @@ class CronJob:
 
 
 class CronScheduler:
-    """Persistent cron scheduler that lives in the mesh host."""
+    """Persistent cron scheduler that lives in the mesh host.
+
+    Heartbeat jobs run cheap deterministic probes before dispatching to
+    the agent. This keeps autonomous operation economical — the LLM is
+    only invoked when there's actually something to act on.
+    """
 
     TICK_INTERVAL = 15
 
@@ -52,10 +71,14 @@ class CronScheduler:
         self,
         config_path: str = "config/cron.json",
         dispatch_fn: Optional[Callable] = None,
+        workflow_trigger_fn: Optional[Callable] = None,
+        blackboard: Any = None,
     ):
         self.config_path = Path(config_path)
         self.jobs: dict[str, CronJob] = {}
         self.dispatch_fn = dispatch_fn
+        self.workflow_trigger_fn = workflow_trigger_fn
+        self.blackboard = blackboard
         self._running = False
         self._load()
 
@@ -64,6 +87,8 @@ class CronScheduler:
             return
         try:
             data = json.loads(self.config_path.read_text())
+            if not isinstance(data, dict):
+                return
             for job_data in data.get("jobs", []):
                 job = CronJob(**job_data)
                 self.jobs[job.id] = job
@@ -75,17 +100,22 @@ class CronScheduler:
         data = {"jobs": [asdict(j) for j in self.jobs.values()]}
         self.config_path.write_text(json.dumps(data, indent=2) + "\n")
 
-    def add_job(self, agent: str, schedule: str, message: str, **kwargs: Any) -> CronJob:
+    def add_job(
+        self, agent: str, schedule: str, message: str,
+        heartbeat: bool = False, **kwargs: Any,
+    ) -> CronJob:
         job = CronJob(
             id=generate_id("cron"),
             agent=agent,
             schedule=schedule,
             message=message,
+            heartbeat=heartbeat,
             **kwargs,
         )
         self.jobs[job.id] = job
         self._save()
-        logger.info(f"Added cron job {job.id}: agent={agent} schedule={schedule}")
+        kind = "heartbeat" if heartbeat else "cron"
+        logger.info(f"Added {kind} job {job.id}: agent={agent} schedule={schedule}")
         return job
 
     def remove_job(self, job_id: str) -> bool:
@@ -140,20 +170,89 @@ class CronScheduler:
             self._save()
 
             response = None
-            if self.dispatch_fn:
-                response = await self.dispatch_fn(job.agent, job.message)
+            if job.workflow and self.workflow_trigger_fn:
+                payload = json.loads(job.workflow_payload) if job.workflow_payload else {}
+                payload.setdefault("date", datetime.now(UTC).strftime("%Y-%m-%d"))
+                response = await self.workflow_trigger_fn(job.workflow, payload)
+                logger.info(f"Cron {job.id} triggered workflow '{job.workflow}'")
+            elif self.dispatch_fn:
+                # Heartbeat: run cheap probes first, only dispatch if triggered
+                if job.heartbeat:
+                    probes = self._run_heartbeat_probes(job.agent)
+                    triggered = [p for p in probes if p.triggered]
+                    if not triggered:
+                        logger.debug(f"Heartbeat {job.id}: all probes clean, skipping LLM")
+                        return None
+                    probe_summary = "\n".join(
+                        f"- [{p.name}] {p.detail}" for p in triggered
+                    )
+                    message = (
+                        f"Heartbeat alert — the following probes triggered:\n"
+                        f"{probe_summary}\n\n"
+                        f"Check HEARTBEAT.md for your autonomous rules and take action."
+                    )
+                    response = await self.dispatch_fn(job.agent, message)
+                    logger.info(
+                        f"Heartbeat {job.id}: {len(triggered)} probes triggered for '{job.agent}'"
+                    )
+                else:
+                    response = await self.dispatch_fn(job.agent, job.message)
 
                 if job.suppress_empty and _is_empty_response(response):
                     logger.debug(f"Cron {job.id}: suppressed empty response")
                     return response
+                logger.info(f"Cron {job.id} executed for agent '{job.agent}'")
 
-            logger.info(f"Cron {job.id} executed for agent '{job.agent}'")
             return response
         except Exception as e:
             job.error_count += 1
             self._save()
             logger.error(f"Cron {job.id} failed: {e}")
             return None
+
+    def _run_heartbeat_probes(self, agent: str) -> list[HeartbeatProbeResult]:
+        """Run cheap, deterministic probes before invoking the LLM."""
+        results: list[HeartbeatProbeResult] = []
+
+        # Probe 1: Disk usage on agent data volume
+        try:
+            data_dir = Path(f"/tmp/openlegion_data_{agent}")
+            if not data_dir.exists():
+                data_dir = Path(".")
+            usage = shutil.disk_usage(str(data_dir))
+            pct = (usage.used / usage.total) * 100 if usage.total else 0
+            results.append(HeartbeatProbeResult(
+                name="disk_usage",
+                triggered=pct > 85,
+                detail=f"{pct:.0f}% used ({usage.free // (1024**2)}MB free)",
+            ))
+        except OSError:
+            pass
+
+        # Probe 2: Pending signals on blackboard
+        if self.blackboard:
+            try:
+                signals = self.blackboard.list_by_prefix(f"signals/{agent}")
+                results.append(HeartbeatProbeResult(
+                    name="pending_signals",
+                    triggered=len(signals) > 0,
+                    detail=f"{len(signals)} pending signal(s)",
+                ))
+            except Exception:
+                pass
+
+            # Probe 3: Pending tasks on blackboard
+            try:
+                tasks = self.blackboard.list_by_prefix(f"tasks/{agent}")
+                results.append(HeartbeatProbeResult(
+                    name="pending_tasks",
+                    triggered=len(tasks) > 0,
+                    detail=f"{len(tasks)} pending task(s)",
+                ))
+            except Exception:
+                pass
+
+        return results
 
     def _is_due(self, job: CronJob, now: datetime) -> bool:
         schedule = job.schedule.strip()

@@ -22,3 +22,10 @@ htmlcov/
 data/
 *.db-wal
 *.db-shm
+config/agents.yaml
+config/team.yaml
+config/cron.json
+config/webhooks.json
+config/telegram_paired.json
+config/discord_paired.json
+benchmark_report.md

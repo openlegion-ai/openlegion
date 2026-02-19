@@ -2,18 +2,23 @@
 
 Layout:
   /data/workspace/
+  ├── PROJECT.md      # Shared fleet context (mounted read-only from host)
   ├── AGENTS.md       # Operating instructions (loaded into system prompt)
   ├── SOUL.md         # Identity, personality, tone
   ├── USER.md         # User context, preferences
   ├── MEMORY.md       # Curated long-term memory (auto + manual)
-  └── memory/
-      ├── 2026-02-18.md   # Today's session log
-      └── 2026-02-17.md   # Yesterday's log
+  ├── HEARTBEAT.md    # Autonomous task rules (checked on heartbeat)
+  ├── memory/
+  │   ├── 2026-02-18.md   # Today's session log
+  │   └── 2026-02-17.md   # Yesterday's log
+  └── learnings/
+      ├── errors.md       # Tool/task failure log with context
+      └── corrections.md  # User corrections and preferences
 
 All files are plain Markdown. Human-readable, git-versionable.
-The agent reads workspace files on session start and appends to the
-daily log during conversation. MEMORY.md is the durable store that
-the context manager flushes to before compacting.
+PROJECT.md is shared across all agents — it defines what the fleet
+is building, the current priority, and hard constraints. Each agent
+reads it on session start for alignment without centralized control.
 """
 
 from __future__ import annotations
@@ -45,17 +50,39 @@ _SCAFFOLD_FILES: dict[str, str] = {
         "Curated facts and important information are stored here automatically.\n"
         "You can also edit this file directly.\n"
     ),
+    "HEARTBEAT.md": (
+        "# Heartbeat Rules\n\n"
+        "Define what to check on each heartbeat. The agent reads this file\n"
+        "periodically and takes action when rules are triggered.\n\n"
+        "## Rules\n\n"
+        "- Check for pending tasks on the blackboard\n"
+        "- Review and summarize new information\n"
+    ),
 }
 
 _MAX_FILE_SIZE = 200_000
 
 
+_CORRECTION_SIGNALS = frozenset({
+    "no,", "no.", "wrong", "incorrect", "that's not", "that is not",
+    "actually,", "i meant", "you should", "don't do", "do not do",
+    "stop doing", "not what i", "i said", "please don't", "instead,",
+    "correction:", "fix:", "not like that",
+})
+
+_MAX_LEARNINGS_SIZE = 50_000
+
+
 class WorkspaceManager:
     """Reads and writes the agent's persistent workspace files."""
 
-    PROMPT_FILES = ("AGENTS.md", "SOUL.md", "USER.md")
+    PROMPT_FILES = ("PROJECT.md", "AGENTS.md", "SOUL.md", "USER.md")
     MEMORY_FILE = "MEMORY.md"
+    HEARTBEAT_FILE = "HEARTBEAT.md"
     DAILY_DIR = "memory"
+    LEARNINGS_DIR = "learnings"
+    ERRORS_FILE = "learnings/errors.md"
+    CORRECTIONS_FILE = "learnings/corrections.md"
 
     def __init__(self, workspace_dir: str = "/data/workspace"):
         self.root = Path(workspace_dir)
@@ -65,6 +92,7 @@ class WorkspaceManager:
         """Create workspace directory and default files if they don't exist."""
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / self.DAILY_DIR).mkdir(exist_ok=True)
+        (self.root / self.LEARNINGS_DIR).mkdir(exist_ok=True)
         for filename, default_content in _SCAFFOLD_FILES.items():
             path = self.root / filename
             if not path.exists():
@@ -74,7 +102,7 @@ class WorkspaceManager:
     # ── Reading ──────────────────────────────────────────────
 
     def load_prompt_context(self) -> str:
-        """Load AGENTS.md + SOUL.md + USER.md for the system prompt."""
+        """Load PROJECT.md, AGENTS.md, SOUL.md, USER.md into the system prompt."""
         parts: list[str] = []
         for filename in self.PROMPT_FILES:
             content = self._read_file(filename)
@@ -172,6 +200,69 @@ class WorkspaceManager:
             return []
         files = sorted(daily_dir.glob("*.md"), reverse=True)
         return [str(f.relative_to(self.root)) for f in files]
+
+    # ── Learnings ────────────────────────────────────────────────
+
+    def record_error(self, tool: str, error: str, context: str = "") -> None:
+        """Record a tool or task failure for future avoidance."""
+        path = self.root / self.ERRORS_FILE
+        self._rotate_if_large(path)
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
+        entry = f"- [{timestamp}] **{tool}**: {error}"
+        if context:
+            entry += f"\n  Context: {context}"
+        with path.open("a") as f:
+            f.write(entry + "\n")
+
+    def record_correction(self, original: str, correction: str) -> None:
+        """Record a user correction for learning."""
+        path = self.root / self.CORRECTIONS_FILE
+        self._rotate_if_large(path)
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
+        entry = (
+            f"- [{timestamp}] Original: {original[:200]}\n"
+            f"  Correction: {correction[:500]}\n"
+        )
+        with path.open("a") as f:
+            f.write(entry)
+
+    @staticmethod
+    def looks_like_correction(message: str) -> bool:
+        """Heuristic: does this user message look like a correction?"""
+        lower = message.lower().strip()
+        return any(lower.startswith(s) for s in _CORRECTION_SIGNALS)
+
+    def get_learnings_context(self, max_chars: int = 3000) -> str:
+        """Load recent errors and corrections for system prompt injection."""
+        parts: list[str] = []
+        for relpath, heading in [
+            (self.ERRORS_FILE, "## Recent Errors (avoid repeating)"),
+            (self.CORRECTIONS_FILE, "## User Corrections (follow these)"),
+        ]:
+            content = self._read_file(relpath)
+            if content and content.strip():
+                lines = content.strip().splitlines()
+                tail = "\n".join(lines[-20:])
+                parts.append(f"{heading}\n\n{tail}")
+        combined = "\n\n".join(parts)
+        return combined[:max_chars] if combined else ""
+
+    def load_heartbeat_rules(self) -> str:
+        """Load HEARTBEAT.md content for autonomous operation."""
+        return self._read_file(self.HEARTBEAT_FILE) or ""
+
+    def _rotate_if_large(self, path: Path) -> None:
+        """Trim old entries when a learning file exceeds the size limit."""
+        if not path.exists():
+            return
+        try:
+            size = path.stat().st_size
+            if size > _MAX_LEARNINGS_SIZE:
+                lines = path.read_text(errors="replace").splitlines()
+                half = len(lines) // 2
+                path.write_text("\n".join(lines[half:]) + "\n")
+        except OSError:
+            pass
 
 
 # ── BM25 implementation (no external deps) ───────────────────
