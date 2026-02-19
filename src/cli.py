@@ -946,6 +946,8 @@ def _start_interactive(config_path: str) -> None:
                     "  Falling back to Docker container isolation...\n",
                     err=True,
                 )
+                # Clean up the failed sandbox before switching backends
+                runtime.stop_all()
                 runtime = DockerBackend(
                     mesh_host_port=mesh_port,
                     use_host_network=True,

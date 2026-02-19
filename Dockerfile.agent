@@ -1,8 +1,9 @@
 FROM python:3.12-slim
 
-# System tools useful for agent operations
+# System tools useful for agent operations + build tools for native extensions
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl wget git jq vim-tiny procps \
+    gcc python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user (created early so /data ownership is correct)
@@ -11,14 +12,19 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash agent
 WORKDIR /app
 
 # Python dependencies
+# sqlite-vec is built from source to ensure correct architecture on all platforms
 COPY pyproject.toml .
 RUN pip install --no-cache-dir \
-    fastapi uvicorn httpx pydantic litellm sqlite-vec pyyaml playwright
+    fastapi uvicorn httpx pydantic litellm pyyaml playwright \
+    && pip install --no-cache-dir --no-binary sqlite-vec sqlite-vec
 
 # Install Chromium for browser automation — shared path so non-root agent can access it
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN playwright install chromium --with-deps \
     && chmod -R o+rx /opt/pw-browsers
+
+# Remove build tools (no longer needed at runtime)
+RUN apt-get purge -y gcc python3-dev && apt-get autoremove -y
 
 # Application code
 COPY src/agent/ /app/src/agent/
