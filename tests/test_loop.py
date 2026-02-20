@@ -289,3 +289,61 @@ async def test_llm_retry_in_chat_mode():
 
     assert result["response"] == "Hello!"
     assert loop.llm.chat.call_count == 2
+
+
+# === Silent Reply Token ===
+
+
+@pytest.mark.asyncio
+async def test_silent_reply_token_returns_empty():
+    """When LLM returns __SILENT__, chat() should return empty string response."""
+    silent_response = LLMResponse(content="__SILENT__", tokens_used=10)
+    loop = _make_loop([silent_response])
+    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+
+    result = await loop.chat("heartbeat ping")
+    assert result["response"] == ""
+
+
+@pytest.mark.asyncio
+async def test_silent_reply_token_with_whitespace():
+    """__SILENT__ with surrounding whitespace should still be detected."""
+    silent_response = LLMResponse(content="  __SILENT__  \n", tokens_used=10)
+    loop = _make_loop([silent_response])
+    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+
+    result = await loop.chat("cron tick")
+    assert result["response"] == ""
+
+
+@pytest.mark.asyncio
+async def test_non_silent_reply_passes_through():
+    """Normal LLM responses should pass through unchanged."""
+    normal_response = LLMResponse(content="Hello, how can I help?", tokens_used=20)
+    loop = _make_loop([normal_response])
+    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+
+    result = await loop.chat("hi")
+    assert result["response"] == "Hello, how can I help?"
+
+
+@pytest.mark.asyncio
+async def test_silent_token_after_tool_rounds_exhausted():
+    """__SILENT__ at max-rounds fallback should also be suppressed."""
+    tool_call = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="search", arguments={"q": "x"})],
+        tokens_used=10,
+    )
+    # Fill CHAT_MAX_TOOL_ROUNDS with tool calls, then final __SILENT__
+    silent_final = LLMResponse(content="__SILENT__", tokens_used=10)
+    responses = [tool_call] * 31 + [silent_final]
+
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "search"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+
+    result = await loop.chat("do something")
+    assert result["response"] == ""

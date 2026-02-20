@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 
 from src.channels.base import (
+    AddKeyFn,
     Channel,
     CostsFn,
     DispatchFn,
@@ -92,6 +93,7 @@ class TelegramChannel(Channel):
         costs_fn: CostsFn | None = None,
         reset_fn: ResetFn | None = None,
         stream_dispatch_fn: StreamDispatchFn | None = None,
+        addkey_fn: AddKeyFn | None = None,
     ):
         super().__init__(
             dispatch_fn=dispatch_fn,
@@ -101,6 +103,7 @@ class TelegramChannel(Channel):
             costs_fn=costs_fn,
             reset_fn=reset_fn,
             stream_dispatch_fn=stream_dispatch_fn,
+            addkey_fn=addkey_fn,
         )
         self.token = token
         self._explicit_allowed = set(allowed_users) if allowed_users else None
@@ -130,7 +133,7 @@ class TelegramChannel(Channel):
         self._app.add_handler(CommandHandler("paired", self._cmd_paired))
         # Route OpenLegion REPL commands (/status, /agents, /costs, etc.)
         # through the base Channel.handle_message() handler.
-        _repl_cmds = ("use", "agents", "status", "broadcast", "costs", "reset", "help")
+        _repl_cmds = ("use", "agents", "status", "broadcast", "costs", "reset", "addkey", "help")
         for cmd in _repl_cmds:
             self._app.add_handler(CommandHandler(cmd, self._on_repl_command))
         self._app.add_handler(

@@ -435,6 +435,233 @@ class TestBrowserTypeRef:
         assert "'text'" in result["error"]
 
 
+class TestBrowserTypeCredentialHandles:
+    @pytest.mark.asyncio
+    async def test_cred_handle_resolved(self):
+        """$CRED{name} is resolved and return shows [credential] not the value."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_locator = AsyncMock()
+        mock_page = AsyncMock()
+        bt._page_refs["e5"] = mock_locator
+
+        mock_client = AsyncMock()
+        mock_client.vault_resolve.return_value = "actual-secret-value"
+
+        with patch.object(bt, "_get_page", return_value=mock_page):
+            result = await bt.browser_type(
+                text="$CRED{my_api_key}", ref="e5", mesh_client=mock_client,
+            )
+
+        assert result["typed"] == "[credential]"
+        assert "actual-secret-value" not in str(result)
+        # Verify fill() was called with the actual value
+        mock_locator.fill.assert_awaited_once_with("actual-secret-value", timeout=10000)
+
+    @pytest.mark.asyncio
+    async def test_cred_handle_not_found(self):
+        """$CRED{nonexistent} returns error."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_client = AsyncMock()
+        mock_client.vault_resolve.return_value = None
+
+        result = await bt.browser_type(
+            text="$CRED{nonexistent}", ref="e1", mesh_client=mock_client,
+        )
+        assert "error" in result
+        assert "not found" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_cred_handle_no_mesh_client(self):
+        """$CRED{} without mesh_client returns error."""
+        import src.agent.builtins.browser_tool as bt
+
+        result = await bt.browser_type(
+            text="$CRED{some_key}", ref="e1", mesh_client=None,
+        )
+        assert "error" in result
+        assert "mesh connectivity" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_mixed_text_and_cred(self):
+        """Text with $CRED{} embedded resolves and returns [credential]."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_locator = AsyncMock()
+        mock_page = AsyncMock()
+        bt._page_refs["e1"] = mock_locator
+
+        mock_client = AsyncMock()
+        mock_client.vault_resolve.return_value = "secret123"
+
+        with patch.object(bt, "_get_page", return_value=mock_page):
+            result = await bt.browser_type(
+                text="Bearer $CRED{token}", ref="e1", mesh_client=mock_client,
+            )
+
+        assert result["typed"] == "[credential]"
+        mock_locator.fill.assert_awaited_once_with("Bearer secret123", timeout=10000)
+
+
+class TestBrowserSnapshotRedaction:
+    def test_redacts_api_key_patterns(self):
+        from src.agent.builtins.browser_tool import _redact_credentials
+
+        assert _redact_credentials("sk-abcdefghijklmnopqrstuvwxyz") == "[REDACTED]"
+        assert _redact_credentials("ghp_abcdefghijklmnopqrstuvwxyz0123456789") == "[REDACTED]"
+        assert _redact_credentials("xoxb-123-456-abcdefghijklmnop") == "[REDACTED]"
+        assert _redact_credentials("AKIAIOSFODNN7EXAMPLE") == "[REDACTED]"
+
+    def test_preserves_normal_text(self):
+        from src.agent.builtins.browser_tool import _redact_credentials
+
+        assert _redact_credentials("Submit") == "Submit"
+        assert _redact_credentials("Enter your email") == "Enter your email"
+        assert _redact_credentials("Price: $42.00") == "Price: $42.00"
+        assert _redact_credentials("") == ""
+
+    @pytest.mark.asyncio
+    async def test_snapshot_redacts_element_values(self):
+        """Snapshot redacts secret patterns in element name/value fields."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://dashboard.example.com"
+        mock_page.title = AsyncMock(return_value="Dashboard")
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea",
+            "name": "Dashboard",
+            "children": [
+                {"role": "textbox", "name": "API Key", "value": "sk-abcdefghijklmnopqrstuvwxyz"},
+                {"role": "button", "name": "Copy"},
+            ],
+        })
+        mock_page.get_by_role = MagicMock(return_value=MagicMock())
+
+        with patch.object(bt, "_get_page", return_value=mock_page):
+            bt._page_refs.clear()
+            result = await bt.browser_snapshot()
+
+        # The API key value should be redacted
+        api_key_el = next(e for e in result["elements"] if e["role"] == "textbox")
+        assert "[REDACTED]" in api_key_el["value"]
+        assert "sk-" not in api_key_el["value"]
+
+        # Normal button name should be preserved
+        button_el = next(e for e in result["elements"] if e["role"] == "button")
+        assert button_el["name"] == "Copy"
+
+
+class TestBrowserNavigateRedaction:
+    @pytest.mark.asyncio
+    async def test_navigate_redacts_api_keys_in_content(self):
+        """browser_navigate redacts secret patterns in page content."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com/settings"
+        mock_page.title = AsyncMock(return_value="Settings")
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_page.goto = AsyncMock(return_value=mock_response)
+        # Page content contains an API key
+        mock_page.inner_text = AsyncMock(
+            return_value="Your API key: sk-abcdefghijklmnopqrstuvwxyz"
+        )
+
+        with patch.object(bt, "_get_page", return_value=mock_page):
+            result = await bt.browser_navigate(url="https://example.com/settings")
+
+        assert "sk-" not in result["content"]
+        assert "[REDACTED]" in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_navigate_preserves_normal_content(self):
+        """Normal page content passes through unredacted."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com"
+        mock_page.title = AsyncMock(return_value="Example")
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_page.goto = AsyncMock(return_value=mock_response)
+        mock_page.inner_text = AsyncMock(return_value="Welcome to Example.com")
+
+        with patch.object(bt, "_get_page", return_value=mock_page):
+            result = await bt.browser_navigate(url="https://example.com")
+
+        assert result["content"] == "Welcome to Example.com"
+
+
+class TestBrowserEvaluateRedaction:
+    @pytest.mark.asyncio
+    async def test_evaluate_redacts_string_result(self):
+        """browser_evaluate redacts secret patterns in string results."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.evaluate = AsyncMock(
+            return_value="sk-abcdefghijklmnopqrstuvwxyz"
+        )
+
+        with patch.object(bt, "_get_page", return_value=mock_page):
+            result = await bt.browser_evaluate(script="document.querySelector('.key').textContent")
+
+        assert "sk-" not in str(result)
+        assert result["result"] == "[REDACTED]"
+
+    @pytest.mark.asyncio
+    async def test_evaluate_redacts_dict_result(self):
+        """browser_evaluate redacts secret patterns in dict values."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.evaluate = AsyncMock(
+            return_value={"key": "ghp_abcdefghijklmnopqrstuvwxyz0123456789", "label": "API Key"}
+        )
+
+        with patch.object(bt, "_get_page", return_value=mock_page):
+            result = await bt.browser_evaluate(script="getConfig()")
+
+        assert "ghp_" not in str(result)
+        assert result["result"]["key"] == "[REDACTED]"
+        assert result["result"]["label"] == "API Key"
+
+    @pytest.mark.asyncio
+    async def test_evaluate_redacts_list_result(self):
+        """browser_evaluate redacts secret patterns in list items."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.evaluate = AsyncMock(
+            return_value=["sk-abcdefghijklmnopqrstuvwxyz", "normal text", 42]
+        )
+
+        with patch.object(bt, "_get_page", return_value=mock_page):
+            result = await bt.browser_evaluate(script="getKeys()")
+
+        assert "sk-" not in str(result)
+        assert result["result"][0] == "[REDACTED]"
+        assert result["result"][1] == "normal text"
+        assert result["result"][2] == 42
+
+    @pytest.mark.asyncio
+    async def test_evaluate_preserves_normal_result(self):
+        """Normal evaluate results pass through unchanged."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value="Hello World")
+
+        with patch.object(bt, "_get_page", return_value=mock_page):
+            result = await bt.browser_evaluate(script="document.title")
+
+        assert result["result"] == "Hello World"
+
+
 class TestBrowserNavigateClearsRefs:
     @pytest.mark.asyncio
     async def test_navigate_clears_refs(self):

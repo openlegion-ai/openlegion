@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 logger = setup_logging("agent.loop")
 
+SILENT_REPLY_TOKEN = "__SILENT__"
+
 # Status codes that indicate transient server-side errors worth retrying
 _RETRYABLE_STATUS_CODES = {429, 502, 503}
 _MAX_RETRIES = 3
@@ -511,11 +513,15 @@ class AgentLoop:
                 total_tokens += llm_response.tokens_used
 
                 if not llm_response.tool_calls:
-                    self._chat_messages.append({"role": "assistant", "content": llm_response.content})
-                    self._log_chat_turn(user_message, llm_response.content)
+                    content = llm_response.content
+                    # Suppress silent acknowledgments (heartbeat/cron filler)
+                    if content and content.strip() == SILENT_REPLY_TOKEN:
+                        content = ""
+                    self._chat_messages.append({"role": "assistant", "content": content})
+                    self._log_chat_turn(user_message, content)
                     self.state = "idle"
                     return {
-                        "response": llm_response.content,
+                        "response": content,
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
                     }
@@ -585,11 +591,14 @@ class AgentLoop:
                 tools=self.skills.get_tool_definitions() or None,
             )
             total_tokens += llm_response.tokens_used
-            self._chat_messages.append({"role": "assistant", "content": llm_response.content})
-            self._log_chat_turn(user_message, llm_response.content)
+            content = llm_response.content
+            if content and content.strip() == SILENT_REPLY_TOKEN:
+                content = ""
+            self._chat_messages.append({"role": "assistant", "content": content})
+            self._log_chat_turn(user_message, content)
             self.state = "idle"
             return {
-                "response": llm_response.content,
+                "response": content,
                 "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens,
             }
@@ -789,15 +798,17 @@ class AgentLoop:
                 total_tokens += llm_response.tokens_used
 
                 if not llm_response.tool_calls:
-                    # Stream the final text
-                    if llm_response.content:
-                        yield {"type": "text_delta", "content": llm_response.content}
-                    self._chat_messages.append({"role": "assistant", "content": llm_response.content})
-                    self._log_chat_turn(user_message, llm_response.content)
+                    content = llm_response.content
+                    if content and content.strip() == SILENT_REPLY_TOKEN:
+                        content = ""
+                    if content:
+                        yield {"type": "text_delta", "content": content}
+                    self._chat_messages.append({"role": "assistant", "content": content})
+                    self._log_chat_turn(user_message, content)
                     self.state = "idle"
                     yield {
                         "type": "done",
-                        "response": llm_response.content,
+                        "response": content,
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
                     }
@@ -869,14 +880,17 @@ class AgentLoop:
                 tools=self.skills.get_tool_definitions() or None,
             )
             total_tokens += llm_response.tokens_used
-            if llm_response.content:
-                yield {"type": "text_delta", "content": llm_response.content}
-            self._chat_messages.append({"role": "assistant", "content": llm_response.content})
-            self._log_chat_turn(user_message, llm_response.content)
+            content = llm_response.content
+            if content and content.strip() == SILENT_REPLY_TOKEN:
+                content = ""
+            if content:
+                yield {"type": "text_delta", "content": content}
+            self._chat_messages.append({"role": "assistant", "content": content})
+            self._log_chat_turn(user_message, content)
             self.state = "idle"
             yield {
                 "type": "done",
-                "response": llm_response.content,
+                "response": content,
                 "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens,
             }

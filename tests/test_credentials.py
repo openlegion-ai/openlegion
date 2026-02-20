@@ -232,6 +232,69 @@ async def test_stream_failover(monkeypatch):
     assert any("done" in e for e in events)
 
 
+# ── Hot-reload credential management ──────────────────────────
+
+
+def test_add_credential_stores_in_memory(monkeypatch):
+    monkeypatch.delenv("OPENLEGION_CRED_MY_SVC_KEY", raising=False)
+    v = CredentialVault()
+    # Patch _persist_to_env to avoid writing to real .env
+    import src.host.credentials as cred_mod
+    original = cred_mod._persist_to_env
+    cred_mod._persist_to_env = lambda *a, **kw: None
+    try:
+        handle = v.add_credential("my_svc_key", "secret123")
+        assert v.credentials["my_svc_key"] == "secret123"
+        assert handle == "$CRED{my_svc_key}"
+    finally:
+        cred_mod._persist_to_env = original
+
+
+def test_add_credential_persists_to_env(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("EXISTING_VAR=keep\n")
+
+    import src.host.credentials as cred_mod
+    original = cred_mod._persist_to_env
+    from src.host.credentials import _persist_to_env
+
+    v = CredentialVault()
+    _persist_to_env("OPENLEGION_CRED_TEST_KEY", "val123", env_file=str(env_file))
+
+    content = env_file.read_text()
+    assert "OPENLEGION_CRED_TEST_KEY=val123" in content
+    assert "EXISTING_VAR=keep" in content
+
+
+def test_resolve_credential():
+    v = CredentialVault()
+    import src.host.credentials as cred_mod
+    original = cred_mod._persist_to_env
+    cred_mod._persist_to_env = lambda *a, **kw: None
+    try:
+        v.add_credential("found_key", "the_value")
+        assert v.resolve_credential("found_key") == "the_value"
+        assert v.resolve_credential("not_found") is None
+    finally:
+        cred_mod._persist_to_env = original
+
+
+def test_list_credential_names(monkeypatch):
+    monkeypatch.setenv("OPENLEGION_CRED_ALPHA_KEY", "a")
+    monkeypatch.setenv("OPENLEGION_CRED_BETA_KEY", "b")
+    v = CredentialVault()
+    names = v.list_credential_names()
+    assert "alpha_key" in names
+    assert "beta_key" in names
+
+
+def test_has_credential(monkeypatch):
+    monkeypatch.setenv("OPENLEGION_CRED_EXISTS_KEY", "yes")
+    v = CredentialVault()
+    assert v.has_credential("exists_key") is True
+    assert v.has_credential("nope_key") is False
+
+
 async def test_cost_tracking_uses_actual_model(monkeypatch):
     """Cost is attributed to the model that actually responded."""
     monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")

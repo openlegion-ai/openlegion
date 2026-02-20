@@ -87,6 +87,7 @@ class TestSandboxBackend:
         backend.project_root = project_root
         backend.mesh_host_port = 8420
         backend.agents = {}
+        backend.auth_tokens = {}
         backend._workspace_root = tmp_path / ".openlegion" / "agents"
         backend._workspace_root.mkdir(parents=True)
 
@@ -108,6 +109,8 @@ class TestSandboxBackend:
         assert "AGENT_ID=alpha" in env_content
         assert "AGENT_ROLE=test" in env_content
         assert "LLM_MODEL=openai/gpt-4o-mini" in env_content
+        assert "MESH_AUTH_TOKEN=" in env_content
+        assert "alpha" in backend.auth_tokens
 
     def test_stop_agent_removes_from_registry(self):
         backend = SandboxBackend.__new__(SandboxBackend)

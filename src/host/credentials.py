@@ -22,6 +22,35 @@ from src.shared.utils import setup_logging
 logger = setup_logging("host.credentials")
 
 
+def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
+    """Persist an environment variable to .env and os.environ.
+
+    If *env_file* is empty, defaults to ``PROJECT_ROOT / ".env"``.
+    """
+    from pathlib import Path
+
+    if not env_file:
+        env_file = str(Path(__file__).resolve().parent.parent.parent / ".env")
+
+    env_path = Path(env_file)
+    lines: list[str] = []
+    found = False
+
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if line.startswith(f"{env_key}=") or line.startswith(f"# {env_key}="):
+                lines.append(f"{env_key}={value}")
+                found = True
+            else:
+                lines.append(line)
+
+    if not found:
+        lines.append(f"{env_key}={value}")
+
+    env_path.write_text("\n".join(lines) + "\n")
+    os.environ[env_key] = value
+
+
 class CredentialVault:
     """Stores API credentials and executes proxied API calls."""
 
@@ -62,6 +91,27 @@ class CredentialVault:
         loaded = list(self.credentials.keys())
         if loaded:
             logger.info(f"Loaded credentials: {', '.join(loaded)}")
+
+    def add_credential(self, name: str, value: str) -> str:
+        """Store a credential in memory and persist to .env. Returns a $CRED{name} handle."""
+        cred_key = name.lower()
+        self.credentials[cred_key] = value
+        env_key = f"OPENLEGION_CRED_{name.upper()}"
+        _persist_to_env(env_key, value)
+        logger.info(f"Credential stored: {cred_key}")
+        return f"$CRED{{{name}}}"
+
+    def resolve_credential(self, name: str) -> str | None:
+        """Resolve a credential name to its value. Returns None if not found."""
+        return self.credentials.get(name.lower())
+
+    def list_credential_names(self) -> list[str]:
+        """Return a list of credential names (never values)."""
+        return list(self.credentials.keys())
+
+    def has_credential(self, name: str) -> bool:
+        """Check if a credential exists by name."""
+        return name.lower() in self.credentials
 
     def _register_handlers(self) -> None:
         """Register API call handlers for each supported service."""

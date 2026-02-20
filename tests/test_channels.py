@@ -224,6 +224,72 @@ class TestNotifications:
         assert "cron" in ch.notifications[0]
 
 
+# ── /addkey command ────────────────────────────────────────────
+
+class TestAddKeyCommand:
+    @pytest.mark.asyncio
+    async def test_addkey_command(self):
+        stored = []
+        def addkey_fn(svc, key):
+            stored.append((svc, key))
+        ch = _make_channel(addkey_fn=addkey_fn)
+        result = await ch.handle_message("u1", "/addkey brave_search sk-test-123")
+        assert "stored" in result.lower()
+        assert stored == [("brave_search", "sk-test-123")]
+
+    @pytest.mark.asyncio
+    async def test_addkey_not_forwarded(self):
+        """The /addkey command must be consumed at channel layer, never dispatched."""
+        dispatch_called = []
+
+        async def dispatch_fn(agent: str, message: str) -> str:
+            dispatch_called.append(message)
+            return "reply"
+
+        def list_agents_fn():
+            return {"alpha": {}}
+
+        stored = []
+        def addkey_fn(svc, key):
+            stored.append((svc, key))
+
+        ch = StubChannel(
+            dispatch_fn=dispatch_fn,
+            default_agent="alpha",
+            list_agents_fn=list_agents_fn,
+            addkey_fn=addkey_fn,
+        )
+        await ch.handle_message("u1", "/addkey my_svc my_key")
+        assert len(dispatch_called) == 0  # NOT forwarded to agent
+        assert len(stored) == 1
+
+    @pytest.mark.asyncio
+    async def test_addkey_missing_args(self):
+        stored = []
+        def addkey_fn(svc, key):
+            stored.append((svc, key))
+        ch = _make_channel(addkey_fn=addkey_fn)
+        result = await ch.handle_message("u1", "/addkey")
+        assert "usage" in result.lower()
+        assert len(stored) == 0
+
+    @pytest.mark.asyncio
+    async def test_addkey_missing_key(self):
+        stored = []
+        def addkey_fn(svc, key):
+            stored.append((svc, key))
+        ch = _make_channel(addkey_fn=addkey_fn)
+        result = await ch.handle_message("u1", "/addkey service_only")
+        assert "usage" in result.lower()
+        assert len(stored) == 0
+
+    @pytest.mark.asyncio
+    async def test_addkey_in_help(self):
+        ch = _make_channel()
+        result = await ch.handle_message("u1", "/help")
+        assert "/addkey" in result
+
+
 # ── Discord !-to-/ command translation ────────────────────────
 
 class TestDiscordCommandTranslation:
@@ -239,3 +305,45 @@ class TestDiscordCommandTranslation:
         result = await ch.handle_message("u1", text)
         assert "alpha" in result
         assert "beta" in result
+
+
+# ── empty/silent response suppression ────────────────────────
+
+class TestSilentResponseSuppression:
+    @pytest.mark.asyncio
+    async def test_empty_response_suppressed(self):
+        """When dispatch returns empty string, handle_message returns empty."""
+        async def silent_dispatch(agent: str, message: str) -> str:
+            return ""
+
+        ch = _make_channel(dispatch_fn=silent_dispatch)
+        result = await ch.handle_message("u1", "heartbeat ping")
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_response_suppressed(self):
+        """Whitespace-only responses are suppressed."""
+        async def whitespace_dispatch(agent: str, message: str) -> str:
+            return "   \n  "
+
+        ch = _make_channel(dispatch_fn=whitespace_dispatch)
+        result = await ch.handle_message("u1", "cron tick")
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_none_response_suppressed(self):
+        """None responses are suppressed."""
+        async def none_dispatch(agent: str, message: str) -> str:
+            return None
+
+        ch = _make_channel(dispatch_fn=none_dispatch)
+        result = await ch.handle_message("u1", "silent message")
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_normal_response_not_suppressed(self):
+        """Normal responses still appear with agent label."""
+        ch = _make_channel()
+        result = await ch.handle_message("u1", "hello")
+        assert "[alpha]" in result
+        assert "reply from alpha" in result

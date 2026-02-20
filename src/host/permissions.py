@@ -48,6 +48,7 @@ class PermissionMatrix:
                 blackboard_read=default.blackboard_read,
                 blackboard_write=default.blackboard_write,
                 allowed_apis=default.allowed_apis,
+                can_manage_vault=default.can_manage_vault,
             )
         return AgentPermissions(agent_id=agent_id)
 
@@ -86,3 +87,9 @@ class PermissionMatrix:
             return True
         perms = self.get_permissions(agent_id)
         return service in perms.allowed_apis
+
+    def can_manage_vault(self, agent_id: str) -> bool:
+        if agent_id in ("mesh", "orchestrator"):
+            return True
+        perms = self.get_permissions(agent_id)
+        return perms.can_manage_vault

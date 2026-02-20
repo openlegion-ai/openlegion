@@ -370,6 +370,54 @@ class TestLearnings:
         assert "pending tasks" in rules
 
 
+class TestSoulFallback:
+    """SOUL.md project-level fallback: when workspace SOUL.md is the default scaffold,
+    the workspace loads a project-level SOUL.md from /app/SOUL.md instead."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.ws = WorkspaceManager(workspace_dir=self._tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_custom_soul_takes_precedence(self):
+        """If the user wrote a custom SOUL.md in workspace, use it."""
+        root = Path(self._tmpdir)
+        (root / "SOUL.md").write_text("# My Custom Persona\nI am a pirate.")
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        content = ws.get_bootstrap_content()
+        assert "pirate" in content
+
+    def test_scaffold_soul_falls_back_to_project(self, tmp_path):
+        """Default scaffold SOUL.md is replaced by project-level /app/SOUL.md."""
+        import src.agent.workspace as ws_mod
+        # Workspace uses default scaffold
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        # Create a fake project-level SOUL.md
+        project_soul = tmp_path / "project_soul.md"
+        project_soul.write_text("# Fleet Persona\nWe are professional analysts.")
+        original = ws_mod._SOUL_FALLBACK_PATH
+        ws_mod._SOUL_FALLBACK_PATH = project_soul
+        try:
+            content = ws.get_bootstrap_content()
+            assert "professional analysts" in content
+        finally:
+            ws_mod._SOUL_FALLBACK_PATH = original
+
+    def test_no_project_soul_uses_scaffold(self):
+        """When no project-level SOUL.md exists, scaffold is silently used."""
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        content = ws.get_bootstrap_content()
+        # Scaffold SOUL.md starts with "# Identity" - might be empty or default
+        # The point is: no crash
+        assert isinstance(content, str)
+
+    def test_read_external_returns_none_for_missing(self):
+        result = WorkspaceManager._read_external("/nonexistent/SOUL.md")
+        assert result is None
+
+
 class TestHeartbeatFile:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
