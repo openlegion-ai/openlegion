@@ -17,7 +17,7 @@ WORKDIR /app
 # sqlite-vec requires amd64 (ARM wheels have broken 32-bit .so files)
 COPY pyproject.toml .
 RUN pip install --no-cache-dir \
-    fastapi uvicorn httpx pydantic playwright sqlite-vec
+    fastapi uvicorn httpx pydantic playwright sqlite-vec mcp
 
 # Install Chromium for browser automation — shared path so non-root agent can access it
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers

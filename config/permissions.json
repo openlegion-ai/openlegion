@@ -27,6 +27,34 @@
       "allowed_apis": [
         "llm"
       ]
+    },
+    "salesman": {
+      "can_message": [
+        "orchestrator",
+        "*"
+      ],
+      "can_publish": [
+        "salesman_complete"
+      ],
+      "can_subscribe": [
+        "*"
+      ],
+      "blackboard_read": [
+        "context/*",
+        "tasks/*",
+        "goals/*",
+        "signals/*",
+        "artifacts/*"
+      ],
+      "blackboard_write": [
+        "context/*",
+        "goals/*",
+        "signals/*",
+        "artifacts/*"
+      ],
+      "allowed_apis": [
+        "llm"
+      ]
     }
   }
 }

@@ -6,13 +6,13 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-424%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-495%20passing-brightgreen.svg)]()
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
 [![Docker](https://img.shields.io/badge/isolation-Docker%20%2B%20microVM-blue.svg)]()
 
 **The AI agent framework built for builders who can't afford a security incident.**
 
-[Quick Start](#quick-start) · [Full Setup Guide](QUICKSTART.md) · [Why Not OpenClaw?](#why-not-openclaw) · [Docs](#architecture)
+[Quick Start](#quick-start) · [Full Setup Guide](QUICKSTART.md) · [Why Not OpenClaw?](#why-not-openclaw) · [Docs](docs/)
 
 ---
 
@@ -42,6 +42,7 @@
 - [Security Model](#security-model)
 - [CLI Reference](#cli-reference)
 - [Configuration](#configuration)
+- [MCP Tool Support](#mcp-tool-support)
 - [Testing](#testing)
 - [Dependencies](#dependencies)
 - [Project Structure](#project-structure)
@@ -113,7 +114,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 424 tests including full Docker E2E |
+| **Test coverage** | Minimal | 495 tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~11,000 lines — auditable in a day |
 
 ---
@@ -128,7 +129,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, or CLI. Agents act aut
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**424 tests passing** across **~11,000 lines** of application code.
+**495 tests passing** across **~11,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
@@ -387,6 +388,10 @@ searches memory for relevant facts. Executes tool calls in a bounded loop
 Custom skills are Python functions decorated with `@skill`, auto-discovered
 from the agent's `skills_dir` at startup. Agents can also create new skills
 at runtime and hot-reload them.
+
+Agents also support **[MCP (Model Context Protocol)](#mcp-tool-support)** — any
+MCP-compatible tool server can be plugged in via config, giving agents access to
+databases, filesystems, APIs, and more without writing custom skills.
 
 ---
 
@@ -701,6 +706,58 @@ On next `openlegion start`, a pairing code appears — send it to your bot to li
 
 ---
 
+## MCP Tool Support
+
+OpenLegion supports the **[Model Context Protocol (MCP)](https://modelcontextprotocol.io)** —
+the emerging standard for LLM tool interoperability. Any MCP-compatible tool server
+can be plugged into an agent via config, with tools automatically discovered and
+exposed to the LLM alongside built-in skills.
+
+### Configuration
+
+Add `mcp_servers` to any agent in `config/agents.yaml`:
+
+```yaml
+agents:
+  researcher:
+    role: "research"
+    model: "openai/gpt-4o-mini"
+    mcp_servers:
+      - name: filesystem
+        command: mcp-server-filesystem
+        args: ["/data"]
+      - name: database
+        command: mcp-server-sqlite
+        args: ["--db", "/data/research.db"]
+```
+
+Each server is launched as a subprocess inside the agent container using stdio
+transport. Tools are discovered automatically via the MCP protocol and appear
+in the LLM's tool list alongside built-in skills.
+
+### How It Works
+
+1. Agent container reads `MCP_SERVERS` from environment (set by the runtime)
+2. `MCPClient` launches each server subprocess via stdio transport
+3. MCP protocol handshake discovers available tools and their schemas
+4. Tools are registered in `SkillRegistry` with OpenAI function-calling format
+5. LLM tool calls route through `MCPClient.call_tool()` to the correct server
+6. Name conflicts with built-in skills are resolved by prefixing (`mcp_{server}_{tool}`)
+
+### Server Config Options
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Server identifier (used for logging and conflict prefixes) |
+| `command` | string | Command to launch the server |
+| `args` | list | Command-line arguments (optional) |
+| `env` | dict | Environment variables for the server process (optional) |
+
+See the full **[MCP Integration Guide](docs/mcp.md)** for advanced usage,
+custom server setup, and troubleshooting.
+
+---
+
 ## Testing
 
 ```bash
@@ -732,10 +789,12 @@ pytest tests/
 | Context Manager | 17 | Token estimation, compaction, flushing, pruning |
 | Agent Loop | 15 | Task execution, tool calling, cancellation |
 | Failover | 15 | Health tracking, chain cascade, cooldown |
-| Skills | 14 | Discovery, execution, injection |
+| Skills | 19 | Discovery, execution, injection, MCP integration |
 | Integration | 13 | Multi-component mesh operations |
 | Credentials | 13 | Vault, API proxy, provider detection |
 | Chat | 18 | Chat mode, workspace integration, cross-session |
+| MCP Client | 10 | Tool discovery, routing, conflicts, lifecycle |
+| MCP E2E | 7 | Real MCP protocol with live server subprocess |
 | Costs | 10 | Usage recording, budgets, vault integration |
 | Types | 8 | Pydantic validation, serialization |
 | CLI | 8 | Agent add/list/remove, chat, setup |
@@ -744,7 +803,7 @@ pytest tests/
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **424** | |
+| **Total** | **495** | |
 
 ---
 
@@ -763,6 +822,7 @@ pytest tests/
 | docker | Docker API client |
 | python-dotenv | `.env` file loading |
 | playwright | Browser automation (in container only) |
+| mcp | MCP tool server client (in container only, optional) |
 
 Dev: pytest, pytest-asyncio, ruff.
 
@@ -779,6 +839,7 @@ src/
 │   ├── __main__.py                     # Container entry
 │   ├── loop.py                         # Execution loop (task + chat)
 │   ├── skills.py                       # Skill registry + discovery
+│   ├── mcp_client.py                   # MCP server lifecycle + tool routing
 │   ├── memory.py                       # Hierarchical memory (SQLite + sqlite-vec + FTS5)
 │   ├── workspace.py                    # Persistent workspace + BM25 search
 │   ├── context.py                      # Context manager (token tracking, compaction)

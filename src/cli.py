@@ -1013,6 +1013,7 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
             )
         skills_dir = os.path.abspath(agent_cfg.get("skills_dir", ""))
         agent_model = agent_cfg.get("model", default_model)
+        agent_mcp_servers = agent_cfg.get("mcp_servers") or None
         try:
             url = runtime.start_agent(
                 agent_id=agent_id,
@@ -1020,6 +1021,7 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
                 skills_dir=skills_dir,
                 system_prompt=agent_cfg.get("system_prompt", ""),
                 model=agent_model,
+                mcp_servers=agent_mcp_servers,
             )
         except (subprocess.TimeoutExpired, RuntimeError) as exc:
             if isinstance(runtime, SandboxBackend):
@@ -1044,6 +1046,7 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
                     skills_dir=skills_dir,
                     system_prompt=agent_cfg.get("system_prompt", ""),
                     model=agent_model,
+                    mcp_servers=agent_mcp_servers,
                 )
             else:
                 raise
@@ -1655,6 +1658,7 @@ def _multi_agent_repl(
                 _create_agent(new_name, new_desc, model)
                 agent_cfg_data = _load_config().get("agents", {}).get(new_name, {})
                 skills_dir = os.path.abspath(agent_cfg_data.get("skills_dir", ""))
+                add_mcp_servers = agent_cfg_data.get("mcp_servers") or None
                 import asyncio
                 url = container_manager.start_agent(
                     agent_id=new_name,
@@ -1662,6 +1666,7 @@ def _multi_agent_repl(
                     skills_dir=skills_dir,
                     system_prompt=agent_cfg_data.get("system_prompt", ""),
                     model=agent_cfg_data.get("model", model),
+                    mcp_servers=add_mcp_servers,
                 )
                 router.register_agent(new_name, url)
                 agent_urls[new_name] = url

@@ -46,6 +46,7 @@ class RuntimeBackend(abc.ABC):
         skills_dir: str,
         system_prompt: str = "",
         model: str = "",
+        mcp_servers: list[dict] | None = None,
     ) -> str:
         """Start an agent. Returns a URL or identifier for reaching it."""
 
@@ -72,11 +73,13 @@ class RuntimeBackend(abc.ABC):
         system_prompt: str = "",
         model: str = "",
         ttl: int = 3600,
+        mcp_servers: list[dict] | None = None,
     ) -> str:
         """Spawn an ephemeral agent with a TTL for auto-cleanup."""
         url = self.start_agent(
             agent_id=agent_id, role=role, skills_dir="",
             system_prompt=system_prompt, model=model,
+            mcp_servers=mcp_servers,
         )
         self.agents[agent_id]["ephemeral"] = True
         self.agents[agent_id]["ttl"] = ttl
@@ -173,6 +176,7 @@ class DockerBackend(RuntimeBackend):
         skills_dir: str,
         system_prompt: str = "",
         model: str = "",
+        mcp_servers: list[dict] | None = None,
     ) -> str:
         import docker as _docker
 
@@ -194,6 +198,8 @@ class DockerBackend(RuntimeBackend):
         }
         if model:
             environment["LLM_MODEL"] = model
+        if mcp_servers:
+            environment["MCP_SERVERS"] = json.dumps(mcp_servers)
         if self.use_host_network:
             environment["AGENT_PORT"] = str(port)
 
@@ -256,6 +262,7 @@ class DockerBackend(RuntimeBackend):
             "skills_dir": skills_dir,
             "system_prompt": system_prompt,
             "model": model,
+            "mcp_servers": mcp_servers,
         }
         logger.info(f"Started agent '{agent_id}' (role={role}) at {url}")
         return url
@@ -381,6 +388,7 @@ class SandboxBackend(RuntimeBackend):
         skills_dir: str,
         system_prompt: str,
         model: str,
+        mcp_servers: list[dict] | None = None,
     ) -> Path:
         """Create the per-agent host directory that will sync into the sandbox."""
         ws = self._workspace_root / agent_id
@@ -422,6 +430,8 @@ class SandboxBackend(RuntimeBackend):
         }
         if model:
             env_cfg["LLM_MODEL"] = model
+        if mcp_servers:
+            env_cfg["MCP_SERVERS"] = json.dumps(mcp_servers)
 
         env_file = ws / ".agent.env"
         env_file.write_text(
@@ -436,9 +446,10 @@ class SandboxBackend(RuntimeBackend):
         skills_dir: str,
         system_prompt: str = "",
         model: str = "",
+        mcp_servers: list[dict] | None = None,
     ) -> str:
         sandbox_name = f"openlegion_{agent_id}"
-        ws = self._prepare_workspace(agent_id, role, skills_dir, system_prompt, model)
+        ws = self._prepare_workspace(agent_id, role, skills_dir, system_prompt, model, mcp_servers=mcp_servers)
 
         # Create sandbox with the shell agent type and workspace
         # First creation can be slow (microVM init), allow up to 120s
@@ -483,6 +494,7 @@ class SandboxBackend(RuntimeBackend):
             "skills_dir": skills_dir,
             "system_prompt": system_prompt,
             "model": model,
+            "mcp_servers": mcp_servers,
         }
         logger.info(f"Started agent '{agent_id}' in sandbox '{sandbox_name}'")
         return url
