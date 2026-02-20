@@ -2,11 +2,11 @@
 
 > **Autonomous AI agent fleets — isolated, auditable, and production-ready.**
 > Every agent runs in its own Docker container. API keys never leave the vault.
-> Chat via Telegram or Discord. Built-in cost controls. 100+ LLM providers.
+> Chat via Telegram, Discord, Slack, or WhatsApp. Built-in cost controls. 100+ LLM providers.
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-495%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-638%20passing-brightgreen.svg)]()
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
 [![Docker](https://img.shields.io/badge/isolation-Docker%20%2B%20microVM-blue.svg)]()
 
@@ -114,7 +114,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 495 tests including full Docker E2E |
+| **Test coverage** | Minimal | 638 tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~11,000 lines — auditable in a day |
 
 ---
@@ -129,7 +129,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, or CLI. Agents act aut
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**495 tests passing** across **~11,000 lines** of application code.
+**638 tests passing** across **~11,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
@@ -152,7 +152,7 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
 6. **Self-extends** — agents write their own Python skills at runtime and hot-reload them. Agents can also spawn sub-agents for specialized work.
 
-7. **Multi-channel** — connect agents to Telegram and Discord. Also accessible via CLI and API.
+7. **Multi-channel** — connect agents to Telegram, Discord, Slack, and WhatsApp. Also accessible via CLI and API.
 
 8. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly budget enforcement.
 
@@ -298,7 +298,7 @@ steps:
 ### Container Manager
 
 Each agent runs in an isolated Docker container with:
-- **Image**: `openlegion-agent:latest` (Python 3.12, system tools, Playwright, Chromium)
+- **Image**: `openlegion-agent:latest` (Python 3.12, system tools, Playwright, Chromium, Camoufox)
 - **Network**: Bridge with port mapping (macOS/Windows) or host network (Linux)
 - **Volume**: `openlegion_data_{agent_id}` mounted at `/data`
 - **Resources**: 512MB RAM limit, 50% CPU quota
@@ -360,7 +360,7 @@ searches memory for relevant facts. Executes tool calls in a bounded loop
 | `write_file` | Write/append file in `/data` |
 | `list_files` | List/glob files in `/data` |
 | `http_request` | HTTP GET/POST/PUT/DELETE/PATCH |
-| `browser_navigate` | Open URL, extract page text |
+| `browser_navigate` | Open URL, extract page text (basic/stealth/advanced backends) |
 | `browser_snapshot` | Accessibility tree snapshot with element refs (e1, e2, ...) |
 | `browser_screenshot` | Capture page screenshot |
 | `browser_click` | Click element by ref or CSS selector |
@@ -582,9 +582,9 @@ openlegion
 │   └── remove <name> [--yes]            # Remove an agent
 │
 └── channels
-    ├── add [telegram|discord]           # Connect a messaging channel
-    ├── list                             # Show configured channels
-    └── remove <telegram|discord>        # Disconnect a channel
+    ├── add [telegram|discord|slack|whatsapp]  # Connect a messaging channel
+    ├── list                                    # Show configured channels
+    └── remove <name>                           # Disconnect a channel
 ```
 
 ### Interactive REPL Commands
@@ -659,6 +659,7 @@ agents:
     model: "openai/gpt-4o-mini"
     skills_dir: "./skills/research"
     system_prompt: "You are a research specialist..."
+    browser_backend: "stealth"          # basic (default), stealth, or advanced
     resources:
       memory_limit: "512m"
       cpu_limit: 0.5
@@ -688,6 +689,10 @@ OPENLEGION_CRED_OPENAI_API_KEY=sk-...
 OPENLEGION_CRED_BRAVE_SEARCH_API_KEY=BSA...
 OPENLEGION_CRED_TELEGRAM_BOT_TOKEN=123456:ABC...
 OPENLEGION_CRED_DISCORD_BOT_TOKEN=MTIz...
+OPENLEGION_CRED_SLACK_BOT_TOKEN=xoxb-...
+OPENLEGION_CRED_SLACK_APP_TOKEN=xapp-...
+OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN=EAAx...
+OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
 
 # Log format: "json" (default) or "text" (human-readable)
 OPENLEGION_LOG_FORMAT=text
@@ -698,6 +703,8 @@ OPENLEGION_LOG_FORMAT=text
 ```bash
 openlegion channels add telegram    # prompts for bot token from @BotFather
 openlegion channels add discord     # prompts for bot token
+openlegion channels add slack       # prompts for bot + app tokens
+openlegion channels add whatsapp    # prompts for access token + phone ID
 openlegion channels list            # check what's connected
 openlegion channels remove telegram # disconnect
 ```
@@ -777,33 +784,36 @@ pytest tests/
 
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
-| Built-in Tools | 48 | exec, file, browser, memory, mesh tools, discovery |
+| Built-in Tools | 54 | exec, file, browser (incl. backend tiers), memory, mesh tools, discovery |
 | Workspace | 41 | File scaffold, loading, BM25 search, daily logs, learnings |
+| Slack Channel | 21 | Socket Mode, thread routing, pairing, command translation |
+| WhatsApp Channel | 21 | Cloud API, webhook verification, message chunking |
+| Channels (base) | 21 | Abstract channel, commands, per-user routing, chunking |
 | Mesh | 28 | Blackboard, PubSub, MessageRouter, permissions |
-| Memory Store | 26 | SQLite ops, vector search, categories, hierarchical search, salience decay |
+| Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
 | Orchestrator | 25 | Workflows, conditions, retries, failures |
 | Cron | 25 | Cron expressions, intervals, dispatch, persistence |
-| Channels | 21 | Base channel, commands, per-user routing, chunking |
+| Agent Loop | 21 | Task execution, tool calling, cancellation, tool memory |
+| Context Manager | 17 | Token estimation (tiktoken + model-aware), compaction, flushing |
+| Runtime Backend | 20 | DockerBackend, SandboxBackend, browser_backend, detection, selection |
 | Transport | 18 | HttpTransport, SandboxTransport, resolve_url |
-| Runtime Backend | 18 | DockerBackend, SandboxBackend, detection, selection |
-| Context Manager | 17 | Token estimation, compaction, flushing, pruning |
-| Agent Loop | 15 | Task execution, tool calling, cancellation |
-| Failover | 15 | Health tracking, chain cascade, cooldown |
 | Skills | 19 | Discovery, execution, injection, MCP integration |
-| Integration | 13 | Multi-component mesh operations |
-| Credentials | 13 | Vault, API proxy, provider detection |
 | Chat | 18 | Chat mode, workspace integration, cross-session |
+| Failover | 15 | Health tracking, chain cascade, cooldown |
+| Credentials | 13 | Vault, API proxy, provider detection |
+| Integration | 13 | Multi-component mesh operations |
 | MCP Client | 10 | Tool discovery, routing, conflicts, lifecycle |
-| MCP E2E | 7 | Real MCP protocol with live server subprocess |
 | Costs | 10 | Usage recording, budgets, vault integration |
-| Types | 8 | Pydantic validation, serialization |
 | CLI | 8 | Agent add/list/remove, chat, setup |
+| Types | 8 | Pydantic validation, serialization |
+| MCP E2E | 7 | Real MCP protocol with live server subprocess |
 | Webhooks | 7 | Add/remove, persistence, dispatch |
 | File Watchers | 7 | Polling, dispatch, pattern matching |
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **495** | |
+| Queue Modes | 7 | Steer, collect, followup queue strategies |
+| **Total** | **638** | |
 
 ---
 
@@ -821,8 +831,10 @@ pytest tests/
 | click | CLI framework |
 | docker | Docker API client |
 | python-dotenv | `.env` file loading |
-| playwright | Browser automation (in container only) |
+| playwright | Browser automation — basic tier (in container only) |
+| camoufox | Anti-detect browser — stealth tier (in container only) |
 | mcp | MCP tool server client (in container only, optional) |
+| slack-bolt | Slack channel adapter (optional) |
 
 Dev: pytest, pytest-asyncio, ruff.
 
@@ -875,6 +887,8 @@ src/
 │   ├── base.py                         # Abstract channel with unified UX
 │   ├── telegram.py                     # Telegram adapter
 │   ├── discord.py                      # Discord adapter
+│   ├── slack.py                        # Slack adapter (Socket Mode)
+│   ├── whatsapp.py                     # WhatsApp Cloud API adapter
 │   └── webhook.py                      # Workflow trigger webhook adapter
 └── templates/
     ├── starter.yaml                    # Single-agent template

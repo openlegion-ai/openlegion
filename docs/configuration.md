@@ -31,6 +31,7 @@ agents:
     budget:
       daily_usd: 5.00
       monthly_usd: 100.00
+    browser_backend: stealth
     mcp_servers:
       - name: filesystem
         command: mcp-server-filesystem
@@ -49,6 +50,7 @@ agents:
 | `resources.cpu_limit` | float | No | CPU quota, 0.5 = 50% (default: `0.5`) |
 | `budget.daily_usd` | float | No | Daily spend cap in USD |
 | `budget.monthly_usd` | float | No | Monthly spend cap in USD |
+| `browser_backend` | string | No | Browser tier: `basic` (default), `stealth` (Camoufox), or `advanced` (Bright Data CDP) |
 | `mcp_servers` | list | No | External MCP tool servers. See [MCP Integration](mcp.md) |
 
 ### Model Format
@@ -128,6 +130,10 @@ See [Channels](channels.md) for full setup instructions.
 | `channels.discord.enabled` | boolean | Enable Discord bot |
 | `channels.discord.default_agent` | string | Default agent for Discord users |
 | `channels.discord.allowed_guilds` | list[int] | Optional: restrict by Discord server ID |
+| `channels.slack.enabled` | boolean | Enable Slack bot (Socket Mode) |
+| `channels.slack.default_agent` | string | Default agent for Slack users |
+| `channels.whatsapp.enabled` | boolean | Enable WhatsApp bot (Cloud API) |
+| `channels.whatsapp.default_agent` | string | Default agent for WhatsApp users |
 
 ## `config/permissions.json`
 
@@ -186,6 +192,10 @@ OPENLEGION_CRED_GEMINI_API_KEY=...
 # Channel Bot Tokens (optional)
 OPENLEGION_CRED_TELEGRAM_BOT_TOKEN=123456:ABC-...
 OPENLEGION_CRED_DISCORD_BOT_TOKEN=MTIz...
+OPENLEGION_CRED_SLACK_BOT_TOKEN=xoxb-...
+OPENLEGION_CRED_SLACK_APP_TOKEN=xapp-...
+OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN=EAAx...
+OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
 
 # External API Keys (optional)
 OPENLEGION_CRED_BRAVE_SEARCH_API_KEY=BSA...
@@ -226,6 +236,7 @@ Beyond credentials, these environment variables affect runtime behavior:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENLEGION_LOG_FORMAT` | `json` | Log output format: `json` (structured) or `text` (human-readable) |
+| `BROWSER_BACKEND` | `basic` | Browser tier: `basic`, `stealth`, or `advanced` (set automatically in containers) |
 | `MCP_SERVERS` | -- | JSON string of MCP server configs (set automatically in containers) |
 | `MESH_AUTH_TOKEN` | -- | Agent auth token (set automatically in containers) |
 | `MESH_HOST` | -- | Mesh host URL (set automatically in containers) |

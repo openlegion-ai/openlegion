@@ -41,9 +41,10 @@ Manages the LLM's context window to prevent overflow while preserving important 
 
 ### Token Tracking
 
-- Estimates token count for each message using word-based heuristics (~4 chars per token)
-- Tracks cumulative usage across the conversation
-- Three thresholds:
+- **Model-aware token estimation**: tiktoken for OpenAI models (accurate), 3.5 chars/token for Anthropic, 4 chars/token fallback for unknown providers
+- **Model-aware context windows**: auto-detects max context from model name (12 models supported), with explicit `max_tokens` override
+- **80% context warning**: injected into system prompt telling agents to wrap up or save important facts
+- Three compaction thresholds:
   - **60%** -- proactive flush (extract facts to MEMORY.md)
   - **70%** -- auto-compact (summarize + trim to last 4 messages)
   - **90%** -- emergency hard-prune (keep only first + last 4 messages)

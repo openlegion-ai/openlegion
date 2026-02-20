@@ -77,7 +77,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `exec_tool.py` | Shell command execution |
 | `file_tool.py` | File read/write/list scoped to /data |
 | `http_tool.py` | HTTP requests |
-| `browser_tool.py` | Playwright headless Chromium |
+| `browser_tool.py` | 3-tier browser: Playwright Chromium, Camoufox stealth, Bright Data CDP |
 | `mesh_tool.py` | Blackboard, PubSub, fleet awareness, artifacts, cron, heartbeat, spawn |
 | `memory_tool.py` | Memory search, save, recall |
 | `vault_tool.py` | Credential-blind vault operations |
@@ -91,6 +91,8 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `base.py` | Abstract base with @mention routing, /commands, message chunking |
 | `telegram.py` | Telegram Bot API adapter |
 | `discord.py` | Discord Bot adapter |
+| `slack.py` | Slack adapter (Socket Mode via slack-bolt) |
+| `whatsapp.py` | WhatsApp Cloud API adapter |
 | `webhook.py` | Generic webhook-to-workflow adapter |
 
 ### Shared (`src/shared/`)
