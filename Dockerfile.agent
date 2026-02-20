@@ -17,12 +17,16 @@ WORKDIR /app
 # sqlite-vec requires amd64 (ARM wheels have broken 32-bit .so files)
 COPY pyproject.toml .
 RUN pip install --no-cache-dir \
-    fastapi uvicorn httpx pydantic playwright sqlite-vec mcp
+    fastapi uvicorn httpx pydantic playwright sqlite-vec mcp camoufox
 
-# Install Chromium for browser automation — shared path so non-root agent can access it
+# Install browsers — must run as root before USER agent.
+# Playwright Chromium goes to /opt/pw-browsers; Camoufox fetches its Firefox binary.
+# Both need o+rx so the non-root agent user can execute them.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN playwright install chromium --with-deps \
-    && chmod -R o+rx /opt/pw-browsers
+    && chmod -R o+rx /opt/pw-browsers \
+    && python -m camoufox fetch \
+    && (chmod -R o+rx /root/.camoufox 2>/dev/null || true)
 
 # Application code
 COPY src/agent/ /app/src/agent/
