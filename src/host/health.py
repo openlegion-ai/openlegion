@@ -57,16 +57,6 @@ class HealthMonitor:
         self.agents: dict[str, AgentHealth] = {}
         self._running = False
 
-    # Backward compat: old code passes container_manager= kwarg
-    @classmethod
-    def from_legacy(
-        cls,
-        container_manager: RuntimeBackend,
-        transport: Transport,
-        router: MessageRouter,
-    ) -> HealthMonitor:
-        return cls(runtime=container_manager, transport=transport, router=router)
-
     def register(self, agent_id: str, url: str = "") -> None:
         self.agents[agent_id] = AgentHealth(agent_id=agent_id)
 

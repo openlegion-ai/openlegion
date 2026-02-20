@@ -295,17 +295,6 @@ def _set_collaborative_permissions() -> None:
     _save_permissions(perms)
 
 
-def _set_isolated_permissions() -> None:
-    """Restrict agent permissions to orchestrator-only messaging."""
-    perms = _load_permissions()
-    for name, p in perms.get("permissions", {}).items():
-        if name == "default":
-            continue
-        p["can_message"] = ["orchestrator"]
-        p["can_subscribe"] = []
-    _save_permissions(perms)
-
-
 def _create_agent(name: str, description: str, model: str) -> None:
     """Create an agent: config, permissions, skills directory."""
     system_prompt = (
@@ -515,27 +504,6 @@ def _apply_template(template_name: str, tpl: dict) -> list[str]:
         created.append(agent_name)
 
     return created
-
-
-def _discover_workflows() -> list[dict]:
-    """Discover workflow definitions from config/workflows/."""
-    wf_dir = PROJECT_ROOT / "config" / "workflows"
-    if not wf_dir.exists():
-        return []
-    workflows = []
-    for wf_file in sorted(wf_dir.glob("*.yaml")):
-        with open(wf_file) as f:
-            wf = yaml.safe_load(f) or {}
-        if "name" not in wf or "steps" not in wf:
-            continue
-        agents_used = sorted({s["agent"] for s in wf["steps"] if "agent" in s})
-        workflows.append({
-            "name": wf["name"],
-            "file": wf_file.name,
-            "agents": agents_used,
-            "label": wf["name"].replace("_", " ").title(),
-        })
-    return workflows
 
 
 # ── Main group ───────────────────────────────────────────────

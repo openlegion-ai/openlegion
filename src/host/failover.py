@@ -11,7 +11,7 @@ cooldowns from a previous run should not block models that may now be healthy.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from src.shared.utils import setup_logging
 

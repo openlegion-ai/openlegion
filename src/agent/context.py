@@ -23,7 +23,6 @@ logger = setup_logging("agent.context")
 
 _FLUSH_THRESHOLD = 0.60
 _COMPACT_THRESHOLD = 0.70
-_PRUNE_THRESHOLD = 0.90
 
 
 def estimate_tokens(messages: list[dict]) -> int:
@@ -57,9 +56,6 @@ class ContextManager:
 
     def should_compact(self, messages: list[dict]) -> bool:
         return self.usage(messages) >= _COMPACT_THRESHOLD
-
-    def _should_prune(self, messages: list[dict]) -> bool:
-        return self.usage(messages) >= _PRUNE_THRESHOLD
 
     async def maybe_compact(
         self, system_prompt: str, messages: list[dict],
