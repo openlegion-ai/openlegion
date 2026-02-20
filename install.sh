@@ -28,9 +28,11 @@ if [ "$(id -u)" -eq 0 ]; then
     echo -e "  ${YELLOW} ${NC} Run without sudo instead:"
     echo -e "  ${YELLOW} ${NC}   ./install.sh"
     echo ""
-    echo -e "  ${YELLOW} ${NC} If Docker requires sudo, add your user to the docker group:"
-    echo -e "  ${YELLOW} ${NC}   sudo usermod -aG docker \$USER && newgrp docker"
-    echo ""
+    if [ "$(uname)" = "Linux" ]; then
+        echo -e "  ${YELLOW} ${NC} If Docker requires sudo, add your user to the docker group:"
+        echo -e "  ${YELLOW} ${NC}   sudo usermod -aG docker \$USER && newgrp docker"
+        echo ""
+    fi
     read -rp "  Continue anyway? [y/N] " reply
     if [[ ! "$reply" =~ ^[Yy]$ ]]; then
         exit 1
@@ -100,9 +102,13 @@ fi
 if ! docker info &>/dev/null 2>&1; then
     # Distinguish "not running" from "permission denied"
     if docker info 2>&1 | grep -qi "permission denied"; then
-        fail "Docker permission denied. Add your user to the docker group:
+        if [ "$(uname)" = "Linux" ]; then
+            fail "Docker permission denied. Add your user to the docker group:
       sudo usermod -aG docker \$USER && newgrp docker
     Then run this installer again (without sudo)."
+        else
+            fail "Docker permission denied. Make sure Docker Desktop is running."
+        fi
     else
         fail "Docker is installed but not running.
     Start it:
@@ -123,12 +129,29 @@ if ! command -v git &>/dev/null; then
 fi
 info "Git available"
 
+# ── Detect platform for venv paths ───────────────────────────
+# Windows (Git Bash/MSYS2) uses Scripts/, Unix uses bin/
+
+if [ -d ".venv/Scripts" ] || [[ "$(uname -s)" == MINGW* ]] || [[ "$(uname -s)" == MSYS* ]]; then
+    VENV_BIN_DIR=".venv/Scripts"
+else
+    VENV_BIN_DIR=".venv/bin"
+fi
+
 # ── Create virtual environment ────────────────────────────────
 
 echo ""
 
 # If .venv exists but is broken (missing python or pip), recreate it
-if [ -d ".venv" ] && { [ ! -x ".venv/bin/python" ] || [ ! -x ".venv/bin/pip" ]; }; then
+VENV_BROKEN=false
+if [ -d ".venv" ]; then
+    if [ ! -x "$VENV_BIN_DIR/python" ] && [ ! -x "$VENV_BIN_DIR/python.exe" ]; then
+        VENV_BROKEN=true
+    elif [ ! -x "$VENV_BIN_DIR/pip" ] && [ ! -x "$VENV_BIN_DIR/pip.exe" ]; then
+        VENV_BROKEN=true
+    fi
+fi
+if [ "$VENV_BROKEN" = true ]; then
     warn "Existing .venv is broken — recreating..."
     rm -rf .venv 2>/dev/null || true
     # If rm failed (e.g. root-owned .venv), try with sudo
@@ -155,7 +178,7 @@ echo -e "  ${YELLOW}First install takes 2-3 minutes (downloads ~70 packages).${N
 echo -e "  ${YELLOW}Subsequent installs are fast (cached).${NC}"
 echo ""
 
-.venv/bin/pip install -e ".[dev]" 2>&1 | while IFS= read -r line; do
+"$VENV_BIN_DIR/pip" install -e ".[dev]" 2>&1 | while IFS= read -r line; do
     # Show download/install progress, skip noise
     case "$line" in
         *Collecting*|*Downloading*|*Installing*|*Building*|*Successfully*)
@@ -165,12 +188,12 @@ echo ""
 done
 
 # Check pip actually succeeded (pipe can mask failures with set -e)
-if [ ! -x ".venv/bin/openlegion" ]; then
+if [ ! -x "$VENV_BIN_DIR/openlegion" ] && [ ! -x "$VENV_BIN_DIR/openlegion.exe" ]; then
     # Retry without filtering to show the real error
     echo ""
     warn "Install may have failed. Retrying with full output..."
     echo ""
-    .venv/bin/pip install -e ".[dev]"
+    "$VENV_BIN_DIR/pip" install -e ".[dev]"
 fi
 
 echo ""
@@ -182,13 +205,18 @@ echo ""
 
 # Resolve the real user's home when running under sudo
 if [ -n "$SUDO_USER" ]; then
-    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    # getent works on Linux; fall back to HOME-based lookup or ~user expansion
+    REAL_HOME=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)
+    if [ -z "$REAL_HOME" ]; then
+        # macOS / systems without getent
+        REAL_HOME=$(eval echo "~$SUDO_USER")
+    fi
 else
     REAL_HOME="$HOME"
 fi
 
 LINK_DIR="$REAL_HOME/.local/bin"
-VENV_BIN="$(cd "$(dirname "$0")" && pwd)/.venv/bin/openlegion"
+VENV_BIN="$(cd "$(dirname "$0")" && pwd)/$VENV_BIN_DIR/openlegion"
 PATH_UPDATED=""
 
 if [ -f "$VENV_BIN" ]; then
