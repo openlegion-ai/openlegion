@@ -83,7 +83,8 @@ def create_skill(name: str, code: str, *, workspace_manager=None) -> dict:
     if error:
         return {"error": f"Validation failed: {error}"}
 
-    skills_dir = Path("/app/skills")
+    # Write to /data/custom_skills (writable) — /app/skills is read-only
+    skills_dir = Path("/data/custom_skills")
     skills_dir.mkdir(parents=True, exist_ok=True)
 
     filename = _sanitize_filename(name)
@@ -119,7 +120,7 @@ def reload_skills() -> dict:
     parameters={},
 )
 def list_custom_skills() -> dict:
-    skills_dir = Path("/app/skills")
+    skills_dir = Path("/data/custom_skills")
     if not skills_dir.exists():
         return {"skills": [], "count": 0}
     files = [f.name for f in skills_dir.glob("*.py") if not f.name.startswith("_")]

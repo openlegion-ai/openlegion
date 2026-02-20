@@ -42,11 +42,14 @@ class SkillRegistry:
     Supports hot-reload when agents create new skills at runtime.
     """
 
+    CUSTOM_SKILLS_DIR = "/data/custom_skills"
+
     def __init__(self, skills_dir: str):
         self.skills_dir = skills_dir
         self.skills: dict[str, dict] = {}
         self._discover_builtins()
         self._discover(skills_dir)
+        self._discover(self.CUSTOM_SKILLS_DIR)
         self.skills = dict(_skill_staging)
 
     def _discover_builtins(self) -> None:
@@ -82,6 +85,7 @@ class SkillRegistry:
         _skill_staging.clear()
         self._discover_builtins()
         self._discover(self.skills_dir)
+        self._discover(self.CUSTOM_SKILLS_DIR)
         self.skills = dict(_skill_staging)
         logger.info(f"Reloaded {len(self.skills)} skills")
         return len(self.skills)

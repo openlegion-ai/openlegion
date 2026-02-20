@@ -66,7 +66,7 @@ class CronScheduler:
     only invoked when there's actually something to act on.
     """
 
-    TICK_INTERVAL = 15
+    TICK_INTERVAL = 5
 
     def __init__(
         self,
@@ -105,6 +105,9 @@ class CronScheduler:
         self, agent: str, schedule: str, message: str,
         heartbeat: bool = False, **kwargs: Any,
     ) -> CronJob:
+        error = self._validate_schedule(schedule)
+        if error:
+            raise ValueError(error)
         job = CronJob(
             id=generate_id("cron"),
             agent=agent,
@@ -258,11 +261,11 @@ class CronScheduler:
     def _is_due(self, job: CronJob, now: datetime) -> bool:
         schedule = job.schedule.strip()
 
-        interval_match = re.match(r"every\s+(\d+)([mhd])", schedule, re.IGNORECASE)
+        interval_match = re.match(r"every\s+(\d+)([smhd])", schedule, re.IGNORECASE)
         if interval_match:
             amount = int(interval_match.group(1))
             unit = interval_match.group(2).lower()
-            seconds = {"m": 60, "h": 3600, "d": 86400}[unit] * amount
+            seconds = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit] * amount
             if job.last_run:
                 last = datetime.fromisoformat(job.last_run)
                 if last.tzinfo is None:
@@ -275,6 +278,23 @@ class CronScheduler:
             return self._match_cron(parts, now, job)
 
         return False
+
+    @staticmethod
+    def _validate_schedule(schedule: str) -> str | None:
+        """Validate a schedule string. Returns error message or None."""
+        schedule = schedule.strip()
+        if re.match(r"every\s+(\d+)([smhd])", schedule, re.IGNORECASE):
+            return None
+        parts = schedule.split()
+        if len(parts) == 6:
+            return (
+                "6-field (seconds) cron is not supported. "
+                "Use 5-field cron (minute resolution) or 'every Ns' for seconds. "
+                "Example: 'every 5s' or '*/1 * * * *'"
+            )
+        if len(parts) == 5:
+            return None
+        return f"Invalid schedule: '{schedule}'. Use 5-field cron or 'every N[s/m/h/d]'"
 
     def _match_cron(self, parts: list[str], now: datetime, job: CronJob) -> bool:
         """Match a 5-field cron expression, firing at most once per minute."""
