@@ -206,7 +206,7 @@ connections.
 │  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘   │
 └──────────────────────────────────────────────────────────────────────────┘
                │
-               │  Docker Bridge Network (openlegion_internal)
+               │  Docker Network (bridge / host)
                │
      ┌─────────┼──────────┬──────────────────────┐
      ▼         ▼          ▼                      ▼
@@ -300,7 +300,7 @@ steps:
 
 Each agent runs in an isolated Docker container with:
 - **Image**: `openlegion-agent:latest` (Python 3.12, system tools, Playwright, Chromium)
-- **Network**: `openlegion_internal` bridge (can only reach mesh host)
+- **Network**: Bridge with port mapping (macOS/Windows) or host network (Linux)
 - **Volume**: `openlegion_data_{agent_id}` mounted at `/data`
 - **Resources**: 512MB RAM limit, 50% CPU quota
 - **Security**: `no-new-privileges`, runs as non-root `agent` user (UID 1000)
@@ -537,7 +537,29 @@ Defense-in-depth with five layers:
 
 ### Dual Runtime Backend
 
-Agents run in hardened Docker containers by default (non-root, memory-limited, CPU-throttled, no host filesystem access). For hypervisor-level isolation, use `openlegion start --sandbox` which runs agents in Docker Sandbox microVMs (requires Docker Desktop 4.58+).
+OpenLegion supports two isolation levels:
+
+| | Docker Containers (default) | Docker Sandbox microVMs |
+|---|---|---|
+| **Isolation** | Shared kernel, namespace separation | Own kernel per agent (hypervisor) |
+| **Escape risk** | Kernel exploit could escape | Hypervisor boundary — much harder |
+| **Performance** | Native speed | Near-native (Rosetta 2 on Apple Silicon) |
+| **Requirements** | Any Docker install | Docker Desktop 4.58+ |
+| **Enable** | `openlegion start` | `openlegion start --sandbox` |
+
+**Docker containers** (default) run agents as non-root with `no-new-privileges`, 512MB memory limit, 50% CPU cap, and no host filesystem access. This is secure for most use cases.
+
+**Docker Sandbox microVMs** give each agent its own Linux kernel via Apple Virtualization.framework (macOS) or Hyper-V (Windows). Even if an agent achieves code execution, it's trapped inside a lightweight VM with no visibility into other agents or the host. Use this when running untrusted code or when compliance requires hypervisor isolation.
+
+```bash
+# Default: container isolation (works everywhere)
+openlegion start
+
+# Maximum security: microVM isolation (Docker Desktop 4.58+ required)
+openlegion start --sandbox
+```
+
+> **Check compatibility:** Run `docker sandbox version` — if it returns a version number, your Docker Desktop supports sandboxes. If not, update Docker Desktop to 4.58+.
 
 ---
 
