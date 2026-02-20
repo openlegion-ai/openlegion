@@ -140,8 +140,6 @@ class DockerBackend(RuntimeBackend):
         self.use_host_network = use_host_network
         self._next_port = 8401
         self._cleanup_stale()
-        if not use_host_network:
-            self._ensure_network()
 
     @staticmethod
     def backend_name() -> str:
@@ -220,12 +218,12 @@ class DockerBackend(RuntimeBackend):
         if self.use_host_network:
             run_kwargs["network_mode"] = "host"
         else:
-            extra_hosts: dict[str, str] = {}
-            if platform.system() == "Linux":
-                extra_hosts["host.docker.internal"] = "host-gateway"
-            run_kwargs["network"] = self.NETWORK_NAME
             run_kwargs["ports"] = {"8400/tcp": port}
-            run_kwargs["extra_hosts"] = extra_hosts
+            # On Linux Docker Engine, host.docker.internal isn't automatic
+            if platform.system() == "Linux":
+                run_kwargs["extra_hosts"] = {
+                    "host.docker.internal": "host-gateway",
+                }
 
         container_name = f"openlegion_{agent_id}"
         try:
@@ -235,7 +233,7 @@ class DockerBackend(RuntimeBackend):
             pass
 
         container = self.client.containers.run(self.BASE_IMAGE, **run_kwargs)
-        url = f"http://localhost:{port}"
+        url = f"http://127.0.0.1:{port}"
         self.agents[agent_id] = {
             "container": container,
             "url": url,
@@ -284,20 +282,30 @@ class DockerBackend(RuntimeBackend):
         if not url:
             return False
         start = time.time()
+        last_error = ""
         while time.time() - start < timeout:
             if not self.health_check(agent_id):
-                logger.warning(f"Agent '{agent_id}' container exited during startup")
+                logs = self.get_logs(agent_id, tail=20)
+                logger.warning(
+                    f"Agent '{agent_id}' container exited during startup. "
+                    f"Logs:\n{logs}"
+                )
                 return False
             try:
-                async with httpx.AsyncClient(timeout=2) as client:
+                async with httpx.AsyncClient(timeout=3) as client:
                     resp = await client.get(f"{url}/status")
                     if resp.status_code == 200:
                         return True
-            except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError):
-                pass
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+                last_error = str(e)
             except Exception as e:
+                last_error = str(e)
                 logger.debug(f"Unexpected error polling agent '{agent_id}': {e}")
             await asyncio.sleep(0.5)
+        logger.warning(
+            f"Agent '{agent_id}' did not respond within {timeout}s. "
+            f"URL: {url}, last error: {last_error}"
+        )
         return False
 
 

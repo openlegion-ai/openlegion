@@ -1036,9 +1036,10 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
                 )
                 # Clean up the failed sandbox before switching backends
                 runtime.stop_all()
+                import platform as _platform
                 runtime = DockerBackend(
                     mesh_host_port=mesh_port,
-                    use_host_network=True,
+                    use_host_network=_platform.system() == "Linux",
                     project_root=str(PROJECT_ROOT),
                 )
                 transport = HttpTransport()

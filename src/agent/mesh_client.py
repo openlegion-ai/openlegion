@@ -36,12 +36,15 @@ class MeshClient:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    async def register(self, capabilities: list[str], port: int = 8400) -> None:
+    async def register(
+        self, capabilities: list[str], port: int = 8400, timeout: int = 5,
+    ) -> None:
         """Register this agent with the mesh on startup."""
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/register",
             json={"agent_id": self.agent_id, "capabilities": capabilities, "port": port},
+            timeout=timeout,
         )
         response.raise_for_status()
 
