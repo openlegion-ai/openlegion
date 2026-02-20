@@ -221,7 +221,12 @@ def _build_docker_image() -> None:
     click.echo("Building Docker image...")
     click.echo("  First build downloads base image + Chromium (~2 min). Rebuilds are fast.\n")
     proc = subprocess.Popen(
-        ["docker", "build", "-t", "openlegion-agent:latest", "-f", "Dockerfile.agent", "."],
+        [
+            "docker", "build",
+            "--platform", "linux/amd64",
+            "-t", "openlegion-agent:latest",
+            "-f", "Dockerfile.agent", ".",
+        ],
         cwd=str(PROJECT_ROOT),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -237,7 +242,7 @@ def _build_docker_image() -> None:
     proc.wait()
     if proc.returncode != 0:
         click.echo("Docker build failed. Run manually for full output:", err=True)
-        click.echo("  docker build -t openlegion-agent:latest -f Dockerfile.agent .", err=True)
+        click.echo("  docker build --platform linux/amd64 -t openlegion-agent:latest -f Dockerfile.agent .", err=True)
         sys.exit(1)
     click.echo("\n  Docker image built successfully.")
 
