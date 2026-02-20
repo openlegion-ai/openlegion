@@ -23,6 +23,21 @@ make start           # openlegion start
 make test            # run the test suite
 ```
 
+## Fast Path (Windows)
+
+**Prerequisites:** [Docker Desktop](https://docker.com/products/docker-desktop) running, Python 3.12+, an LLM API key.
+
+```powershell
+git clone https://github.com/openlegion-ai/openlegion.git
+cd openlegion
+powershell -ExecutionPolicy Bypass -File install.ps1
+.venv\Scripts\Activate.ps1
+openlegion setup     # API key, project description, team template
+openlegion start     # launch agents and start chatting
+```
+
+> PowerShell blocks the script? Run: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+
 ---
 
 ## Prerequisites
@@ -140,7 +155,7 @@ You need one key. Pick a provider:
 
 ## Install (Manual)
 
-If you prefer not to use `install.sh`:
+If you prefer not to use the install scripts:
 
 <details>
 <summary><strong>macOS / Linux</strong></summary>
@@ -170,6 +185,8 @@ pip install -e ".[dev]"
 
 </details>
 
+> First install downloads ~70 packages and takes 2-3 minutes. Subsequent installs use pip's cache and are much faster.
+
 Verify: `openlegion --help`
 
 ---
@@ -183,9 +200,10 @@ openlegion start     # launches agents and drops you into the chat REPL
 
 The setup wizard asks for:
 1. **LLM provider + API key** — pick one, paste your key
-2. **Project description** — one line about what your agents will do
+2. **Project description** — one line about what your agents will do (optional)
 3. **Team template** — starter (1 agent), sales (3), devteam (3), or content (3)
-4. **Docker image build** — automatic, takes 1-2 minutes on first run
+
+The Docker image builds automatically on your first `openlegion start` (~2 min).
 
 ---
 
@@ -220,11 +238,12 @@ Add bot tokens to `config/mesh.yaml`. On next start, a pairing code appears — 
 
 | Problem | Fix |
 |---|---|
-| `command not found: openlegion` | Activate the venv: `source .venv/bin/activate` |
+| `command not found: openlegion` | Activate the venv: `source .venv/bin/activate` (macOS/Linux) or `.venv\Scripts\Activate.ps1` (Windows) |
 | `Docker is not running` | Open Docker Desktop (macOS/Windows) or `sudo systemctl start docker` (Linux) |
 | `permission denied` on Docker | Linux: `sudo usermod -aG docker $USER` then log out/in |
-| `python3: command not found` | Install Python 3.12+ (see above) |
-| `pip install` permission error | Activate the venv first |
+| `python3: command not found` | Install Python 3.12+ (see above). On Windows, use `python` instead of `python3`. |
+| `pip install` is slow | First install downloads ~70 packages (2-3 min). This is normal. Subsequent installs are fast. |
+| `pip install` permission error | Activate the venv first — don't install globally. |
 | Docker build is slow | First build downloads base image + Chromium (~2 min). Rebuilds are fast. |
 | Agent not responding | `openlegion status` to check health. Verify API key has credits. |
-| PowerShell blocks venv | `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` |
+| PowerShell blocks scripts | `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` |
