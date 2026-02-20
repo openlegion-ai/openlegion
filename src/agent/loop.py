@@ -117,6 +117,22 @@ class AgentLoop:
         self._current_task_handle: Optional[asyncio.Task] = None
         self._last_result: Optional[TaskResult] = None
         self._chat_lock = asyncio.Lock()
+        self._steer_queue: asyncio.Queue[str] = asyncio.Queue()
+
+    async def inject_steer(self, message: str) -> bool:
+        """Inject a steer message. Returns True if agent is working."""
+        await self._steer_queue.put(message)
+        return self.state == "working"
+
+    def _drain_steer_messages(self) -> list[str]:
+        """Non-blocking drain of all pending steer messages."""
+        messages = []
+        while not self._steer_queue.empty():
+            try:
+                messages.append(self._steer_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return messages
 
     async def execute_task(self, assignment: TaskAssignment) -> TaskResult:
         """Main execution method. Runs bounded loop for a single task.
@@ -500,6 +516,11 @@ class AgentLoop:
                     )
 
             self._chat_messages.append({"role": "user", "content": user_message})
+            # Drain steer messages that arrived while idle
+            steered = self._drain_steer_messages()
+            if steered:
+                combined = "\n\n".join(steered)
+                self._chat_messages[-1]["content"] += f"\n\n[Additional context]: {combined}"
 
             system = self._build_chat_system_prompt(goals=goals)
 
@@ -580,6 +601,12 @@ class AgentLoop:
                     )
                 else:
                     self._chat_messages = self._trim_context(self._chat_messages, max_tokens=100_000)
+
+                # Inject mid-execution steer as new user message
+                steered = self._drain_steer_messages()
+                if steered:
+                    combined = "\n\n".join(f"[User interjection]: {s}" for s in steered)
+                    self._chat_messages.append({"role": "user", "content": combined})
 
             # Max tool rounds exhausted — force final text response.
             # Must still pass tools= when tool messages are in history
@@ -786,6 +813,12 @@ class AgentLoop:
                     )
 
             self._chat_messages.append({"role": "user", "content": user_message})
+            # Drain steer messages that arrived while idle
+            steered = self._drain_steer_messages()
+            if steered:
+                combined = "\n\n".join(steered)
+                self._chat_messages[-1]["content"] += f"\n\n[Additional context]: {combined}"
+
             system = self._build_chat_system_prompt(goals=goals)
 
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
@@ -870,6 +903,12 @@ class AgentLoop:
                     )
                 else:
                     self._chat_messages = self._trim_context(self._chat_messages, max_tokens=100_000)
+
+                # Inject mid-execution steer as new user message
+                steered = self._drain_steer_messages()
+                if steered:
+                    combined = "\n\n".join(f"[User interjection]: {s}" for s in steered)
+                    self._chat_messages.append({"role": "user", "content": combined})
 
             # Max tool rounds exhausted — force final response.
             # Must still pass tools= when tool messages are in history.

@@ -18,7 +18,7 @@ import json as json_module
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
-from src.shared.types import AgentMessage, AgentStatus, ChatMessage, ChatResponse, TaskAssignment, TaskResult
+from src.shared.types import AgentMessage, AgentStatus, ChatMessage, ChatResponse, SteerMessage, TaskAssignment, TaskResult
 from src.shared.utils import setup_logging
 
 if TYPE_CHECKING:
@@ -98,6 +98,12 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         """Interactive chat with the agent. Supports tool use."""
         result = await loop.chat(msg.message)
         return ChatResponse(**result)
+
+    @app.post("/chat/steer")
+    async def chat_steer(msg: SteerMessage) -> dict:
+        """Inject a message into the active conversation. Does NOT acquire _chat_lock."""
+        injected = await loop.inject_steer(msg.message)
+        return {"injected": injected, "agent_state": loop.state}
 
     @app.post("/chat/stream")
     async def chat_stream(msg: ChatMessage) -> StreamingResponse:

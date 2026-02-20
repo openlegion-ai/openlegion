@@ -347,3 +347,111 @@ async def test_silent_token_after_tool_rounds_exhausted():
 
     result = await loop.chat("do something")
     assert result["response"] == ""
+
+
+# === Steer Injection ===
+
+
+@pytest.mark.asyncio
+async def test_inject_steer_returns_working_state():
+    """inject_steer returns True when agent is working."""
+    loop = _make_loop()
+    loop.state = "working"
+    result = await loop.inject_steer("stop, do this instead")
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_inject_steer_returns_idle_state():
+    """inject_steer returns False when agent is idle."""
+    loop = _make_loop()
+    loop.state = "idle"
+    result = await loop.inject_steer("hello")
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_steer_to_idle_merges_with_next_message():
+    """Steer message sent while idle gets merged into next user message."""
+    loop = _make_loop([
+        LLMResponse(content="Got it with context", tokens_used=50),
+    ])
+    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+
+    # Inject steer while idle
+    await loop.inject_steer("extra context here")
+
+    # Now send a chat message — steer should be merged
+    result = await loop.chat("do the task")
+    assert result["response"] == "Got it with context"
+
+    # The first user message should contain the steer content
+    user_msg = loop._chat_messages[0]
+    assert "[Additional context]: extra context here" in user_msg["content"]
+
+
+@pytest.mark.asyncio
+async def test_steer_injection_between_tool_rounds():
+    """Steer message appears in LLM context after tool results."""
+    tool_response = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="search", arguments={"q": "x"})],
+        tokens_used=10,
+    )
+    final_response = LLMResponse(content="Redirected!", tokens_used=20)
+    captured_messages = []
+
+    loop = _make_loop([tool_response, final_response])
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "search"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+
+    original_chat = loop.llm.chat
+
+    async def capturing_chat(system, messages, tools=None, **kwargs):
+        captured_messages.append([dict(m) for m in messages])
+        return await original_chat(system=system, messages=messages, tools=tools, **kwargs)
+
+    loop.llm.chat = capturing_chat
+
+    # Inject steer after first tool call starts
+    # We need to inject before the second LLM call
+    original_execute = loop.skills.execute
+
+    async def execute_with_steer(*args, **kwargs):
+        # Inject steer message during tool execution
+        await loop.inject_steer("stop, do this instead")
+        return await original_execute(*args, **kwargs)
+
+    loop.skills.execute = execute_with_steer
+
+    result = await loop.chat("start task")
+    assert result["response"] == "Redirected!"
+
+    # The second LLM call should contain a user interjection message
+    second_call = captured_messages[1]
+    interjection_msgs = [m for m in second_call if "[User interjection]" in m.get("content", "")]
+    assert len(interjection_msgs) == 1
+    assert "stop, do this instead" in interjection_msgs[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_multiple_steers_combined():
+    """Multiple steer messages are drained and joined together."""
+    loop = _make_loop([
+        LLMResponse(content="Acknowledged all", tokens_used=50),
+    ])
+    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+
+    # Queue multiple steer messages while idle
+    await loop.inject_steer("first update")
+    await loop.inject_steer("second update")
+
+    result = await loop.chat("go")
+    assert result["response"] == "Acknowledged all"
+
+    # Both should be in the first user message
+    user_msg = loop._chat_messages[0]["content"]
+    assert "first update" in user_msg
+    assert "second update" in user_msg

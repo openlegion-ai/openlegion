@@ -1037,7 +1037,15 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
         except Exception as e:
             return f"Error: {e}"
 
-    lane_manager = LaneManager(dispatch_fn=_direct_dispatch)
+    async def _direct_steer(agent_name: str, message: str) -> dict:
+        try:
+            return await transport.request(
+                agent_name, "POST", "/chat/steer", json={"message": message},
+            )
+        except Exception as e:
+            return {"injected": False, "error": str(e)}
+
+    lane_manager = LaneManager(dispatch_fn=_direct_dispatch, steer_fn=_direct_steer)
 
     # Dedicated event loop for dispatching — all asyncio primitives
     # (lane queues, futures, tasks) live here. Thread-safe from any caller.
@@ -1050,10 +1058,10 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
     _dispatch_thread = threading.Thread(target=_run_dispatch_loop, daemon=True)
     _dispatch_thread.start()
 
-    async def dispatch_to_agent(agent_name: str, message: str) -> str:
+    async def dispatch_to_agent(agent_name: str, message: str, *, mode: str = "followup") -> str:
         """Thread-safe dispatch: schedules onto the dedicated dispatch loop."""
         future = asyncio.run_coroutine_threadsafe(
-            lane_manager.enqueue(agent_name, message), _dispatch_loop,
+            lane_manager.enqueue(agent_name, message, mode=mode), _dispatch_loop,
         )
         # If we're already in an event loop (Telegram, cron), await via a
         # thread-pool so we don't block the caller's loop.
@@ -1229,6 +1237,7 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
             active_agent, agent_urls, router, cost_tracker, runtime, cfg,
             transport=transport, dispatch_loop=_dispatch_loop,
             credential_vault=credential_vault,
+            lane_manager=lane_manager,
         )
     except KeyboardInterrupt:
         click.echo("")
@@ -1552,6 +1561,7 @@ def _multi_agent_repl(
     transport: object | None = None,
     dispatch_loop=None,
     credential_vault: object | None = None,
+    lane_manager: object | None = None,
 ) -> None:
     """Interactive REPL supporting multiple agents, @mentions, and slash commands."""
     import concurrent.futures
@@ -1684,6 +1694,21 @@ def _multi_agent_repl(
                         click.echo(f"[{aid}] {response}\n")
                 continue
 
+            elif cmd == "/steer":
+                if len(cmd_parts) < 2:
+                    click.echo("Usage: /steer <message>")
+                    continue
+                if lane_manager is None or dispatch_loop is None:
+                    click.echo("Steer not available in this mode.")
+                    continue
+                import asyncio as _steer_asyncio
+                steer_msg = cmd_parts[1]
+                future = _steer_asyncio.run_coroutine_threadsafe(
+                    lane_manager.enqueue(current, steer_msg, mode="steer"), dispatch_loop,
+                )
+                click.echo(future.result())
+                continue
+
             elif cmd == "/costs":
                 try:
                     agents_spend = cost_tracker.get_all_agents_spend("today")
@@ -1744,6 +1769,7 @@ def _multi_agent_repl(
                 click.echo("  /add              Add a new agent")
                 click.echo("  /status           Show agent health")
                 click.echo("  /broadcast <msg>  Send to all agents")
+                click.echo("  /steer <msg>      Inject message into busy agent")
                 click.echo("  /costs            Show today's LLM spend")
                 click.echo("  /addkey <svc> [key]  Add an API credential")
                 click.echo("  /reset            Clear conversation with active agent")

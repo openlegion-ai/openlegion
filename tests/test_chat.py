@@ -155,3 +155,35 @@ class TestChatEndpoints:
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
         assert len(loop._chat_messages) == 0
+
+    def test_post_chat_steer_returns_200(self):
+        """POST /chat/steer returns 200 with injected key."""
+        loop = _make_loop()
+        app = create_agent_app(loop)
+        client = TestClient(app)
+
+        resp = client.post("/chat/steer", json={"message": "redirect"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "injected" in data
+        assert "agent_state" in data
+
+    def test_chat_steer_does_not_block(self):
+        """Steer endpoint returns immediately without acquiring _chat_lock."""
+        import asyncio
+
+        loop = _make_loop()
+        app = create_agent_app(loop)
+        client = TestClient(app)
+
+        # Manually acquire the chat lock to simulate a busy agent
+        acquired = asyncio.get_event_loop().run_until_complete(loop._chat_lock.acquire())
+        assert acquired
+
+        try:
+            # Steer should still work since it bypasses _chat_lock
+            resp = client.post("/chat/steer", json={"message": "urgent"})
+            assert resp.status_code == 200
+            assert resp.json()["injected"] is False  # idle state
+        finally:
+            loop._chat_lock.release()

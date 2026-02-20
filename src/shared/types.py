@@ -252,3 +252,9 @@ class ChatResponse(BaseModel):
     response: str
     tool_outputs: list[dict[str, Any]] = []
     tokens_used: int = 0
+
+
+class SteerMessage(BaseModel):
+    """Injected into an agent's active conversation mid-execution."""
+
+    message: str
