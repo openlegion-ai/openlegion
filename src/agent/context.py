@@ -23,11 +23,66 @@ logger = setup_logging("agent.context")
 
 _FLUSH_THRESHOLD = 0.60
 _COMPACT_THRESHOLD = 0.70
+_WARNING_THRESHOLD = 0.80
+
+_encoding_cache: dict[str, object | None] = {}
+
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "openai/gpt-4o": 128_000,
+    "openai/gpt-4o-mini": 128_000,
+    "openai/gpt-4.1": 1_047_576,
+    "openai/gpt-4.1-mini": 1_047_576,
+    "openai/gpt-4.1-nano": 1_047_576,
+    "openai/o3": 200_000,
+    "openai/o3-mini": 200_000,
+    "openai/o4-mini": 200_000,
+    "anthropic/claude-opus-4-6": 200_000,
+    "anthropic/claude-sonnet-4-6": 200_000,
+    "anthropic/claude-sonnet-4-5-20250929": 200_000,
+    "anthropic/claude-haiku-4-5-20251001": 200_000,
+}
+_DEFAULT_CONTEXT_WINDOW = 128_000
 
 
-def estimate_tokens(messages: list[dict]) -> int:
-    """Rough token estimate: ~4 chars per token."""
-    return sum(len(json.dumps(m)) for m in messages) // 4
+def _get_tiktoken_encoding(model: str):
+    """Get cached tiktoken encoding for an OpenAI model. Returns None if unavailable."""
+    if model in _encoding_cache:
+        return _encoding_cache[model]
+    try:
+        import tiktoken
+        bare = model.removeprefix("openai/")
+        enc = tiktoken.encoding_for_model(bare)
+        _encoding_cache[model] = enc
+        return enc
+    except Exception:
+        _encoding_cache[model] = None
+        return None
+
+
+def estimate_tokens(messages: list[dict], model: str = "") -> int:
+    """Estimate token count for a message list.
+
+    - OpenAI models: use tiktoken for accurate counting
+    - Anthropic models: ~3.5 chars per token
+    - Others/fallback: ~4 chars per token
+    """
+    if model.startswith("openai/"):
+        enc = _get_tiktoken_encoding(model)
+        if enc is not None:
+            total = 0
+            for msg in messages:
+                total += 4  # per-message overhead
+                for val in msg.values():
+                    if isinstance(val, str):
+                        total += len(enc.encode(val))
+                    elif isinstance(val, list):
+                        total += len(enc.encode(json.dumps(val)))
+            return total
+
+    chars = sum(len(json.dumps(m)) for m in messages)
+    if model.startswith("anthropic/"):
+        return int(chars / 3.5)
+    return chars // 4
 
 
 class ContextManager:
@@ -39,12 +94,14 @@ class ContextManager:
 
     def __init__(
         self,
-        max_tokens: int = 128_000,
+        max_tokens: int = 0,
         llm: LLMClient | None = None,
         workspace: WorkspaceManager | None = None,
         memory: MemoryStore | None = None,
+        model: str = "",
     ):
-        self.max_tokens = max_tokens
+        self.model = model
+        self.max_tokens = max_tokens or MODEL_CONTEXT_WINDOWS.get(model, _DEFAULT_CONTEXT_WINDOW)
         self.llm = llm
         self.workspace = workspace
         self.memory = memory
@@ -52,7 +109,25 @@ class ContextManager:
 
     def usage(self, messages: list[dict]) -> float:
         """Return context usage as a fraction (0.0 to 1.0)."""
-        return estimate_tokens(messages) / self.max_tokens
+        return estimate_tokens(messages, model=self.model) / self.max_tokens
+
+    def token_count(self, messages: list[dict]) -> int:
+        """Return absolute token count for the message list."""
+        return estimate_tokens(messages, model=self.model)
+
+    def context_warning(self, messages: list[dict]) -> str | None:
+        """Return a warning string if context usage >= 80%, else None."""
+        tokens = self.token_count(messages)
+        usage = tokens / self.max_tokens
+        if usage >= _WARNING_THRESHOLD:
+            pct = int(usage * 100)
+            return (
+                f"CONTEXT WARNING: Your context is {pct}% full "
+                f"({tokens:,}/{self.max_tokens:,} tokens). "
+                f"Wrap up your current work or save important facts with memory_save. "
+                f"Context will be auto-compacted soon."
+            )
+        return None
 
     def should_compact(self, messages: list[dict]) -> bool:
         return self.usage(messages) >= _COMPACT_THRESHOLD

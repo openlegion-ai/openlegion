@@ -181,9 +181,16 @@ class AgentLoop:
                     return result
 
                 # === DECIDE (LLM call) ===
+                # Refresh system prompt with context warning if applicable
+                effective_system = system_prompt
+                if self.context_manager:
+                    warning = self.context_manager.context_warning(messages)
+                    if warning:
+                        effective_system = system_prompt + f"\n\n## {warning}"
+
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat,
-                    system=system_prompt,
+                    system=effective_system,
                     messages=messages,
                     tools=self.skills.get_tool_definitions() or None,
                 )
@@ -745,10 +752,24 @@ class AgentLoop:
             f"- Respect user corrections — they define preferred behavior.\n"
         )
 
+        # Context usage warning at 80%+
+        if self.context_manager and hasattr(self, "_chat_messages"):
+            warning = self.context_manager.context_warning(self._chat_messages)
+            if warning:
+                parts.append(f"## {warning}")
+
         return "\n\n".join(parts)
 
     def get_status(self) -> AgentStatus:
         """Return current agent status."""
+        ctx_tokens = 0
+        ctx_max = 0
+        ctx_pct = 0.0
+        if self.context_manager:
+            ctx_max = self.context_manager.max_tokens
+            if hasattr(self, "_chat_messages") and self._chat_messages:
+                ctx_tokens = self.context_manager.token_count(self._chat_messages)
+                ctx_pct = round(ctx_tokens / ctx_max, 4) if ctx_max else 0.0
         return AgentStatus(
             agent_id=self.agent_id,
             role=self.role,
@@ -758,6 +779,9 @@ class AgentLoop:
             uptime_seconds=time.time() - self._start_time,
             tasks_completed=self.tasks_completed,
             tasks_failed=self.tasks_failed,
+            context_tokens=ctx_tokens,
+            context_max=ctx_max,
+            context_pct=ctx_pct,
         )
 
     # ── Streaming chat ────────────────────────────────────────
