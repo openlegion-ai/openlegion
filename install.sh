@@ -18,6 +18,26 @@ echo "  OpenLegion Installer"
 echo "  ────────────────────"
 echo ""
 
+# ── Sudo guard ───────────────────────────────────────────────
+# Running the whole script as root causes venv/config ownership issues.
+# Only Docker may need elevated access — handled separately below.
+
+if [ "$(id -u)" -eq 0 ]; then
+    echo -e "  ${YELLOW}!${NC} Running as root. The virtual environment and config files"
+    echo -e "  ${YELLOW} ${NC} will be owned by root, which causes permission issues later."
+    echo -e "  ${YELLOW} ${NC} Run without sudo instead:"
+    echo -e "  ${YELLOW} ${NC}   ./install.sh"
+    echo ""
+    echo -e "  ${YELLOW} ${NC} If Docker requires sudo, add your user to the docker group:"
+    echo -e "  ${YELLOW} ${NC}   sudo usermod -aG docker \$USER && newgrp docker"
+    echo ""
+    read -rp "  Continue anyway? [y/N] " reply
+    if [[ ! "$reply" =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+    echo ""
+fi
+
 # ── Check Python ──────────────────────────────────────────────
 
 PYTHON=""
@@ -54,6 +74,20 @@ if ! "$PYTHON" -m pip --version &>/dev/null; then
 fi
 info "pip available"
 
+# ── Check venv module (Debian/Ubuntu ship it separately) ──────
+
+if ! "$PYTHON" -m venv --help &>/dev/null 2>&1; then
+    # Detect Debian/Ubuntu for a helpful message
+    if [ -f /etc/debian_version ]; then
+        fail "python3-venv is not installed (required on Debian/Ubuntu).
+    Install it:
+      sudo apt install python3-venv"
+    else
+        fail "Python venv module is not available.
+    Install it for your platform and retry."
+    fi
+fi
+
 # ── Check Docker ──────────────────────────────────────────────
 
 if ! command -v docker &>/dev/null; then
@@ -64,10 +98,17 @@ if ! command -v docker &>/dev/null; then
 fi
 
 if ! docker info &>/dev/null 2>&1; then
-    fail "Docker is installed but not running.
+    # Distinguish "not running" from "permission denied"
+    if docker info 2>&1 | grep -qi "permission denied"; then
+        fail "Docker permission denied. Add your user to the docker group:
+      sudo usermod -aG docker \$USER && newgrp docker
+    Then run this installer again (without sudo)."
+    else
+        fail "Docker is installed but not running.
     Start it:
       macOS/Windows: Open Docker Desktop
       Linux:         sudo systemctl start docker"
+    fi
 fi
 info "Docker is running"
 
@@ -85,6 +126,13 @@ info "Git available"
 # ── Create virtual environment ────────────────────────────────
 
 echo ""
+
+# If .venv exists but is broken (missing bin/python), recreate it
+if [ -d ".venv" ] && [ ! -x ".venv/bin/python" ]; then
+    warn "Existing .venv is broken — recreating..."
+    rm -rf .venv
+fi
+
 if [ ! -d ".venv" ]; then
     echo "  Creating virtual environment..."
     "$PYTHON" -m venv .venv
@@ -92,8 +140,6 @@ if [ ! -d ".venv" ]; then
 else
     info "Virtual environment exists"
 fi
-
-source .venv/bin/activate
 
 # ── Install dependencies ──────────────────────────────────────
 
@@ -103,7 +149,7 @@ echo -e "  ${YELLOW}First install takes 2-3 minutes (downloads ~70 packages).${N
 echo -e "  ${YELLOW}Subsequent installs are fast (cached).${NC}"
 echo ""
 
-pip install -e ".[dev]" 2>&1 | while IFS= read -r line; do
+.venv/bin/pip install -e ".[dev]" 2>&1 | while IFS= read -r line; do
     # Show download/install progress, skip noise
     case "$line" in
         *Collecting*|*Downloading*|*Installing*|*Building*|*Successfully*)
@@ -112,13 +158,30 @@ pip install -e ".[dev]" 2>&1 | while IFS= read -r line; do
     esac
 done
 
+# Check pip actually succeeded (pipe can mask failures with set -e)
+if [ ! -x ".venv/bin/openlegion" ]; then
+    # Retry without filtering to show the real error
+    echo ""
+    warn "Install may have failed. Retrying with full output..."
+    echo ""
+    .venv/bin/pip install -e ".[dev]"
+fi
+
 echo ""
 info "OpenLegion installed"
 
 # ── Global CLI access ────────────────────────────────────────
 
 echo ""
-LINK_DIR="$HOME/.local/bin"
+
+# Resolve the real user's home when running under sudo
+if [ -n "$SUDO_USER" ]; then
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+else
+    REAL_HOME="$HOME"
+fi
+
+LINK_DIR="$REAL_HOME/.local/bin"
 VENV_BIN="$(cd "$(dirname "$0")" && pwd)/.venv/bin/openlegion"
 PATH_UPDATED=""
 
@@ -126,19 +189,24 @@ if [ -f "$VENV_BIN" ]; then
     mkdir -p "$LINK_DIR"
     ln -sf "$VENV_BIN" "$LINK_DIR/openlegion"
 
+    # Fix ownership if running as root
+    if [ -n "$SUDO_USER" ]; then
+        chown -R "$SUDO_USER:$SUDO_USER" "$LINK_DIR" 2>/dev/null || true
+    fi
+
     if echo "$PATH" | tr ':' '\n' | grep -qx "$LINK_DIR"; then
         info "openlegion available globally"
     else
         # Auto-add to shell rc file (same approach as rustup, nvm, etc.)
-        SHELL_NAME="$(basename "$SHELL")"
+        SHELL_NAME="$(basename "${SHELL:-/bin/bash}")"
         PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
         RC_FILE=""
         if [ "$SHELL_NAME" = "zsh" ]; then
-            RC_FILE="$HOME/.zshrc"
+            RC_FILE="$REAL_HOME/.zshrc"
         elif [ "$SHELL_NAME" = "fish" ]; then
             RC_FILE=""  # fish uses fish_add_path, handled separately
         else
-            RC_FILE="$HOME/.bashrc"
+            RC_FILE="$REAL_HOME/.bashrc"
         fi
 
         if [ -n "$RC_FILE" ]; then
@@ -147,6 +215,10 @@ if [ -f "$VENV_BIN" ]; then
                 echo "" >> "$RC_FILE"
                 echo "# Added by OpenLegion installer" >> "$RC_FILE"
                 echo "$PATH_LINE" >> "$RC_FILE"
+                # Fix ownership of rc file if running as root
+                if [ -n "$SUDO_USER" ]; then
+                    chown "$SUDO_USER:$SUDO_USER" "$RC_FILE" 2>/dev/null || true
+                fi
                 info "Added ~/.local/bin to PATH in $(basename "$RC_FILE")"
             fi
         elif [ "$SHELL_NAME" = "fish" ]; then
