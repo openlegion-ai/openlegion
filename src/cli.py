@@ -316,7 +316,7 @@ def _suppress_host_logs() -> None:
         "host.mesh", "host.costs", "host.permissions", "host.cron", "host.webhooks",
         "host.health", "host.lanes", "host.runtime", "host.watchers",
         "channels", "channels.base", "channels.telegram", "channels.discord",
-        "channels.slack",
+        "channels.slack", "channels.whatsapp",
     ]:
         logging.getLogger(name).setLevel(logging.WARNING)
 
@@ -350,17 +350,18 @@ def _start_channels(
     reset_fn=None,
     stream_dispatch_fn=None,
     addkey_fn=None,
-) -> list[str]:
-    """Start configured messaging channels (Telegram, Discord) in background threads.
+) -> tuple[list[str], list]:
+    """Start configured messaging channels in background threads.
 
     Channels receive the same callbacks as the CLI REPL so they present
     a unified multi-agent chat interface.
 
-    Returns a list of pairing instruction strings to display to the user.
+    Returns (pairing_instructions, webhook_routers).
     """
     import threading
 
     pairing_instructions: list[str] = []
+    webhook_routers: list = []
     channels_cfg = cfg.get("channels", {})
     all_agents = cfg.get("agents", {})
     first_agent = next(iter(all_agents), "")
@@ -482,7 +483,47 @@ def _start_channels(
         else:
             click.echo("  Slack channel active (paired)")
 
-    return pairing_instructions
+    # WhatsApp
+    wa_cfg = channels_cfg.get("whatsapp", {})
+    wa_token = (
+        wa_cfg.get("access_token")
+        or os.environ.get("OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN", "")
+        or os.environ.get("WHATSAPP_ACCESS_TOKEN", "")
+    )
+    wa_phone_id = (
+        wa_cfg.get("phone_number_id")
+        or os.environ.get("OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID", "")
+        or os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
+    )
+    if wa_token and wa_phone_id:
+        import asyncio as _wa_asyncio
+
+        wa_code = _ensure_pairing_code(PROJECT_ROOT / "config" / "whatsapp_paired.json")
+        wa_verify = (
+            wa_cfg.get("verify_token")
+            or os.environ.get("OPENLEGION_CRED_WHATSAPP_VERIFY_TOKEN", "")
+            or secrets.token_hex(16)
+        )
+        from src.channels.whatsapp import WhatsAppChannel
+        wa = WhatsAppChannel(
+            access_token=wa_token,
+            phone_number_id=wa_phone_id,
+            verify_token=wa_verify,
+            default_agent=wa_cfg.get("default_agent", first_agent),
+            **common,
+        )
+        _wa_asyncio.run(wa.start())
+        webhook_routers.append(wa.create_router())
+        active_channels.append(wa)
+
+        if wa_code:
+            pairing_instructions.append(
+                f"  WhatsApp: send to your number →  !start {wa_code}"
+            )
+        else:
+            click.echo("  WhatsApp channel active (paired)")
+
+    return pairing_instructions, webhook_routers
 
 
 def _stop_channels(active_channels: list) -> None:
@@ -697,6 +738,12 @@ _CHANNEL_TYPES = {
         "config_section": "slack",
         "token_help": "Create a Slack app at https://api.slack.com/apps -- enable Socket Mode",
     },
+    "whatsapp": {
+        "label": "WhatsApp",
+        "env_key": "whatsapp_access_token",
+        "config_section": "whatsapp",
+        "token_help": "Set up at https://developers.facebook.com/apps -- WhatsApp Business API",
+    },
 }
 
 
@@ -749,6 +796,15 @@ def channels_add(channel_type: str | None):
             _set_env_key("slack_app_token", app_token.strip())
         else:
             click.echo("  No app token provided. Socket Mode will not work.")
+            return
+
+    # WhatsApp needs a phone number ID
+    if channel_type == "whatsapp":
+        phone_id = click.prompt("  WhatsApp phone number ID")
+        if phone_id.strip():
+            _set_env_key("whatsapp_phone_number_id", phone_id.strip())
+        else:
+            click.echo("  No phone number ID provided.")
             return
 
     # Enable in mesh config
@@ -1138,8 +1194,8 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
     def _channel_addkey(service: str, key: str) -> None:
         credential_vault.add_credential(service, key)
 
-    # Start messaging channels (Telegram, Discord) if configured
-    pairing_instructions = _start_channels(
+    # Start messaging channels if configured
+    pairing_instructions, channel_routers = _start_channels(
         cfg, dispatch_to_agent, router.agent_registry, active_channels,
         status_fn=_channel_status,
         costs_fn=_channel_costs,
@@ -1147,6 +1203,8 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
         stream_dispatch_fn=stream_dispatch_to_agent,
         addkey_fn=_channel_addkey,
     )
+    for ch_router in channel_routers:
+        app.include_router(ch_router)
 
     # Pick the first agent as the default active one
     active_agents = list(agents_cfg.keys())
