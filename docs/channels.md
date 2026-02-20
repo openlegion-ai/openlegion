@@ -141,6 +141,105 @@ Pairing state is stored in `config/discord_paired.json`.
 - Per-user agent tracking
 - Optional guild (server) allowlisting
 
+## Slack
+
+### Setup
+
+```bash
+openlegion channels add slack
+```
+
+This prompts for a bot token and app-level token. Alternatively, set them in `.env`:
+
+```bash
+OPENLEGION_CRED_SLACK_BOT_TOKEN=xoxb-...
+OPENLEGION_CRED_SLACK_APP_TOKEN=xapp-...
+```
+
+Enable in `config/mesh.yaml`:
+
+```yaml
+channels:
+  slack:
+    enabled: true
+    default_agent: assistant
+```
+
+### Requirements
+
+Slack uses **Socket Mode** (no public URL needed). In the [Slack API dashboard](https://api.slack.com/apps):
+
+1. Enable **Socket Mode** and generate an app-level token (`xapp-...`)
+2. Add **Bot Token Scopes**: `chat:write`, `app_mentions:read`, `channels:history`, `im:history`
+3. Enable **Event Subscriptions**: `message.channels`, `message.im`, `app_mention`
+
+### Pairing
+
+Slack uses the same pairing pattern as other channels:
+
+| Command | Description |
+|---------|-------------|
+| `!start <code>` | Pair with the bot |
+| `!allow <user_id>` | Owner: allow a Slack user |
+| `!revoke <user_id>` | Owner: revoke a user's access |
+
+### Features
+
+- Thread-aware routing (each thread maps to its own agent context)
+- `!`-prefix commands translated to `/` internally
+- Messages chunked at 3000 characters
+- Per-user agent tracking via composite `user_id:thread_ts` key
+
+## WhatsApp
+
+### Setup
+
+```bash
+openlegion channels add whatsapp
+```
+
+This prompts for your access token and phone number ID. Alternatively, set them in `.env`:
+
+```bash
+OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN=EAAx...
+OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
+```
+
+Enable in `config/mesh.yaml`:
+
+```yaml
+channels:
+  whatsapp:
+    enabled: true
+    default_agent: assistant
+```
+
+### Requirements
+
+WhatsApp uses the **Cloud API** with webhook-based message delivery. In the [Meta Developer Portal](https://developers.facebook.com/):
+
+1. Create a WhatsApp Business app
+2. Generate a permanent access token
+3. Configure the webhook URL: `https://your-server:8420/channels/whatsapp/webhook`
+4. Subscribe to `messages` webhook field
+
+### Pairing
+
+WhatsApp uses the same pairing pattern:
+
+| Command | Description |
+|---------|-------------|
+| Send pairing code | First user to send the code becomes owner |
+| `/allow <phone>` | Owner: allow a phone number |
+| `/revoke <phone>` | Owner: revoke access |
+
+### Features
+
+- Text messages only (media logged and skipped)
+- Messages chunked at 4096 characters
+- Per-user agent tracking by phone number
+- Webhook verification challenge handled automatically
+
 ## Webhooks
 
 HTTP webhooks for programmatic integration and workflow triggering.
@@ -169,9 +268,9 @@ Subclass `Channel` from `src/channels/base.py`:
 ```python
 from src.channels.base import Channel
 
-class SlackChannel(Channel):
+class MyChannel(Channel):
     async def start(self) -> None:
-        # Connect to Slack, start listening for messages
+        # Connect to your platform, start listening for messages
         pass
 
     async def stop(self) -> None:
@@ -179,7 +278,7 @@ class SlackChannel(Channel):
         pass
 
     async def send_notification(self, text: str) -> None:
-        # Push cron/heartbeat results to Slack
+        # Push cron/heartbeat results to users
         pass
 ```
 
@@ -206,5 +305,7 @@ The channel receives these callbacks at construction:
 | `src/channels/base.py` | Abstract `Channel` class with command handling |
 | `src/channels/telegram.py` | Telegram bot adapter |
 | `src/channels/discord.py` | Discord bot adapter |
+| `src/channels/slack.py` | Slack adapter (Socket Mode via slack-bolt) |
+| `src/channels/whatsapp.py` | WhatsApp Cloud API adapter |
 | `src/channels/webhook.py` | HTTP webhook adapter |
 | `src/cli.py` | CLI REPL (uses same dispatch pattern) |

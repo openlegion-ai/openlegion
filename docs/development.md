@@ -287,6 +287,8 @@ openlegion/
 │   │   ├── base.py              # Abstract channel
 │   │   ├── telegram.py          # Telegram bot
 │   │   ├── discord.py           # Discord bot
+│   │   ├── slack.py             # Slack (Socket Mode)
+│   │   ├── whatsapp.py          # WhatsApp (Cloud API)
 │   │   └── webhook.py           # HTTP webhooks
 │   ├── shared/                  # Shared between host and agent
 │   │   ├── types.py             # Pydantic contracts
@@ -299,7 +301,7 @@ openlegion/
 │   ├── permissions.json
 │   ├── cron.json
 │   └── workflows/
-├── tests/                       # Test suite (~495 tests)
+├── tests/                       # Test suite (~638 tests)
 │   └── fixtures/                # Test fixtures (echo MCP server, etc.)
 ├── Dockerfile.agent             # Agent container image
 └── pyproject.toml               # Project metadata
@@ -330,7 +332,8 @@ openlegion/
 | `pydantic` | Type validation |
 | `sqlite-vec` | Vector search for memory |
 | `mcp` | Model Context Protocol client |
-| `playwright` | Browser automation (Chromium) |
+| `playwright` | Browser automation — basic tier (Chromium) |
+| `camoufox` | Anti-detect browser — stealth tier (Firefox) |
 
 ### Optional
 
@@ -338,7 +341,7 @@ openlegion/
 |-------|----------|---------|
 | `dev` | `pytest`, `pytest-asyncio`, `ruff` | Testing and linting |
 | `mcp` | `mcp>=1.0` | MCP tool support |
-| `channels` | `python-telegram-bot`, `discord.py` | Messaging channels |
+| `channels` | `python-telegram-bot`, `discord.py`, `slack-bolt` | Messaging channels |
 
 ## Common Mistakes
 

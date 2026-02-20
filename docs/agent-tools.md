@@ -28,7 +28,15 @@ All file operations are scoped to `/data` inside the container. Path traversal i
 
 ### Browser Automation
 
-Powered by Playwright with headless Chromium pre-installed in the agent container.
+Three-tier browser backend system controlled by `browser_backend` in `config/agents.yaml`:
+
+| Tier | Stack | Anti-Detection | Cost |
+|------|-------|---------------|------|
+| **basic** (default) | Playwright + Chromium | Low | Free |
+| **stealth** | Camoufox (Firefox-based anti-detect) | Medium | Free |
+| **advanced** | Bright Data Scraping Browser via CDP | High (residential proxies, CAPTCHA solving) | Paid |
+
+The backend is selected per-agent via the `BROWSER_BACKEND` environment variable. All tiers expose the same tool interface — downstream tools work identically regardless of backend.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
