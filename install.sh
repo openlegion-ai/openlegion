@@ -127,10 +127,16 @@ info "Git available"
 
 echo ""
 
-# If .venv exists but is broken (missing bin/python), recreate it
-if [ -d ".venv" ] && [ ! -x ".venv/bin/python" ]; then
+# If .venv exists but is broken (missing python or pip), recreate it
+if [ -d ".venv" ] && { [ ! -x ".venv/bin/python" ] || [ ! -x ".venv/bin/pip" ]; }; then
     warn "Existing .venv is broken — recreating..."
-    rm -rf .venv
+    rm -rf .venv 2>/dev/null || true
+    # If rm failed (e.g. root-owned .venv), try with sudo
+    if [ -d ".venv" ]; then
+        warn ".venv is owned by another user — need sudo to remove it"
+        sudo rm -rf .venv || fail "Cannot remove broken .venv. Delete it manually:
+      sudo rm -rf .venv"
+    fi
 fi
 
 if [ ! -d ".venv" ]; then
