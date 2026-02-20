@@ -238,6 +238,22 @@ openlegion channels list           # check what's connected
 
 On next `openlegion start`, a pairing code appears — send it to your bot to link.
 
+### Docker Sandbox (maximum security)
+
+By default, agents run in standard Docker containers — secure for most use cases. For stronger isolation, Docker Sandbox runs each agent in its own microVM with a dedicated kernel:
+
+```bash
+# Check if your Docker supports sandboxes
+docker sandbox version
+
+# Start with microVM isolation
+openlegion start --sandbox
+```
+
+**Requirements:** Docker Desktop 4.58+ (macOS or Windows). If `docker sandbox version` returns an error, update Docker Desktop.
+
+**Why use it?** Standard containers share the host kernel — a kernel exploit could theoretically escape. Sandbox microVMs give each agent its own kernel via Apple Virtualization.framework (macOS) or Hyper-V (Windows), making escape significantly harder. Use `--sandbox` when running untrusted code or when compliance requires hypervisor-level isolation.
+
 ---
 
 ## Troubleshooting
