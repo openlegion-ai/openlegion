@@ -215,19 +215,31 @@ def _ensure_docker_image() -> None:
 
 
 def _build_docker_image() -> None:
-    """Build the agent Docker image."""
+    """Build the agent Docker image with visible progress."""
     import subprocess
-    click.echo("Building Docker image (this may take a few minutes)...")
-    result = subprocess.run(
+
+    click.echo("Building Docker image...")
+    click.echo("  First build downloads base image + Chromium (~2 min). Rebuilds are fast.\n")
+    proc = subprocess.Popen(
         ["docker", "build", "-t", "openlegion-agent:latest", "-f", "Dockerfile.agent", "."],
         cwd=str(PROJECT_ROOT),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
     )
-    if result.returncode != 0:
-        click.echo(f"Docker build failed:\n{result.stderr}", err=True)
+    for line in proc.stdout:
+        line = line.rstrip()
+        if not line:
+            continue
+        # Show step progress and download/install lines, skip noisy intermediate output
+        if line.startswith("Step ") or line.startswith("#") or "Downloading" in line or "Installing" in line:
+            click.echo(f"  {line}")
+    proc.wait()
+    if proc.returncode != 0:
+        click.echo("Docker build failed. Run manually for full output:", err=True)
+        click.echo("  docker build -t openlegion-agent:latest -f Dockerfile.agent .", err=True)
         sys.exit(1)
-    click.echo("Docker image built successfully.")
+    click.echo("\n  Docker image built successfully.")
 
 
 def _add_agent_to_config(name: str, role: str, model: str, system_prompt: str) -> None:
@@ -544,7 +556,7 @@ def cli():
 
 @cli.command()
 def setup():
-    """One-time setup: API key, project definition, first agent, Docker image."""
+    """One-time setup: API key, project definition, first agent."""
 
     click.echo("=== OpenLegion Setup ===\n")
 
@@ -651,69 +663,23 @@ def setup():
         else:
             _setup_agent_wizard(selected_model)
 
-    # Step 4: Messaging channels (optional)
-    click.echo("\nStep 4: Messaging Channels (optional)\n")
-
-    if click.confirm("  Connect a Telegram bot?", default=False):
-        tg_token = click.prompt("  Telegram bot token", hide_input=True)
-        _set_env_key("telegram_bot_token", tg_token)
-        mesh_cfg = {}
-        if CONFIG_FILE.exists():
-            with open(CONFIG_FILE) as f:
-                mesh_cfg = yaml.safe_load(f) or {}
-        mesh_cfg.setdefault("channels", {}).setdefault("telegram", {})
-        mesh_cfg["channels"]["telegram"]["enabled"] = True
-        with open(CONFIG_FILE, "w") as f:
-            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
-        click.echo("  Telegram configured. Pairing code will appear when you run `openlegion start`.")
-
-    if click.confirm("  Connect a Discord bot?", default=False):
-        dc_token = click.prompt("  Discord bot token", hide_input=True)
-        _set_env_key("discord_bot_token", dc_token)
-        mesh_cfg = {}
-        if CONFIG_FILE.exists():
-            with open(CONFIG_FILE) as f:
-                mesh_cfg = yaml.safe_load(f) or {}
-        mesh_cfg.setdefault("channels", {}).setdefault("discord", {})
-        mesh_cfg["channels"]["discord"]["enabled"] = True
-        with open(CONFIG_FILE, "w") as f:
-            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
-        click.echo("  Discord configured. Pairing code will appear when you run `openlegion start`.")
-
-    has_tg = os.environ.get("OPENLEGION_CRED_TELEGRAM_BOT_TOKEN")
-    has_dc = os.environ.get("OPENLEGION_CRED_DISCORD_BOT_TOKEN")
-    if not has_tg and not has_dc:
-        click.echo("  Skipped. Add channels later during setup or by setting tokens in .env.")
-
-    # Step 5: Agent collaboration mode
-    click.echo("\nStep 5: Agent Collaboration\n")
-    click.echo("  Isolated:      Agents work independently, no shared context or messaging.")
-    click.echo("  Collaborative: Agents can message each other, share blackboard data.\n")
-
-    collab = click.confirm("  Enable agent collaboration?", default=True)
+    # Enable collaboration by default (users can change via config later)
     mesh_cfg = {}
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE) as f:
             mesh_cfg = yaml.safe_load(f) or {}
-    mesh_cfg["collaboration"] = collab
-    with open(CONFIG_FILE, "w") as f:
-        yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
-
-    if collab:
-        # Update permissions so agents can message each other
+    if "collaboration" not in mesh_cfg:
+        mesh_cfg["collaboration"] = True
+        with open(CONFIG_FILE, "w") as f:
+            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
         _set_collaborative_permissions()
-        click.echo("  Collaboration enabled. Agents can communicate via the mesh.")
-    else:
-        _set_isolated_permissions()
-        click.echo("  Isolation mode. Agents operate independently.")
 
-    # Step 6: Docker image
-    _ensure_docker_image()
-
-    # Done
-    click.echo("\nSetup complete.")
-    click.echo("  Start the runtime:  openlegion start")
-    click.echo("  Add more agents:    openlegion agent add")
+    # Done — Docker image builds automatically on first `openlegion start`
+    click.echo("\nSetup complete. Run `openlegion start` to launch your agents.")
+    click.echo("")
+    click.echo("  Optional next steps:")
+    click.echo("    openlegion agent add <name>   # add more agents")
+    click.echo("    Add Telegram/Discord tokens to .env for channel integration")
 
 
 def _setup_agent_wizard(model: str) -> str:

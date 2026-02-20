@@ -53,6 +53,8 @@
 
 **Requirements:** Python 3.12+, Docker (running), an LLM API key ([Anthropic](https://console.anthropic.com/) / [Moonshot](https://platform.moonshot.cn/) / [OpenAI](https://platform.openai.com/api-keys))
 
+**macOS / Linux:**
+
 ```bash
 git clone https://github.com/openlegion-ai/openlegion.git && cd openlegion
 ./install.sh                     # checks deps, creates venv, installs everything
@@ -61,7 +63,20 @@ openlegion setup                 # API key, project description, team template
 openlegion start                 # launch agents and start chatting
 ```
 
-> **Need help?** See the **[full setup guide](QUICKSTART.md)** for platform-specific instructions, Windows support, and troubleshooting.
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/openlegion-ai/openlegion.git
+cd openlegion
+powershell -ExecutionPolicy Bypass -File install.ps1
+.venv\Scripts\Activate.ps1
+openlegion setup
+openlegion start
+```
+
+> First install downloads ~70 packages and takes 2-3 minutes. Subsequent installs are fast.
+>
+> **Need help?** See the **[full setup guide](QUICKSTART.md)** for platform-specific instructions and troubleshooting.
 
 ```bash
 # Add more agents later
