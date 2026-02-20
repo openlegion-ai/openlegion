@@ -2,7 +2,7 @@
 
 ## Fast Path (macOS / Linux)
 
-**Prerequisites:** [Docker Desktop](https://docker.com/products/docker-desktop) running, Python 3.12+, an LLM API key.
+**Prerequisites:** [Docker Desktop](https://docker.com/products/docker-desktop) running, Python 3.10+, an LLM API key.
 
 ```bash
 git clone https://github.com/openlegion-ai/openlegion.git && cd openlegion
@@ -25,7 +25,7 @@ make test            # run the test suite
 
 ## Fast Path (Windows)
 
-**Prerequisites:** [Docker Desktop](https://docker.com/products/docker-desktop) running, Python 3.12+, an LLM API key.
+**Prerequisites:** [Docker Desktop](https://docker.com/products/docker-desktop) running, Python 3.10+, an LLM API key.
 
 ```powershell
 git clone https://github.com/openlegion-ai/openlegion.git
@@ -44,14 +44,14 @@ openlegion start     # launch agents and start chatting
 
 You need three things installed before running OpenLegion:
 
-### 1. Python 3.12+
+### 1. Python 3.10+
 
 <details>
 <summary><strong>macOS</strong></summary>
 
 ```bash
-brew install python@3.12
-python3 --version   # verify: 3.12 or higher
+brew install python@3
+python3 --version   # verify: 3.10 or higher
 ```
 
 Or download from [python.org/downloads](https://www.python.org/downloads/).
@@ -70,17 +70,17 @@ sudo dnf install python3 python3-pip git
 ```
 
 ```bash
-python3 --version   # verify: 3.12 or higher
+python3 --version   # verify: 3.10 or higher
 ```
 
-> Distro ships 3.11 or older? Use [pyenv](https://github.com/pyenv/pyenv) to get 3.12+.
+> Distro ships 3.9 or older? Use [pyenv](https://github.com/pyenv/pyenv) to get 3.10+.
 
 </details>
 
 <details>
 <summary><strong>Windows</strong></summary>
 
-1. Download Python 3.12+ from [python.org/downloads](https://www.python.org/downloads/)
+1. Download Python 3.10+ from [python.org/downloads](https://www.python.org/downloads/)
 2. Run installer — **check "Add python.exe to PATH"**
 3. Verify in PowerShell: `python --version`
 
@@ -241,7 +241,7 @@ Add bot tokens to `config/mesh.yaml`. On next start, a pairing code appears — 
 | `command not found: openlegion` | Activate the venv: `source .venv/bin/activate` (macOS/Linux) or `.venv\Scripts\Activate.ps1` (Windows) |
 | `Docker is not running` | Open Docker Desktop (macOS/Windows) or `sudo systemctl start docker` (Linux) |
 | `permission denied` on Docker | Linux: `sudo usermod -aG docker $USER` then log out/in |
-| `python3: command not found` | Install Python 3.12+ (see above). On Windows, use `python` instead of `python3`. |
+| `python3: command not found` | Install Python 3.10+ (see above). On Windows, use `python` instead of `python3`. |
 | `pip install` is slow | First install downloads ~70 packages (2-3 min). This is normal. Subsequent installs are fast. |
 | `pip install` permission error | Activate the venv first — don't install globally. |
 | Docker build is slow | First build downloads base image + Chromium (~2 min). Rebuilds are fast. |
