@@ -128,7 +128,7 @@ via cron schedules, webhooks, heartbeat monitoring, and file watchers — withou
 prompted.
 
 **424 tests passing** across **~11,000 lines** of application code.
-No module over 800 lines. **Fully auditable in a day.**
+**Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
 1. **Security by architecture** — every agent runs in an isolated Docker container
@@ -378,6 +378,7 @@ searches memory for relevant facts. Executes tool calls in a bounded loop
 | `set_heartbeat` | Enable autonomous monitoring with probes |
 | `list_cron` / `remove_cron` | Manage scheduled jobs |
 | `create_skill` | Write a new Python skill at runtime |
+| `list_custom_skills` | List all custom skills the agent has created |
 | `reload_skills` | Hot-reload all skills |
 | `spawn_agent` | Spawn an ephemeral sub-agent |
 | `read_agent_history` | Read another agent's conversation logs |
@@ -797,7 +798,7 @@ config/
 | The mesh is the only door | No agent has network access except through the mesh. No agent holds credentials. |
 | Private by default, shared by promotion | Agents keep knowledge private. Facts are explicitly promoted to the blackboard. |
 | Explicit failure handling | Every workflow step declares what happens on failure. No silent error swallowing. |
-| Small enough to audit | No module exceeds ~800 lines. The entire codebase is auditable in a day. |
+| Small enough to audit | ~11,000 total lines. The entire codebase is auditable in a day. |
 | Skills over features | New capabilities are agent skills, not mesh or orchestrator code. |
 | SQLite for all state | Single-file databases. No external services. WAL mode for concurrent reads. |
 | Zero vendor lock-in | LiteLLM supports 100+ providers. Markdown workspace files. No proprietary formats. |
