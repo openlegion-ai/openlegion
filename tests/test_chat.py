@@ -187,3 +187,24 @@ class TestChatEndpoints:
             assert resp.json()["injected"] is False  # idle state
         finally:
             loop._chat_lock.release()
+
+    def test_status_returns_context_fields(self):
+        """GET /status should include context_tokens, context_max, context_pct."""
+        from src.agent.context import ContextManager
+
+        loop = _make_loop()
+        loop.context_manager = ContextManager(max_tokens=50_000)
+        app = create_agent_app(loop)
+        client = TestClient(app)
+
+        # Send a chat message to populate _chat_messages
+        client.post("/chat", json={"message": "Hello"})
+
+        resp = client.get("/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "context_tokens" in data
+        assert "context_max" in data
+        assert "context_pct" in data
+        assert data["context_max"] == 50_000
+        assert data["context_tokens"] >= 0

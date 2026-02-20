@@ -157,7 +157,12 @@ class Channel(abc.ABC):
                 if info:
                     state = info.get("state", "unknown")
                     tasks = info.get("tasks_completed", 0)
-                    lines.append(f"  {name}: {state} ({tasks} tasks)")
+                    ctx_max = info.get("context_max", 0)
+                    if ctx_max:
+                        ctx_pct = int(info.get("context_pct", 0) * 100)
+                        lines.append(f"  {name}: {state} ({tasks} tasks, ctx {ctx_pct}%)")
+                    else:
+                        lines.append(f"  {name}: {state} ({tasks} tasks)")
                 else:
                     lines.append(f"  {name}: unreachable")
             return "Agent status:\n" + "\n".join(lines)

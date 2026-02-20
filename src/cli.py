@@ -1721,6 +1721,22 @@ def _multi_agent_repl(
                         click.echo(f"Today's spend: ${total:.4f}\n")
                         for a in agents_spend:
                             click.echo(f"  {a['agent']:<16} {a['tokens']:>8,} tokens  ${a['cost']:.4f}")
+                    # Context window usage per agent
+                    click.echo("\nContext usage:")
+                    for name in agent_urls:
+                        try:
+                            data = transport.request_sync(name, "GET", "/status", timeout=3)
+                            ctx_tokens = data.get("context_tokens", 0)
+                            ctx_max = data.get("context_max", 0)
+                            ctx_pct = data.get("context_pct", 0.0)
+                            if ctx_max:
+                                pct_str = f"{int(ctx_pct * 100)}%"
+                                click.echo(f"  {name:<16} Context: {ctx_tokens:,}/{ctx_max:,} tokens ({pct_str})")
+                            else:
+                                click.echo(f"  {name:<16} Context: n/a")
+                        except Exception:
+                            click.echo(f"  {name:<16} Context: unreachable")
+
                     # Model health summary
                     model_health = credential_vault.get_model_health() if credential_vault else []
                     if model_health:

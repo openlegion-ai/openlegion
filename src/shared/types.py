@@ -89,6 +89,9 @@ class AgentStatus(BaseModel):
     uptime_seconds: float = 0
     tasks_completed: int = 0
     tasks_failed: int = 0
+    context_tokens: int = 0
+    context_max: int = 0
+    context_pct: float = 0.0
 
 
 # === Blackboard & Events ===

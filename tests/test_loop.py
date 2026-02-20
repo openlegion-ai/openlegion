@@ -455,3 +455,57 @@ async def test_multiple_steers_combined():
     user_msg = loop._chat_messages[0]["content"]
     assert "first update" in user_msg
     assert "second update" in user_msg
+
+
+# === Context Warning Integration ===
+
+
+def test_context_warning_in_chat_system_prompt():
+    """When context >= 80%, _build_chat_system_prompt includes CONTEXT WARNING."""
+    from src.agent.context import ContextManager
+
+    loop = _make_loop()
+    # Set up a context manager with very small max_tokens so any messages exceed 80%
+    loop.context_manager = ContextManager(max_tokens=100)
+    # Prefill chat messages to trigger the 80% threshold
+    loop._chat_messages = [
+        {"role": "user", "content": "x" * 500},
+        {"role": "assistant", "content": "y" * 500},
+    ]
+    prompt = loop._build_chat_system_prompt()
+    assert "CONTEXT WARNING" in prompt
+
+
+def test_context_warning_absent_below_threshold():
+    """When context < 80%, no warning in system prompt."""
+    from src.agent.context import ContextManager
+
+    loop = _make_loop()
+    loop.context_manager = ContextManager(max_tokens=1_000_000)
+    loop._chat_messages = [{"role": "user", "content": "Hello"}]
+    prompt = loop._build_chat_system_prompt()
+    assert "CONTEXT WARNING" not in prompt
+
+
+def test_get_status_includes_context_fields():
+    """get_status should return context_tokens, context_max, context_pct."""
+    from src.agent.context import ContextManager
+
+    loop = _make_loop()
+    loop.context_manager = ContextManager(max_tokens=10_000)
+    loop._chat_messages = [
+        {"role": "user", "content": "Hello world " * 100},
+    ]
+    status = loop.get_status()
+    assert status.context_max == 10_000
+    assert status.context_tokens > 0
+    assert 0 < status.context_pct < 1.0
+
+
+def test_get_status_context_fields_without_context_manager():
+    """get_status should return zero context fields when no context_manager."""
+    loop = _make_loop()
+    status = loop.get_status()
+    assert status.context_tokens == 0
+    assert status.context_max == 0
+    assert status.context_pct == 0.0

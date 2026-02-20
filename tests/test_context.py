@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.agent.context import ContextManager, estimate_tokens
+from src.agent.context import (
+    MODEL_CONTEXT_WINDOWS,
+    ContextManager,
+    _DEFAULT_CONTEXT_WINDOW,
+    estimate_tokens,
+)
 from src.agent.workspace import WorkspaceManager
 from src.shared.types import LLMResponse
 
@@ -260,3 +266,97 @@ class TestHardPrune:
         msgs = _make_messages(4, chars_each=50)
         pruned = cm._hard_prune(msgs)
         assert pruned == msgs
+
+
+class TestEstimateTokensAccuracy:
+    def test_openai_tiktoken_returns_positive(self):
+        """tiktoken for OpenAI models should return int > 0."""
+        msgs = [{"role": "user", "content": "Hello, world!"}]
+        tokens = estimate_tokens(msgs, model="openai/gpt-4o")
+        assert isinstance(tokens, int)
+        assert tokens > 0
+
+    def test_anthropic_uses_3_5_ratio(self):
+        """Anthropic models should use ~3.5 chars per token."""
+        msgs = [{"role": "user", "content": "x" * 350}]
+        tokens = estimate_tokens(msgs, model="anthropic/claude-sonnet-4-5-20250929")
+        # 350 content chars + JSON overhead, divided by 3.5
+        chars = sum(len(json.dumps(m)) for m in msgs)
+        assert tokens == int(chars / 3.5)
+
+    def test_unknown_model_uses_4_ratio(self):
+        """Unknown models should fall back to 4 chars/token."""
+        msgs = [{"role": "user", "content": "x" * 400}]
+        tokens = estimate_tokens(msgs, model="custom/my-model")
+        chars = sum(len(json.dumps(m)) for m in msgs)
+        assert tokens == chars // 4
+
+    def test_empty_model_uses_fallback(self):
+        """Empty model string should use 4 chars/token fallback."""
+        msgs = [{"role": "user", "content": "Hello"}]
+        tokens_default = estimate_tokens(msgs, model="")
+        tokens_no_model = estimate_tokens(msgs)
+        assert tokens_default == tokens_no_model
+
+    def test_unknown_openai_model_falls_back(self):
+        """An unrecognized OpenAI model should fall back gracefully."""
+        msgs = [{"role": "user", "content": "Hello, world!"}]
+        tokens = estimate_tokens(msgs, model="openai/gpt-99-nonexistent")
+        assert isinstance(tokens, int)
+        assert tokens > 0
+
+
+class TestModelContextWindows:
+    def test_auto_detect_gpt4o(self):
+        cm = ContextManager(model="openai/gpt-4o")
+        assert cm.max_tokens == 128_000
+
+    def test_auto_detect_claude(self):
+        cm = ContextManager(model="anthropic/claude-sonnet-4-5-20250929")
+        assert cm.max_tokens == 200_000
+
+    def test_unknown_model_defaults_128k(self):
+        cm = ContextManager(model="custom/unknown-model")
+        assert cm.max_tokens == _DEFAULT_CONTEXT_WINDOW
+
+    def test_explicit_max_tokens_overrides(self):
+        cm = ContextManager(max_tokens=50_000, model="openai/gpt-4o")
+        assert cm.max_tokens == 50_000
+
+
+class TestContextWarning:
+    def test_no_warning_below_80(self):
+        cm = ContextManager(max_tokens=10_000)
+        msgs = _make_messages(2, chars_each=50)  # very small
+        assert cm.context_warning(msgs) is None
+
+    def test_warning_at_80_pct(self):
+        cm = ContextManager(max_tokens=100)
+        msgs = _make_messages(5, chars_each=200)  # well over 80%
+        warning = cm.context_warning(msgs)
+        assert warning is not None
+        assert "CONTEXT WARNING" in warning
+
+    def test_warning_contains_token_counts(self):
+        cm = ContextManager(max_tokens=100)
+        msgs = _make_messages(5, chars_each=200)
+        warning = cm.context_warning(msgs)
+        assert warning is not None
+        assert "100" in warning  # max_tokens
+        assert "tokens" in warning
+
+
+class TestTokenCount:
+    def test_returns_positive_int(self):
+        cm = ContextManager(max_tokens=10_000)
+        msgs = _make_messages(3, chars_each=100)
+        count = cm.token_count(msgs)
+        assert isinstance(count, int)
+        assert count > 0
+
+    def test_with_model(self):
+        cm = ContextManager(max_tokens=10_000, model="anthropic/claude-sonnet-4-5-20250929")
+        msgs = _make_messages(3, chars_each=100)
+        count = cm.token_count(msgs)
+        assert isinstance(count, int)
+        assert count > 0
