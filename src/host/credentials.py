@@ -16,6 +16,7 @@ from collections.abc import Callable
 
 import httpx
 
+from src.host.transcript import sanitize_for_provider
 from src.shared.types import APIProxyRequest, APIProxyResponse
 from src.shared.utils import setup_logging
 
@@ -249,9 +250,10 @@ class CredentialVault:
 
         if request.action == "chat":
             async def _chat(model: str, api_key: str):
+                sanitized = sanitize_for_provider(request.params.get("messages", []), model)
                 return await litellm.acompletion(
                     model=model,
-                    messages=request.params.get("messages", []),
+                    messages=sanitized,
                     api_key=api_key,
                     **{k: v for k, v in request.params.items() if k not in ("model", "messages")},
                 )
@@ -320,9 +322,10 @@ class CredentialVault:
             if not api_key:
                 continue
             try:
+                sanitized = sanitize_for_provider(request.params.get("messages", []), model)
                 response = await litellm.acompletion(
                     model=model,
-                    messages=request.params.get("messages", []),
+                    messages=sanitized,
                     api_key=api_key,
                     stream=True,
                     **{k: v for k, v in request.params.items() if k not in ("model", "messages")},
@@ -396,9 +399,11 @@ class CredentialVault:
         import litellm
 
         if request.action == "chat":
+            model = request.params.get("model", "anthropic/claude-sonnet-4-5-20250929")
+            sanitized = sanitize_for_provider(request.params.get("messages", []), model)
             response = await litellm.acompletion(
-                model=request.params.get("model", "anthropic/claude-sonnet-4-5-20250929"),
-                messages=request.params.get("messages", []),
+                model=model,
+                messages=sanitized,
                 api_key=api_key,
                 **{k: v for k, v in request.params.items() if k not in ("model", "messages")},
             )
