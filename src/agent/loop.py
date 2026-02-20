@@ -238,6 +238,7 @@ class AgentLoop:
                             self._record_failure(
                                 tool_call.name, str(e),
                                 truncate(str(tool_call.arguments), 200),
+                                arguments=tool_call.arguments,
                             )
 
                         messages.append({
@@ -412,6 +413,13 @@ class AgentLoop:
             input_summary=truncate(str(tool_input), 200),
             output_summary=truncate(str(tool_output), 200),
         )
+        # Record structured tool outcome
+        self.memory.store_tool_outcome(
+            tool_name=tool_name,
+            arguments=tool_input,
+            outcome=truncate(str(tool_output), 500),
+            success=True,
+        )
         if isinstance(tool_output, dict):
             for key, value in tool_output.items():
                 if isinstance(value, (str, int, float, bool)):
@@ -422,16 +430,33 @@ class AgentLoop:
                         source=f"tool:{tool_name}",
                     )
 
-    def _record_failure(self, tool_name: str, error: str, context: str = "") -> None:
+    def _record_failure(self, tool_name: str, error: str, context: str = "", arguments: dict | None = None) -> None:
         """Record a tool failure so the agent can avoid repeating mistakes."""
         if self.workspace:
             self.workspace.record_error(tool_name, error, context)
+        self.memory.store_tool_outcome(
+            tool_name=tool_name,
+            arguments=arguments,
+            outcome=truncate(error, 500),
+            success=False,
+        )
 
     def _maybe_reload_skills(self, result: Any) -> None:
         """If a tool returned reload_requested, hot-reload the skill registry."""
         if isinstance(result, dict) and result.get("reload_requested"):
             count = self.skills.reload()
             logger.info(f"Hot-reloaded skills: {count} available")
+
+    def _build_tool_history_context(self, limit: int = 10) -> str:
+        """Build a system prompt section with recent tool outcomes."""
+        history = self.memory.get_tool_history(limit=limit)
+        if not history:
+            return ""
+        lines = []
+        for h in history:
+            status = "OK" if h["success"] else "FAILED"
+            lines.append(f"- {h['tool_name']} [{status}]: {truncate(h['outcome'], 100)}")
+        return "## Recent Tool History\n\n" + "\n".join(lines)
 
     def _build_system_prompt(self, assignment: TaskAssignment) -> str:
         tools_desc = self.skills.get_descriptions()
@@ -455,6 +480,9 @@ class AgentLoop:
             learnings = self.workspace.get_learnings_context()
             if learnings:
                 parts.append(f"## Learnings\n\n{learnings}")
+        tool_history = self._build_tool_history_context()
+        if tool_history:
+            parts.append(tool_history)
         return "\n\n".join(parts)
 
     def _parse_final_output(self, content: str) -> tuple[dict, dict]:
@@ -581,6 +609,7 @@ class AgentLoop:
                             memory_store=self.memory,
                         )
                         result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+                        await self._learn(tool_call.name, tool_call.arguments, result)
                     except Exception as e:
                         result_str = json.dumps({"error": str(e)})
                         result = {"error": str(e)}
@@ -588,6 +617,7 @@ class AgentLoop:
                         self._record_failure(
                             tool_call.name, str(e),
                             truncate(str(tool_call.arguments), 200),
+                            arguments=tool_call.arguments,
                         )
 
                     self._chat_messages.append({
@@ -752,6 +782,10 @@ class AgentLoop:
             f"- Respect user corrections — they define preferred behavior.\n"
         )
 
+        tool_history = self._build_tool_history_context()
+        if tool_history:
+            parts.append(tool_history)
+
         # Context usage warning at 80%+
         if self.context_manager and hasattr(self, "_chat_messages"):
             warning = self.context_manager.context_warning(self._chat_messages)
@@ -899,6 +933,7 @@ class AgentLoop:
                             memory_store=self.memory,
                         )
                         result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+                        await self._learn(tool_call.name, tool_call.arguments, result)
                     except Exception as e:
                         result_str = json.dumps({"error": str(e)})
                         result = {"error": str(e)}
@@ -906,6 +941,7 @@ class AgentLoop:
                         self._record_failure(
                             tool_call.name, str(e),
                             truncate(str(tool_call.arguments), 200),
+                            arguments=tool_call.arguments,
                         )
 
                     self._chat_messages.append({
