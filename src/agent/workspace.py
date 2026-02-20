@@ -69,6 +69,11 @@ _MAX_SOUL = 4_000
 _MAX_USER = 4_000
 _MAX_MEMORY = 16_000
 
+# Project-level SOUL.md fallback (mounted into container by runtime)
+_SOUL_FALLBACK_PATH = Path("/app/SOUL.md")
+# First line of default scaffold — used to detect un-customized SOUL.md
+_DEFAULT_SOUL_PREFIX = "# Identity\n\nDefine personality"
+
 
 _CORRECTION_SIGNALS = frozenset({
     "no,", "no.", "wrong", "incorrect", "that's not", "that is not",
@@ -160,6 +165,16 @@ class WorkspaceManager:
 
         for filename, cap in caps.items():
             content = self._read_file(filename)
+
+            # SOUL.md: fall back to project-level if workspace copy is default scaffold
+            if filename == "SOUL.md" and (
+                not content or not content.strip()
+                or content.strip().startswith(_DEFAULT_SOUL_PREFIX)
+            ):
+                fallback = self._read_external(str(_SOUL_FALLBACK_PATH))
+                if fallback and fallback.strip():
+                    content = fallback
+
             if not content or not content.strip():
                 continue
             content = content.strip()
@@ -185,6 +200,17 @@ class WorkspaceManager:
             return path.read_text(errors="replace")[:_MAX_FILE_SIZE]
         except Exception as e:
             logger.warning(f"Failed to read {relative_path}: {e}")
+            return None
+
+    @staticmethod
+    def _read_external(absolute_path: str) -> str | None:
+        """Read a file by absolute path (e.g. project-level mounts)."""
+        p = Path(absolute_path)
+        if not p.exists() or not p.is_file():
+            return None
+        try:
+            return p.read_text(errors="replace")[:_MAX_FILE_SIZE]
+        except Exception:
             return None
 
     # ── Writing ──────────────────────────────────────────────

@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 
 from src.channels.base import (
+    AddKeyFn,
     Channel,
     CostsFn,
     DispatchFn,
@@ -63,6 +64,7 @@ class DiscordChannel(Channel):
         status_fn: StatusFn | None = None,
         costs_fn: CostsFn | None = None,
         reset_fn: ResetFn | None = None,
+        addkey_fn: AddKeyFn | None = None,
     ):
         super().__init__(
             dispatch_fn=dispatch_fn,
@@ -71,6 +73,7 @@ class DiscordChannel(Channel):
             status_fn=status_fn,
             costs_fn=costs_fn,
             reset_fn=reset_fn,
+            addkey_fn=addkey_fn,
         )
         self.token = token
         self.allowed_guilds = set(allowed_guilds) if allowed_guilds else None

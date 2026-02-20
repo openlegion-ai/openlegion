@@ -7,6 +7,7 @@ The mesh tracks token usage and enforces budgets.
 from __future__ import annotations
 
 import json
+import os
 
 import httpx
 
@@ -24,10 +25,14 @@ class LLMClient:
         self.agent_id = agent_id
         self.default_model = default_model
         self._client: httpx.AsyncClient | None = None
+        self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=120)
+            headers: dict[str, str] = {}
+            if self._auth_token:
+                headers["Authorization"] = f"Bearer {self._auth_token}"
+            self._client = httpx.AsyncClient(timeout=120, headers=headers)
         return self._client
 
     async def close(self) -> None:

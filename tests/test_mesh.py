@@ -317,3 +317,42 @@ def test_permissions_wildcard_messaging(tmp_path):
     assert pm.can_message("ceo", "anyone")
     assert not pm.can_message("worker", "ceo")
     assert pm.can_message("worker", "orchestrator")
+
+
+def test_can_manage_vault_default_false(permissions):
+    """can_manage_vault defaults to False for agents without explicit grant."""
+    assert permissions.can_manage_vault("research") is False
+    assert permissions.can_manage_vault("qualify") is False
+
+
+def test_can_manage_vault_granted(tmp_path):
+    """Agent with can_manage_vault=True passes the check."""
+    config = {
+        "permissions": {
+            "admin": {
+                "can_message": ["*"],
+                "blackboard_read": ["*"],
+                "blackboard_write": ["*"],
+                "allowed_apis": ["llm"],
+                "can_manage_vault": True,
+            },
+            "worker": {
+                "can_message": ["orchestrator"],
+                "blackboard_read": [],
+                "blackboard_write": [],
+                "allowed_apis": [],
+            },
+        }
+    }
+    config_path = tmp_path / "permissions.json"
+    config_path.write_text(json.dumps(config))
+    pm = PermissionMatrix(config_path=str(config_path))
+
+    assert pm.can_manage_vault("admin") is True
+    assert pm.can_manage_vault("worker") is False
+
+
+def test_can_manage_vault_orchestrator_always_allowed(permissions):
+    """Orchestrator and mesh always have vault access."""
+    assert permissions.can_manage_vault("orchestrator") is True
+    assert permissions.can_manage_vault("mesh") is True

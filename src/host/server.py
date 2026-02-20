@@ -10,12 +10,18 @@ Provides endpoints for:
 
 from __future__ import annotations
 
+import hmac
+import time
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from src.shared.types import AgentMessage, APIProxyRequest, APIProxyResponse, MeshEvent
+from src.shared.utils import setup_logging
+
+_server_logger = setup_logging("host.server")
 
 if TYPE_CHECKING:
     from src.host.credentials import CredentialVault
@@ -37,20 +43,41 @@ def create_mesh_app(
     container_manager: RuntimeBackend | None = None,
     transport: Transport | None = None,
     orchestrator: Orchestrator | None = None,
+    auth_tokens: dict[str, str] | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
 
+    _auth_tokens = auth_tokens if auth_tokens is not None else {}
+
+    # Vault resolve rate limiting: max 5 resolves per agent per 60 seconds
+    _VAULT_RESOLVE_LIMIT = 5
+    _VAULT_RESOLVE_WINDOW = 60
+    _vault_resolve_ts: dict[str, list[float]] = defaultdict(list)
+
+    def _verify_auth(agent_id: str, request: Request) -> None:
+        """Verify agent identity via auth token. No-op when auth is not configured."""
+        if not _auth_tokens or not agent_id or agent_id in ("mesh", "orchestrator"):
+            return
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(401, "Missing authentication token")
+        token = auth_header[7:]
+        expected = _auth_tokens.get(agent_id)
+        if not expected or not hmac.compare_digest(token, expected):
+            raise HTTPException(401, "Invalid authentication token")
+
     # === System Messaging (orchestrator/mesh → agent) ===
 
     @app.post("/mesh/message")
-    async def send_message(msg: AgentMessage) -> dict:
+    async def send_message(msg: AgentMessage, request: Request) -> dict:
         """Route a system message to an agent (task results, orchestrator commands).
 
         Special case: messages addressed to "orchestrator" with type "task_result"
         are intercepted and resolved against the orchestrator's pending futures
         instead of being routed to an agent container.
         """
+        _verify_auth(msg.from_agent, request)
         if msg.to == "orchestrator" and msg.type == "task_result" and orchestrator is not None:
             from src.shared.types import TaskResult
             try:
@@ -65,16 +92,18 @@ def create_mesh_app(
     # NOTE: list route must be defined BEFORE the {key:path} route to avoid shadowing
 
     @app.get("/mesh/blackboard/")
-    async def list_blackboard(prefix: str, agent_id: str) -> list[dict]:
+    async def list_blackboard(prefix: str, agent_id: str, request: Request) -> list[dict]:
         """List blackboard entries by prefix."""
+        _verify_auth(agent_id, request)
         if not permissions.can_read_blackboard(agent_id, prefix):
             raise HTTPException(403, f"Agent {agent_id} cannot read {prefix}")
         entries = blackboard.list_by_prefix(prefix)
         return [e.model_dump(mode="json") for e in entries]
 
     @app.get("/mesh/blackboard/{key:path}")
-    async def read_blackboard(key: str, agent_id: str) -> dict:
+    async def read_blackboard(key: str, agent_id: str, request: Request) -> dict:
         """Read a blackboard entry. Agent must have read permission."""
+        _verify_auth(agent_id, request)
         if not permissions.can_read_blackboard(agent_id, key):
             raise HTTPException(403, f"Agent {agent_id} cannot read {key}")
         entry = blackboard.read(key)
@@ -83,8 +112,9 @@ def create_mesh_app(
         return entry.model_dump(mode="json")
 
     @app.put("/mesh/blackboard/{key:path}")
-    async def write_blackboard(key: str, agent_id: str, value: dict) -> dict:
+    async def write_blackboard(key: str, agent_id: str, value: dict, request: Request) -> dict:
         """Write to blackboard. Agent must have write permission."""
+        _verify_auth(agent_id, request)
         if not permissions.can_write_blackboard(agent_id, key):
             raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
         entry = blackboard.write(key, value, written_by=agent_id)
@@ -93,8 +123,9 @@ def create_mesh_app(
     # === Pub/Sub ===
 
     @app.post("/mesh/publish")
-    async def publish_event(event: MeshEvent) -> dict:
+    async def publish_event(event: MeshEvent, request: Request) -> dict:
         """Publish an event to a topic."""
+        _verify_auth(event.source, request)
         if not permissions.can_publish(event.source, event.topic):
             raise HTTPException(403, f"Agent {event.source} cannot publish to {event.topic}")
         subscribers = pubsub.get_subscribers(event.topic)
@@ -110,8 +141,9 @@ def create_mesh_app(
         return {"subscribers_notified": len(subscribers)}
 
     @app.post("/mesh/subscribe")
-    async def subscribe(topic: str, agent_id: str) -> dict:
+    async def subscribe(topic: str, agent_id: str, request: Request) -> dict:
         """Subscribe an agent to an event topic."""
+        _verify_auth(agent_id, request)
         if not permissions.can_subscribe(agent_id, topic):
             raise HTTPException(403, f"Agent {agent_id} cannot subscribe to {topic}")
         pubsub.subscribe(topic, agent_id)
@@ -120,23 +152,25 @@ def create_mesh_app(
     # === API Proxy ===
 
     @app.post("/mesh/api", response_model=APIProxyResponse)
-    async def proxy_api_call(request: APIProxyRequest, agent_id: str) -> APIProxyResponse:
+    async def proxy_api_call(request: Request, api_request: APIProxyRequest, agent_id: str) -> APIProxyResponse:
         """Proxy external API calls. Agent never sees credentials."""
-        if not permissions.can_use_api(agent_id, request.service):
-            raise HTTPException(403, f"Agent {agent_id} cannot access {request.service}")
+        _verify_auth(agent_id, request)
+        if not permissions.can_use_api(agent_id, api_request.service):
+            raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
         if credential_vault is None:
             return APIProxyResponse(success=False, error="No credential vault configured")
-        return await credential_vault.execute_api_call(request, agent_id=agent_id)
+        return await credential_vault.execute_api_call(api_request, agent_id=agent_id)
 
     @app.post("/mesh/api/stream")
-    async def proxy_api_stream(request: APIProxyRequest, agent_id: str) -> StreamingResponse:
+    async def proxy_api_stream(request: Request, api_request: APIProxyRequest, agent_id: str) -> StreamingResponse:
         """Streaming API proxy. Returns SSE stream for LLM completions."""
-        if not permissions.can_use_api(agent_id, request.service):
-            raise HTTPException(403, f"Agent {agent_id} cannot access {request.service}")
+        _verify_auth(agent_id, request)
+        if not permissions.can_use_api(agent_id, api_request.service):
+            raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
         if credential_vault is None:
             raise HTTPException(503, "No credential vault configured")
         return StreamingResponse(
-            credential_vault.stream_llm(request, agent_id=agent_id),
+            credential_vault.stream_llm(api_request, agent_id=agent_id),
             media_type="text/event-stream",
         )
 
@@ -149,12 +183,88 @@ def create_mesh_app(
             return []
         return credential_vault.get_model_health()
 
+    # === Vault (credential management) ===
+
+    @app.post("/mesh/vault/store")
+    async def vault_store(data: dict, request: Request) -> dict:
+        """Store a credential and return an opaque $CRED{name} handle."""
+        agent_id = data.get("agent_id", "")
+        _verify_auth(agent_id, request)
+        if not permissions.can_manage_vault(agent_id):
+            raise HTTPException(403, f"Agent {agent_id} cannot manage vault")
+        if credential_vault is None:
+            raise HTTPException(503, "No credential vault configured")
+        name = data.get("name", "")
+        value = data.get("value", "")
+        if not name or not value:
+            raise HTTPException(400, "name and value are required")
+        handle = credential_vault.add_credential(name, value)
+        return {"stored": True, "handle": handle}
+
+    @app.get("/mesh/vault/list")
+    async def vault_list(agent_id: str, request: Request) -> dict:
+        """List credential names (never values)."""
+        _verify_auth(agent_id, request)
+        if not permissions.can_manage_vault(agent_id):
+            raise HTTPException(403, f"Agent {agent_id} cannot manage vault")
+        if credential_vault is None:
+            raise HTTPException(503, "No credential vault configured")
+        names = credential_vault.list_credential_names()
+        return {"credentials": names, "count": len(names)}
+
+    @app.get("/mesh/vault/status/{name}")
+    async def vault_status(name: str, agent_id: str, request: Request) -> dict:
+        """Check if a credential exists by name."""
+        _verify_auth(agent_id, request)
+        if not permissions.can_manage_vault(agent_id):
+            raise HTTPException(403, f"Agent {agent_id} cannot manage vault")
+        if credential_vault is None:
+            raise HTTPException(503, "No credential vault configured")
+        return {"name": name, "exists": credential_vault.has_credential(name)}
+
+    @app.post("/mesh/vault/resolve")
+    async def vault_resolve(data: dict, request: Request) -> dict:
+        """Resolve a credential handle to its value. Internal use only (browser tool)."""
+        agent_id = data.get("agent_id", "")
+        _verify_auth(agent_id, request)
+        if not permissions.can_manage_vault(agent_id):
+            raise HTTPException(403, f"Agent {agent_id} cannot manage vault")
+        if credential_vault is None:
+            raise HTTPException(503, "No credential vault configured")
+        name = data.get("name", "")
+        if not name:
+            raise HTTPException(400, "name is required")
+
+        # Rate limit: max N resolves per agent per window
+        now = time.time()
+        ts_list = _vault_resolve_ts[agent_id]
+        ts_list[:] = [t for t in ts_list if now - t < _VAULT_RESOLVE_WINDOW]
+        if len(ts_list) >= _VAULT_RESOLVE_LIMIT:
+            _server_logger.warning(
+                "Vault resolve rate limit hit",
+                extra={"extra_data": {"agent_id": agent_id, "name": name}},
+            )
+            raise HTTPException(429, "Vault resolve rate limit exceeded")
+        ts_list.append(now)
+
+        # Audit log every resolve
+        _server_logger.info(
+            "Vault credential resolved",
+            extra={"extra_data": {"agent_id": agent_id, "credential": name}},
+        )
+
+        value = credential_vault.resolve_credential(name)
+        if value is None:
+            raise HTTPException(404, f"Credential not found: {name}")
+        return {"name": name, "value": value}
+
     # === Agent Registry ===
 
     @app.post("/mesh/register")
-    async def register_agent(data: dict) -> dict:
+    async def register_agent(data: dict, request: Request) -> dict:
         """Agent registers itself with the mesh on startup."""
         agent_id = data["agent_id"]
+        _verify_auth(agent_id, request)
         capabilities = data.get("capabilities", [])
         port = data.get("port", 8400)
 
@@ -178,11 +288,13 @@ def create_mesh_app(
     # === Cron CRUD ===
 
     @app.post("/mesh/cron")
-    async def create_cron_job(data: dict) -> dict:
+    async def create_cron_job(data: dict, request: Request) -> dict:
         """Create a cron job. Body: {agent_id, schedule, message, heartbeat?}."""
         if cron_scheduler is None:
             raise HTTPException(503, "Cron scheduler not available")
         agent_id = data.get("agent_id")
+        if agent_id:
+            _verify_auth(agent_id, request)
         schedule = data.get("schedule")
         message = data.get("message", "")
         heartbeat = data.get("heartbeat", False)

@@ -18,6 +18,7 @@ _browser = None
 _context = None
 _page = None
 _page_refs: dict[str, object] = {}
+_credential_filled_refs: set[str] = set()  # refs that had $CRED{} typed into them
 
 _ACTIONABLE_ROLES = frozenset({
     "button", "link", "textbox", "checkbox", "radio", "combobox",
@@ -38,6 +39,30 @@ _ARIA_LINE_RE = re.compile(
     r'(?:\s+"([^"]*)")?'   # optional "name"
     r"(?:\s+\[([^\]]*)\])?"  # optional [attributes]
 )
+
+_CRED_HANDLE_RE = re.compile(r"\$CRED\{([^}]+)\}")
+
+# Patterns for redacting common secret formats in browser output
+_REDACT_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),          # OpenAI / Anthropic keys
+    re.compile(r"ghp_[A-Za-z0-9]{36,}"),            # GitHub PATs
+    re.compile(r"gho_[A-Za-z0-9]{36,}"),            # GitHub OAuth tokens
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),    # GitHub fine-grained PATs
+    re.compile(r"xoxb-[A-Za-z0-9\-]{20,}"),         # Slack bot tokens
+    re.compile(r"xoxp-[A-Za-z0-9\-]{20,}"),         # Slack user tokens
+    re.compile(r"AKIA[A-Z0-9]{16}"),                 # AWS access key IDs
+    re.compile(r"(?<![A-Za-z0-9])[A-Fa-f0-9]{40,}(?![A-Za-z0-9])"),  # 40+ hex chars
+    re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9/+=])"),  # base64 40+ chars
+]
+
+
+def _redact_credentials(text: str) -> str:
+    """Replace common secret patterns with [REDACTED]."""
+    if not text:
+        return text
+    for pattern in _REDACT_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+    return text
 
 
 async def _get_page():
@@ -119,6 +144,7 @@ async def browser_navigate(url: str, wait_ms: int = 1000) -> dict:
     """Navigate to a URL and extract text content."""
     try:
         _page_refs.clear()
+        _credential_filled_refs.clear()
         page = await _get_page()
         response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         if wait_ms:
@@ -128,7 +154,7 @@ async def browser_navigate(url: str, wait_ms: int = 1000) -> dict:
             "url": page.url,
             "title": await page.title(),
             "status": response.status if response else 0,
-            "content": text[:50000],
+            "content": _redact_credentials(text[:50000]),
         }
     except Exception as e:
         return {"error": str(e), "url": url}
@@ -217,7 +243,14 @@ async def browser_snapshot() -> dict:
 
             _page_refs[ref] = locator
 
-            entry = {"ref": ref, **el}
+            # Redact common secret patterns from element text
+            redacted_el = dict(el)
+            if "name" in redacted_el:
+                redacted_el["name"] = _redact_credentials(redacted_el["name"])
+            if "value" in redacted_el:
+                redacted_el["value"] = _redact_credentials(redacted_el["value"])
+
+            entry = {"ref": ref, **redacted_el}
             elements.append(entry)
 
         result: dict = {
@@ -324,23 +357,51 @@ async def browser_click(selector: str = "", ref: str = "") -> dict:
         },
     },
 )
-async def browser_type(text: str, selector: str = "", ref: str = "") -> dict:
+async def browser_type(
+    text: str, selector: str = "", ref: str = "", *, mesh_client=None,
+) -> dict:
     """Type text into an element by ref or CSS selector."""
     if not text:
         return {"error": "The 'text' parameter is required"}
     if not selector and not ref:
         return {"error": "Provide either 'ref' (from browser_snapshot) or 'selector' (CSS)"}
+
+    # Resolve $CRED{name} handles to actual values (credential-blind typing)
+    is_credential = False
+    actual_text = text
+    cred_matches = _CRED_HANDLE_RE.findall(text)
+    if cred_matches:
+        if not mesh_client:
+            return {"error": "$CRED{} handles require mesh connectivity for resolution"}
+        for cred_name in cred_matches:
+            resolved = await mesh_client.vault_resolve(cred_name)
+            if resolved is None:
+                return {"error": f"Credential not found: {cred_name}"}
+            actual_text = actual_text.replace(f"$CRED{{{cred_name}}}", resolved)
+        is_credential = True
+
     try:
         page = await _get_page()
         if ref:
             locator = _page_refs.get(ref)
             if not locator:
                 return {"error": f"Unknown ref '{ref}'. Call browser_snapshot first to get current refs."}
-            await locator.fill(text, timeout=10000)
-            return {"typed": text, "ref": ref}
+            await locator.fill(actual_text, timeout=10000)
         else:
-            await page.fill(selector, text, timeout=10000)
-            return {"typed": text, "selector": selector}
+            await page.fill(selector, actual_text, timeout=10000)
+
+        # Track which refs have been filled with credentials
+        if is_credential and ref:
+            _credential_filled_refs.add(ref)
+
+        # Never return credential values to the LLM
+        display_text = "[credential]" if is_credential else text
+        result: dict = {"typed": display_text}
+        if ref:
+            result["ref"] = ref
+        else:
+            result["selector"] = selector
+        return result
     except Exception as e:
         return {"error": str(e), "selector": selector, "ref": ref}
 
@@ -361,6 +422,19 @@ async def browser_evaluate(script: str) -> dict:
     try:
         page = await _get_page()
         result = await page.evaluate(script)
+        # Redact any credential values that might appear in evaluate results
+        if isinstance(result, str):
+            result = _redact_credentials(result)
+        elif isinstance(result, dict):
+            result = {
+                k: _redact_credentials(v) if isinstance(v, str) else v
+                for k, v in result.items()
+            }
+        elif isinstance(result, list):
+            result = [
+                _redact_credentials(item) if isinstance(item, str) else item
+                for item in result
+            ]
         return {"result": result}
     except Exception as e:
         return {"error": str(e)}

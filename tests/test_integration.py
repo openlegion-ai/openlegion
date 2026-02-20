@@ -216,6 +216,240 @@ def test_webhook_unknown_workflow(tmp_path):
     assert response.status_code == 404
 
 
+# ── Vault endpoint tests ──────────────────────────────────────
+
+
+@pytest.fixture
+def vault_components(tmp_path):
+    """Mesh components with vault support and can_manage_vault permission."""
+    from src.host.credentials import CredentialVault
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "trusted": AgentPermissions(
+            agent_id="trusted",
+            can_message=["orchestrator"],
+            blackboard_read=["context/*"],
+            blackboard_write=[],
+            allowed_apis=["llm"],
+            can_manage_vault=True,
+        ),
+        "untrusted": AgentPermissions(
+            agent_id="untrusted",
+            can_message=["orchestrator"],
+            blackboard_read=[],
+            blackboard_write=[],
+            allowed_apis=[],
+            can_manage_vault=False,
+        ),
+    }
+
+    router = MessageRouter(permissions=perms, agent_registry={})
+    vault = CredentialVault()
+
+    # Patch _persist_to_env to avoid writing to real .env
+    import src.host.credentials as cred_mod
+    cred_mod._persist_to_env = lambda *a, **kw: None
+
+    app = create_mesh_app(bb, pubsub, router, perms, credential_vault=vault)
+    client = TestClient(app)
+
+    return {"client": client, "vault": vault}
+
+
+def test_vault_store_endpoint(vault_components):
+    client = vault_components["client"]
+    response = client.post(
+        "/mesh/vault/store",
+        json={"agent_id": "trusted", "name": "brave_search", "value": "sk-test-123"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["stored"] is True
+    assert data["handle"] == "$CRED{brave_search}"
+    # Value must NOT be in response
+    assert "sk-test-123" not in str(data)
+
+
+def test_vault_store_permission_denied(vault_components):
+    client = vault_components["client"]
+    response = client.post(
+        "/mesh/vault/store",
+        json={"agent_id": "untrusted", "name": "key", "value": "secret"},
+    )
+    assert response.status_code == 403
+
+
+def test_vault_list_endpoint(vault_components):
+    client = vault_components["client"]
+    vault = vault_components["vault"]
+    vault.credentials["test_key"] = "value"
+
+    response = client.get("/mesh/vault/list", params={"agent_id": "trusted"})
+    assert response.status_code == 200
+    data = response.json()
+    assert "test_key" in data["credentials"]
+    assert data["count"] >= 1
+
+
+def test_vault_status_endpoint(vault_components):
+    client = vault_components["client"]
+    vault = vault_components["vault"]
+    vault.credentials["exists_key"] = "val"
+
+    response = client.get(
+        "/mesh/vault/status/exists_key", params={"agent_id": "trusted"},
+    )
+    assert response.status_code == 200
+    assert response.json()["exists"] is True
+
+    response = client.get(
+        "/mesh/vault/status/missing_key", params={"agent_id": "trusted"},
+    )
+    assert response.status_code == 200
+    assert response.json()["exists"] is False
+
+
+def test_vault_resolve_endpoint(vault_components):
+    client = vault_components["client"]
+    vault = vault_components["vault"]
+    vault.credentials["resolve_me"] = "secret_value"
+
+    response = client.post(
+        "/mesh/vault/resolve",
+        json={"agent_id": "trusted", "name": "resolve_me"},
+    )
+    assert response.status_code == 200
+    assert response.json()["value"] == "secret_value"
+
+
+def test_vault_resolve_not_found(vault_components):
+    client = vault_components["client"]
+    response = client.post(
+        "/mesh/vault/resolve",
+        json={"agent_id": "trusted", "name": "nonexistent"},
+    )
+    assert response.status_code == 404
+
+
+# ── Auth token tests ──────────────────────────────────────────
+
+
+@pytest.fixture
+def authed_components(tmp_path):
+    """Mesh components with auth tokens configured."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "research": AgentPermissions(
+            agent_id="research",
+            can_message=["orchestrator"],
+            can_publish=["research_complete"],
+            can_subscribe=["new_lead"],
+            blackboard_read=["context/*"],
+            blackboard_write=["context/research_*"],
+            allowed_apis=["anthropic"],
+        ),
+    }
+
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    tokens = {"research": "test-token-abc123"}
+    app = create_mesh_app(bb, pubsub, router, perms, auth_tokens=tokens)
+    client = TestClient(app)
+
+    return {"client": client, "tokens": tokens}
+
+
+def test_auth_valid_token_passes(authed_components):
+    """Request with correct Bearer token succeeds."""
+    client = authed_components["client"]
+    response = client.post(
+        "/mesh/register",
+        json={"agent_id": "research", "capabilities": [], "port": 8401},
+        headers={"Authorization": "Bearer test-token-abc123"},
+    )
+    assert response.status_code == 200
+    assert response.json()["registered"] is True
+
+
+def test_auth_missing_token_rejected(authed_components):
+    """Request without auth header returns 401."""
+    client = authed_components["client"]
+    response = client.post(
+        "/mesh/register",
+        json={"agent_id": "research", "capabilities": [], "port": 8401},
+    )
+    assert response.status_code == 401
+
+
+def test_auth_wrong_token_rejected(authed_components):
+    """Request with wrong token returns 401."""
+    client = authed_components["client"]
+    response = client.post(
+        "/mesh/register",
+        json={"agent_id": "research", "capabilities": [], "port": 8401},
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+    assert response.status_code == 401
+
+
+def test_auth_not_required_without_config(mesh_components):
+    """Without auth_tokens configured, requests pass without token."""
+    client = mesh_components["client"]
+    response = client.post(
+        "/mesh/register",
+        json={"agent_id": "research", "capabilities": [], "port": 8401},
+    )
+    assert response.status_code == 200
+
+
+def test_auth_mesh_agent_id_bypasses(authed_components):
+    """The 'mesh' and 'orchestrator' agent IDs bypass auth."""
+    client = authed_components["client"]
+    response = client.post(
+        "/mesh/message",
+        json={
+            "from_agent": "mesh",
+            "to": "research",
+            "type": "system",
+            "payload": {"text": "hello"},
+        },
+    )
+    # Should not get 401 — mesh identity bypasses auth
+    assert response.status_code != 401
+
+
+# ── Vault rate limiting tests ─────────────────────────────────
+
+
+def test_vault_resolve_rate_limited(vault_components):
+    """After 5 resolves, subsequent ones return 429."""
+    client = vault_components["client"]
+    vault = vault_components["vault"]
+    vault.credentials["rate_test"] = "value"
+
+    # First 5 should succeed
+    for _ in range(5):
+        resp = client.post(
+            "/mesh/vault/resolve",
+            json={"agent_id": "trusted", "name": "rate_test"},
+        )
+        assert resp.status_code == 200
+
+    # 6th should be rate limited
+    resp = client.post(
+        "/mesh/vault/resolve",
+        json={"agent_id": "trusted", "name": "rate_test"},
+    )
+    assert resp.status_code == 429
+
+
 def test_mesh_message_to_orchestrator(tmp_path):
     """Messages to 'orchestrator' with type 'task_result' resolve pending futures."""
     import asyncio

@@ -14,6 +14,7 @@ import abc
 import asyncio
 import json
 import platform
+import secrets
 import shutil
 import subprocess
 import time
@@ -35,6 +36,7 @@ class RuntimeBackend(abc.ABC):
             else Path(__file__).resolve().parent.parent.parent
         )
         self.agents: dict[str, dict] = {}
+        self.auth_tokens: dict[str, str] = {}
 
     @abc.abstractmethod
     def start_agent(
@@ -177,6 +179,10 @@ class DockerBackend(RuntimeBackend):
         port = self._next_port
         self._next_port += 1
 
+        # Generate per-agent auth token for mesh request verification
+        auth_token = secrets.token_urlsafe(32)
+        self.auth_tokens[agent_id] = auth_token
+
         mesh_host = "127.0.0.1" if self.use_host_network else "host.docker.internal"
         environment: dict[str, str] = {
             "AGENT_ID": agent_id,
@@ -184,6 +190,7 @@ class DockerBackend(RuntimeBackend):
             "MESH_URL": f"http://{mesh_host}:{self.mesh_host_port}",
             "SKILLS_DIR": "/app/skills",
             "SYSTEM_PROMPT": system_prompt,
+            "MESH_AUTH_TOKEN": auth_token,
         }
         if model:
             environment["LLM_MODEL"] = model
@@ -204,6 +211,13 @@ class DockerBackend(RuntimeBackend):
             if platform.system() == "Windows":
                 host_path = project_md.as_posix()
             volumes[host_path] = {"bind": "/app/PROJECT.md", "mode": "ro"}
+
+        soul_md = self.project_root / "SOUL.md"
+        if soul_md.exists():
+            host_path = str(soul_md)
+            if platform.system() == "Windows":
+                host_path = soul_md.as_posix()
+            volumes[host_path] = {"bind": "/app/SOUL.md", "mode": "ro"}
 
         run_kwargs: dict[str, Any] = {
             "detach": True,
@@ -378,6 +392,11 @@ class SandboxBackend(RuntimeBackend):
         if project_md.exists():
             shutil.copy2(project_md, ws / "PROJECT.md")
 
+        # Copy SOUL.md (project-level persona)
+        soul_md = self.project_root / "SOUL.md"
+        if soul_md.exists():
+            shutil.copy2(soul_md, ws / "SOUL.md")
+
         # Copy skills
         skills_dest = ws / "skills"
         if skills_dir and Path(skills_dir).is_dir():
@@ -387,6 +406,10 @@ class SandboxBackend(RuntimeBackend):
         else:
             skills_dest.mkdir(exist_ok=True)
 
+        # Generate per-agent auth token for mesh request verification
+        auth_token = secrets.token_urlsafe(32)
+        self.auth_tokens[agent_id] = auth_token
+
         # Write agent env config
         env_cfg = {
             "AGENT_ID": agent_id,
@@ -395,6 +418,7 @@ class SandboxBackend(RuntimeBackend):
             "SKILLS_DIR": "/app/skills",
             "SYSTEM_PROMPT": system_prompt,
             "AGENT_PORT": str(self.AGENT_PORT),
+            "MESH_AUTH_TOKEN": auth_token,
         }
         if model:
             env_cfg["LLM_MODEL"] = model

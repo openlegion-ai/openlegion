@@ -6,6 +6,7 @@ All external interaction is mediated by the mesh host process.
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import httpx
@@ -26,10 +27,14 @@ class MeshClient:
         self.mesh_url = mesh_url
         self.agent_id = agent_id
         self._client: httpx.AsyncClient | None = None
+        self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=30)
+            headers: dict[str, str] = {}
+            if self._auth_token:
+                headers["Authorization"] = f"Bearer {self._auth_token}"
+            self._client = httpx.AsyncClient(timeout=30, headers=headers)
         return self._client
 
     async def close(self) -> None:
@@ -176,6 +181,54 @@ class MeshClient:
         )
         response.raise_for_status()
         return response.json()
+
+    # === Vault (credential management) ===
+
+    async def vault_store(self, name: str, value: str) -> dict:
+        """Store a credential in the mesh vault. Returns handle."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/vault/store",
+            json={"agent_id": self.agent_id, "name": name, "value": value},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def vault_list(self) -> list[str]:
+        """List credential names stored in the vault."""
+        client = await self._get_client()
+        response = await client.get(
+            f"{self.mesh_url}/mesh/vault/list",
+            params={"agent_id": self.agent_id},
+        )
+        response.raise_for_status()
+        return response.json().get("credentials", [])
+
+    async def vault_status(self, name: str) -> dict:
+        """Check whether a credential exists."""
+        client = await self._get_client()
+        response = await client.get(
+            f"{self.mesh_url}/mesh/vault/status/{name}",
+            params={"agent_id": self.agent_id},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def vault_resolve(self, name: str) -> str | None:
+        """Resolve a credential name to its value.
+
+        WARNING: The return value is a secret. The caller must NEVER
+        return it to the LLM or include it in any tool output dict.
+        """
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/vault/resolve",
+            json={"agent_id": self.agent_id, "name": name},
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json().get("value")
 
     async def api_call(
         self, service: str, action: str, params: dict | None = None, timeout: int = 30

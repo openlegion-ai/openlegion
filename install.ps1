@@ -97,13 +97,52 @@ pip install -e ".[dev]" 2>&1 | ForEach-Object {
 Write-Host ""
 Write-OK "OpenLegion installed"
 
+# ── Global CLI access ────────────────────────────────────────
+
+Write-Host ""
+$LinkDir = Join-Path $env:LOCALAPPDATA "OpenLegion"
+$VenvExe = Join-Path $PWD ".venv\Scripts\openlegion.exe"
+
+$NeedRestart = $false
+if (Test-Path $VenvExe) {
+    if (-not (Test-Path $LinkDir)) { New-Item -ItemType Directory -Path $LinkDir | Out-Null }
+
+    # Create a .cmd wrapper that invokes the venv entry point
+    # Includes existence check so users get a clear error if the project is moved
+    $WrapperPath = Join-Path $LinkDir "openlegion.cmd"
+    $WrapperContent = @"
+@echo off
+if not exist "$VenvExe" (
+    echo openlegion: installation not found at $VenvExe
+    echo Re-run install.ps1 from the project directory to fix.
+    exit /b 1
+)
+"$VenvExe" %*
+"@
+    Set-Content -Path $WrapperPath -Value $WrapperContent
+
+    $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($UserPath -notlike "*$LinkDir*") {
+        [Environment]::SetEnvironmentVariable("Path", "$LinkDir;$UserPath", "User")
+        $env:Path = "$LinkDir;$env:Path"
+        Write-OK "Added $LinkDir to user PATH"
+        $NeedRestart = $true
+    } else {
+        Write-OK "openlegion available globally"
+    }
+} else {
+    Write-Warn "Could not create global wrapper — run from the project directory"
+}
+
 # ── Done ──────────────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "  Ready!" -ForegroundColor Green -NoNewline
 Write-Host " Next steps:"
 Write-Host ""
-Write-Host "    .venv\Scripts\Activate.ps1   # activate the environment"
+if ($NeedRestart) {
+    Write-Host "    Restart your terminal, then:" -ForegroundColor Yellow
+}
 Write-Host "    openlegion setup             # configure API key + agents"
 Write-Host "    openlegion start             # launch and start chatting"
 Write-Host ""

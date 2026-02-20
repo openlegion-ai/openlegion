@@ -7,12 +7,13 @@
 ```bash
 git clone https://github.com/openlegion-ai/openlegion.git && cd openlegion
 ./install.sh         # checks dependencies, creates venv, installs everything
-source .venv/bin/activate
 openlegion setup     # API key, project description, team template
 openlegion start     # launch agents and start chatting
 ```
 
-That's it. If `install.sh` passes, you're good. If it fails, it tells you exactly what's missing.
+That's it. The installer makes `openlegion` available globally — no need to activate a virtual environment. If `install.sh` passes, you're good. If it fails, it tells you exactly what's missing.
+
+> **Note:** If `openlegion: command not found` after install, your `~/.local/bin` may not be on PATH. The installer will print the exact command to fix this.
 
 You can also use `make`:
 
@@ -31,12 +32,12 @@ make test            # run the test suite
 git clone https://github.com/openlegion-ai/openlegion.git
 cd openlegion
 powershell -ExecutionPolicy Bypass -File install.ps1
-.venv\Scripts\Activate.ps1
 openlegion setup     # API key, project description, team template
 openlegion start     # launch agents and start chatting
 ```
 
 > PowerShell blocks the script? Run: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+> After install, restart your terminal if `openlegion` isn't recognized.
 
 ---
 
@@ -164,8 +165,19 @@ If you prefer not to use the install scripts:
 git clone https://github.com/openlegion-ai/openlegion.git
 cd openlegion
 python3 -m venv .venv
-source .venv/bin/activate
-pip3 install -e ".[dev]"
+.venv/bin/pip install -e ".[dev]"
+
+# Make openlegion available globally (no venv activation needed):
+mkdir -p ~/.local/bin
+ln -sf "$(pwd)/.venv/bin/openlegion" ~/.local/bin/openlegion
+```
+
+If `~/.local/bin` isn't on your PATH, add it:
+```bash
+# bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+# zsh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
 
 </details>
@@ -177,8 +189,7 @@ pip3 install -e ".[dev]"
 git clone https://github.com/openlegion-ai/openlegion.git
 cd openlegion
 python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
+.venv\Scripts\pip install -e ".[dev]"
 ```
 
 > PowerShell blocks the script? Run: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
@@ -260,7 +271,7 @@ openlegion start --sandbox
 
 | Problem | Fix |
 |---|---|
-| `command not found: openlegion` | Activate the venv: `source .venv/bin/activate` (macOS/Linux) or `.venv\Scripts\Activate.ps1` (Windows) |
+| `command not found: openlegion` | Re-run `./install.sh` or add `~/.local/bin` to PATH: `export PATH="$HOME/.local/bin:$PATH"`. On Windows, restart your terminal after install. |
 | `Docker is not running` | Open Docker Desktop (macOS/Windows) or `sudo systemctl start docker` (Linux) |
 | `permission denied` on Docker | Linux: `sudo usermod -aG docker $USER` then log out/in |
 | `python3: command not found` | Install Python 3.10+ (see above). On Windows, use `python` instead of `python3`. |

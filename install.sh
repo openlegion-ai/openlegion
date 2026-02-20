@@ -115,12 +115,66 @@ done
 echo ""
 info "OpenLegion installed"
 
+# ── Global CLI access ────────────────────────────────────────
+
+echo ""
+LINK_DIR="$HOME/.local/bin"
+VENV_BIN="$(cd "$(dirname "$0")" && pwd)/.venv/bin/openlegion"
+PATH_UPDATED=""
+
+if [ -f "$VENV_BIN" ]; then
+    mkdir -p "$LINK_DIR"
+    ln -sf "$VENV_BIN" "$LINK_DIR/openlegion"
+
+    if echo "$PATH" | tr ':' '\n' | grep -qx "$LINK_DIR"; then
+        info "openlegion available globally"
+    else
+        # Auto-add to shell rc file (same approach as rustup, nvm, etc.)
+        SHELL_NAME="$(basename "$SHELL")"
+        PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+        RC_FILE=""
+        if [ "$SHELL_NAME" = "zsh" ]; then
+            RC_FILE="$HOME/.zshrc"
+        elif [ "$SHELL_NAME" = "fish" ]; then
+            RC_FILE=""  # fish uses fish_add_path, handled separately
+        else
+            RC_FILE="$HOME/.bashrc"
+        fi
+
+        if [ -n "$RC_FILE" ]; then
+            # Only append if not already present
+            if ! grep -qF '/.local/bin' "$RC_FILE" 2>/dev/null; then
+                echo "" >> "$RC_FILE"
+                echo "# Added by OpenLegion installer" >> "$RC_FILE"
+                echo "$PATH_LINE" >> "$RC_FILE"
+                info "Added ~/.local/bin to PATH in $(basename "$RC_FILE")"
+            fi
+        elif [ "$SHELL_NAME" = "fish" ]; then
+            fish -c "fish_add_path $LINK_DIR" 2>/dev/null || true
+            info "Added ~/.local/bin to fish PATH"
+        fi
+
+        # Update PATH for the current script session
+        export PATH="$LINK_DIR:$PATH"
+        PATH_UPDATED="yes"
+        info "openlegion available globally"
+    fi
+else
+    warn "Could not create global symlink — run from the project directory"
+fi
+
 # ── Done ──────────────────────────────────────────────────────
 
 echo ""
 echo -e "  ${GREEN}Ready!${NC} Next steps:"
 echo ""
-echo "    source .venv/bin/activate    # activate the environment"
+if [ -n "$PATH_UPDATED" ]; then
+    if [ -n "$RC_FILE" ]; then
+        echo "    source ~/$(basename "$RC_FILE")   # reload PATH in this terminal"
+    else
+        echo "    Open a new terminal to pick up the PATH change, then:"
+    fi
+fi
 echo "    openlegion setup             # configure API key + agents"
 echo "    openlegion start             # launch and start chatting"
 echo ""

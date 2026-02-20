@@ -57,8 +57,7 @@
 
 ```bash
 git clone https://github.com/openlegion-ai/openlegion.git && cd openlegion
-./install.sh                     # checks deps, creates venv, installs everything
-source .venv/bin/activate
+./install.sh                     # checks deps, creates venv, makes CLI global
 openlegion setup                 # API key, project description, team template
 openlegion start                 # launch agents and start chatting
 ```
@@ -69,7 +68,6 @@ openlegion start                 # launch agents and start chatting
 git clone https://github.com/openlegion-ai/openlegion.git
 cd openlegion
 powershell -ExecutionPolicy Bypass -File install.ps1
-.venv\Scripts\Activate.ps1
 openlegion setup
 openlegion start
 ```

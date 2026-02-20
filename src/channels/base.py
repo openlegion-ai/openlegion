@@ -23,6 +23,7 @@ ListAgentsFn = Callable[[], dict]
 StatusFn = Callable[[str], dict | None]
 CostsFn = Callable[[], list[dict]]
 ResetFn = Callable[[str], bool]
+AddKeyFn = Callable[[str, str], None]
 
 
 class Channel(abc.ABC):
@@ -45,6 +46,7 @@ class Channel(abc.ABC):
         costs_fn: CostsFn | None = None,
         reset_fn: ResetFn | None = None,
         stream_dispatch_fn: StreamDispatchFn | None = None,
+        addkey_fn: AddKeyFn | None = None,
     ):
         self.dispatch_fn = dispatch_fn
         self.default_agent = default_agent
@@ -53,6 +55,7 @@ class Channel(abc.ABC):
         self.costs_fn = costs_fn
         self.reset_fn = reset_fn
         self.stream_dispatch_fn = stream_dispatch_fn
+        self.addkey_fn = addkey_fn
         self._active_agent: dict[str, str] = {}  # user_id -> agent_name
         self._notify_targets: list[Any] = []
 
@@ -127,6 +130,8 @@ class Channel(abc.ABC):
 
         # Normal message: dispatch to agent
         response = await self.dispatch(target, message)
+        if not response or not response.strip():
+            return ""  # Suppress silent/empty responses
         return f"[{target}] {response}"
 
     async def _handle_command(
@@ -200,6 +205,22 @@ class Channel(abc.ABC):
                 self.reset_fn(current)
             return f"Conversation with '{current}' reset."
 
+        if cmd == "/addkey":
+            if not self.addkey_fn:
+                return "Credential management not available."
+            args = message.split(None, 2)
+            if len(args) < 2:
+                return "Usage: /addkey <service> <key>"
+            service = args[1]
+            key = args[2] if len(args) > 2 else ""
+            if not key:
+                return "Usage: /addkey <service> <key>"
+            try:
+                self.addkey_fn(service, key)
+                return f"Credential '{service}' stored."
+            except Exception as e:
+                return f"Error storing credential: {e}"
+
         if cmd == "/help":
             return (
                 "Commands:\n"
@@ -209,6 +230,7 @@ class Channel(abc.ABC):
                 "  /status           Show agent health\n"
                 "  /broadcast <msg>  Send to all agents\n"
                 "  /costs            Show today's LLM spend\n"
+                "  /addkey <svc> <key>  Add an API credential\n"
                 "  /reset            Clear conversation with active agent\n"
                 "  /help             Show this help"
             )

@@ -132,23 +132,10 @@ def _save_permissions(perms: dict) -> None:
 
 def _set_env_key(name: str, value: str) -> None:
     """Set or update a key in the .env file."""
+    from src.host.credentials import _persist_to_env
+
     env_key = f"OPENLEGION_CRED_{name.upper()}"
-    lines: list[str] = []
-    found = False
-
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().splitlines():
-            if line.startswith(f"{env_key}=") or line.startswith(f"# {env_key}="):
-                lines.append(f"{env_key}={value}")
-                found = True
-            else:
-                lines.append(line)
-
-    if not found:
-        lines.append(f"{env_key}={value}")
-
-    ENV_FILE.write_text("\n".join(lines) + "\n")
-    os.environ[env_key] = value
+    _persist_to_env(env_key, value, env_file=str(ENV_FILE))
 
 
 def _check_docker_running() -> bool:
@@ -372,6 +359,7 @@ def _start_channels(
     costs_fn=None,
     reset_fn=None,
     stream_dispatch_fn=None,
+    addkey_fn=None,
 ) -> list[str]:
     """Start configured messaging channels (Telegram, Discord) in background threads.
 
@@ -397,6 +385,7 @@ def _start_channels(
         "costs_fn": costs_fn,
         "reset_fn": reset_fn,
         "stream_dispatch_fn": stream_dispatch_fn,
+        "addkey_fn": addkey_fn,
     }
 
     # Telegram
@@ -1139,6 +1128,7 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
     app = create_mesh_app(
         blackboard, pubsub, router, permissions, credential_vault,
         cron_scheduler, runtime, transport, orchestrator,
+        auth_tokens=runtime.auth_tokens,
     )
     app.include_router(create_webhook_router(orchestrator))
     app.include_router(webhook_manager.create_router())
@@ -1231,6 +1221,9 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
         ):
             yield event
 
+    def _channel_addkey(service: str, key: str) -> None:
+        credential_vault.add_credential(service, key)
+
     # Start messaging channels (Telegram, Discord) if configured
     pairing_instructions = _start_channels(
         cfg, dispatch_to_agent, router.agent_registry, active_channels,
@@ -1238,6 +1231,7 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
         costs_fn=_channel_costs,
         reset_fn=_channel_reset,
         stream_dispatch_fn=stream_dispatch_to_agent,
+        addkey_fn=_channel_addkey,
     )
 
     # Pick the first agent as the default active one
@@ -1750,6 +1744,24 @@ def _multi_agent_repl(
                     click.echo(f"Error: {e}")
                 continue
 
+            elif cmd == "/addkey":
+                if len(cmd_parts) < 2:
+                    service = click.prompt("Service name (e.g. brave_search)")
+                else:
+                    service = cmd_parts[1].split()[0]
+                # Check for inline key: /addkey brave_search sk-abc123
+                inline_parts = cmd_parts[1].split(None, 1) if len(cmd_parts) > 1 else []
+                if len(inline_parts) > 1:
+                    key_value = inline_parts[1]
+                else:
+                    key_value = click.prompt(f"  {service} key", hide_input=True)
+                if not key_value:
+                    click.echo("No key provided.")
+                    continue
+                credential_vault.add_credential(service, key_value)
+                click.echo(f"Credential '{service}' stored.")
+                continue
+
             elif cmd == "/help":
                 click.echo("Commands:")
                 click.echo("  @agent <msg>      Send message to a specific agent")
@@ -1759,6 +1771,7 @@ def _multi_agent_repl(
                 click.echo("  /status           Show agent health")
                 click.echo("  /broadcast <msg>  Send to all agents")
                 click.echo("  /costs            Show today's LLM spend")
+                click.echo("  /addkey <svc> [key]  Add an API credential")
                 click.echo("  /reset            Clear conversation with active agent")
                 click.echo("  /quit             Exit and stop runtime")
                 continue
