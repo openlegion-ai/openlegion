@@ -348,3 +348,60 @@ def test_boost_formula_correctness():
     expected = 1.0 + math.log(1 + access) * recency
     actual = MemoryStore._compute_boost(access, days)
     assert abs(actual - expected) < 1e-10
+
+
+# ── Tool outcome tests ────────────────────────────────────
+
+
+class TestToolOutcomes:
+    def test_store_and_retrieve(self, memory):
+        memory.store_tool_outcome("exec", {"command": "ls"}, "file.txt", success=True)
+        history = memory.get_tool_history("exec")
+        assert len(history) == 1
+        assert history[0]["tool_name"] == "exec"
+        assert history[0]["success"] is True
+
+    def test_failure_recorded(self, memory):
+        memory.store_tool_outcome("exec", {"command": "bad"}, "error: not found", success=False)
+        history = memory.get_tool_history("exec")
+        assert len(history) == 1
+        assert history[0]["success"] is False
+
+    def test_params_hash_deterministic(self, memory):
+        args = {"command": "ls", "cwd": "/tmp"}
+        h1 = MemoryStore._compute_params_hash(args)
+        h2 = MemoryStore._compute_params_hash({"cwd": "/tmp", "command": "ls"})
+        assert h1 == h2  # order-independent
+
+    def test_params_hash_none(self, memory):
+        h = MemoryStore._compute_params_hash(None)
+        assert isinstance(h, str)
+        assert len(h) == 16
+
+    def test_prune_keeps_50(self, memory):
+        for i in range(60):
+            memory.store_tool_outcome("exec", {"i": i}, f"output_{i}")
+        history = memory.get_tool_history("exec", limit=100)
+        assert len(history) == 50
+
+    def test_filter_by_params_hash(self, memory):
+        memory.store_tool_outcome("exec", {"command": "ls"}, "files", success=True)
+        memory.store_tool_outcome("exec", {"command": "pwd"}, "/home", success=True)
+        h = MemoryStore._compute_params_hash({"command": "ls"})
+        history = memory.get_tool_history("exec", params_hash=h)
+        assert len(history) == 1
+        assert "files" in history[0]["outcome"]
+
+    def test_get_all_tools(self, memory):
+        memory.store_tool_outcome("exec", {}, "ok")
+        memory.store_tool_outcome("web_search", {}, "results")
+        history = memory.get_tool_history(limit=10)
+        assert len(history) == 2
+
+    def test_tool_outcomes_table_created(self, tmp_path):
+        store = MemoryStore(db_path=str(tmp_path / "schema.db"))
+        tables = [r[0] for r in store.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()]
+        assert "tool_outcomes" in tables
+        store.close()

@@ -12,6 +12,8 @@ Embeddings are generated via mesh proxy (embed_fn).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import sqlite3
 import struct
@@ -101,6 +103,16 @@ class MemoryStore:
                 duration_ms INTEGER DEFAULT 0,
                 timestamp TEXT DEFAULT (datetime('now'))
             );
+            CREATE TABLE IF NOT EXISTS tool_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tool_name TEXT NOT NULL,
+                params_hash TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                success INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_outcomes_name
+                ON tool_outcomes(tool_name, created_at DESC);
         """)
         # Lazy migration: add category_id FK to facts if not present
         try:
@@ -369,6 +381,68 @@ class MemoryStore:
                 duration_ms=r[6],
                 timestamp=r[7],
             )
+            for r in rows
+        ]
+
+    # ── Tool outcome tracking ─────────────────────────────────
+
+    @staticmethod
+    def _compute_params_hash(arguments: dict | None) -> str:
+        """SHA-256 of sorted JSON arguments for deduplication."""
+        raw = json.dumps(arguments or {}, sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    def store_tool_outcome(
+        self,
+        tool_name: str,
+        arguments: dict | None,
+        outcome: str,
+        success: bool = True,
+    ) -> None:
+        """Record a tool execution outcome. Auto-prunes to 50 per tool."""
+        params_hash = self._compute_params_hash(arguments)
+        self.db.execute(
+            "INSERT INTO tool_outcomes (tool_name, params_hash, outcome, success) "
+            "VALUES (?, ?, ?, ?)",
+            (tool_name, params_hash, outcome, 1 if success else 0),
+        )
+        # Prune: keep last 50 per tool (order by id for deterministic tie-breaking)
+        self.db.execute(
+            "DELETE FROM tool_outcomes WHERE tool_name = ? AND id NOT IN "
+            "(SELECT id FROM tool_outcomes WHERE tool_name = ? ORDER BY id DESC LIMIT 50)",
+            (tool_name, tool_name),
+        )
+        self.db.commit()
+
+    def get_tool_history(
+        self,
+        tool_name: str | None = None,
+        limit: int = 20,
+        params_hash: str | None = None,
+    ) -> list[dict]:
+        """Query recent tool outcomes, optionally filtered by tool and/or params_hash."""
+        query = "SELECT tool_name, params_hash, outcome, success, created_at FROM tool_outcomes"
+        conditions: list[str] = []
+        params: list[Any] = []
+        if tool_name:
+            conditions.append("tool_name = ?")
+            params.append(tool_name)
+        if params_hash:
+            conditions.append("params_hash = ?")
+            params.append(params_hash)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.db.execute(query, params).fetchall()
+        return [
+            {
+                "tool_name": r[0],
+                "params_hash": r[1],
+                "outcome": r[2],
+                "success": bool(r[3]),
+                "created_at": r[4],
+            }
             for r in rows
         ]
 
