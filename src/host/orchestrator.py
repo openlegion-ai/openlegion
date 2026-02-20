@@ -163,20 +163,6 @@ class Orchestrator:
         future.set_result(result)
         return True
 
-    def cleanup_stale_results(self, max_age_seconds: float = 3600) -> int:
-        """Remove pending futures that have been waiting longer than max_age.
-
-        Called periodically to prevent unbounded growth of _pending_results
-        when agents crash or tasks are abandoned.
-        """
-        stale = [
-            task_id for task_id, future in self._pending_results.items()
-            if future.done()
-        ]
-        for task_id in stale:
-            self._pending_results.pop(task_id, None)
-        return len(stale)
-
     def _load_workflows(self, workflows_dir: str) -> None:
         """Load all workflow YAML files."""
         wf_path = Path(workflows_dir)

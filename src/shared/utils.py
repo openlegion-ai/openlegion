@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 import uuid
 from datetime import UTC, datetime
 
@@ -13,11 +12,6 @@ from datetime import UTC, datetime
 def generate_id(prefix: str = "id") -> str:
     """Generate a unique ID with a descriptive prefix."""
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
-
-
-def timestamp_iso() -> str:
-    """Current UTC timestamp in ISO format."""
-    return datetime.now(UTC).isoformat()
 
 
 def truncate(text: str, max_len: int = 200) -> str:
@@ -75,18 +69,3 @@ def setup_logging(name: str, level: str = "INFO") -> logging.Logger:
             handler.setFormatter(StructuredFormatter())
         logger.addHandler(handler)
     return logger
-
-
-class Timer:
-    """Context manager for timing operations in milliseconds."""
-
-    def __init__(self) -> None:
-        self.start: float = 0
-        self.elapsed_ms: int = 0
-
-    def __enter__(self) -> Timer:
-        self.start = time.time()
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        self.elapsed_ms = int((time.time() - self.start) * 1000)

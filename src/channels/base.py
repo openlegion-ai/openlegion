@@ -93,13 +93,6 @@ class Channel(abc.ABC):
             logger.error(f"Dispatch to '{target}' failed: {e}")
             return f"Error: {e}"
 
-    async def send_status(self, text: str) -> None:
-        """Send an intermediate status update to connected users.
-
-        Channels can override this to send "typing" indicators or
-        intermediate tool-use notifications.  Default is a no-op.
-        """
-
     async def handle_message(self, user_id: str, text: str) -> str:
         """Process a user message with full REPL-like command support.
 

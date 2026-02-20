@@ -155,13 +155,11 @@ class WorkspaceManager:
         }
 
         parts: list[str] = []
-        total = 0
 
         # PROJECT.md has no individual cap but counts toward total
         project = self._read_file("PROJECT.md")
         if project and project.strip():
             parts.append(project.strip())
-            total += len(parts[-1])
 
         for filename, cap in caps.items():
             content = self._read_file(filename)
@@ -183,7 +181,6 @@ class WorkspaceManager:
                     "\n\n... (truncated, use memory_search for full content)"
                 )
             parts.append(content)
-            total += len(content)
 
         combined = "\n\n---\n\n".join(parts)
         if len(combined) > _MAX_BOOTSTRAP:

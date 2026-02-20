@@ -86,16 +86,6 @@ class RuntimeBackend(abc.ABC):
         self.agents[agent_id]["spawned_at"] = time.time()
         return url
 
-    def cleanup_expired(self) -> list[str]:
-        """Remove ephemeral agents that have exceeded their TTL."""
-        now = time.time()
-        expired = []
-        for agent_id, info in list(self.agents.items()):
-            if info.get("ephemeral") and now - info.get("spawned_at", now) > info.get("ttl", 3600):
-                expired.append(agent_id)
-                self.stop_agent(agent_id)
-        return expired
-
     def get_agent_url(self, agent_id: str) -> str | None:
         info = self.agents.get(agent_id)
         return info["url"] if info else None
@@ -130,7 +120,6 @@ class RuntimeBackend(abc.ABC):
 class DockerBackend(RuntimeBackend):
     """Runs agents in standard Docker containers (shared host kernel)."""
 
-    NETWORK_NAME = "openlegion_internal"
     BASE_IMAGE = "openlegion-agent:latest"
 
     def __init__(
@@ -160,14 +149,6 @@ class DockerBackend(RuntimeBackend):
                     pass
         except Exception:
             pass
-
-    def _ensure_network(self) -> None:
-        import docker as _docker
-        try:
-            self.client.networks.get(self.NETWORK_NAME)
-        except _docker.errors.NotFound:
-            self.client.networks.create(self.NETWORK_NAME, driver="bridge")
-            logger.info(f"Created network: {self.NETWORK_NAME}")
 
     def start_agent(
         self,

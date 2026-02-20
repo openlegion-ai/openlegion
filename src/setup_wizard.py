@@ -325,7 +325,7 @@ class SetupWizard:
             try:
                 if env_var:
                     os.environ[env_var] = api_key
-                response = asyncio.run(
+                asyncio.run(
                     litellm.acompletion(
                         model=validation_model,
                         messages=[{"role": "user", "content": "hi"}],
