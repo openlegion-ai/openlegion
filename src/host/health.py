@@ -141,6 +141,7 @@ class HealthMonitor:
                 skills_dir=info.get("skills_dir", ""),
                 system_prompt=info.get("system_prompt", ""),
                 model=info.get("model", ""),
+                mcp_servers=info.get("mcp_servers"),
             )
 
             self.router.register_agent(agent_id, url)

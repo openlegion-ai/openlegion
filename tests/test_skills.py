@@ -3,6 +3,7 @@
 import shutil
 import tempfile
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -214,3 +215,127 @@ class TestSkillRegistryIsolation:
 
         # r1 still has its snapshot
         assert "original" in r1.skills
+
+
+class TestMCPIntegration:
+    """Tests for MCP tool integration with SkillRegistry."""
+
+    def setup_method(self):
+        _skill_staging.clear()
+
+    def _make_mcp_client(self, tools: list[dict] | None = None):
+        """Create a mock MCPClient with optional tool definitions."""
+        from src.agent.mcp_client import MCPClient
+        mcp = MagicMock(spec=MCPClient)
+        mcp.list_tools.return_value = tools or []
+        mcp.has_tool.side_effect = lambda name: name in {t["name"] for t in (tools or [])}
+        mcp.call_tool = AsyncMock(return_value={"result": "mcp_result"})
+        return mcp
+
+    def test_mcp_tools_in_get_tool_definitions(self):
+        """MCP tools appear in the LLM tool list with correct format."""
+        mcp_tools = [
+            {
+                "name": "search_db",
+                "description": "Search the database",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                    },
+                    "required": ["query"],
+                },
+                "function": "mcp",
+            },
+        ]
+        mcp = self._make_mcp_client(mcp_tools)
+
+        registry = SkillRegistry.__new__(SkillRegistry)
+        registry.skills_dir = "/nonexistent"
+        registry._mcp_client = mcp
+        registry.skills = {}
+        registry._register_mcp_tools()
+
+        defs = registry.get_tool_definitions()
+        assert len(defs) == 1
+        assert defs[0]["type"] == "function"
+        assert defs[0]["function"]["name"] == "search_db"
+        assert defs[0]["function"]["parameters"]["type"] == "object"
+        assert "query" in defs[0]["function"]["parameters"]["properties"]
+
+    @pytest.mark.asyncio
+    async def test_execute_mcp_tool(self):
+        """MCP tool calls route through MCPClient, not function inspection."""
+        mcp_tools = [
+            {
+                "name": "mcp_tool",
+                "description": "An MCP tool",
+                "parameters": {"type": "object", "properties": {}},
+                "function": "mcp",
+            },
+        ]
+        mcp = self._make_mcp_client(mcp_tools)
+
+        registry = SkillRegistry.__new__(SkillRegistry)
+        registry.skills_dir = "/nonexistent"
+        registry._mcp_client = mcp
+        registry.skills = {}
+        registry._register_mcp_tools()
+
+        result = await registry.execute("mcp_tool", {"key": "value"})
+        assert result == {"result": "mcp_result"}
+        mcp.call_tool.assert_awaited_once_with("mcp_tool", {"key": "value"})
+
+    def test_reload_preserves_mcp_tools(self):
+        """After reload, MCP tools are still registered."""
+        mcp_tools = [
+            {
+                "name": "persistent_mcp",
+                "description": "Persists across reload",
+                "parameters": {"type": "object", "properties": {}},
+                "function": "mcp",
+            },
+        ]
+        mcp = self._make_mcp_client(mcp_tools)
+
+        registry = SkillRegistry.__new__(SkillRegistry)
+        registry.skills_dir = "/nonexistent"
+        registry._mcp_client = mcp
+        registry.skills = {}
+        registry._register_mcp_tools()
+        assert "persistent_mcp" in registry.skills
+
+        # Simulate reload
+        _skill_staging.clear()
+        registry.skills = dict(_skill_staging)
+        registry._register_mcp_tools()
+        assert "persistent_mcp" in registry.skills
+
+    def test_mcp_tools_in_list_skills(self):
+        """MCP tools appear in list_skills output."""
+        mcp_tools = [
+            {
+                "name": "mcp_listed",
+                "description": "Should be listed",
+                "parameters": {"type": "object", "properties": {}},
+                "function": "mcp",
+            },
+        ]
+        mcp = self._make_mcp_client(mcp_tools)
+
+        registry = SkillRegistry.__new__(SkillRegistry)
+        registry.skills_dir = "/nonexistent"
+        registry._mcp_client = mcp
+        registry.skills = {}
+        registry._register_mcp_tools()
+
+        assert "mcp_listed" in registry.list_skills()
+
+    def test_no_mcp_client_is_noop(self):
+        """When no MCP client is set, _register_mcp_tools does nothing."""
+        registry = SkillRegistry.__new__(SkillRegistry)
+        registry.skills_dir = "/nonexistent"
+        registry._mcp_client = None
+        registry.skills = {}
+        registry._register_mcp_tools()
+        assert len(registry.skills) == 0

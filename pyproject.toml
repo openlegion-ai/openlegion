@@ -28,6 +28,10 @@ dev = [
     "ruff>=0.8.0",
 ]
 
+mcp = [
+    "mcp>=1.0",
+]
+
 channels = [
     "python-telegram-bot>=21.0",
     "discord.py>=2.0",

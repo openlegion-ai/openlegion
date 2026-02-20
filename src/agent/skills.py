@@ -10,9 +10,12 @@ import asyncio
 import importlib.util
 import inspect
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.shared.utils import setup_logging
+
+if TYPE_CHECKING:
+    from src.agent.mcp_client import MCPClient
 
 logger = setup_logging("agent.skills")
 
@@ -44,13 +47,15 @@ class SkillRegistry:
 
     CUSTOM_SKILLS_DIR = "/data/custom_skills"
 
-    def __init__(self, skills_dir: str):
+    def __init__(self, skills_dir: str, mcp_client: MCPClient | None = None):
         self.skills_dir = skills_dir
+        self._mcp_client = mcp_client
         self.skills: dict[str, dict] = {}
         self._discover_builtins()
         self._discover(skills_dir)
         self._discover(self.CUSTOM_SKILLS_DIR)
         self.skills = dict(_skill_staging)
+        self._register_mcp_tools()
 
     def _discover_builtins(self) -> None:
         """Load all tool modules from the builtins package."""
@@ -80,6 +85,16 @@ class SkillRegistry:
             except Exception as e:
                 logger.warning(f"Failed to load {label} {py_file}: {e}")
 
+    def _register_mcp_tools(self) -> None:
+        """Register tools from connected MCP servers."""
+        if not getattr(self, "_mcp_client", None):
+            return
+        for tool_def in self._mcp_client.list_tools():
+            name = tool_def["name"]
+            if name not in self.skills:
+                self.skills[name] = tool_def
+            # Conflicts already handled with prefixing in MCPClient.start()
+
     def reload(self) -> int:
         """Re-discover skills from builtins and skills_dir. Returns new skill count."""
         _skill_staging.clear()
@@ -87,6 +102,7 @@ class SkillRegistry:
         self._discover(self.skills_dir)
         self._discover(self.CUSTOM_SKILLS_DIR)
         self.skills = dict(_skill_staging)
+        self._register_mcp_tools()
         logger.info(f"Reloaded {len(self.skills)} skills")
         return len(self.skills)
 
@@ -99,6 +115,9 @@ class SkillRegistry:
         memory_store: Any = None,
     ) -> Any:
         """Execute a skill by name with given arguments."""
+        if getattr(self, "_mcp_client", None) and self._mcp_client.has_tool(name):
+            return await self._mcp_client.call_tool(name, arguments)
+
         if name not in self.skills:
             raise ValueError(f"Unknown skill: {name}")
 
@@ -125,7 +144,13 @@ class SkillRegistry:
         """Return human-readable descriptions of all skills."""
         lines = []
         for name, info in self.skills.items():
-            params = ", ".join(f"{k}: {v.get('type', 'any')}" for k, v in info["parameters"].items())
+            raw_params = info["parameters"]
+            # MCP tools have full JSON Schema; extract from "properties"
+            if info.get("function") == "mcp":
+                props = raw_params.get("properties", {})
+                params = ", ".join(f"{k}: {v.get('type', 'any')}" for k, v in props.items())
+            else:
+                params = ", ".join(f"{k}: {v.get('type', 'any')}" for k, v in raw_params.items())
             lines.append(f"- {name}({params}): {info['description']}")
         return "\n".join(lines)
 
@@ -133,9 +158,25 @@ class SkillRegistry:
         """Return OpenAI-compatible tool definitions for LLM function calling."""
         tools = []
         for name, info in self.skills.items():
+            params = info["parameters"]
+
+            # MCP tools provide a full JSON Schema (with "type": "object",
+            # "properties", etc.) — use it directly.
+            if info.get("function") == "mcp":
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": info["description"],
+                        "parameters": params,
+                    },
+                })
+                continue
+
+            # Built-in skills store a flat {param_name: {type, description, ...}} dict.
             properties = {}
             required = []
-            for param_name, param_info in info["parameters"].items():
+            for param_name, param_info in params.items():
                 properties[param_name] = {
                     "type": param_info.get("type", "string"),
                     "description": param_info.get("description", ""),

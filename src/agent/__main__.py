@@ -7,6 +7,7 @@ and starts the FastAPI server.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -48,7 +49,16 @@ def main() -> None:
     llm = LLMClient(mesh_url=mesh_url, agent_id=agent_id, default_model=llm_model)
     mesh_client = MeshClient(mesh_url=mesh_url, agent_id=agent_id)
     memory = MemoryStore(db_path=f"/data/{agent_id}.db", embed_fn=llm.embed)
-    skills = SkillRegistry(skills_dir=skills_dir)
+
+    # MCP server support — parse config from environment
+    mcp_client = None
+    mcp_servers_json = os.environ.get("MCP_SERVERS", "")
+    if mcp_servers_json:
+        from src.agent.mcp_client import MCPClient
+        mcp_client = MCPClient()
+        logger.info(f"MCP servers configured for agent '{agent_id}'")
+
+    skills = SkillRegistry(skills_dir=skills_dir, mcp_client=mcp_client)
     workspace = WorkspaceManager(workspace_dir="/data/workspace")
 
     # Copy host-mounted PROJECT.md into workspace (mounted at /app to avoid
@@ -79,6 +89,18 @@ def main() -> None:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # Start MCP servers if configured
+        if mcp_client and mcp_servers_json:
+            try:
+                server_configs = json.loads(mcp_servers_json)
+                builtin_names = set(skills.list_skills())
+                await mcp_client.start(server_configs, builtin_names=builtin_names)
+                # Re-register MCP tools now that servers are running
+                skills._register_mcp_tools()
+                logger.info(f"MCP servers started for agent '{agent_id}'")
+            except Exception as e:
+                logger.error(f"Failed to start MCP servers: {e}")
+
         registered = False
         for attempt in range(1, _MAX_REGISTRATION_ATTEMPTS + 1):
             try:
@@ -107,6 +129,8 @@ def main() -> None:
                     await asyncio.wait_for(handle, timeout=5.0)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     pass
+        if mcp_client:
+            await mcp_client.stop()
         await llm.close()
         memory.close()
         logger.info(f"Agent '{agent_id}' shut down")
