@@ -537,10 +537,7 @@ Defense-in-depth with five layers:
 
 ### Dual Runtime Backend
 
-OpenLegion auto-detects the best isolation available:
-
-- **Docker Sandbox (microVM)**: Each agent runs in its own virtual machine with a separate kernel. Even if compromised, the hypervisor boundary prevents host access.
-- **Docker Container (fallback)**: Standard container isolation with hardening. Used when Docker Sandbox is unavailable. A startup warning is displayed when this fallback is active.
+Agents run in hardened Docker containers by default (non-root, memory-limited, CPU-throttled, no host filesystem access). For hypervisor-level isolation, use `openlegion start --sandbox` which runs agents in Docker Sandbox microVMs (requires Docker Desktop 4.58+).
 
 ---
 
@@ -549,15 +546,20 @@ OpenLegion auto-detects the best isolation available:
 ```
 openlegion
 ├── setup                                # Guided setup wizard
-├── start [--config PATH] [-d]           # Start runtime + interactive REPL
+├── start [--config PATH] [-d] [--sandbox]  # Start runtime + interactive REPL
 ├── stop                                 # Stop all containers
 ├── chat <name> [--port PORT]            # Connect to a running agent
 ├── status [--port PORT]                 # Show agent status
 │
-└── agent
-    ├── add [name]                       # Add a new agent
-    ├── list                             # List configured agents
-    └── remove <name> [--yes]            # Remove an agent
+├── agent
+│   ├── add [name]                       # Add a new agent
+│   ├── list                             # List configured agents
+│   └── remove <name> [--yes]            # Remove an agent
+│
+└── channels
+    ├── add [telegram|discord]           # Connect a messaging channel
+    ├── list                             # Show configured channels
+    └── remove <telegram|discord>        # Disconnect a channel
 ```
 
 ### Interactive REPL Commands
@@ -652,15 +654,30 @@ retry policies, and failure handlers.
 
 ### `.env` — API Keys
 
+Managed automatically by `openlegion setup` and `openlegion channels add`. You can also edit directly:
+
 ```bash
 OPENLEGION_CRED_ANTHROPIC_API_KEY=sk-ant-...
 OPENLEGION_CRED_MOONSHOT_API_KEY=sk-...
 OPENLEGION_CRED_OPENAI_API_KEY=sk-...
 OPENLEGION_CRED_BRAVE_SEARCH_API_KEY=BSA...
+OPENLEGION_CRED_TELEGRAM_BOT_TOKEN=123456:ABC...
+OPENLEGION_CRED_DISCORD_BOT_TOKEN=MTIz...
 
 # Log format: "json" (default) or "text" (human-readable)
 OPENLEGION_LOG_FORMAT=text
 ```
+
+### Connecting Channels
+
+```bash
+openlegion channels add telegram    # prompts for bot token from @BotFather
+openlegion channels add discord     # prompts for bot token
+openlegion channels list            # check what's connected
+openlegion channels remove telegram # disconnect
+```
+
+On next `openlegion start`, a pairing code appears — send it to your bot to link.
 
 ---
 
