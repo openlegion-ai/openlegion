@@ -919,7 +919,8 @@ def channels_remove(channel_type: str):
 @cli.command()
 @click.option("--config", "config_path", default="config/mesh.yaml", help="Path to mesh config")
 @click.option("--detach", "-d", is_flag=True, help="Run in background (no interactive REPL)")
-def start(config_path: str, detach: bool):
+@click.option("--sandbox", is_flag=True, help="Use Docker Sandbox microVMs (requires Docker Desktop 4.58+)")
+def start(config_path: str, detach: bool, sandbox: bool):
     """Start the runtime and chat with your agents.
 
     By default, starts the mesh and all agents then drops into an interactive
@@ -927,16 +928,17 @@ def start(config_path: str, detach: bool):
 
     \b
     Examples:
-      openlegion start          # interactive mode
-      openlegion start -d       # background mode
+      openlegion start              # interactive mode
+      openlegion start -d           # background mode
+      openlegion start --sandbox    # use microVM isolation
     """
     if detach:
         _start_detached(config_path)
     else:
-        _start_interactive(config_path)
+        _start_interactive(config_path, use_sandbox=sandbox)
 
 
-def _start_interactive(config_path: str) -> None:
+def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
     """Start mesh + agents in background threads, then drop into REPL."""
     import asyncio
     import threading
@@ -970,11 +972,11 @@ def _start_interactive(config_path: str) -> None:
         click.echo("Docker is not running. Please start Docker first.", err=True)
         sys.exit(1)
 
-    # Select runtime backend (sandbox microVM if available, else containers)
+    # Select runtime backend (Docker containers by default, sandbox opt-in)
     runtime = select_backend(
         mesh_host_port=mesh_port, project_root=str(PROJECT_ROOT),
+        use_sandbox=use_sandbox,
     )
-    backend_label = runtime.backend_name()
     is_sandbox = isinstance(runtime, SandboxBackend)
 
     if is_sandbox:
@@ -983,16 +985,7 @@ def _start_interactive(config_path: str) -> None:
     else:
         transport = HttpTransport()
         _ensure_docker_image()
-        click.echo("Starting OpenLegion (container isolation)...\n")
-        click.echo(
-            "  WARNING: Docker Sandbox not detected. Agents are running in "
-            "standard containers\n"
-            "  (shared host kernel). For hypervisor-level isolation, install "
-            "Docker Desktop 4.58+\n"
-            "  and enable Docker Sandbox. See: "
-            "https://docs.docker.com/sandbox/\n",
-            err=True,
-        )
+        click.echo("Starting OpenLegion...\n")
 
     blackboard = Blackboard()
     pubsub = PubSub(db_path="pubsub.db")

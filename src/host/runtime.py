@@ -534,19 +534,24 @@ def sandbox_available() -> bool:
 def select_backend(
     mesh_host_port: int = 8420,
     project_root: str | None = None,
-    force_docker: bool = False,
+    use_sandbox: bool = False,
 ) -> RuntimeBackend:
-    """Auto-select the best available runtime backend.
+    """Select the runtime backend.
 
-    Prefers SandboxBackend (microVM isolation) when available.
-    Falls back to DockerBackend (container isolation) otherwise.
-    Use force_docker=True to skip sandbox detection.
+    Defaults to DockerBackend (container isolation) which works everywhere.
+    Use use_sandbox=True to opt in to SandboxBackend (microVM isolation),
+    which requires Docker Desktop 4.58+ with sandbox support.
     """
-    if not force_docker and sandbox_available():
-        logger.info("Docker Sandbox available -- using microVM isolation")
-        return SandboxBackend(
-            mesh_host_port=mesh_host_port,
-            project_root=project_root,
+    if use_sandbox:
+        if sandbox_available():
+            logger.info("Docker Sandbox available -- using microVM isolation")
+            return SandboxBackend(
+                mesh_host_port=mesh_host_port,
+                project_root=project_root,
+            )
+        logger.warning(
+            "Docker Sandbox requested but not available. "
+            "Requires Docker Desktop 4.58+. Falling back to containers."
         )
     logger.info("Using Docker container isolation")
     return DockerBackend(
