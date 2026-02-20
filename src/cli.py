@@ -678,8 +678,9 @@ def setup():
     click.echo("\nSetup complete. Run `openlegion start` to launch your agents.")
     click.echo("")
     click.echo("  Optional next steps:")
-    click.echo("    openlegion agent add <name>   # add more agents")
-    click.echo("    Add Telegram/Discord tokens to .env for channel integration")
+    click.echo("    openlegion agent add <name>       # add more agents")
+    click.echo("    openlegion channels add telegram  # connect Telegram bot")
+    click.echo("    openlegion channels add discord   # connect Discord bot")
 
 
 def _setup_agent_wizard(model: str) -> str:
@@ -784,6 +785,133 @@ def agent_remove(name: str, yes: bool):
     _save_permissions(perms)
 
     click.echo(f"Removed agent '{name}'.")
+
+
+# ── channels subgroup ────────────────────────────────────────
+
+_CHANNEL_TYPES = {
+    "telegram": {
+        "label": "Telegram",
+        "env_key": "telegram_bot_token",
+        "config_section": "telegram",
+        "token_help": "Get one from @BotFather on Telegram: https://t.me/BotFather",
+    },
+    "discord": {
+        "label": "Discord",
+        "env_key": "discord_bot_token",
+        "config_section": "discord",
+        "token_help": "Create one at: https://discord.com/developers/applications",
+    },
+}
+
+
+@cli.group()
+def channels():
+    """Connect Telegram, Discord, or other messaging channels."""
+    pass
+
+
+@channels.command("add")
+@click.argument("channel_type", required=False, default=None)
+def channels_add(channel_type: str | None):
+    """Connect a messaging channel.
+
+    \b
+    Examples:
+      openlegion channels add telegram
+      openlegion channels add discord
+      openlegion channels add           # interactive
+    """
+    if channel_type is None:
+        click.echo("Available channels:\n")
+        for i, (key, info) in enumerate(_CHANNEL_TYPES.items(), 1):
+            click.echo(f"  {i}. {info['label']}")
+        click.echo("")
+        choice = click.prompt("Select channel", type=click.IntRange(1, len(_CHANNEL_TYPES)), default=1)
+        channel_type = list(_CHANNEL_TYPES.keys())[choice - 1]
+
+    channel_type = channel_type.lower()
+    if channel_type not in _CHANNEL_TYPES:
+        click.echo(f"Unknown channel '{channel_type}'. Available: {', '.join(_CHANNEL_TYPES)}")
+        return
+
+    ch = _CHANNEL_TYPES[channel_type]
+    click.echo(f"\n  {ch['label']} Setup")
+    click.echo(f"  {ch['token_help']}\n")
+
+    token = click.prompt(f"  {ch['label']} bot token", hide_input=True)
+    if not token.strip():
+        click.echo("  No token provided. Skipped.")
+        return
+
+    _set_env_key(ch["env_key"], token.strip())
+
+    # Enable in mesh config
+    mesh_cfg = {}
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            mesh_cfg = yaml.safe_load(f) or {}
+    mesh_cfg.setdefault("channels", {}).setdefault(ch["config_section"], {})
+    mesh_cfg["channels"][ch["config_section"]]["enabled"] = True
+    with open(CONFIG_FILE, "w") as f:
+        yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+
+    click.echo(f"\n  {ch['label']} connected. A pairing code will appear on next `openlegion start`.")
+
+
+@channels.command("list")
+def channels_list():
+    """Show configured channels and their status."""
+    mesh_cfg = {}
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            mesh_cfg = yaml.safe_load(f) or {}
+
+    channel_cfg = mesh_cfg.get("channels", {})
+    if not channel_cfg:
+        click.echo("No channels configured. Add one: openlegion channels add")
+        return
+
+    click.echo(f"{'Channel':<16} {'Status':<12}")
+    click.echo("-" * 28)
+    for key, info in _CHANNEL_TYPES.items():
+        section = channel_cfg.get(info["config_section"], {})
+        env_key = f"OPENLEGION_CRED_{info['env_key'].upper()}"
+        has_token = bool(os.environ.get(env_key))
+        if section.get("enabled"):
+            status = "ready" if has_token else "no token"
+            click.echo(f"{info['label']:<16} {status:<12}")
+
+
+@channels.command("remove")
+@click.argument("channel_type")
+def channels_remove(channel_type: str):
+    """Disconnect a messaging channel.
+
+    \b
+    Examples:
+      openlegion channels remove telegram
+      openlegion channels remove discord
+    """
+    channel_type = channel_type.lower()
+    if channel_type not in _CHANNEL_TYPES:
+        click.echo(f"Unknown channel '{channel_type}'. Available: {', '.join(_CHANNEL_TYPES)}")
+        return
+
+    ch = _CHANNEL_TYPES[channel_type]
+
+    mesh_cfg = {}
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            mesh_cfg = yaml.safe_load(f) or {}
+    channels_section = mesh_cfg.get("channels", {})
+    if ch["config_section"] in channels_section:
+        del channels_section[ch["config_section"]]
+        with open(CONFIG_FILE, "w") as f:
+            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+
+    click.echo(f"Removed {ch['label']} channel.")
+    click.echo(f"  Token remains in .env — delete the OPENLEGION_CRED_{ch['env_key'].upper()} line to fully remove.")
 
 
 # ── start ────────────────────────────────────────────────────
