@@ -51,29 +51,17 @@
 
 ## Quick Start
 
-> **First time?** See the **[full setup guide](QUICKSTART.md)** with platform-specific instructions for macOS, Linux, and Windows.
-
 **Requirements:** Python 3.12+, Docker (running), an LLM API key ([Anthropic](https://console.anthropic.com/) / [Moonshot](https://platform.moonshot.cn/) / [OpenAI](https://platform.openai.com/api-keys))
 
 ```bash
-# 1. Clone and install
-git clone https://github.com/openlegion-ai/openlegion.git
-cd openlegion
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\Activate.ps1
-pip3 install -e ".[dev]"         # Windows: pip install -e ".[dev]"
-
-# 2. Make sure Docker is running
-#    macOS/Windows: Open Docker Desktop
-#    Linux: sudo systemctl start docker
-docker info
-
-# 3. Guided setup — API key, project description, team template, Docker build
-openlegion setup
-
-# 4. Start the runtime and chat with your agents
-openlegion start
+git clone https://github.com/openlegion-ai/openlegion.git && cd openlegion
+./install.sh                     # checks deps, creates venv, installs everything
+source .venv/bin/activate
+openlegion setup                 # API key, project description, team template
+openlegion start                 # launch agents and start chatting
 ```
+
+> **Need help?** See the **[full setup guide](QUICKSTART.md)** for platform-specific instructions, Windows support, and troubleshooting.
 
 ```bash
 # Add more agents later
