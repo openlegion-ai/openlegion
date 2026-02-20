@@ -2,10 +2,13 @@
 
 Provides headless Chromium access for web scraping, testing, and interaction.
 A single browser instance is lazily initialized per agent process and reused.
+Supports three backends via BROWSER_BACKEND env var: basic, stealth, advanced.
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
 import re
 from pathlib import Path
 
@@ -14,9 +17,12 @@ from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.browser")
 
+_pw = None  # Playwright instance (needs explicit stop on cleanup)
+_camoufox_cm = None  # Camoufox context manager (needs __aexit__ on cleanup)
 _browser = None
 _context = None
 _page = None
+_launch_lock = asyncio.Lock()
 _page_refs: dict[str, object] = {}
 _credential_filled_refs: set[str] = set()  # refs that had $CRED{} typed into them
 
@@ -65,12 +71,28 @@ def _redact_credentials(text: str) -> str:
     return text
 
 
-async def _get_page():
+async def _get_page(*, mesh_client=None):
     """Lazily initialize a persistent browser context and page."""
     global _browser, _context, _page
-    if _page and not _page.is_closed():
+    async with _launch_lock:
+        if _page and not _page.is_closed():
+            return _page
+
+        backend = os.environ.get("BROWSER_BACKEND", "basic")
+
+        if backend == "stealth":
+            _browser, _context, _page = await _launch_stealth()
+        elif backend == "advanced":
+            _browser, _context, _page = await _launch_advanced(mesh_client)
+        else:
+            _browser, _context, _page = await _launch_basic()
+
         return _page
 
+
+async def _launch_basic():
+    """Launch standard Playwright Chromium."""
+    global _pw
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -78,18 +100,100 @@ async def _get_page():
             "playwright is not installed. The agent container must include "
             "playwright and chromium. See Dockerfile.agent."
         )
-
-    pw = await async_playwright().start()
-    _browser = await pw.chromium.launch(headless=True)
-    _context = await _browser.new_context(
+    _pw = await async_playwright().start()
+    browser = await _pw.chromium.launch(headless=True)
+    context = await browser.new_context(
         viewport={"width": 1280, "height": 720},
         user_agent=(
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         ),
     )
-    _page = await _context.new_page()
-    return _page
+    page = await context.new_page()
+    logger.info("Browser backend: basic (Playwright Chromium)")
+    return browser, context, page
+
+
+async def _launch_stealth():
+    """Launch Camoufox anti-detect browser.
+
+    Camoufox handles its own user-agent and fingerprint rotation,
+    so we intentionally skip the custom user_agent set in _launch_basic().
+    """
+    global _camoufox_cm
+    try:
+        from camoufox.async_api import AsyncCamoufox
+    except ImportError:
+        raise RuntimeError(
+            "camoufox is not installed. The agent container must include "
+            "camoufox. See Dockerfile.agent."
+        )
+    _camoufox_cm = AsyncCamoufox(headless=True)
+    browser = await _camoufox_cm.__aenter__()
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    logger.info("Browser backend: stealth (Camoufox)")
+    return browser, context, page
+
+
+async def _launch_advanced(mesh_client):
+    """Connect to Bright Data Scraping Browser via CDP."""
+    global _pw
+    if not mesh_client:
+        raise RuntimeError(
+            "Advanced browser backend requires mesh connectivity for credential resolution"
+        )
+    cdp_url = await mesh_client.vault_resolve("brightdata_cdp_url")
+    if not cdp_url:
+        raise RuntimeError(
+            "Credential 'brightdata_cdp_url' not found in vault. "
+            "Set OPENLEGION_CRED_BRIGHTDATA_CDP_URL on the host."
+        )
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        raise RuntimeError(
+            "playwright is not installed. The agent container must include "
+            "playwright. See Dockerfile.agent."
+        )
+    _pw = await async_playwright().start()
+    browser = await _pw.chromium.connect_over_cdp(cdp_url, timeout=120000)
+    # Always create a fresh context for a clean state with known viewport
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    logger.info("Browser backend: advanced (Bright Data CDP)")
+    return browser, context, page
+
+
+async def browser_cleanup():
+    """Release browser resources. Called on agent shutdown."""
+    global _pw, _camoufox_cm, _browser, _context, _page
+    try:
+        if _page and not _page.is_closed():
+            await _page.close()
+    except Exception:
+        pass
+    try:
+        if _context:
+            await _context.close()
+    except Exception:
+        pass
+    try:
+        if _browser:
+            await _browser.close()
+    except Exception:
+        pass
+    try:
+        if _camoufox_cm:
+            await _camoufox_cm.__aexit__(None, None, None)
+    except Exception:
+        pass
+    try:
+        if _pw:
+            await _pw.stop()
+    except Exception:
+        pass
+    _pw = _camoufox_cm = _browser = _context = _page = None
 
 
 def _flatten_tree(node: dict) -> list[dict]:
@@ -140,12 +244,12 @@ def _flatten_tree(node: dict) -> list[dict]:
         },
     },
 )
-async def browser_navigate(url: str, wait_ms: int = 1000) -> dict:
+async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -> dict:
     """Navigate to a URL and extract text content."""
     try:
         _page_refs.clear()
         _credential_filled_refs.clear()
-        page = await _get_page()
+        page = await _get_page(mesh_client=mesh_client)
         response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         if wait_ms:
             await page.wait_for_timeout(wait_ms)
@@ -198,10 +302,10 @@ def _parse_aria_snapshot(yaml_text: str) -> list[dict]:
     ),
     parameters={},
 )
-async def browser_snapshot() -> dict:
+async def browser_snapshot(*, mesh_client=None) -> dict:
     """Return an accessibility tree snapshot with element refs."""
     try:
-        page = await _get_page()
+        page = await _get_page(mesh_client=mesh_client)
 
         # Modern Playwright (1.49+): aria_snapshot() returns YAML text
         # Legacy Playwright: page.accessibility.snapshot() returns dict tree
@@ -283,11 +387,11 @@ async def browser_snapshot() -> dict:
     },
 )
 async def browser_screenshot(
-    filename: str = "screenshot.png", full_page: bool = False
+    filename: str = "screenshot.png", full_page: bool = False, *, mesh_client=None,
 ) -> dict:
     """Take a screenshot and save it to the data volume."""
     try:
-        page = await _get_page()
+        page = await _get_page(mesh_client=mesh_client)
         save_path = Path("/data") / filename
         save_path.parent.mkdir(parents=True, exist_ok=True)
         await page.screenshot(path=str(save_path), full_page=full_page)
@@ -315,12 +419,12 @@ async def browser_screenshot(
         },
     },
 )
-async def browser_click(selector: str = "", ref: str = "") -> dict:
+async def browser_click(selector: str = "", ref: str = "", *, mesh_client=None) -> dict:
     """Click an element by ref or CSS selector."""
     if not selector and not ref:
         return {"error": "Provide either 'ref' (from browser_snapshot) or 'selector' (CSS)"}
     try:
-        page = await _get_page()
+        page = await _get_page(mesh_client=mesh_client)
         if ref:
             locator = _page_refs.get(ref)
             if not locator:
@@ -381,7 +485,7 @@ async def browser_type(
         is_credential = True
 
     try:
-        page = await _get_page()
+        page = await _get_page(mesh_client=mesh_client)
         if ref:
             locator = _page_refs.get(ref)
             if not locator:
@@ -417,10 +521,10 @@ async def browser_type(
         "script": {"type": "string", "description": "JavaScript code to evaluate"},
     },
 )
-async def browser_evaluate(script: str) -> dict:
+async def browser_evaluate(script: str, *, mesh_client=None) -> dict:
     """Evaluate JavaScript in the page context."""
     try:
-        page = await _get_page()
+        page = await _get_page(mesh_client=mesh_client)
         result = await page.evaluate(script)
         # Redact any credential values that might appear in evaluate results
         if isinstance(result, str):

@@ -1,6 +1,7 @@
 """Tests for built-in agent tools: exec, file, http, browser."""
 
 import math
+import os
 import shutil
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -893,3 +894,73 @@ class TestMemorySave:
         assert result["count"] >= 1
         assert any("New_York" in r["value"] for r in result["results"])
         store.close()
+
+
+# ── browser backend selection ─────────────────────────────────
+
+
+class TestBrowserBackendSelection:
+    @pytest.mark.asyncio
+    async def test_default_is_basic(self):
+        """Without BROWSER_BACKEND, _get_page() launches basic Chromium."""
+        import src.agent.builtins.browser_tool as bt
+        bt._browser = bt._context = bt._page = None
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BROWSER_BACKEND", None)
+            with patch.object(bt, "_launch_basic", new_callable=AsyncMock) as mock_basic:
+                mock_page = AsyncMock()
+                mock_page.is_closed.return_value = False
+                mock_basic.return_value = (MagicMock(), MagicMock(), mock_page)
+                await bt._get_page()
+                mock_basic.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stealth_dispatches_to_camoufox(self):
+        """BROWSER_BACKEND=stealth calls _launch_stealth()."""
+        import src.agent.builtins.browser_tool as bt
+        bt._browser = bt._context = bt._page = None
+        with patch.dict(os.environ, {"BROWSER_BACKEND": "stealth"}):
+            with patch.object(bt, "_launch_stealth", new_callable=AsyncMock) as mock_stealth:
+                mock_page = AsyncMock()
+                mock_page.is_closed.return_value = False
+                mock_stealth.return_value = (MagicMock(), MagicMock(), mock_page)
+                await bt._get_page()
+                mock_stealth.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_advanced_dispatches_to_brightdata(self):
+        """BROWSER_BACKEND=advanced calls _launch_advanced(mesh_client)."""
+        import src.agent.builtins.browser_tool as bt
+        bt._browser = bt._context = bt._page = None
+        mock_mesh = MagicMock()
+        with patch.dict(os.environ, {"BROWSER_BACKEND": "advanced"}):
+            with patch.object(bt, "_launch_advanced", new_callable=AsyncMock) as mock_adv:
+                mock_page = AsyncMock()
+                mock_page.is_closed.return_value = False
+                mock_adv.return_value = (MagicMock(), MagicMock(), mock_page)
+                await bt._get_page(mesh_client=mock_mesh)
+                mock_adv.assert_called_once_with(mock_mesh)
+
+    @pytest.mark.asyncio
+    async def test_advanced_requires_mesh_client(self):
+        """_launch_advanced() raises without mesh_client."""
+        import src.agent.builtins.browser_tool as bt
+        with pytest.raises(RuntimeError, match="mesh connectivity"):
+            await bt._launch_advanced(None)
+
+    @pytest.mark.asyncio
+    async def test_advanced_requires_vault_credential(self):
+        """_launch_advanced() raises when credential not found."""
+        import src.agent.builtins.browser_tool as bt
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(return_value=None)
+        with pytest.raises(RuntimeError, match="brightdata_cdp_url"):
+            await bt._launch_advanced(mock_mesh)
+
+    @pytest.mark.asyncio
+    async def test_stealth_import_error(self):
+        """_launch_stealth() gives helpful error when camoufox not installed."""
+        import src.agent.builtins.browser_tool as bt
+        with patch.dict("sys.modules", {"camoufox": None, "camoufox.async_api": None}):
+            with pytest.raises(RuntimeError, match="camoufox is not installed"):
+                await bt._launch_stealth()

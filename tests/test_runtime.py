@@ -112,6 +112,55 @@ class TestSandboxBackend:
         assert "MESH_AUTH_TOKEN=" in env_content
         assert "alpha" in backend.auth_tokens
 
+    def test_prepare_workspace_browser_backend(self, tmp_path):
+        """browser_backend config is passed as BROWSER_BACKEND env var."""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+
+        backend = SandboxBackend.__new__(SandboxBackend)
+        backend.project_root = project_root
+        backend.mesh_host_port = 8420
+        backend.agents = {}
+        backend.auth_tokens = {}
+        backend._workspace_root = tmp_path / ".openlegion" / "agents"
+        backend._workspace_root.mkdir(parents=True)
+
+        ws = backend._prepare_workspace(
+            agent_id="beta",
+            role="scraper",
+            skills_dir="",
+            system_prompt="You scrape",
+            model="openai/gpt-4o-mini",
+            browser_backend="stealth",
+        )
+
+        env_content = (ws / ".agent.env").read_text()
+        assert "BROWSER_BACKEND=stealth" in env_content
+
+    def test_prepare_workspace_no_browser_backend(self, tmp_path):
+        """Without browser_backend, BROWSER_BACKEND is not in env."""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+
+        backend = SandboxBackend.__new__(SandboxBackend)
+        backend.project_root = project_root
+        backend.mesh_host_port = 8420
+        backend.agents = {}
+        backend.auth_tokens = {}
+        backend._workspace_root = tmp_path / ".openlegion" / "agents"
+        backend._workspace_root.mkdir(parents=True)
+
+        ws = backend._prepare_workspace(
+            agent_id="gamma",
+            role="helper",
+            skills_dir="",
+            system_prompt="You help",
+            model="openai/gpt-4o-mini",
+        )
+
+        env_content = (ws / ".agent.env").read_text()
+        assert "BROWSER_BACKEND" not in env_content
+
     def test_stop_agent_removes_from_registry(self):
         backend = SandboxBackend.__new__(SandboxBackend)
         backend.agents = {

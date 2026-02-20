@@ -110,7 +110,7 @@ async def vault_capture_from_page(
     try:
         from src.agent.builtins.browser_tool import _get_page, _page_refs
 
-        page = await _get_page()
+        page = await _get_page(mesh_client=mesh_client)
         if ref:
             locator = _page_refs.get(ref)
             if not locator:

@@ -981,6 +981,7 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
         skills_dir = os.path.abspath(agent_cfg.get("skills_dir", ""))
         agent_model = agent_cfg.get("model", default_model)
         agent_mcp_servers = agent_cfg.get("mcp_servers") or None
+        agent_browser_backend = agent_cfg.get("browser_backend", "")
         try:
             url = runtime.start_agent(
                 agent_id=agent_id,
@@ -989,6 +990,7 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
                 system_prompt=agent_cfg.get("system_prompt", ""),
                 model=agent_model,
                 mcp_servers=agent_mcp_servers,
+                browser_backend=agent_browser_backend,
             )
         except (subprocess.TimeoutExpired, RuntimeError) as exc:
             if isinstance(runtime, SandboxBackend):
@@ -1014,6 +1016,7 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
                     system_prompt=agent_cfg.get("system_prompt", ""),
                     model=agent_model,
                     mcp_servers=agent_mcp_servers,
+                    browser_backend=agent_browser_backend,
                 )
             else:
                 raise
@@ -1638,6 +1641,7 @@ def _multi_agent_repl(
                 agent_cfg_data = _load_config().get("agents", {}).get(new_name, {})
                 skills_dir = os.path.abspath(agent_cfg_data.get("skills_dir", ""))
                 add_mcp_servers = agent_cfg_data.get("mcp_servers") or None
+                add_browser_backend = agent_cfg_data.get("browser_backend", "")
                 import asyncio
                 url = container_manager.start_agent(
                     agent_id=new_name,
@@ -1646,6 +1650,7 @@ def _multi_agent_repl(
                     system_prompt=agent_cfg_data.get("system_prompt", ""),
                     model=agent_cfg_data.get("model", model),
                     mcp_servers=add_mcp_servers,
+                    browser_backend=add_browser_backend,
                 )
                 router.register_agent(new_name, url)
                 agent_urls[new_name] = url
