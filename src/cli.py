@@ -978,6 +978,7 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
         use_sandbox=use_sandbox,
     )
     is_sandbox = isinstance(runtime, SandboxBackend)
+    backend_label = runtime.backend_name()
 
     if is_sandbox:
         transport = SandboxTransport()

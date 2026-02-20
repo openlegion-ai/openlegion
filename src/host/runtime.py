@@ -553,9 +553,13 @@ def select_backend(
             "Docker Sandbox requested but not available. "
             "Requires Docker Desktop 4.58+. Falling back to containers."
         )
-    logger.info("Using Docker container isolation")
+    # Host networking only works reliably on Linux. On macOS/Windows,
+    # Docker Desktop runs in a VM so --network=host doesn't expose ports
+    # to the actual host. Use port mapping (bridge network) instead.
+    use_host_net = platform.system() == "Linux"
+    logger.info("Using Docker container isolation (host_network=%s)", use_host_net)
     return DockerBackend(
         mesh_host_port=mesh_host_port,
-        use_host_network=True,
+        use_host_network=use_host_net,
         project_root=project_root,
     )
