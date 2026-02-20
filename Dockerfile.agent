@@ -1,4 +1,6 @@
-FROM python:3.12-slim
+# Force amd64: sqlite-vec and Chromium have broken ARM wheels/binaries.
+# Docker Desktop uses Rosetta 2 on Apple Silicon — fast and reliable.
+FROM --platform=linux/amd64 python:3.12-slim
 
 # System tools useful for agent operations
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -12,7 +14,7 @@ WORKDIR /app
 
 # Python dependencies — only what agents actually import
 # (litellm, pyyaml, click, docker are host-only — not needed here)
-# sqlite-vec has prebuilt wheels for all platforms (linux, macOS, Windows)
+# sqlite-vec requires amd64 (ARM wheels have broken 32-bit .so files)
 COPY pyproject.toml .
 RUN pip install --no-cache-dir \
     fastapi uvicorn httpx pydantic playwright sqlite-vec
