@@ -230,7 +230,13 @@ openlegion stop                 # shut down
 
 ### Telegram / Discord (optional)
 
-Add bot tokens to `config/mesh.yaml`. On next start, a pairing code appears — send it to your bot to link.
+```bash
+openlegion channels add telegram   # prompts for bot token
+openlegion channels add discord    # prompts for bot token
+openlegion channels list           # check what's connected
+```
+
+On next `openlegion start`, a pairing code appears — send it to your bot to link.
 
 ---
 
