@@ -316,6 +316,7 @@ def _suppress_host_logs() -> None:
         "host.mesh", "host.costs", "host.permissions", "host.cron", "host.webhooks",
         "host.health", "host.lanes", "host.runtime", "host.watchers",
         "channels", "channels.base", "channels.telegram", "channels.discord",
+        "channels.slack",
     ]:
         logging.getLogger(name).setLevel(logging.WARNING)
 
@@ -442,6 +443,44 @@ def _start_channels(
             )
         else:
             click.echo("  Discord channel active (paired)")
+
+    # Slack
+    sl_cfg = channels_cfg.get("slack", {})
+    sl_bot_token = (
+        sl_cfg.get("bot_token")
+        or os.environ.get("OPENLEGION_CRED_SLACK_BOT_TOKEN", "")
+        or os.environ.get("SLACK_BOT_TOKEN", "")
+    )
+    sl_app_token = (
+        sl_cfg.get("app_token")
+        or os.environ.get("OPENLEGION_CRED_SLACK_APP_TOKEN", "")
+        or os.environ.get("SLACK_APP_TOKEN", "")
+    )
+    if sl_bot_token and sl_app_token:
+        sl_code = _ensure_pairing_code(PROJECT_ROOT / "config" / "slack_paired.json")
+        from src.channels.slack import SlackChannel
+        sl = SlackChannel(
+            bot_token=sl_bot_token,
+            app_token=sl_app_token,
+            default_agent=sl_cfg.get("default_agent", first_agent),
+            **common,
+        )
+        def run_sl():
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(sl.start())
+            loop.run_forever()
+        t = threading.Thread(target=run_sl, daemon=True)
+        t.start()
+        active_channels.append(sl)
+
+        if sl_code:
+            pairing_instructions.append(
+                f"  Slack: message your bot →  !start {sl_code}"
+            )
+        else:
+            click.echo("  Slack channel active (paired)")
 
     return pairing_instructions
 
@@ -652,6 +691,12 @@ _CHANNEL_TYPES = {
         "config_section": "discord",
         "token_help": "Create one at: https://discord.com/developers/applications",
     },
+    "slack": {
+        "label": "Slack",
+        "env_key": "slack_bot_token",
+        "config_section": "slack",
+        "token_help": "Create a Slack app at https://api.slack.com/apps -- enable Socket Mode",
+    },
 }
 
 
@@ -695,6 +740,16 @@ def channels_add(channel_type: str | None):
         return
 
     _set_env_key(ch["env_key"], token.strip())
+
+    # Slack needs a second token (app-level token for Socket Mode)
+    if channel_type == "slack":
+        click.echo("\n  Socket Mode requires an app-level token (xapp-...).")
+        app_token = click.prompt("  Slack app-level token", hide_input=True)
+        if app_token.strip():
+            _set_env_key("slack_app_token", app_token.strip())
+        else:
+            click.echo("  No app token provided. Socket Mode will not work.")
+            return
 
     # Enable in mesh config
     mesh_cfg = {}
