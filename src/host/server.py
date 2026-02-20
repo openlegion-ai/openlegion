@@ -188,9 +188,12 @@ def create_mesh_app(
         heartbeat = data.get("heartbeat", False)
         if not agent_id or not schedule:
             raise HTTPException(400, "agent_id and schedule are required")
-        job = cron_scheduler.add_job(
-            agent=agent_id, schedule=schedule, message=message, heartbeat=heartbeat,
-        )
+        try:
+            job = cron_scheduler.add_job(
+                agent=agent_id, schedule=schedule, message=message, heartbeat=heartbeat,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
         return {"id": job.id, "agent": job.agent, "schedule": job.schedule, "heartbeat": job.heartbeat}
 
     @app.get("/mesh/cron")
