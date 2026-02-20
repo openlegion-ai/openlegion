@@ -20,7 +20,7 @@ foreach ($cmd in @("python", "python3")) {
         $ver = & $cmd -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
         $major = & $cmd -c "import sys; print(sys.version_info.major)" 2>$null
         $minor = & $cmd -c "import sys; print(sys.version_info.minor)" 2>$null
-        if ([int]$major -ge 3 -and [int]$minor -ge 12) {
+        if ([int]$major -ge 3 -and [int]$minor -ge 10) {
             $python = $cmd
             break
         }
@@ -28,7 +28,7 @@ foreach ($cmd in @("python", "python3")) {
 }
 
 if (-not $python) {
-    Write-Fail "Python 3.12+ is required but not found.
+    Write-Fail "Python 3.10+ is required but not found.
     Download from: https://python.org/downloads
     IMPORTANT: Check 'Add python.exe to PATH' during install."
 }

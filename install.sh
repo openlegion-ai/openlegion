@@ -26,7 +26,7 @@ for cmd in python3 python; do
         version=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
         major=$("$cmd" -c "import sys; print(sys.version_info.major)" 2>/dev/null)
         minor=$("$cmd" -c "import sys; print(sys.version_info.minor)" 2>/dev/null)
-        if [ "$major" -ge 3 ] && [ "$minor" -ge 12 ]; then
+        if [ "$major" -ge 3 ] && [ "$minor" -ge 10 ]; then
             PYTHON="$cmd"
             break
         fi
@@ -34,9 +34,9 @@ for cmd in python3 python; do
 done
 
 if [ -z "$PYTHON" ]; then
-    fail "Python 3.12+ is required but not found.
+    fail "Python 3.10+ is required but not found.
     Install it:
-      macOS:   brew install python@3.12
+      macOS:   brew install python@3
       Ubuntu:  sudo apt install python3
       Windows: https://python.org/downloads
       Other:   https://github.com/pyenv/pyenv"
