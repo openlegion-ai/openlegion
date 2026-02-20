@@ -550,131 +550,19 @@ def cli():
 
 @cli.command()
 def setup():
-    """One-time setup: API key, project definition, first agent."""
+    """Interactive setup: API key, project, agents, collaboration."""
+    from src.setup_wizard import SetupWizard
+    wizard = SetupWizard(PROJECT_ROOT)
+    wizard.run_full()
 
-    click.echo("=== OpenLegion Setup ===\n")
 
-    # 0. Docker pre-flight
-    if not _check_docker_running():
-        click.echo(
-            "Docker is not running or not accessible.\n"
-            "Please start Docker and ensure your user has permission to use it.\n"
-            "  - Linux: sudo systemctl start docker && sudo usermod -aG docker $USER\n"
-            "  - macOS/Windows: Start Docker Desktop",
-            err=True,
-        )
-        sys.exit(1)
-
-    # Step 1: LLM provider + model + API key
-    click.echo("Step 1: LLM Provider\n")
-
-    for i, p in enumerate(_PROVIDERS, 1):
-        click.echo(f"  {i}. {p['label']}")
-    click.echo(
-        "\n  Tip: Anthropic Claude and Moonshot Kimi are recommended for agentic\n"
-        "  tasks (browser automation, web interaction, tool use). They have\n"
-        "  built-in computer use training and strong tool-calling support.\n"
-    )
-    choice = click.prompt("  Select provider", type=click.IntRange(1, len(_PROVIDERS)), default=1)
-    provider = _PROVIDERS[choice - 1]["name"]
-    click.echo(f"  Selected: {_PROVIDERS[choice - 1]['label']}\n")
-
-    # Model selection
-    models = _PROVIDER_MODELS[provider]
-    click.echo("  Available models:")
-    for i, m in enumerate(models, 1):
-        click.echo(f"  {i}. {m}")
-    model_choice = click.prompt("\n  Select model", type=click.IntRange(1, len(models)), default=1)
-    selected_model = models[model_choice - 1]
-    click.echo(f"  Selected: {selected_model}\n")
-
-    # API key
-    key_name = f"{provider}_api_key"
-    existing_key = os.environ.get(f"OPENLEGION_CRED_{key_name.upper()}", "")
-    if existing_key:
-        click.echo(f"  API key already set for {provider}.")
-        if click.confirm("  Replace it?", default=False):
-            api_key = click.prompt("  API key", hide_input=True)
-            _set_env_key(key_name, api_key)
-    else:
-        api_key = click.prompt(f"  {_PROVIDERS[choice - 1]['label']} API key", hide_input=True)
-        _set_env_key(key_name, api_key)
-
-    # Update default model in mesh config
-    mesh_cfg = {}
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE) as f:
-            mesh_cfg = yaml.safe_load(f) or {}
-    mesh_cfg.setdefault("llm", {})["default_model"] = selected_model
-    with open(CONFIG_FILE, "w") as f:
-        yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
-
-    # Step 2: Project definition (optional north star)
-    click.echo("\nStep 2: Your Project (optional)\n")
-
-    project_desc = click.prompt(
-        "  What are you building? (press Enter to skip)",
-        default="",
-        show_default=False,
-    )
-    if project_desc:
-        PROJECT_FILE.write_text(
-            f"# PROJECT.md\n\n"
-            f"## What We're Building\n{project_desc}\n\n"
-            f"## Current Priority\n[Define your current focus]\n\n"
-            f"## Hard Constraints\n[Budget limits, deadlines, compliance rules]\n"
-        )
-        click.echo("  Saved to PROJECT.md. Every agent will see this as their north star.")
-    elif not PROJECT_FILE.exists():
-        click.echo("  Skipped. You can define it later by editing PROJECT.md.")
-
-    # Step 3: First agent (or team template)
-    click.echo("\nStep 3: Your Agents\n")
-
-    cfg = _load_config()
-    existing_agents = list(cfg.get("agents", {}).keys())
-
-    if existing_agents:
-        click.echo(f"  Existing agents: {', '.join(existing_agents)}")
-        if not click.confirm("  Add another agent?", default=False):
-            click.echo("  Keeping existing agents.")
-        else:
-            _setup_agent_wizard(selected_model)
-    else:
-        templates = _load_templates()
-        if templates:
-            tpl_names = list(templates.keys())
-            tpl_display = ", ".join(tpl_names)
-            use_template = click.prompt(
-                f"  Start from a template? ({tpl_display}) or 'none' for custom",
-                default="none",
-            )
-            if use_template != "none" and use_template in templates:
-                created = _apply_template(use_template, templates[use_template])
-                click.echo(f"  Created agents: {', '.join(created)}")
-            else:
-                _setup_agent_wizard(selected_model)
-        else:
-            _setup_agent_wizard(selected_model)
-
-    # Enable collaboration by default (users can change via config later)
-    mesh_cfg = {}
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE) as f:
-            mesh_cfg = yaml.safe_load(f) or {}
-    if "collaboration" not in mesh_cfg:
-        mesh_cfg["collaboration"] = True
-        with open(CONFIG_FILE, "w") as f:
-            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
-        _set_collaborative_permissions()
-
-    # Done — Docker image builds automatically on first `openlegion start`
-    click.echo("\nSetup complete. Run `openlegion start` to launch your agents.")
-    click.echo("")
-    click.echo("  Optional next steps:")
-    click.echo("    openlegion agent add <name>       # add more agents")
-    click.echo("    openlegion channels add telegram  # connect Telegram bot")
-    click.echo("    openlegion channels add discord   # connect Discord bot")
+@cli.command()
+@click.option("--model", default=None, help="LLM model (default: anthropic/claude-sonnet-4-6)")
+def quickstart(model):
+    """One-command setup: API key + single assistant agent."""
+    from src.setup_wizard import SetupWizard
+    wizard = SetupWizard(PROJECT_ROOT)
+    wizard.run_quickstart(model)
 
 
 def _setup_agent_wizard(model: str) -> str:
