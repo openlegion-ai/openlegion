@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -38,12 +39,12 @@ PROJECT_FILE = PROJECT_ROOT / "PROJECT.md"
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 _PROVIDERS = [
+    {"name": "anthropic", "label": "Anthropic (recommended)"},
+    {"name": "moonshot", "label": "Moonshot / Kimi (recommended)"},
+    {"name": "deepseek", "label": "DeepSeek"},
     {"name": "openai", "label": "OpenAI"},
-    {"name": "anthropic", "label": "Anthropic"},
     {"name": "gemini", "label": "Google Gemini"},
     {"name": "xai", "label": "xAI (Grok)"},
-    {"name": "deepseek", "label": "DeepSeek"},
-    {"name": "moonshot", "label": "Moonshot (Kimi)"},
     {"name": "groq", "label": "Groq"},
 ]
 
@@ -214,19 +215,31 @@ def _ensure_docker_image() -> None:
 
 
 def _build_docker_image() -> None:
-    """Build the agent Docker image."""
+    """Build the agent Docker image with visible progress."""
     import subprocess
-    click.echo("Building Docker image (this may take a few minutes)...")
-    result = subprocess.run(
+
+    click.echo("Building Docker image...")
+    click.echo("  First build downloads base image + Chromium (~2 min). Rebuilds are fast.\n")
+    proc = subprocess.Popen(
         ["docker", "build", "-t", "openlegion-agent:latest", "-f", "Dockerfile.agent", "."],
         cwd=str(PROJECT_ROOT),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
     )
-    if result.returncode != 0:
-        click.echo(f"Docker build failed:\n{result.stderr}", err=True)
+    for line in proc.stdout:
+        line = line.rstrip()
+        if not line:
+            continue
+        # Show step progress and download/install lines, skip noisy intermediate output
+        if line.startswith("Step ") or line.startswith("#") or "Downloading" in line or "Installing" in line:
+            click.echo(f"  {line}")
+    proc.wait()
+    if proc.returncode != 0:
+        click.echo("Docker build failed. Run manually for full output:", err=True)
+        click.echo("  docker build -t openlegion-agent:latest -f Dockerfile.agent .", err=True)
         sys.exit(1)
-    click.echo("Docker image built successfully.")
+    click.echo("\n  Docker image built successfully.")
 
 
 def _add_agent_to_config(name: str, role: str, model: str, system_prompt: str) -> None:
@@ -543,7 +556,7 @@ def cli():
 
 @cli.command()
 def setup():
-    """One-time setup: API key, project definition, first agent, Docker image."""
+    """One-time setup: API key, project definition, first agent."""
 
     click.echo("=== OpenLegion Setup ===\n")
 
@@ -564,9 +577,9 @@ def setup():
     for i, p in enumerate(_PROVIDERS, 1):
         click.echo(f"  {i}. {p['label']}")
     click.echo(
-        "\n  Tip: Anthropic Claude models are recommended for agentic tasks\n"
-        "  (browser automation, web interaction). Claude has built-in computer\n"
-        "  use training. GPT models may refuse some autonomous actions.\n"
+        "\n  Tip: Anthropic Claude and Moonshot Kimi are recommended for agentic\n"
+        "  tasks (browser automation, web interaction, tool use). They have\n"
+        "  built-in computer use training and strong tool-calling support.\n"
     )
     choice = click.prompt("  Select provider", type=click.IntRange(1, len(_PROVIDERS)), default=1)
     provider = _PROVIDERS[choice - 1]["name"]
@@ -650,69 +663,24 @@ def setup():
         else:
             _setup_agent_wizard(selected_model)
 
-    # Step 4: Messaging channels (optional)
-    click.echo("\nStep 4: Messaging Channels (optional)\n")
-
-    if click.confirm("  Connect a Telegram bot?", default=False):
-        tg_token = click.prompt("  Telegram bot token", hide_input=True)
-        _set_env_key("telegram_bot_token", tg_token)
-        mesh_cfg = {}
-        if CONFIG_FILE.exists():
-            with open(CONFIG_FILE) as f:
-                mesh_cfg = yaml.safe_load(f) or {}
-        mesh_cfg.setdefault("channels", {}).setdefault("telegram", {})
-        mesh_cfg["channels"]["telegram"]["enabled"] = True
-        with open(CONFIG_FILE, "w") as f:
-            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
-        click.echo("  Telegram configured. Pairing code will appear when you run `openlegion start`.")
-
-    if click.confirm("  Connect a Discord bot?", default=False):
-        dc_token = click.prompt("  Discord bot token", hide_input=True)
-        _set_env_key("discord_bot_token", dc_token)
-        mesh_cfg = {}
-        if CONFIG_FILE.exists():
-            with open(CONFIG_FILE) as f:
-                mesh_cfg = yaml.safe_load(f) or {}
-        mesh_cfg.setdefault("channels", {}).setdefault("discord", {})
-        mesh_cfg["channels"]["discord"]["enabled"] = True
-        with open(CONFIG_FILE, "w") as f:
-            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
-        click.echo("  Discord configured. Pairing code will appear when you run `openlegion start`.")
-
-    has_tg = os.environ.get("OPENLEGION_CRED_TELEGRAM_BOT_TOKEN")
-    has_dc = os.environ.get("OPENLEGION_CRED_DISCORD_BOT_TOKEN")
-    if not has_tg and not has_dc:
-        click.echo("  Skipped. Add channels later during setup or by setting tokens in .env.")
-
-    # Step 5: Agent collaboration mode
-    click.echo("\nStep 5: Agent Collaboration\n")
-    click.echo("  Isolated:      Agents work independently, no shared context or messaging.")
-    click.echo("  Collaborative: Agents can message each other, share blackboard data.\n")
-
-    collab = click.confirm("  Enable agent collaboration?", default=True)
+    # Enable collaboration by default (users can change via config later)
     mesh_cfg = {}
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE) as f:
             mesh_cfg = yaml.safe_load(f) or {}
-    mesh_cfg["collaboration"] = collab
-    with open(CONFIG_FILE, "w") as f:
-        yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
-
-    if collab:
-        # Update permissions so agents can message each other
+    if "collaboration" not in mesh_cfg:
+        mesh_cfg["collaboration"] = True
+        with open(CONFIG_FILE, "w") as f:
+            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
         _set_collaborative_permissions()
-        click.echo("  Collaboration enabled. Agents can communicate via the mesh.")
-    else:
-        _set_isolated_permissions()
-        click.echo("  Isolation mode. Agents operate independently.")
 
-    # Step 6: Docker image
-    _ensure_docker_image()
-
-    # Done
-    click.echo("\nSetup complete.")
-    click.echo("  Start the runtime:  openlegion start")
-    click.echo("  Add more agents:    openlegion agent add")
+    # Done — Docker image builds automatically on first `openlegion start`
+    click.echo("\nSetup complete. Run `openlegion start` to launch your agents.")
+    click.echo("")
+    click.echo("  Optional next steps:")
+    click.echo("    openlegion agent add <name>       # add more agents")
+    click.echo("    openlegion channels add telegram  # connect Telegram bot")
+    click.echo("    openlegion channels add discord   # connect Discord bot")
 
 
 def _setup_agent_wizard(model: str) -> str:
@@ -819,12 +787,140 @@ def agent_remove(name: str, yes: bool):
     click.echo(f"Removed agent '{name}'.")
 
 
+# ── channels subgroup ────────────────────────────────────────
+
+_CHANNEL_TYPES = {
+    "telegram": {
+        "label": "Telegram",
+        "env_key": "telegram_bot_token",
+        "config_section": "telegram",
+        "token_help": "Get one from @BotFather on Telegram: https://t.me/BotFather",
+    },
+    "discord": {
+        "label": "Discord",
+        "env_key": "discord_bot_token",
+        "config_section": "discord",
+        "token_help": "Create one at: https://discord.com/developers/applications",
+    },
+}
+
+
+@cli.group()
+def channels():
+    """Connect Telegram, Discord, or other messaging channels."""
+    pass
+
+
+@channels.command("add")
+@click.argument("channel_type", required=False, default=None)
+def channels_add(channel_type: str | None):
+    """Connect a messaging channel.
+
+    \b
+    Examples:
+      openlegion channels add telegram
+      openlegion channels add discord
+      openlegion channels add           # interactive
+    """
+    if channel_type is None:
+        click.echo("Available channels:\n")
+        for i, (key, info) in enumerate(_CHANNEL_TYPES.items(), 1):
+            click.echo(f"  {i}. {info['label']}")
+        click.echo("")
+        choice = click.prompt("Select channel", type=click.IntRange(1, len(_CHANNEL_TYPES)), default=1)
+        channel_type = list(_CHANNEL_TYPES.keys())[choice - 1]
+
+    channel_type = channel_type.lower()
+    if channel_type not in _CHANNEL_TYPES:
+        click.echo(f"Unknown channel '{channel_type}'. Available: {', '.join(_CHANNEL_TYPES)}")
+        return
+
+    ch = _CHANNEL_TYPES[channel_type]
+    click.echo(f"\n  {ch['label']} Setup")
+    click.echo(f"  {ch['token_help']}\n")
+
+    token = click.prompt(f"  {ch['label']} bot token", hide_input=True)
+    if not token.strip():
+        click.echo("  No token provided. Skipped.")
+        return
+
+    _set_env_key(ch["env_key"], token.strip())
+
+    # Enable in mesh config
+    mesh_cfg = {}
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            mesh_cfg = yaml.safe_load(f) or {}
+    mesh_cfg.setdefault("channels", {}).setdefault(ch["config_section"], {})
+    mesh_cfg["channels"][ch["config_section"]]["enabled"] = True
+    with open(CONFIG_FILE, "w") as f:
+        yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+
+    click.echo(f"\n  {ch['label']} connected. A pairing code will appear on next `openlegion start`.")
+
+
+@channels.command("list")
+def channels_list():
+    """Show configured channels and their status."""
+    mesh_cfg = {}
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            mesh_cfg = yaml.safe_load(f) or {}
+
+    channel_cfg = mesh_cfg.get("channels", {})
+    if not channel_cfg:
+        click.echo("No channels configured. Add one: openlegion channels add")
+        return
+
+    click.echo(f"{'Channel':<16} {'Status':<12}")
+    click.echo("-" * 28)
+    for key, info in _CHANNEL_TYPES.items():
+        section = channel_cfg.get(info["config_section"], {})
+        env_key = f"OPENLEGION_CRED_{info['env_key'].upper()}"
+        has_token = bool(os.environ.get(env_key))
+        if section.get("enabled"):
+            status = "ready" if has_token else "no token"
+            click.echo(f"{info['label']:<16} {status:<12}")
+
+
+@channels.command("remove")
+@click.argument("channel_type")
+def channels_remove(channel_type: str):
+    """Disconnect a messaging channel.
+
+    \b
+    Examples:
+      openlegion channels remove telegram
+      openlegion channels remove discord
+    """
+    channel_type = channel_type.lower()
+    if channel_type not in _CHANNEL_TYPES:
+        click.echo(f"Unknown channel '{channel_type}'. Available: {', '.join(_CHANNEL_TYPES)}")
+        return
+
+    ch = _CHANNEL_TYPES[channel_type]
+
+    mesh_cfg = {}
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            mesh_cfg = yaml.safe_load(f) or {}
+    channels_section = mesh_cfg.get("channels", {})
+    if ch["config_section"] in channels_section:
+        del channels_section[ch["config_section"]]
+        with open(CONFIG_FILE, "w") as f:
+            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+
+    click.echo(f"Removed {ch['label']} channel.")
+    click.echo(f"  Token remains in .env — delete the OPENLEGION_CRED_{ch['env_key'].upper()} line to fully remove.")
+
+
 # ── start ────────────────────────────────────────────────────
 
 @cli.command()
 @click.option("--config", "config_path", default="config/mesh.yaml", help="Path to mesh config")
 @click.option("--detach", "-d", is_flag=True, help="Run in background (no interactive REPL)")
-def start(config_path: str, detach: bool):
+@click.option("--sandbox", is_flag=True, help="Use Docker Sandbox microVMs (requires Docker Desktop 4.58+)")
+def start(config_path: str, detach: bool, sandbox: bool):
     """Start the runtime and chat with your agents.
 
     By default, starts the mesh and all agents then drops into an interactive
@@ -832,16 +928,17 @@ def start(config_path: str, detach: bool):
 
     \b
     Examples:
-      openlegion start          # interactive mode
-      openlegion start -d       # background mode
+      openlegion start              # interactive mode
+      openlegion start -d           # background mode
+      openlegion start --sandbox    # use microVM isolation
     """
     if detach:
         _start_detached(config_path)
     else:
-        _start_interactive(config_path)
+        _start_interactive(config_path, use_sandbox=sandbox)
 
 
-def _start_interactive(config_path: str) -> None:
+def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
     """Start mesh + agents in background threads, then drop into REPL."""
     import asyncio
     import threading
@@ -858,7 +955,7 @@ def _start_interactive(config_path: str) -> None:
     from src.host.mesh import Blackboard, MessageRouter, PubSub
     from src.host.orchestrator import Orchestrator
     from src.host.permissions import PermissionMatrix
-    from src.host.runtime import SandboxBackend, select_backend
+    from src.host.runtime import DockerBackend, SandboxBackend, select_backend
     from src.host.server import create_mesh_app
     from src.host.transport import HttpTransport, SandboxTransport
     from src.host.webhooks import WebhookManager
@@ -875,12 +972,13 @@ def _start_interactive(config_path: str) -> None:
         click.echo("Docker is not running. Please start Docker first.", err=True)
         sys.exit(1)
 
-    # Select runtime backend (sandbox microVM if available, else containers)
+    # Select runtime backend (Docker containers by default, sandbox opt-in)
     runtime = select_backend(
         mesh_host_port=mesh_port, project_root=str(PROJECT_ROOT),
+        use_sandbox=use_sandbox,
     )
-    backend_label = runtime.backend_name()
     is_sandbox = isinstance(runtime, SandboxBackend)
+    backend_label = runtime.backend_name()
 
     if is_sandbox:
         transport = SandboxTransport()
@@ -888,16 +986,7 @@ def _start_interactive(config_path: str) -> None:
     else:
         transport = HttpTransport()
         _ensure_docker_image()
-        click.echo("Starting OpenLegion (container isolation)...\n")
-        click.echo(
-            "  WARNING: Docker Sandbox not detected. Agents are running in "
-            "standard containers\n"
-            "  (shared host kernel). For hypervisor-level isolation, install "
-            "Docker Desktop 4.58+\n"
-            "  and enable Docker Sandbox. See: "
-            "https://docs.docker.com/sandbox/\n",
-            err=True,
-        )
+        click.echo("Starting OpenLegion...\n")
 
     blackboard = Blackboard()
     pubsub = PubSub(db_path="pubsub.db")
@@ -930,13 +1019,40 @@ def _start_interactive(config_path: str) -> None:
             )
         skills_dir = os.path.abspath(agent_cfg.get("skills_dir", ""))
         agent_model = agent_cfg.get("model", default_model)
-        url = runtime.start_agent(
-            agent_id=agent_id,
-            role=agent_cfg["role"],
-            skills_dir=skills_dir,
-            system_prompt=agent_cfg.get("system_prompt", ""),
-            model=agent_model,
-        )
+        try:
+            url = runtime.start_agent(
+                agent_id=agent_id,
+                role=agent_cfg["role"],
+                skills_dir=skills_dir,
+                system_prompt=agent_cfg.get("system_prompt", ""),
+                model=agent_model,
+            )
+        except (subprocess.TimeoutExpired, RuntimeError) as exc:
+            if isinstance(runtime, SandboxBackend):
+                click.echo(
+                    f"\n  Sandbox failed for '{agent_id}': {exc}\n"
+                    "  Falling back to Docker container isolation...\n",
+                    err=True,
+                )
+                # Clean up the failed sandbox before switching backends
+                runtime.stop_all()
+                import platform as _platform
+                runtime = DockerBackend(
+                    mesh_host_port=mesh_port,
+                    use_host_network=_platform.system() == "Linux",
+                    project_root=str(PROJECT_ROOT),
+                )
+                transport = HttpTransport()
+                _ensure_docker_image()
+                url = runtime.start_agent(
+                    agent_id=agent_id,
+                    role=agent_cfg["role"],
+                    skills_dir=skills_dir,
+                    system_prompt=agent_cfg.get("system_prompt", ""),
+                    model=agent_model,
+                )
+            else:
+                raise
         router.register_agent(agent_id, url)
         agent_urls[agent_id] = url
         if isinstance(transport, HttpTransport):
@@ -1177,35 +1293,46 @@ def _start_interactive(config_path: str) -> None:
 
 def _start_detached(config_path: str) -> None:
     """Start the runtime in a background subprocess."""
-    import subprocess
+    import threading
 
     cmd = [sys.executable, "-m", "src.cli", "start", "--config", config_path]
-    proc = subprocess.Popen(
-        cmd,
+
+    # Platform-specific process detachment
+    popen_kwargs: dict = dict(
         cwd=str(PROJECT_ROOT),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        start_new_session=True,
     )
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
 
-    # Read output until agents are ready or timeout
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+
+    # Read output until agents are ready or timeout.
+    # Use a thread to read stdout (cross-platform, unlike select.select on fds).
     started_lines: list[str] = []
-    import select
-    deadline = time.time() + 90
-    while time.time() < deadline:
-        ready_fds, _, _ = select.select([proc.stdout], [], [], 1.0)
-        if ready_fds:
-            line = proc.stdout.readline()
-            if not line:
-                break
+    ready_event = threading.Event()
+
+    def _reader() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
             line = line.rstrip()
             started_lines.append(line)
             click.echo(line)
             if "Chatting with" in line:
-                break
-        if proc.poll() is not None:
-            break
+                ready_event.set()
+                return
+        ready_event.set()  # EOF — unblock main thread
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
+    ready_event.wait(timeout=90)
+
+    if proc.poll() is not None:
+        reader_thread.join(timeout=2)
 
     if proc.poll() is not None:
         click.echo("Runtime failed to start. Check logs.", err=True)

@@ -10,10 +10,12 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash agent
 
 WORKDIR /app
 
-# Python dependencies
+# Python dependencies — only what agents actually import
+# (litellm, pyyaml, click, docker are host-only — not needed here)
+# sqlite-vec has prebuilt wheels for all platforms (linux, macOS, Windows)
 COPY pyproject.toml .
 RUN pip install --no-cache-dir \
-    fastapi uvicorn httpx pydantic litellm sqlite-vec pyyaml playwright
+    fastapi uvicorn httpx pydantic playwright sqlite-vec
 
 # Install Chromium for browser automation — shared path so non-root agent can access it
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers

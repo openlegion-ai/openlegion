@@ -193,29 +193,30 @@ class TestSandboxDetection:
 # ── select_backend ────────────────────────────────────────────
 
 class TestSelectBackend:
-    def test_force_docker(self):
+    def test_default_is_docker(self):
+        """Default (no flags) should always use DockerBackend."""
         with patch("src.host.runtime.DockerBackend") as MockDocker:
             mock_instance = MagicMock()
             MockDocker.return_value = mock_instance
-            result = select_backend(force_docker=True)
+            result = select_backend()
             assert result is mock_instance
 
-    def test_sandbox_when_available(self):
+    def test_sandbox_when_opted_in_and_available(self):
         with (
             patch("src.host.runtime.sandbox_available", return_value=True),
             patch("src.host.runtime.SandboxBackend") as MockSandbox,
         ):
             mock_instance = MagicMock()
             MockSandbox.return_value = mock_instance
-            result = select_backend()
+            result = select_backend(use_sandbox=True)
             assert result is mock_instance
 
-    def test_docker_fallback(self):
+    def test_sandbox_requested_but_unavailable_falls_back(self):
         with (
             patch("src.host.runtime.sandbox_available", return_value=False),
             patch("src.host.runtime.DockerBackend") as MockDocker,
         ):
             mock_instance = MagicMock()
             MockDocker.return_value = mock_instance
-            result = select_backend()
+            result = select_backend(use_sandbox=True)
             assert result is mock_instance

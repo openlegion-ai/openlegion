@@ -27,8 +27,9 @@ from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.main")
 
-_MAX_REGISTRATION_ATTEMPTS = 10
+_MAX_REGISTRATION_ATTEMPTS = 5
 _REGISTRATION_BACKOFF_SECONDS = 1
+_REGISTRATION_TIMEOUT_SECONDS = 5
 
 
 def main() -> None:
@@ -81,7 +82,11 @@ def main() -> None:
         registered = False
         for attempt in range(1, _MAX_REGISTRATION_ATTEMPTS + 1):
             try:
-                await mesh_client.register(capabilities=skills.list_skills(), port=agent_port)
+                await mesh_client.register(
+                    capabilities=skills.list_skills(),
+                    port=agent_port,
+                    timeout=_REGISTRATION_TIMEOUT_SECONDS,
+                )
                 logger.info(f"Agent '{agent_id}' registered with mesh")
                 registered = True
                 break

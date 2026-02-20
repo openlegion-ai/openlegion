@@ -140,8 +140,6 @@ class DockerBackend(RuntimeBackend):
         self.use_host_network = use_host_network
         self._next_port = 8401
         self._cleanup_stale()
-        if not use_host_network:
-            self._ensure_network()
 
     @staticmethod
     def backend_name() -> str:
@@ -196,10 +194,16 @@ class DockerBackend(RuntimeBackend):
             f"openlegion_data_{agent_id}": {"bind": "/data", "mode": "rw"},
         }
         if skills_dir:
-            volumes[skills_dir] = {"bind": "/app/skills", "mode": "ro"}
+            # docker-py on Windows needs forward-slash or POSIX paths for bind mounts
+            volumes[str(Path(skills_dir).as_posix() if platform.system() == "Windows" else skills_dir)] = {
+                "bind": "/app/skills", "mode": "ro",
+            }
         project_md = self.project_root / "PROJECT.md"
         if project_md.exists():
-            volumes[str(project_md)] = {"bind": "/app/PROJECT.md", "mode": "ro"}
+            host_path = str(project_md)
+            if platform.system() == "Windows":
+                host_path = project_md.as_posix()
+            volumes[host_path] = {"bind": "/app/PROJECT.md", "mode": "ro"}
 
         run_kwargs: dict[str, Any] = {
             "detach": True,
@@ -214,12 +218,12 @@ class DockerBackend(RuntimeBackend):
         if self.use_host_network:
             run_kwargs["network_mode"] = "host"
         else:
-            extra_hosts: dict[str, str] = {}
-            if platform.system() == "Linux":
-                extra_hosts["host.docker.internal"] = "host-gateway"
-            run_kwargs["network"] = self.NETWORK_NAME
             run_kwargs["ports"] = {"8400/tcp": port}
-            run_kwargs["extra_hosts"] = extra_hosts
+            # On Linux Docker Engine, host.docker.internal isn't automatic
+            if platform.system() == "Linux":
+                run_kwargs["extra_hosts"] = {
+                    "host.docker.internal": "host-gateway",
+                }
 
         container_name = f"openlegion_{agent_id}"
         try:
@@ -229,7 +233,7 @@ class DockerBackend(RuntimeBackend):
             pass
 
         container = self.client.containers.run(self.BASE_IMAGE, **run_kwargs)
-        url = f"http://localhost:{port}"
+        url = f"http://127.0.0.1:{port}"
         self.agents[agent_id] = {
             "container": container,
             "url": url,
@@ -278,20 +282,30 @@ class DockerBackend(RuntimeBackend):
         if not url:
             return False
         start = time.time()
+        last_error = ""
         while time.time() - start < timeout:
             if not self.health_check(agent_id):
-                logger.warning(f"Agent '{agent_id}' container exited during startup")
+                logs = self.get_logs(agent_id, tail=20)
+                logger.warning(
+                    f"Agent '{agent_id}' container exited during startup. "
+                    f"Logs:\n{logs}"
+                )
                 return False
             try:
-                async with httpx.AsyncClient(timeout=2) as client:
+                async with httpx.AsyncClient(timeout=3) as client:
                     resp = await client.get(f"{url}/status")
                     if resp.status_code == 200:
                         return True
-            except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError):
-                pass
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+                last_error = str(e)
             except Exception as e:
+                last_error = str(e)
                 logger.debug(f"Unexpected error polling agent '{agent_id}': {e}")
             await asyncio.sleep(0.5)
+        logger.warning(
+            f"Agent '{agent_id}' did not respond within {timeout}s. "
+            f"URL: {url}, last error: {last_error}"
+        )
         return False
 
 
@@ -403,13 +417,14 @@ class SandboxBackend(RuntimeBackend):
         ws = self._prepare_workspace(agent_id, role, skills_dir, system_prompt, model)
 
         # Create sandbox with the shell agent type and workspace
+        # First creation can be slow (microVM init), allow up to 120s
         create_cmd = [
             "docker", "sandbox", "create",
             "--name", sandbox_name,
             "shell", str(ws),
         ]
         result = subprocess.run(
-            create_cmd, capture_output=True, text=True, timeout=30,
+            create_cmd, capture_output=True, text=True, timeout=120,
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -426,7 +441,7 @@ class SandboxBackend(RuntimeBackend):
             "python", "-m", "src.agent",
         ]
         result = subprocess.run(
-            start_cmd, capture_output=True, text=True, timeout=30,
+            start_cmd, capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:
             logger.warning(
@@ -527,23 +542,32 @@ def sandbox_available() -> bool:
 def select_backend(
     mesh_host_port: int = 8420,
     project_root: str | None = None,
-    force_docker: bool = False,
+    use_sandbox: bool = False,
 ) -> RuntimeBackend:
-    """Auto-select the best available runtime backend.
+    """Select the runtime backend.
 
-    Prefers SandboxBackend (microVM isolation) when available.
-    Falls back to DockerBackend (container isolation) otherwise.
-    Use force_docker=True to skip sandbox detection.
+    Defaults to DockerBackend (container isolation) which works everywhere.
+    Use use_sandbox=True to opt in to SandboxBackend (microVM isolation),
+    which requires Docker Desktop 4.58+ with sandbox support.
     """
-    if not force_docker and sandbox_available():
-        logger.info("Docker Sandbox available -- using microVM isolation")
-        return SandboxBackend(
-            mesh_host_port=mesh_host_port,
-            project_root=project_root,
+    if use_sandbox:
+        if sandbox_available():
+            logger.info("Docker Sandbox available -- using microVM isolation")
+            return SandboxBackend(
+                mesh_host_port=mesh_host_port,
+                project_root=project_root,
+            )
+        logger.warning(
+            "Docker Sandbox requested but not available. "
+            "Requires Docker Desktop 4.58+. Falling back to containers."
         )
-    logger.info("Using Docker container isolation")
+    # Host networking only works reliably on Linux. On macOS/Windows,
+    # Docker Desktop runs in a VM so --network=host doesn't expose ports
+    # to the actual host. Use port mapping (bridge network) instead.
+    use_host_net = platform.system() == "Linux"
+    logger.info("Using Docker container isolation (host_network=%s)", use_host_net)
     return DockerBackend(
         mesh_host_port=mesh_host_port,
-        use_host_network=True,
+        use_host_network=use_host_net,
         project_root=project_root,
     )
