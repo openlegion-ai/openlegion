@@ -542,3 +542,32 @@ def test_notify_endpoint_no_notify_fn(tmp_path):
     assert response.status_code == 503
 
     bb.close()
+
+
+def test_notify_endpoint_truncates_long_message(tmp_path):
+    """Messages longer than _NOTIFY_MAX_LEN (2000) are truncated."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    calls = []
+
+    async def mock_notify(agent_name: str, message: str):
+        calls.append((agent_name, message))
+
+    app = create_mesh_app(bb, pubsub, router, perms, notify_fn=mock_notify)
+    client = TestClient(app)
+
+    long_message = "x" * 3000
+    response = client.post("/mesh/notify", json={
+        "agent_id": "agent1",
+        "message": long_message,
+    })
+    assert response.status_code == 200
+    assert len(calls) == 1
+    assert len(calls[0][1]) == 2000
+    assert calls[0][1] == "x" * 2000
+
+    bb.close()
