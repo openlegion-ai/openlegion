@@ -49,6 +49,7 @@ class EventBus:
         self._buffer: deque[dict] = deque(maxlen=BUFFER_SIZE)
         self._clients: list[_Subscription] = []
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._seq: int = 0  # monotonic sequence counter
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind to the mesh server's event loop. Idempotent."""
@@ -65,6 +66,8 @@ class EventBus:
         """
         evt = DashboardEvent(type=event_type, agent=agent, data=data or {})
         evt_dict = evt.model_dump(mode="json")
+        self._seq += 1
+        evt_dict["_seq"] = self._seq
         self._buffer.append(evt_dict)
 
         if not self._clients:
@@ -103,16 +106,32 @@ class EventBus:
     def unsubscribe(self, ws: WebSocket) -> None:
         self._clients = [c for c in self._clients if c.ws is not ws]
 
+    @property
+    def current_seq(self) -> int:
+        """Return the current sequence number (for subscribe-before-replay)."""
+        return self._seq
+
     def recent_events(
         self,
         agents_filter: set[str] | None = None,
         types_filter: set[str] | None = None,
+        before_seq: int | None = None,
     ) -> list[dict]:
-        """Return buffered events, optionally filtered."""
-        if not agents_filter and not types_filter:
-            return list(self._buffer)
+        """Return buffered events, optionally filtered.
+
+        If *before_seq* is given, only return events with _seq <= before_seq.
+        This prevents replaying events that will also arrive via the live feed.
+        """
         sub = _Subscription(ws=None, agents=agents_filter or set(), types=types_filter or set())  # type: ignore[arg-type]
-        return [e for e in self._buffer if sub.matches(e)]
+        result = []
+        for e in self._buffer:
+            if before_seq is not None and e.get("_seq", 0) > before_seq:
+                continue
+            if agents_filter or types_filter:
+                if not sub.matches(e):
+                    continue
+            result.append(e)
+        return result
 
     async def _broadcast(self, evt_dict: dict) -> None:
         """Send event to all matching subscribers. Remove dead connections."""

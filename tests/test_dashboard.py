@@ -552,7 +552,12 @@ class TestDashboardQueues:
     def test_queues_empty(self):
         resp = self.client.get("/dashboard/api/queues")
         assert resp.status_code == 200
-        assert resp.json()["queues"] == {}
+        queues = resp.json()["queues"]
+        # All agents appear with idle status (even without active lanes)
+        assert "alpha" in queues
+        assert "beta" in queues
+        assert queues["alpha"]["busy"] is False
+        assert queues["alpha"]["queued"] == 0
 
     def test_queues_with_data(self):
         self.components["lane_manager"].get_status.return_value = {
@@ -569,7 +574,10 @@ class TestDashboardQueues:
         self.client = _make_client(self.components)
         resp = self.client.get("/dashboard/api/queues")
         assert resp.status_code == 200
-        assert resp.json()["queues"] == {}
+        queues = resp.json()["queues"]
+        # All agents still appear with idle defaults
+        assert "alpha" in queues
+        assert queues["alpha"]["busy"] is False
 
 
 # ── V2 Tests: Cron ──────────────────────────────────────────

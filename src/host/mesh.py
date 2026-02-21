@@ -309,6 +309,7 @@ class MessageRouter:
     ):
         self.permissions = permissions
         self.agent_registry: dict[str, str] = agent_registry
+        self.agent_roles: dict[str, str] = {}
         self.message_log: list[dict] = []
         self._capabilities_cache: dict[str, list[str]] = {}
         self._client: httpx.AsyncClient | None = None
@@ -377,9 +378,15 @@ class MessageRouter:
 
         return None
 
-    def register_agent(self, agent_id: str, url: str, capabilities: list[str] | None = None) -> None:
+    def register_agent(
+        self, agent_id: str, url: str,
+        capabilities: list[str] | None = None,
+        role: str = "",
+    ) -> None:
         """Register an agent and its capabilities."""
         self.agent_registry[agent_id] = url
+        if role:
+            self.agent_roles[agent_id] = role
         if capabilities:
             self._capabilities_cache[agent_id] = capabilities
         else:
@@ -389,3 +396,4 @@ class MessageRouter:
         """Remove an agent from the registry."""
         self.agent_registry.pop(agent_id, None)
         self._capabilities_cache.pop(agent_id, None)
+        self.agent_roles.pop(agent_id, None)

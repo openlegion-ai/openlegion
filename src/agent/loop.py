@@ -119,6 +119,52 @@ class AgentLoop:
         self._chat_messages: list[dict] = []
         self._chat_lock = asyncio.Lock()
         self._steer_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._fleet_roster: list[dict] | None = None  # cached fleet info
+        self._fleet_roster_ts: float = 0  # timestamp of last fetch
+
+    async def _fetch_fleet_roster(self) -> list[dict]:
+        """Fetch and cache the fleet roster from the mesh (TTL: 10 min)."""
+        if self._fleet_roster is not None and (time.time() - self._fleet_roster_ts) < 600:
+            return self._fleet_roster
+        try:
+            registry = await self.mesh_client.list_agents()
+            roster = []
+            for name, info in registry.items():
+                if name == self.agent_id:
+                    continue  # skip self
+                entry = {"name": name}
+                if isinstance(info, dict):
+                    entry["role"] = info.get("role", "")
+                roster.append(entry)
+            self._fleet_roster = roster
+            self._fleet_roster_ts = time.time()
+        except Exception:
+            self._fleet_roster = []
+            self._fleet_roster_ts = time.time()
+        return self._fleet_roster
+
+    def _build_fleet_context(self, roster: list[dict]) -> str:
+        """Build fleet collaboration context for the system prompt."""
+        if not roster:
+            return ""
+        lines = ["## Your Team\n"]
+        lines.append("You are part of a multi-agent fleet. Your teammates:\n")
+        for agent in roster:
+            role = agent.get("role", "")
+            if role:
+                lines.append(f"- **{agent['name']}**: {role}")
+            else:
+                lines.append(f"- **{agent['name']}**")
+        lines.append(
+            "\n## Collaboration via Blackboard\n"
+            "The blackboard is your shared workspace. Use it to:\n"
+            "- **Share findings**: `write_shared_state(key='findings/<topic>', ...)`\n"
+            "- **Read others' work**: `list_shared_state(prefix='findings/')` then `read_shared_state(key=...)`\n"
+            "- **Coordinate tasks**: write to `tasks/<agent_name>` to request work from a teammate\n"
+            "- **Publish deliverables**: `save_artifact(name=..., content=...)` for files others can use\n"
+            "\nCheck the blackboard regularly for updates from your teammates."
+        )
+        return "\n".join(lines)
 
     async def inject_steer(self, message: str) -> bool:
         """Inject a steer message. Returns True if agent is working."""
@@ -563,7 +609,8 @@ class AgentLoop:
             combined = "\n\n".join(steered)
             self._chat_messages[-1]["content"] += f"\n\n[Additional context]: {combined}"
 
-        system = self._build_chat_system_prompt(goals=goals)
+        roster = await self._fetch_fleet_roster()
+        system = self._build_chat_system_prompt(goals=goals, fleet_roster=roster)
         return user_message, system
 
     def _build_tool_call_entries(self, llm_response) -> list[dict]:
@@ -720,7 +767,7 @@ class AgentLoop:
         async with self._chat_lock:
             self._chat_messages = []
 
-    def _build_chat_system_prompt(self, goals: dict | None = None) -> str:
+    def _build_chat_system_prompt(self, goals: dict | None = None, fleet_roster: list[dict] | None = None) -> str:
         tools_desc = self.skills.get_descriptions()
         parts = [self.system_prompt]
 
@@ -812,6 +859,12 @@ class AgentLoop:
             f"- Learn from past errors — avoid repeating known failures.\n"
             f"- Respect user corrections — they define preferred behavior.\n"
         )
+
+        # Fleet collaboration context (only for multi-agent setups)
+        if fleet_roster:
+            fleet_ctx = self._build_fleet_context(fleet_roster)
+            if fleet_ctx:
+                parts.append(fleet_ctx)
 
         tool_history = self._build_tool_history_context()
         if tool_history:

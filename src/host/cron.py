@@ -124,6 +124,24 @@ class CronScheduler:
         logger.info(f"Added {kind} job {job.id}: agent={agent} schedule={schedule}")
         return job
 
+    def find_heartbeat_job(self, agent: str) -> CronJob | None:
+        """Find existing heartbeat job for an agent."""
+        for job in self.jobs.values():
+            if job.agent == agent and job.heartbeat:
+                return job
+        return None
+
+    def update_job(self, job_id: str, **kwargs) -> CronJob | None:
+        """Update fields on an existing cron job. Returns updated job or None."""
+        job = self.jobs.get(job_id)
+        if not job:
+            return None
+        for k, v in kwargs.items():
+            if hasattr(job, k) and k != "id":
+                setattr(job, k, v)
+        self._save()
+        return job
+
     def remove_job(self, job_id: str) -> bool:
         if job_id not in self.jobs:
             return False
@@ -189,24 +207,25 @@ class CronScheduler:
                 response = await self.workflow_trigger_fn(job.workflow, payload)
                 logger.info(f"Cron {job.id} triggered workflow '{job.workflow}'")
             elif self.dispatch_fn:
-                # Heartbeat: run cheap probes first, only dispatch if triggered
+                # Heartbeat: always wake agent, probes provide context
                 if job.heartbeat:
                     probes = self._run_heartbeat_probes(job.agent)
                     triggered = [p for p in probes if p.triggered]
-                    if not triggered:
-                        logger.debug(f"Heartbeat {job.id}: all probes clean, skipping LLM")
-                        return None
-                    probe_summary = "\n".join(
-                        f"- [{p.name}] {p.detail}" for p in triggered
-                    )
+                    if triggered:
+                        context = "Probes detected:\n" + "\n".join(
+                            f"- [{p.name}] {p.detail}" for p in triggered
+                        )
+                    else:
+                        context = "No probe alerts — routine check-in."
                     message = (
-                        f"Heartbeat alert — the following probes triggered:\n"
-                        f"{probe_summary}\n\n"
-                        f"Check HEARTBEAT.md for your autonomous rules and take action."
+                        f"Heartbeat for {job.agent}.\n{context}\n\n"
+                        "Review your HEARTBEAT.md rules, work toward your current goals, "
+                        "and send a brief status update."
                     )
                     response = await self.dispatch_fn(job.agent, message)
                     logger.info(
-                        f"Heartbeat {job.id}: {len(triggered)} probes triggered for '{job.agent}'"
+                        f"Heartbeat {job.id}: dispatched for '{job.agent}' "
+                        f"({len(triggered)} probes triggered)"
                     )
                 else:
                     response = await self.dispatch_fn(job.agent, job.message)

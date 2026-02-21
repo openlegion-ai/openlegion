@@ -29,6 +29,7 @@ async def list_agents(*, mesh_client=None) -> dict:
         for name, info in registry.items():
             entry = {"name": name}
             if isinstance(info, dict):
+                entry["role"] = info.get("role", "")
                 entry["capabilities"] = info.get("capabilities", [])
             agents.append(entry)
         return {"agents": agents, "count": len(agents)}
@@ -240,16 +241,15 @@ async def set_cron(schedule: str, message: str, *, mesh_client=None) -> dict:
 @skill(
     name="set_heartbeat",
     description=(
-        "Enable a heartbeat for yourself. The mesh will periodically run cheap "
-        "deterministic probes (disk usage, pending tasks, signals) and only wake "
-        "you with an LLM call if something needs attention. Much more efficient "
-        "than a regular cron for autonomous monitoring. Define your monitoring "
-        "rules in HEARTBEAT.md in your workspace."
+        "Set or update your heartbeat schedule. You are automatically given a "
+        "heartbeat on startup — use this to change the frequency. The mesh will "
+        "periodically wake you to work toward your goals and check for pending "
+        "tasks. Define your autonomous rules in HEARTBEAT.md in your workspace."
     ),
     parameters={
         "schedule": {
             "type": "string",
-            "description": "How often to probe (e.g. 'every 15m', 'every 1h', '*/30 * * * *')",
+            "description": "How often to wake (e.g. 'every 15m', 'every 1h', '*/30 * * * *')",
         },
     },
 )
@@ -257,12 +257,21 @@ async def set_heartbeat(schedule: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     try:
+        # Check for existing heartbeat job and update it
+        jobs = await mesh_client.list_cron()
+        existing = next((j for j in jobs if j.get("heartbeat")), None)
+        if existing:
+            result = await mesh_client.update_cron(
+                existing["id"], schedule=schedule,
+            )
+            return {"updated": True, "type": "heartbeat", **result}
+        # No existing heartbeat — create one
         result = await mesh_client.create_cron(
             schedule=schedule, message="heartbeat", heartbeat=True,
         )
         return {"created": True, "type": "heartbeat", **result}
     except Exception as e:
-        return {"error": f"Failed to create heartbeat: {e}"}
+        return {"error": f"Failed to set heartbeat: {e}"}
 
 
 @skill(

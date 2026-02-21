@@ -1,7 +1,7 @@
 /**
  * OpenLegion Dashboard — Alpine.js application.
  *
- * Nine panels: Fleet, Events, Agents, Blackboard, Costs, Traces, Queues, Cron, Settings.
+ * Six panels: Fleet, Activity, Blackboard, Costs, Automation, System.
  * Real-time updates via WebSocket + periodic REST polling.
  */
 function dashboard() {
@@ -10,14 +10,11 @@ function dashboard() {
     activeTab: 'fleet',
     tabs: [
       { id: 'fleet', label: 'Fleet' },
-      { id: 'events', label: 'Events' },
-      { id: 'agents', label: 'Agents' },
+      { id: 'activity', label: 'Activity' },
       { id: 'blackboard', label: 'Blackboard' },
       { id: 'costs', label: 'Costs' },
-      { id: 'traces', label: 'Traces' },
-      { id: 'queues', label: 'Queues' },
-      { id: 'cron', label: 'Cron' },
-      { id: 'settings', label: 'Settings' },
+      { id: 'automation', label: 'Automation' },
+      { id: 'system', label: 'System' },
     ],
     connected: false,
     loading: true,
@@ -77,11 +74,28 @@ function dashboard() {
     // Queues (V2)
     queueStatus: {},
 
-    // Cron (V2)
+    // Cron / Automation
     cronJobs: [],
+    editingCronJob: null,
+    cronEditSchedule: '',
 
     // Settings (V2)
     settingsData: null,
+
+    // Chat
+    chatAgent: null,
+    chatMessage: '',
+    chatHistory: [],
+    chatLoading: false,
+
+    // Broadcast
+    broadcastMessage: '',
+    broadcastLoading: false,
+    broadcastResults: null,
+
+    // Credentials
+    credService: '',
+    credKey: '',
 
     // WebSocket
     _ws: null,
@@ -143,26 +157,27 @@ function dashboard() {
       // Clear tab-specific auto-refresh intervals
       if (this._queueInterval) { clearInterval(this._queueInterval); this._queueInterval = null; }
       if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
-      if (tab === 'events') {
+      if (tab === 'activity') {
         this.unreadEvents = 0;
         this._lastSeenEventCount = this.events.length;
       }
       if (tab === 'blackboard') this.fetchBlackboard();
       if (tab === 'costs') this.fetchCosts();
-      if (tab === 'traces') this.fetchTraces();
-      if (tab === 'agents') {
+      if (tab === 'fleet') {
+        this.fetchAgents();
+        this.fetchQueues();
         this.fetchSettings();
         this.agents.forEach(a => this.fetchAgentConfig(a.id));
-      }
-      if (tab === 'queues') {
-        this.fetchQueues();
         this._queueInterval = setInterval(() => this.fetchQueues(), 5000);
       }
-      if (tab === 'cron') {
+      if (tab === 'automation') {
         this.fetchCronJobs();
         this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
       }
-      if (tab === 'settings') this.fetchSettings();
+      if (tab === 'system') {
+        this.fetchTraces();
+        this.fetchSettings();
+      }
     },
 
     // ── Toast helper ──────────────────────────────────────
@@ -180,8 +195,8 @@ function dashboard() {
       this.events.unshift(evt);
       if (this.events.length > 500) this.events.splice(500);
 
-      // Track unread events when not on Events tab
-      if (this.activeTab !== 'events') {
+      // Track unread events when not on Activity tab
+      if (this.activeTab !== 'activity') {
         this.unreadEvents++;
       }
 
@@ -465,7 +480,37 @@ function dashboard() {
       } catch (e) { console.warn('resumeCronJob failed:', e); }
     },
 
-    // ── V2: Settings fetcher ──────────────────────────────
+    // ── Cron inline editing ─────────────────────────────
+
+    editCronJob(job) {
+      this.editingCronJob = job.id;
+      this.cronEditSchedule = job.schedule;
+    },
+
+    cancelCronEdit() {
+      this.editingCronJob = null;
+      this.cronEditSchedule = '';
+    },
+
+    async saveCronEdit(jobId) {
+      if (!this.cronEditSchedule.trim()) { this.cancelCronEdit(); return; }
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/cron/${jobId}`, {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ schedule: this.cronEditSchedule.trim() }),
+        });
+        if (resp.ok) {
+          this.showToast(`Schedule updated for ${jobId}`);
+          this.fetchCronJobs();
+        } else {
+          const err = await resp.json();
+          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+      this.cancelCronEdit();
+    },
+
+    // ── Settings fetcher ─────────────────────────────────
 
     async fetchSettings() {
       try {
@@ -481,6 +526,118 @@ function dashboard() {
           }
         }
       } catch (e) { console.warn('fetchSettings failed:', e); }
+    },
+
+    // ── Chat with agent ──────────────────────────────────
+
+    openChat(agentId) {
+      this.chatAgent = agentId;
+      this.chatHistory = [];
+      this.chatMessage = '';
+    },
+
+    closeChat() {
+      this.chatAgent = null;
+      this.chatMessage = '';
+      this.chatHistory = [];
+    },
+
+    async sendChat() {
+      if (!this.chatMessage.trim() || !this.chatAgent) return;
+      const msg = this.chatMessage.trim();
+      this.chatHistory.push({ role: 'user', content: msg });
+      this.chatMessage = '';
+      this.chatLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${this.chatAgent}/chat`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ message: msg }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          this.chatHistory.push({ role: 'agent', content: data.response });
+        } else {
+          const err = await resp.json();
+          this.chatHistory.push({ role: 'error', content: err.detail || 'Failed' });
+        }
+      } catch (e) {
+        this.chatHistory.push({ role: 'error', content: e.message });
+      }
+      this.chatLoading = false;
+    },
+
+    // ── Broadcast ────────────────────────────────────────
+
+    async sendBroadcast() {
+      if (!this.broadcastMessage.trim()) return;
+      this.broadcastLoading = true;
+      this.broadcastResults = null;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/broadcast`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ message: this.broadcastMessage.trim() }),
+        });
+        if (resp.ok) {
+          this.broadcastResults = (await resp.json()).responses;
+          this.broadcastMessage = '';
+          this.showToast('Broadcast sent');
+        } else {
+          this.showToast('Broadcast failed');
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+      this.broadcastLoading = false;
+    },
+
+    // ── Steer ────────────────────────────────────────────
+
+    async steerAgent(agentId) {
+      const msg = prompt(`Steer message for ${agentId}:`);
+      if (!msg) return;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/steer`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ message: msg }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          this.showToast(data.result || 'Steered');
+        } else {
+          this.showToast('Steer failed');
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
+    // ── Reset ────────────────────────────────────────────
+
+    async resetAgent(agentId) {
+      if (!confirm(`Reset conversation for "${agentId}"? This clears their chat history.`)) return;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/reset`, { method: 'POST' });
+        if (resp.ok) this.showToast(`${agentId} conversation reset`);
+        else this.showToast('Reset failed');
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
+    // ── Credentials ──────────────────────────────────────
+
+    async addCredential() {
+      if (!this.credService.trim() || !this.credKey.trim()) return;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/credentials`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ service: this.credService.trim(), key: this.credKey.trim() }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          this.showToast(`Credential stored: ${data.service}`);
+          this.credService = '';
+          this.credKey = '';
+          this.fetchSettings();
+        } else {
+          const err = await resp.json();
+          this.showToast(`Error: ${err.detail}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
     },
 
     // ── Agent drill-down ──────────────────────────────────

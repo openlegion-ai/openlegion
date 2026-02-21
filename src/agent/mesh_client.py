@@ -158,6 +158,17 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def update_cron(self, job_id: str, **kwargs) -> dict:
+        """Update a cron job by ID."""
+        client = await self._get_client()
+        response = await client.put(
+            f"{self.mesh_url}/mesh/cron/{job_id}",
+            json=kwargs,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def remove_cron(self, job_id: str) -> dict:
         """Remove a cron job by ID."""
         client = await self._get_client()

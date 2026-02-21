@@ -172,3 +172,15 @@ select:focus-visible,
 .heartbeat-indicator {
   animation: heartbeat-pulse 2s ease-in-out infinite;
 }
+
+/* Inline cron schedule editing */
+.cron-edit-input {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+}
+
+/* Queue depth badge on agent cards */
+.queue-badge {
+  font-size: 0.625rem;
+  letter-spacing: -0.01em;
+}
