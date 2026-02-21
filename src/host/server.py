@@ -224,11 +224,10 @@ def create_mesh_app(
                 llm_data["total_tokens"] = tokens
                 llm_data["input_tokens"] = input_tok
                 llm_data["output_tokens"] = output_tok
-                from src.host.costs import MODEL_COSTS, _DEFAULT_COST
-                ir, or_ = MODEL_COSTS.get(model, _DEFAULT_COST)
-                pt = input_tok or int(tokens * 0.7)
-                ct = output_tok or (tokens - pt)
-                llm_data["cost_usd"] = round((pt / 1000 * ir) + (ct / 1000 * or_), 6)
+                from src.host.costs import estimate_cost
+                llm_data["cost_usd"] = estimate_cost(
+                    model, input_tokens=input_tok, output_tokens=output_tok, total_tokens=tokens,
+                )
             event_bus.emit("llm_call", agent=agent_id, data=llm_data)
         return result
 

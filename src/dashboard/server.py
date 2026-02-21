@@ -130,8 +130,8 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail=f"Invalid browser: {browser_backend}")
 
         if not model:
-            from src.cli.config import _load_config as _lc
-            model = _lc().get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+            from src.cli.config import _load_config
+            model = _load_config().get("llm", {}).get("default_model", "openai/gpt-4o-mini")
         if not role:
             role = "assistant"
 
@@ -139,12 +139,12 @@ def create_dashboard_router(
             raise HTTPException(status_code=503, detail="Runtime not available")
 
         try:
-            from src.cli.config import _create_agent, _load_config as _lc2
+            from src.cli.config import _create_agent, _load_config
             _create_agent(name, role, model, browser_backend=browser_backend)
             if permissions is not None:
                 permissions.reload()
 
-            acfg = _lc2().get("agents", {}).get(name, {})
+            acfg = _load_config().get("agents", {}).get(name, {})
             import os
             skills_dir = os.path.abspath(acfg.get("skills_dir", ""))
             url = runtime.start_agent(
@@ -188,7 +188,7 @@ def create_dashboard_router(
             except Exception:
                 pass
 
-        # Unregister from router and transport
+        # Unregister from router, transport, and health monitor
         if router is not None:
             router.unregister_agent(agent_id)
         agent_registry.pop(agent_id, None)
@@ -196,22 +196,27 @@ def create_dashboard_router(
             from src.host.transport import HttpTransport
             if isinstance(transport, HttpTransport):
                 transport._urls.pop(agent_id, None)
+        if health_monitor is not None:
+            health_monitor.unregister(agent_id)
 
-        # Remove from config and permissions
-        import yaml
-        from src.cli.config import AGENTS_FILE
-        from src.cli.config import _load_permissions, _save_permissions
+        # Remove from config and permissions (best-effort — don't fail if files are missing)
+        try:
+            import yaml
+            from src.cli.config import AGENTS_FILE
+            from src.cli.config import _load_permissions, _save_permissions
 
-        if AGENTS_FILE.exists():
-            with open(AGENTS_FILE) as f:
-                agents_data = yaml.safe_load(f) or {}
-            agents_data.get("agents", {}).pop(agent_id, None)
-            with open(AGENTS_FILE, "w") as f:
-                yaml.dump(agents_data, f, default_flow_style=False, sort_keys=False)
+            if AGENTS_FILE.exists():
+                with open(AGENTS_FILE) as f:
+                    agents_data = yaml.safe_load(f) or {}
+                agents_data.get("agents", {}).pop(agent_id, None)
+                with open(AGENTS_FILE, "w") as f:
+                    yaml.dump(agents_data, f, default_flow_style=False, sort_keys=False)
 
-        perms = _load_permissions()
-        perms.get("permissions", {}).pop(agent_id, None)
-        _save_permissions(perms)
+            perms = _load_permissions()
+            perms.get("permissions", {}).pop(agent_id, None)
+            _save_permissions(perms)
+        except Exception as e:
+            logger.warning(f"Failed to clean config for {agent_id}: {e}")
 
         if event_bus is not None:
             event_bus.emit("agent_state", agent=agent_id,

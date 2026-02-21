@@ -32,6 +32,22 @@ MODEL_COSTS: dict[str, tuple[float, float]] = {
 _DEFAULT_COST = (0.003, 0.015)  # Conservative fallback
 
 
+def estimate_cost(
+    model: str,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    total_tokens: int = 0,
+) -> float:
+    """Estimate USD cost for an LLM call.
+
+    If input/output split is unavailable, falls back to 70/30 split of total_tokens.
+    """
+    ir, or_ = MODEL_COSTS.get(model, _DEFAULT_COST)
+    pt = input_tokens or int(total_tokens * 0.7)
+    ct = output_tokens or (total_tokens - pt)
+    return round((pt / 1000 * ir) + (ct / 1000 * or_), 6)
+
+
 class CostTracker:
     """Tracks token usage and cost per agent, enforces budgets."""
 
@@ -70,8 +86,7 @@ class CostTracker:
     ) -> float:
         """Record a single LLM call. Returns the cost in USD."""
         total = prompt_tokens + completion_tokens
-        input_rate, output_rate = MODEL_COSTS.get(model, _DEFAULT_COST)
-        cost = (prompt_tokens / 1000 * input_rate) + (completion_tokens / 1000 * output_rate)
+        cost = estimate_cost(model, input_tokens=prompt_tokens, output_tokens=completion_tokens)
 
         self.db.execute(
             "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd) "

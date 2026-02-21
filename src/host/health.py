@@ -62,6 +62,9 @@ class HealthMonitor:
     def register(self, agent_id: str, url: str = "") -> None:
         self.agents[agent_id] = AgentHealth(agent_id=agent_id)
 
+    def unregister(self, agent_id: str) -> None:
+        self.agents.pop(agent_id, None)
+
     async def start(self) -> None:
         self._running = True
         logger.info(f"Health monitor started for {len(self.agents)} agents")

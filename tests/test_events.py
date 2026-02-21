@@ -239,6 +239,7 @@ def test_blackboard_emits_on_write(tmp_path):
     assert evt["agent"] == "agent1"
     assert evt["data"]["key"] == "test/key"
     assert evt["data"]["version"] == 1
+    assert evt["data"]["written_by"] == "agent1"
     assert "value_preview" in evt["data"]
 
 
