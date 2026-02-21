@@ -964,3 +964,153 @@ class TestBrowserBackendSelection:
         with patch.dict("sys.modules", {"camoufox": None, "camoufox.async_api": None}):
             with pytest.raises(RuntimeError, match="camoufox is not installed"):
                 await bt._launch_stealth()
+
+
+# ── labeled screenshots ──────────────────────────────────────
+
+
+class TestLabeledScreenshot:
+    @pytest.mark.asyncio
+    async def test_labeled_false_unchanged(self, tmp_path):
+        """No labels key when labeled=False."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.is_closed.return_value = False
+        img_path = tmp_path / "shot.png"
+
+        # Create a minimal valid PNG
+        from PIL import Image
+        Image.new("RGB", (100, 100), "white").save(str(img_path))
+
+        async def mock_screenshot(path, full_page):
+            import shutil
+            shutil.copy2(str(img_path), path)
+
+        mock_page.screenshot = mock_screenshot
+
+        with patch.object(bt, "_get_page", return_value=mock_page):
+            with patch("src.agent.builtins.browser_tool.Path") as MockPath:
+                mock_save_path = MagicMock()
+                mock_save_path.parent.mkdir = MagicMock()
+                mock_save_path.__str__ = lambda self: str(img_path)
+                mock_save_path.stat.return_value.st_size = 100
+                MockPath.__truediv__ = lambda self, other: mock_save_path
+                MockPath.return_value.__truediv__ = lambda self, other: mock_save_path
+                # Simpler approach: just mock Path("/data") / filename
+                result = await bt.browser_screenshot(filename="shot.png", labeled=False)
+
+        assert "labels" not in result
+
+    @pytest.mark.asyncio
+    async def test_labeled_auto_snapshots(self):
+        """Auto-calls snapshot when _page_refs empty and labeled=True."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.is_closed.return_value = False
+        mock_page.url = "https://example.com"
+        mock_page.title = AsyncMock(return_value="Example")
+
+        bt._page_refs.clear()
+        snapshot_called = []
+
+        original_snapshot = bt.browser_snapshot_func
+
+        async def mock_snapshot(*, mesh_client=None):
+            snapshot_called.append(True)
+            bt._page_refs["e1"] = AsyncMock()
+            bt._page_refs["e1"].bounding_box = AsyncMock(return_value=None)
+            return {"element_count": 1}
+
+        bt.browser_snapshot_func = mock_snapshot
+
+        try:
+            with patch.object(bt, "_get_page", return_value=mock_page):
+                # Mock the file operations
+                with patch("src.agent.builtins.browser_tool.Path") as MockPath:
+                    mock_save = MagicMock()
+                    mock_save.parent.mkdir = MagicMock()
+                    mock_save.__str__ = MagicMock(return_value="/data/shot.png")
+                    mock_save.stat.return_value.st_size = 500
+                    MockPath.__truediv__ = lambda self, other: mock_save
+                    MockPath.return_value.__truediv__ = lambda self, other: mock_save
+
+                    with patch.object(bt, "_draw_labels", return_value={}):
+                        result = await bt.browser_screenshot(
+                            filename="shot.png", labeled=True
+                        )
+
+            assert len(snapshot_called) == 1
+            assert result.get("labeled") is True
+        finally:
+            bt.browser_snapshot_func = original_snapshot
+            bt._page_refs.clear()
+
+    @pytest.mark.asyncio
+    async def test_labeled_draws_labels(self, tmp_path):
+        """Mock locators with bounding boxes, verify label_count > 0."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_loc1 = AsyncMock()
+        mock_loc1.bounding_box = AsyncMock(return_value={"x": 10, "y": 20, "width": 80, "height": 30})
+        mock_loc2 = AsyncMock()
+        mock_loc2.bounding_box = AsyncMock(return_value={"x": 50, "y": 100, "width": 120, "height": 40})
+
+        bt._page_refs.clear()
+        bt._page_refs["e1"] = mock_loc1
+        bt._page_refs["e2"] = mock_loc2
+
+        # Create a test image
+        from PIL import Image
+        img_path = str(tmp_path / "test_labels.png")
+        Image.new("RGB", (300, 200), "white").save(img_path)
+
+        labels = await bt._draw_labels(img_path)
+
+        assert len(labels) == 2
+        assert "1" in labels
+        assert "2" in labels
+        assert "80x30" in labels["1"]
+
+        bt._page_refs.clear()
+
+    @pytest.mark.asyncio
+    async def test_labeled_skips_offscreen(self, tmp_path):
+        """bbox=None elements excluded from label map."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_visible = AsyncMock()
+        mock_visible.bounding_box = AsyncMock(return_value={"x": 10, "y": 20, "width": 80, "height": 30})
+        mock_offscreen = AsyncMock()
+        mock_offscreen.bounding_box = AsyncMock(return_value=None)
+
+        bt._page_refs.clear()
+        bt._page_refs["e1"] = mock_visible
+        bt._page_refs["e2"] = mock_offscreen
+
+        from PIL import Image
+        img_path = str(tmp_path / "test_offscreen.png")
+        Image.new("RGB", (300, 200), "white").save(img_path)
+
+        labels = await bt._draw_labels(img_path)
+
+        assert len(labels) == 1
+        assert "1" in labels
+        assert "2" not in labels
+
+        bt._page_refs.clear()
+
+    @pytest.mark.asyncio
+    async def test_labeled_pillow_import_error(self, tmp_path):
+        """Graceful fallback returns empty labels when Pillow not available."""
+        import src.agent.builtins.browser_tool as bt
+
+        bt._page_refs["e1"] = AsyncMock()
+
+        with patch.dict("sys.modules", {"PIL": None, "PIL.Image": None, "PIL.ImageDraw": None, "PIL.ImageFont": None}):
+            # Need to re-import to trigger the ImportError
+            labels = await bt._draw_labels(str(tmp_path / "fake.png"))
+
+        assert labels == {}
+        bt._page_refs.clear()

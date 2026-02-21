@@ -369,10 +369,77 @@ async def browser_snapshot(*, mesh_client=None) -> dict:
     except Exception as e:
         return {"error": str(e)}
 
+# Alias for internal use (browser_screenshot needs to auto-call snapshot)
+browser_snapshot_func = browser_snapshot
+
+
+async def _draw_labels(image_path: str) -> dict[str, str]:
+    """Overlay numbered labels on interactive elements in a screenshot.
+
+    Iterates ``_page_refs`` (populated by ``browser_snapshot``), gets each
+    element's bounding box, draws a red rectangle + white number label, and
+    returns a mapping of label numbers to descriptions.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        logger.warning("Pillow not installed — labeled screenshot unavailable")
+        return {}
+
+    if not _page_refs:
+        return {}
+
+    try:
+        img = Image.open(image_path)
+        draw = ImageDraw.Draw(img)
+    except Exception as e:
+        logger.warning("Failed to open screenshot for labeling: %s", e)
+        return {}
+
+    # Try DejaVu font, fall back to PIL default
+    font = None
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+    except Exception:
+        try:
+            font = ImageFont.load_default()
+        except Exception:
+            pass
+
+    labels: dict[str, str] = {}
+    for ref, locator in _page_refs.items():
+        num = ref.lstrip("e")
+        try:
+            bbox = await locator.bounding_box(timeout=1000)
+        except Exception:
+            continue
+        if bbox is None:
+            continue
+
+        x, y, w, h = bbox["x"], bbox["y"], bbox["width"], bbox["height"]
+        # Draw red rectangle around element
+        draw.rectangle([x, y, x + w, y + h], outline="red", width=2)
+        # Draw label background + number
+        label_text = num
+        text_bbox = draw.textbbox((0, 0), label_text, font=font) if font else (0, 0, 10, 12)
+        tw = text_bbox[2] - text_bbox[0] + 6
+        th = text_bbox[3] - text_bbox[1] + 4
+        draw.rectangle([x, y - th, x + tw, y], fill="red")
+        draw.text((x + 3, y - th + 2), label_text, fill="white", font=font)
+
+        labels[num] = f"{ref} at ({int(x)},{int(y)}) {int(w)}x{int(h)}"
+
+    img.save(image_path)
+    return labels
+
 
 @skill(
     name="browser_screenshot",
-    description="Take a screenshot of the current page. Saves to /data.",
+    description=(
+        "Take a screenshot of the current page. Saves to /data. "
+        "Use labeled=true to overlay numbered labels on interactive elements "
+        "(requires browser_snapshot to have been called first, or auto-calls it)."
+    ),
     parameters={
         "filename": {
             "type": "string",
@@ -384,18 +451,43 @@ async def browser_snapshot(*, mesh_client=None) -> dict:
             "description": "Capture full scrollable page (default false)",
             "default": False,
         },
+        "labeled": {
+            "type": "boolean",
+            "description": "Overlay numbered labels on interactive elements (default false)",
+            "default": False,
+        },
     },
 )
 async def browser_screenshot(
-    filename: str = "screenshot.png", full_page: bool = False, *, mesh_client=None,
+    filename: str = "screenshot.png",
+    full_page: bool = False,
+    labeled: bool = False,
+    *,
+    mesh_client=None,
 ) -> dict:
     """Take a screenshot and save it to the data volume."""
     try:
         page = await _get_page(mesh_client=mesh_client)
+
+        # Auto-snapshot if labeled requested but no refs available
+        if labeled and not _page_refs:
+            await browser_snapshot_func(mesh_client=mesh_client)
+
         save_path = Path("/data") / filename
         save_path.parent.mkdir(parents=True, exist_ok=True)
         await page.screenshot(path=str(save_path), full_page=full_page)
-        return {"path": str(save_path), "size": save_path.stat().st_size}
+
+        result: dict = {"path": str(save_path), "size": save_path.stat().st_size}
+
+        if labeled:
+            labels = await _draw_labels(str(save_path))
+            result["labeled"] = True
+            result["label_count"] = len(labels)
+            result["labels"] = labels
+            # Update file size after drawing labels
+            result["size"] = save_path.stat().st_size
+
+        return result
     except Exception as e:
         return {"error": str(e)}
 
