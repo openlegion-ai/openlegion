@@ -22,7 +22,12 @@ class PermissionMatrix:
 
     def __init__(self, config_path: str = "config/permissions.json"):
         self.permissions: dict[str, AgentPermissions] = {}
+        self._config_path = config_path
         self._load(config_path)
+
+    def reload(self) -> None:
+        """Reload permissions from disk (e.g. after adding an agent at runtime)."""
+        self._load(self._config_path)
 
     def _load(self, config_path: str) -> None:
         path = Path(config_path)
