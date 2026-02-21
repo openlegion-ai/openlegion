@@ -480,13 +480,154 @@ def _apply_template(template_name: str, tpl: dict) -> list[str]:
     return created
 
 
+def _default_description(name: str) -> str:
+    """Return a default agent description."""
+    return f"General-purpose {name} agent"
+
+
+def _update_agent_field(name: str, field: str, value) -> None:
+    """Update a single field in agents.yaml for an agent."""
+    if AGENTS_FILE.exists():
+        with open(AGENTS_FILE) as f:
+            agents_cfg = yaml.safe_load(f) or {"agents": {}}
+    else:
+        agents_cfg = {"agents": {}}
+    if name in agents_cfg.get("agents", {}):
+        agents_cfg["agents"][name][field] = value
+        with open(AGENTS_FILE, "w") as f:
+            yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+
+
+def _prompt_brightdata_key() -> None:
+    """Prompt for Bright Data CDP URL if not already set."""
+    import os
+
+    existing = os.environ.get("OPENLEGION_CRED_BRIGHTDATA_CDP_URL", "")
+    if existing:
+        click.echo("  Bright Data CDP URL already configured.")
+        return
+    click.echo(
+        "\n  Advanced browser requires a Bright Data Scraping Browser CDP URL.\n"
+        "  Get one at: https://brightdata.com/products/scraping-browser\n"
+    )
+    cdp_url = click.prompt("  Bright Data CDP URL (wss://...)", default="", show_default=False)
+    if cdp_url.strip():
+        _set_env_key("brightdata_cdp_url", cdp_url.strip())
+        click.echo("  Saved.\n")
+    else:
+        click.echo("  Skipped. Set OPENLEGION_CRED_BRIGHTDATA_CDP_URL in .env later.\n")
+
+
+def _edit_agent_interactive(name: str, restart_hint: str = "Restart to apply.") -> None:
+    """Interactive property editor for an agent. Reads fresh config."""
+    cfg = _load_config()
+    agent_cfg = cfg.get("agents", {}).get(name, {})
+    default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+
+    current_model = agent_cfg.get("model", default_model)
+    current_browser = agent_cfg.get("browser_backend", "basic") or "basic"
+    current_desc = agent_cfg.get("role", "")
+    current_sysprompt = agent_cfg.get("system_prompt", "")
+    current_budget = agent_cfg.get("daily_budget")
+
+    click.echo(f"\n  {name}")
+    click.echo(f"  Model:       {current_model}")
+    click.echo(f"  Browser:     {current_browser}")
+    click.echo(f"  Description: {current_desc or '(none)'}")
+    if current_budget is not None:
+        click.echo(f"  Budget:      ${current_budget:.2f}/day")
+    click.echo("\n  What to change?\n")
+
+    options = [
+        ("model", current_model),
+        ("browser", current_browser),
+        ("description", _truncate(current_desc, 50) or "(none)"),
+        ("system prompt", _truncate(current_sysprompt, 50) or "(none)"),
+        ("budget", f"${current_budget:.2f}/day" if current_budget is not None else "(none)"),
+    ]
+
+    for i, (label, val) in enumerate(options, 1):
+        click.echo(f"  {i}. {label:<16} {val}")
+
+    choice = click.prompt(
+        "\n  Select",
+        type=click.IntRange(1, len(options)),
+        default=1,
+    )
+
+    if choice == 1:  # model
+        new_model = _pick_model_interactive(current_model, label="current")
+        if new_model == current_model:
+            click.echo(f"Agent '{name}' already uses {current_model}.")
+        else:
+            _update_agent_field(name, "model", new_model)
+            click.echo(f"Agent '{name}' model: {current_model} -> {new_model}")
+            click.echo(restart_hint)
+
+    elif choice == 2:  # browser
+        new_browser = _pick_browser_interactive(current_browser)
+        if new_browser == current_browser:
+            click.echo(f"Agent '{name}' already uses {current_browser} browser.")
+        else:
+            if new_browser == "advanced":
+                _prompt_brightdata_key()
+            _update_agent_field(name, "browser_backend", new_browser)
+            click.echo(f"Agent '{name}' browser: {current_browser} -> {new_browser}")
+            click.echo(restart_hint)
+
+    elif choice == 3:  # description
+        new_desc = click.prompt("  Description", default=current_desc)
+        if new_desc != current_desc:
+            _update_agent_field(name, "role", new_desc)
+            click.echo(f"Agent '{name}' description updated.")
+            click.echo(restart_hint)
+        else:
+            click.echo("No change.")
+
+    elif choice == 4:  # system prompt
+        if current_sysprompt:
+            click.echo(f"  Current: {_truncate(current_sysprompt, 80)}")
+        new_sysprompt = click.prompt("  System prompt", default=current_sysprompt or "")
+        if new_sysprompt != current_sysprompt:
+            _update_agent_field(name, "system_prompt", new_sysprompt)
+            click.echo(f"Agent '{name}' system prompt updated.")
+            click.echo(restart_hint)
+        else:
+            click.echo("No change.")
+
+    elif choice == 5:  # budget
+        default_budget = str(current_budget) if current_budget is not None else ""
+        new_budget_str = click.prompt("  Daily budget (USD)", default=default_budget)
+        if not new_budget_str.strip():
+            click.echo("No change.")
+            return
+        try:
+            new_budget = float(new_budget_str)
+            _update_agent_field(name, "daily_budget", new_budget)
+            click.echo(f"Agent '{name}' budget: ${new_budget:.2f}/day")
+            click.echo(restart_hint)
+        except ValueError:
+            click.echo("Invalid number. Budget not changed.")
+
+
+def _truncate(text: str, length: int) -> str:
+    """Truncate text with ellipsis if longer than length."""
+    if len(text) > length:
+        return text[:length] + "..."
+    return text
+
+
 def _setup_agent_wizard(model: str) -> str:
     """Interactive agent creation for setup. Returns agent name."""
     agent_name = click.prompt("  Agent name", default="assistant")
     description = click.prompt(
         "  What should this agent do?",
-        default="General-purpose assistant",
+        default=_default_description(agent_name),
     )
-    _create_agent(agent_name, description, model)
+    click.echo()
+    browser = _pick_browser_interactive()
+    if browser == "advanced":
+        _prompt_brightdata_key()
+    _create_agent(agent_name, description, model, browser_backend=browser)
     click.echo(f"  Created agent '{agent_name}'.")
     return agent_name

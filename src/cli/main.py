@@ -11,9 +11,8 @@ Core:
 Agent management:
   agent add [name]         Add a new agent
   agent list               List configured agents
-  agent model <name>       Change an agent's model
-  agent browser <name>     Change an agent's browser backend
-  agent remove <name>      Remove an agent
+  agent edit [name]        Change an agent's settings
+  agent remove [name]      Remove an agent
 """
 
 from __future__ import annotations
@@ -31,12 +30,15 @@ from src.cli import config as cli_config
 from src.cli.config import (
     CHANNEL_TYPES,
     _create_agent,
+    _default_description,
     _get_default_model,
     _load_config,
     _load_permissions,
+    _prompt_brightdata_key,
     _save_permissions,
     _set_env_key,
     _suppress_host_logs,
+    _update_agent_field,
 )
 
 logger = logging.getLogger("cli")
@@ -68,13 +70,12 @@ def setup():
 @cli.group(invoke_without_command=True)
 @click.pass_context
 def agent(ctx):
-    """Manage agents (add, list, model, browser, remove)."""
+    """Manage agents (add, list, edit, remove)."""
     if ctx.invoked_subcommand is None:
         commands = [
             ("list", "List configured agents"),
             ("add", "Add a new agent"),
-            ("model", "Change an agent's model"),
-            ("browser", "Change an agent's browser"),
+            ("edit", "Change an agent's settings"),
             ("remove", "Remove an agent"),
         ]
         click.echo("Agent management:\n")
@@ -117,7 +118,7 @@ def agent_add(name: str | None, model_override: str | None, browser_override: st
 
     description = click.prompt(
         "What should this agent do?",
-        default=f"General-purpose {name} agent",
+        default=_default_description(name),
     )
 
     default_model = _get_default_model()
@@ -125,7 +126,6 @@ def agent_add(name: str | None, model_override: str | None, browser_override: st
 
     browser = browser_override or _pick_browser_interactive()
 
-    # Prompt for Bright Data CDP URL if advanced browser selected
     if browser == "advanced":
         _prompt_brightdata_key()
 
@@ -137,113 +137,92 @@ def agent_add(name: str | None, model_override: str | None, browser_override: st
     click.echo("\nStart chatting: openlegion start")
 
 
-@agent.command("model")
+@agent.command("edit")
 @click.argument("name", required=False, default=None)
-@click.argument("model", required=False, default=None)
-def agent_model(name: str | None, model: str | None):
-    """Change an agent's LLM model.
+@click.option("--model", "model_override", default=None, help="Set LLM model")
+@click.option("--browser", "browser_override", default=None,
+              type=click.Choice(["basic", "stealth", "advanced"]),
+              help="Set browser backend")
+@click.option("--description", "desc_override", default=None, help="Set role/description")
+@click.option("--system-prompt", "sysprompt_override", default=None, help="Set system prompt")
+@click.option("--budget", "budget_override", default=None, type=float, help="Set daily budget (USD)")
+def agent_edit(
+    name: str | None,
+    model_override: str | None,
+    browser_override: str | None,
+    desc_override: str | None,
+    sysprompt_override: str | None,
+    budget_override: float | None,
+):
+    """Change an agent's settings.
 
     \b
     Examples:
-      openlegion agent model assistant anthropic/claude-sonnet-4-6
-      openlegion agent model assistant    # interactive picker
-      openlegion agent model              # pick agent then model
+      openlegion agent edit mybot --model anthropic/claude-sonnet-4-6
+      openlegion agent edit mybot --browser stealth
+      openlegion agent edit mybot --description "Web research specialist"
+      openlegion agent edit mybot --budget 10.0
+      openlegion agent edit mybot           # interactive property picker
+      openlegion agent edit                 # pick agent then property
     """
-    from src.cli.config import _pick_model_interactive
+    from src.cli.config import _edit_agent_interactive
 
     cfg = _load_config()
     name = _resolve_agent_name(cfg, name)
     if name is None:
         return
 
-    current_model = cfg["agents"][name].get("model", _get_default_model())
+    # Direct flag mode: apply each provided flag
+    has_flags = any(v is not None for v in [
+        model_override, browser_override, desc_override,
+        sysprompt_override, budget_override,
+    ])
+    if has_flags:
+        agent_cfg = cfg["agents"][name]
+        default_model = _get_default_model()
+        changed = False
 
-    if model is None:
-        click.echo(f"  Current: {current_model}\n")
-        model = _pick_model_interactive(current_model, label="current")
+        if model_override is not None:
+            old = agent_cfg.get("model", default_model)
+            if model_override == old:
+                click.echo(f"Agent '{name}' already uses {model_override}.")
+            else:
+                _update_agent_field(name, "model", model_override)
+                click.echo(f"Agent '{name}' model: {old} -> {model_override}")
+                changed = True
 
-    if model == current_model:
-        click.echo(f"Agent '{name}' already uses {model}.")
+        if browser_override is not None:
+            old = agent_cfg.get("browser_backend", "basic") or "basic"
+            if browser_override == old:
+                click.echo(f"Agent '{name}' already uses {browser_override} browser.")
+            else:
+                if browser_override == "advanced":
+                    _prompt_brightdata_key()
+                _update_agent_field(name, "browser_backend", browser_override)
+                click.echo(f"Agent '{name}' browser: {old} -> {browser_override}")
+                changed = True
+
+        if desc_override is not None:
+            _update_agent_field(name, "role", desc_override)
+            click.echo(f"Agent '{name}' description updated.")
+            changed = True
+
+        if sysprompt_override is not None:
+            _update_agent_field(name, "system_prompt", sysprompt_override)
+            click.echo(f"Agent '{name}' system prompt updated.")
+            changed = True
+
+        if budget_override is not None:
+            _update_agent_field(name, "daily_budget", budget_override)
+            click.echo(f"Agent '{name}' budget: ${budget_override:.2f}/day")
+            changed = True
+
+        if changed:
+            click.echo("Restart to apply: openlegion start")
         return
 
-    _update_agent_field(name, "model", model)
-    click.echo(f"Agent '{name}' model: {current_model} -> {model}")
-    click.echo("Restart to apply: openlegion start")
-
-
-@agent.command("browser")
-@click.argument("name", required=False, default=None)
-@click.argument("backend", required=False, default=None,
-                type=click.Choice(["basic", "stealth", "advanced"]))
-def agent_browser(name: str | None, backend: str | None):
-    """Change an agent's browser backend.
-
-    \b
-    Backends:
-      basic      Built-in Chromium (default)
-      stealth    Camoufox anti-fingerprint browser
-      advanced   Bright Data cloud proxy (requires CDP URL)
-
-    \b
-    Examples:
-      openlegion agent browser scraper stealth
-      openlegion agent browser scraper    # interactive picker
-      openlegion agent browser            # pick agent then browser
-    """
-    from src.cli.config import _pick_browser_interactive
-
-    cfg = _load_config()
-    name = _resolve_agent_name(cfg, name)
-    if name is None:
-        return
-
-    current = cfg["agents"][name].get("browser_backend", "basic") or "basic"
-
-    if backend is None:
-        click.echo(f"  Current: {current}\n")
-        backend = _pick_browser_interactive(current)
-
-    if backend == current:
-        click.echo(f"Agent '{name}' already uses {backend} browser.")
-        return
-
-    if backend == "advanced":
-        _prompt_brightdata_key()
-
-    _update_agent_field(name, "browser_backend", backend)
-    click.echo(f"Agent '{name}' browser: {current} -> {backend}")
-    click.echo("Restart to apply: openlegion start")
-
-
-def _update_agent_field(name: str, field: str, value: str) -> None:
-    """Update a single field in agents.yaml for an agent."""
-    if cli_config.AGENTS_FILE.exists():
-        with open(cli_config.AGENTS_FILE) as f:
-            agents_cfg = yaml.safe_load(f) or {"agents": {}}
-    else:
-        agents_cfg = {"agents": {}}
-    if name in agents_cfg.get("agents", {}):
-        agents_cfg["agents"][name][field] = value
-        with open(cli_config.AGENTS_FILE, "w") as f:
-            yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
-
-
-def _prompt_brightdata_key() -> None:
-    """Prompt for Bright Data CDP URL if not already set."""
-    existing = os.environ.get("OPENLEGION_CRED_BRIGHTDATA_CDP_URL", "")
-    if existing:
-        click.echo("  Bright Data CDP URL already configured.")
-        return
-    click.echo(
-        "\n  Advanced browser requires a Bright Data Scraping Browser CDP URL.\n"
-        "  Get one at: https://brightdata.com/products/scraping-browser\n"
-    )
-    cdp_url = click.prompt("  Bright Data CDP URL (wss://...)", default="", show_default=False)
-    if cdp_url.strip():
-        _set_env_key("brightdata_cdp_url", cdp_url.strip())
-        click.echo("  Saved.\n")
-    else:
-        click.echo("  Skipped. Set OPENLEGION_CRED_BRIGHTDATA_CDP_URL in .env later.\n")
+    # Interactive mode
+    _edit_agent_interactive(name, restart_hint="Restart to apply: openlegion start")
 
 
 def _resolve_agent_name(cfg: dict, name: str | None) -> str | None:
@@ -289,12 +268,13 @@ def agent_list():
         pass
 
     default_model = _get_default_model()
-    click.echo(f"{'Name':<16} {'Model':<40} {'Status':<10}")
-    click.echo("-" * 66)
+    click.echo(f"{'Name':<16} {'Model':<40} {'Browser':<10} {'Status':<10}")
+    click.echo("-" * 79)
     for name, info in agents.items():
         status = "running" if name in running else "stopped"
         model = info.get("model", default_model)
-        click.echo(f"{name:<16} {model:<40} {status:<10}")
+        browser = info.get("browser_backend", "basic") or "basic"
+        click.echo(f"{name:<16} {model:<40} {browser:<10} {status:<10}")
 
 
 @agent.command("remove")
