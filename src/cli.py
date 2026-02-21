@@ -878,6 +878,81 @@ def channels_remove(channel_type: str):
     click.echo(f"  Token remains in .env — delete the OPENLEGION_CRED_{ch['env_key'].upper()} line to fully remove.")
 
 
+# ── skill marketplace ─────────────────────────────────────────
+
+MARKETPLACE_DIR = PROJECT_ROOT / "skills" / "_marketplace"
+
+
+@cli.group()
+def skill():
+    """Install, list, or remove marketplace skills."""
+    pass
+
+
+@skill.command("install")
+@click.argument("repo_url")
+@click.option("--ref", default="", help="Git ref to pin (tag, branch, or commit)")
+def skill_install(repo_url: str, ref: str):
+    """Install a skill from a git repository.
+
+    \b
+    Examples:
+      openlegion skill install https://github.com/user/my-skill
+      openlegion skill install https://github.com/user/my-skill --ref v1.0.0
+    """
+    from src.marketplace import install_skill
+
+    click.echo(f"Installing skill from {repo_url}...")
+    result = install_skill(repo_url, MARKETPLACE_DIR, ref=ref)
+    if "error" in result:
+        click.echo(f"Error: {result['error']}", err=True)
+        return
+    click.echo(f"Installed '{result['name']}' v{result.get('version', '?')}")
+    click.echo(f"  {result.get('description', '')}")
+    click.echo("\nRestart agents to load the new skill.")
+
+
+@skill.command("list")
+def skill_list():
+    """List installed marketplace skills."""
+    from src.marketplace import list_skills
+
+    skills = list_skills(MARKETPLACE_DIR)
+    if not skills:
+        click.echo("No marketplace skills installed.")
+        click.echo("Install one: openlegion skill install <repo_url>")
+        return
+
+    click.echo(f"{'Name':<20} {'Version':<12} {'Description'}")
+    click.echo("-" * 60)
+    for s in skills:
+        click.echo(f"{s.get('name', '?'):<20} {s.get('version', '?'):<12} {s.get('description', '')[:40]}")
+
+
+@skill.command("remove")
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def skill_remove(name: str, yes: bool):
+    """Remove an installed marketplace skill.
+
+    \b
+    Examples:
+      openlegion skill remove my-skill
+      openlegion skill remove my-skill -y
+    """
+    from src.marketplace import remove_skill
+
+    if not yes:
+        click.confirm(f"Remove skill '{name}'?", abort=True)
+
+    result = remove_skill(name, MARKETPLACE_DIR)
+    if "error" in result:
+        click.echo(f"Error: {result['error']}", err=True)
+        return
+    click.echo(f"Removed skill '{name}'.")
+    click.echo("Restart agents for changes to take effect.")
+
+
 # ── start ────────────────────────────────────────────────────
 
 @cli.command()

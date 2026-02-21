@@ -212,6 +212,13 @@ class DockerBackend(RuntimeBackend):
                 host_path = soul_md.as_posix()
             volumes[host_path] = {"bind": "/app/SOUL.md", "mode": "ro"}
 
+        marketplace_dir = self.project_root / "skills" / "_marketplace"
+        if marketplace_dir.is_dir():
+            mp_path = str(marketplace_dir)
+            if platform.system() == "Windows":
+                mp_path = marketplace_dir.as_posix()
+            volumes[mp_path] = {"bind": "/app/marketplace_skills", "mode": "ro"}
+
         run_kwargs: dict[str, Any] = {
             "detach": True,
             "name": f"openlegion_{agent_id}",
@@ -403,6 +410,16 @@ class SandboxBackend(RuntimeBackend):
             shutil.copytree(skills_dir, skills_dest)
         else:
             skills_dest.mkdir(exist_ok=True)
+
+        # Copy marketplace skills
+        marketplace_src = self.project_root / "skills" / "_marketplace"
+        marketplace_dest = ws / "marketplace_skills"
+        if marketplace_src.is_dir():
+            if marketplace_dest.exists():
+                shutil.rmtree(marketplace_dest)
+            shutil.copytree(marketplace_src, marketplace_dest)
+        else:
+            marketplace_dest.mkdir(exist_ok=True)
 
         # Generate per-agent auth token for mesh request verification
         auth_token = secrets.token_urlsafe(32)
