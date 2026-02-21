@@ -64,7 +64,7 @@ class TestSetupFull:
         """Full setup with piped input creates all config files."""
         project = _make_project(tmp_path)
 
-        # Input: provider=1 (anthropic), model=1, API key, project desc, agent name, description
+        # Input: provider=1 (anthropic), model=1, API key, project desc, agent name, description, browser
         piped_input = (
             "1\n"           # provider: Anthropic
             "1\n"           # model: first option
@@ -73,6 +73,7 @@ class TestSetupFull:
             "none\n"        # template: none (custom)
             "myagent\n"     # agent name
             "Test agent\n"  # agent description
+            "\n"            # browser: default (basic)
         )
 
         with _patch_all(project):
@@ -158,7 +159,7 @@ class TestSetupFull:
         """Invalid key on first attempt triggers retry, valid on second."""
         project = _make_project(tmp_path)
 
-        # Input: provider=1, model=1, bad key, good key, skip project, agent
+        # Input: provider=1, model=1, bad key, good key, skip project, agent, browser
         piped_input = (
             "1\n"                # provider
             "1\n"                # model
@@ -168,6 +169,7 @@ class TestSetupFull:
             "none\n"             # no template
             "bot\n"              # agent name
             "Test bot\n"         # agent description
+            "\n"                 # browser: default (basic)
         )
 
         call_count = {"n": 0}

@@ -19,14 +19,18 @@ from src.cli.config import (  # noqa: F401
     _check_docker_image,
     _check_docker_running,
     _create_agent,
+    _default_description,
+    _edit_agent_interactive,
     _get_default_model,
     _load_config,
     _load_permissions,
     _load_templates,
+    _prompt_brightdata_key,
     _save_permissions,
     _set_collaborative_permissions,
     _set_env_key,
     _setup_agent_wizard,
+    _update_agent_field,
 )
 from src.cli.formatting import _format_tool_result_hint, _format_tool_summary  # noqa: F401
 from src.cli.main import cli  # noqa: F401

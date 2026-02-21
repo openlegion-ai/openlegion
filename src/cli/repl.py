@@ -11,10 +11,15 @@ import click
 
 from src.cli.config import (
     _create_agent,
+    _default_description,
+    _edit_agent_interactive,
     _get_default_model,
     _load_config,
+    _load_permissions,
     _pick_browser_interactive,
     _pick_model_interactive,
+    _prompt_brightdata_key,
+    _save_permissions,
 )
 from src.cli.formatting import (
     agent_prompt,
@@ -32,20 +37,43 @@ if TYPE_CHECKING:
 class REPLSession:
     """Interactive REPL supporting multiple agents, @mentions, and slash commands."""
 
+    _COMMAND_GROUPS = [
+        ("Chat", [
+            ("/use <name>",       "Switch active agent"),
+            ("/broadcast <msg>",  "Send to all agents"),
+            ("/steer <msg>",      "Redirect busy agent"),
+            ("/reset",            "Clear conversation history"),
+        ]),
+        ("Agents", [
+            ("/status",           "Show agents, models, and state"),
+            ("/add",              "Add a new agent"),
+            ("/edit [name]",      "Change agent settings"),
+            ("/remove [name]",    "Remove an agent"),
+        ]),
+        ("System", [
+            ("/costs",            "Show spend, context, and model health"),
+            ("/addkey [service]", "Store a credential"),
+            ("/help",             "Show this help"),
+            ("/quit",             "Exit and stop runtime"),
+        ]),
+    ]
+
     def __init__(self, ctx: RuntimeContext):
         self.ctx = ctx
         self.current = list(ctx.agents.keys())[0]
         self._commands = {
             "/quit":      (self._cmd_quit,      "Exit and stop runtime"),
             "/exit":      (self._cmd_quit,      "Exit and stop runtime"),
-            "/agents":    (self._cmd_agents,    "List running agents"),
-            "/use":       (self._cmd_use,       "Switch agent: /use <name>"),
+            "/agents":    (self._cmd_status,    "Show agents, models, and state"),
+            "/use":       (self._cmd_use,       "Switch active agent"),
             "/add":       (self._cmd_add,       "Add a new agent"),
-            "/status":    (self._cmd_status,    "Show agent status and models"),
-            "/broadcast": (self._cmd_broadcast, "Send message to all agents"),
-            "/steer":     (self._cmd_steer,     "Redirect busy agent: /steer <msg>"),
-            "/costs":     (self._cmd_costs,     "Show spend, context, model health"),
-            "/addkey":    (self._cmd_addkey,     "Store a credential: /addkey <service>"),
+            "/edit":      (self._cmd_edit,      "Change agent settings"),
+            "/remove":    (self._cmd_remove,    "Remove an agent"),
+            "/status":    (self._cmd_status,    "Show agents, models, and state"),
+            "/broadcast": (self._cmd_broadcast, "Send to all agents"),
+            "/steer":     (self._cmd_steer,     "Redirect busy agent"),
+            "/costs":     (self._cmd_costs,     "Show spend, context, and model health"),
+            "/addkey":    (self._cmd_addkey,     "Store a credential"),
             "/reset":     (self._cmd_reset,     "Clear conversation history"),
             "/help":      (self._cmd_help,      "Show this help"),
         }
@@ -84,7 +112,7 @@ class REPLSession:
                     return None, ""
                 return mentioned, message
             else:
-                click.echo(f"Unknown agent: '{mentioned}'. Type /agents to list.")
+                click.echo(f"Unknown agent: '{mentioned}'. Type /status to list.")
                 return None, ""
         return self.current, text
 
@@ -104,11 +132,6 @@ class REPLSession:
 
     def _cmd_quit(self, arg: str) -> str:
         return "quit"
-
-    def _cmd_agents(self, arg: str) -> None:
-        for name in self.ctx.agents:
-            marker = " (active)" if name == self.current else ""
-            click.echo(f"  {name}{marker}")
 
     def _cmd_use(self, arg: str) -> None:
         available = ", ".join(self.ctx.agents)
@@ -132,11 +155,14 @@ class REPLSession:
             return
         new_desc = click.prompt(
             "What should this agent do?",
-            default=f"General-purpose {new_name} agent",
+            default=_default_description(new_name),
         )
         default_model = _get_default_model()
         model = _pick_model_interactive(default_model, label="default")
         browser = _pick_browser_interactive()
+
+        if browser == "advanced":
+            _prompt_brightdata_key()
 
         _create_agent(new_name, new_desc, model, browser_backend=browser)
         # Reload permissions so the mesh grants the new agent API access
@@ -287,12 +313,86 @@ class REPLSession:
         except Exception as e:
             click.echo(f"Error: {e}")
 
+    def _cmd_edit(self, arg: str) -> None:
+        """Interactive property editor for an agent."""
+        name = arg.strip() if arg.strip() else self.current
+        if name not in self.ctx.agents:
+            click.echo(f"Agent '{name}' not found.")
+            return
+        _edit_agent_interactive(name, restart_hint="Restart to apply.")
+
+    def _cmd_remove(self, arg: str) -> None:
+        """Remove an agent from config and stop its container."""
+        from src.host.transport import HttpTransport
+
+        if not self.ctx.agents:
+            click.echo("No agents to remove.")
+            return
+
+        name = arg.strip() if arg.strip() else None
+        if name is None:
+            # Interactive picker
+            names = sorted(self.ctx.agents.keys())
+            if len(names) == 1:
+                name = names[0]
+            else:
+                click.echo("Agents:")
+                for i, n in enumerate(names, 1):
+                    click.echo(f"  {i}. {n}")
+                choice = click.prompt("Select agent to remove", type=click.IntRange(1, len(names)))
+                name = names[choice - 1]
+
+        if name not in self.ctx.agents:
+            click.echo(f"Agent '{name}' not found.")
+            return
+
+        if not click.confirm(f"Remove agent '{name}'?"):
+            return
+
+        # Stop the container
+        try:
+            self.ctx.runtime.stop_agent(name)
+        except Exception:
+            pass
+
+        # Remove from router and transport
+        if self.ctx.router:
+            self.ctx.router.unregister_agent(name)
+        self.ctx.agent_urls.pop(name, None)
+        if isinstance(self.ctx.transport, HttpTransport):
+            self.ctx.transport._urls.pop(name, None)
+
+        # Remove from config and permissions
+        import yaml
+        from src.cli.config import AGENTS_FILE
+
+        if AGENTS_FILE.exists():
+            with open(AGENTS_FILE) as f:
+                agents_cfg = yaml.safe_load(f) or {}
+            agents_cfg.get("agents", {}).pop(name, None)
+            with open(AGENTS_FILE, "w") as f:
+                yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+
+        perms = _load_permissions()
+        perms.get("permissions", {}).pop(name, None)
+        _save_permissions(perms)
+
+        click.echo(f"Removed agent '{name}'.")
+
+        # Switch to another agent if we removed the active one
+        if name == self.current and self.ctx.agents:
+            self.current = list(self.ctx.agents.keys())[0]
+            click.echo(f"Switched to '{self.current}'.")
+        elif not self.ctx.agents:
+            click.echo("No agents remaining. Add one with /add.")
+
     def _cmd_help(self, arg: str) -> None:
-        click.echo("Commands:")
-        click.echo(f"  {'@agent <msg>':<20} Send to a specific agent")
-        for cmd, (_, desc) in self._commands.items():
-            if cmd != "/exit":  # skip alias
-                click.echo(f"  {cmd:<20} {desc}")
+        click.echo(f"\n  {'@agent <msg>':<22} Send to a specific agent\n")
+        for group_name, commands in self._COMMAND_GROUPS:
+            click.echo(f"  {group_name}")
+            for cmd, desc in commands:
+                click.echo(f"    {cmd:<20} {desc}")
+            click.echo()
 
     # ── Message sending ─────────────────────────────────────
 

@@ -1,4 +1,4 @@
-"""Tests for CLI commands: agent add/list/model/browser/remove, setup helpers."""
+"""Tests for CLI commands: agent add/list/edit/remove, setup helpers."""
 
 import json
 import os
@@ -131,9 +131,9 @@ class TestAgentAdd:
             assert "already exists" in result.output
 
 
-class TestAgentModel:
-    def test_change_model_direct(self, tmp_path):
-        """Direct model argument updates agents.yaml."""
+class TestAgentEdit:
+    def test_edit_model_flag(self, tmp_path):
+        """--model flag updates agents.yaml."""
         config_file = tmp_path / "mesh.yaml"
         agents_file = tmp_path / "agents.yaml"
 
@@ -155,7 +155,7 @@ class TestAgentModel:
             runner = CliRunner()
             result = runner.invoke(
                 cli,
-                ["agent", "model", "mybot", "anthropic/claude-sonnet-4-6"],
+                ["agent", "edit", "mybot", "--model", "anthropic/claude-sonnet-4-6"],
             )
             assert result.exit_code == 0, result.output
             assert "->" in result.output
@@ -163,83 +163,8 @@ class TestAgentModel:
             agents_cfg = yaml.safe_load(agents_file.read_text())
             assert agents_cfg["agents"]["mybot"]["model"] == "anthropic/claude-sonnet-4-6"
 
-    def test_change_model_interactive(self, tmp_path):
-        """Interactive model picker updates agents.yaml."""
-        config_file = tmp_path / "mesh.yaml"
-        agents_file = tmp_path / "agents.yaml"
-
-        config_file.write_text(yaml.dump({
-            "mesh": {"host": "0.0.0.0", "port": 8420},
-            "llm": {"default_model": "anthropic/claude-haiku-4-5-20251001"},
-        }))
-        agents_file.write_text(yaml.dump({
-            "agents": {"mybot": {
-                "role": "test",
-                "model": "anthropic/claude-haiku-4-5-20251001",
-            }},
-        }))
-
-        with (
-            patch("src.cli.config.CONFIG_FILE", config_file),
-            patch("src.cli.config.AGENTS_FILE", agents_file),
-        ):
-            runner = CliRunner()
-            result = runner.invoke(
-                cli,
-                ["agent", "model", "mybot"],
-                input="2\n",  # pick second model
-            )
-            assert result.exit_code == 0, result.output
-            assert "->" in result.output
-
-    def test_change_model_nonexistent_agent(self, tmp_path):
-        config_file = tmp_path / "mesh.yaml"
-        agents_file = tmp_path / "agents.yaml"
-        config_file.write_text(yaml.dump({"mesh": {}}))
-        agents_file.write_text(yaml.dump({
-            "agents": {"other": {"role": "test", "model": "openai/gpt-4.1"}},
-        }))
-
-        with (
-            patch("src.cli.config.CONFIG_FILE", config_file),
-            patch("src.cli.config.AGENTS_FILE", agents_file),
-        ):
-            runner = CliRunner()
-            result = runner.invoke(cli, ["agent", "model", "ghost", "some/model"])
-            assert "not found" in result.output
-
-    def test_change_model_same_noop(self, tmp_path):
-        """Same model should report no change."""
-        config_file = tmp_path / "mesh.yaml"
-        agents_file = tmp_path / "agents.yaml"
-
-        config_file.write_text(yaml.dump({
-            "mesh": {"host": "0.0.0.0", "port": 8420},
-            "llm": {"default_model": "anthropic/claude-haiku-4-5-20251001"},
-        }))
-        agents_file.write_text(yaml.dump({
-            "agents": {"mybot": {
-                "role": "test",
-                "model": "anthropic/claude-haiku-4-5-20251001",
-            }},
-        }))
-
-        with (
-            patch("src.cli.config.CONFIG_FILE", config_file),
-            patch("src.cli.config.AGENTS_FILE", agents_file),
-        ):
-            runner = CliRunner()
-            result = runner.invoke(
-                cli,
-                ["agent", "model", "mybot", "anthropic/claude-haiku-4-5-20251001"],
-            )
-            assert result.exit_code == 0
-            assert "already uses" in result.output
-
-
-class TestAgentBrowser:
-    def test_change_browser_direct(self, tmp_path):
-        """Direct backend argument updates agents.yaml."""
+    def test_edit_browser_flag(self, tmp_path):
+        """--browser flag updates agents.yaml."""
         config_file = tmp_path / "mesh.yaml"
         agents_file = tmp_path / "agents.yaml"
 
@@ -261,7 +186,7 @@ class TestAgentBrowser:
             runner = CliRunner()
             result = runner.invoke(
                 cli,
-                ["agent", "browser", "mybot", "stealth"],
+                ["agent", "edit", "mybot", "--browser", "stealth"],
             )
             assert result.exit_code == 0, result.output
             assert "->" in result.output
@@ -269,8 +194,8 @@ class TestAgentBrowser:
             agents_cfg = yaml.safe_load(agents_file.read_text())
             assert agents_cfg["agents"]["mybot"]["browser_backend"] == "stealth"
 
-    def test_change_browser_interactive(self, tmp_path):
-        """Interactive browser picker updates agents.yaml."""
+    def test_edit_description_flag(self, tmp_path):
+        """--description flag updates agents.yaml role field."""
         config_file = tmp_path / "mesh.yaml"
         agents_file = tmp_path / "agents.yaml"
 
@@ -281,7 +206,6 @@ class TestAgentBrowser:
             "agents": {"mybot": {
                 "role": "test",
                 "model": "openai/gpt-4.1",
-                "browser_backend": "basic",
             }},
         }))
 
@@ -292,13 +216,45 @@ class TestAgentBrowser:
             runner = CliRunner()
             result = runner.invoke(
                 cli,
-                ["agent", "browser", "mybot"],
-                input="2\n",  # pick stealth
+                ["agent", "edit", "mybot", "--description", "Web research specialist"],
+            )
+            assert result.exit_code == 0, result.output
+            assert "description updated" in result.output
+
+            agents_cfg = yaml.safe_load(agents_file.read_text())
+            assert agents_cfg["agents"]["mybot"]["role"] == "Web research specialist"
+
+    def test_edit_interactive(self, tmp_path):
+        """Interactive menu flow picks model via property selector."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+
+        config_file.write_text(yaml.dump({
+            "mesh": {"host": "0.0.0.0", "port": 8420},
+            "llm": {"default_model": "anthropic/claude-haiku-4-5-20251001"},
+        }))
+        agents_file.write_text(yaml.dump({
+            "agents": {"mybot": {
+                "role": "test",
+                "model": "anthropic/claude-haiku-4-5-20251001",
+            }},
+        }))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                ["agent", "edit", "mybot"],
+                input="1\n2\n",  # select model property, then pick second model
             )
             assert result.exit_code == 0, result.output
             assert "->" in result.output
 
-    def test_change_browser_nonexistent_agent(self, tmp_path):
+    def test_edit_nonexistent_agent(self, tmp_path):
+        """Nonexistent agent name shows error."""
         config_file = tmp_path / "mesh.yaml"
         agents_file = tmp_path / "agents.yaml"
         config_file.write_text(yaml.dump({"mesh": {}}))
@@ -311,22 +267,22 @@ class TestAgentBrowser:
             patch("src.cli.config.AGENTS_FILE", agents_file),
         ):
             runner = CliRunner()
-            result = runner.invoke(cli, ["agent", "browser", "ghost", "stealth"])
+            result = runner.invoke(cli, ["agent", "edit", "ghost", "--model", "x"])
             assert "not found" in result.output
 
-    def test_change_browser_same_noop(self, tmp_path):
-        """Same browser should report no change."""
+    def test_edit_no_change(self, tmp_path):
+        """Same model value should report no change."""
         config_file = tmp_path / "mesh.yaml"
         agents_file = tmp_path / "agents.yaml"
 
         config_file.write_text(yaml.dump({
             "mesh": {"host": "0.0.0.0", "port": 8420},
+            "llm": {"default_model": "anthropic/claude-haiku-4-5-20251001"},
         }))
         agents_file.write_text(yaml.dump({
             "agents": {"mybot": {
                 "role": "test",
-                "model": "openai/gpt-4.1",
-                "browser_backend": "basic",
+                "model": "anthropic/claude-haiku-4-5-20251001",
             }},
         }))
 
@@ -337,7 +293,7 @@ class TestAgentBrowser:
             runner = CliRunner()
             result = runner.invoke(
                 cli,
-                ["agent", "browser", "mybot", "basic"],
+                ["agent", "edit", "mybot", "--model", "anthropic/claude-haiku-4-5-20251001"],
             )
             assert result.exit_code == 0
             assert "already uses" in result.output
@@ -368,6 +324,8 @@ class TestAgentList:
             assert "bot2" in result.output
             assert "openai/gpt-4o-mini" in result.output
             assert "anthropic/claude-sonnet-4-5-20250929" in result.output
+            assert "Browser" in result.output
+            assert "basic" in result.output
 
     def test_list_no_agents(self, tmp_path):
         config_file = tmp_path / "mesh.yaml"
