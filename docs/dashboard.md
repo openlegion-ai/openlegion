@@ -16,7 +16,7 @@ Overview of all registered agents showing health status, activity state (idle/th
 
 ### Events
 
-Real-time event feed streamed via WebSocket. Events include LLM calls, tool executions, messages sent/received, blackboard writes, agent state changes, and health changes. Filter by event type using the chip toggles. Events are capped at 500 in the browser; older events are dropped.
+Real-time event feed streamed via WebSocket. Events include LLM calls, tool executions, text streaming deltas, messages sent/received, blackboard writes, agent state changes, and health changes. Filter by event type using the chip toggles. Events are capped at 500 in the browser; older events are dropped. Note: per-token `text_delta` events are delivered via the direct streaming chat endpoint (not the WebSocket event bus) to avoid flooding the event buffer.
 
 ### Agents
 
@@ -93,6 +93,7 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `DELETE` | `/dashboard/api/agents/{id}` | Remove an agent |
 | `GET` | `/dashboard/api/agents/{id}/config` | Agent configuration |
 | `PUT` | `/dashboard/api/agents/{id}/config` | Update agent configuration |
+| `POST` | `/dashboard/api/agents/{id}/chat/stream` | SSE streaming chat (token-level) |
 | `POST` | `/dashboard/api/agents/{id}/restart` | Restart an agent |
 | `PUT` | `/dashboard/api/agents/{id}/budget` | Update agent budget |
 | `GET` | `/dashboard/api/blackboard` | List blackboard entries |

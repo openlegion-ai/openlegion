@@ -66,7 +66,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `memory.py` | SQLite + sqlite-vec + FTS5 hierarchical memory store |
 | `workspace.py` | Persistent markdown workspace (MEMORY.md, daily logs, learnings) |
 | `context.py` | Context window management with write-then-compact pattern |
-| `llm.py` | LLM client that routes all calls through mesh API proxy |
+| `llm.py` | LLM client with streaming (`chat_stream()`) and non-streaming (`chat()`) — routes through mesh proxy |
 | `mesh_client.py` | HTTP client for agent-to-mesh communication |
 | `server.py` | Agent-side FastAPI server (/task, /chat, /status) |
 
@@ -115,9 +115,9 @@ User -> CLI/Channel -> Mesh Router -> Agent /task endpoint
 ### Chat Mode
 
 ```
-User -> CLI/Channel -> Mesh Router -> Agent /chat endpoint
-  Agent: load workspace context + memory search -> LLM call -> tool rounds
-  Agent -> streaming/complete response -> User
+User -> CLI/Channel -> Mesh Router -> Agent /chat/stream endpoint
+  Agent: load workspace context + memory search -> LLM streaming call -> tool rounds
+  Agent -> token-level SSE stream (text_delta, tool_start, tool_result, done) -> User
 ```
 
 ### Workflow Execution

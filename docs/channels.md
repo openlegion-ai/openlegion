@@ -40,7 +40,7 @@ openlegion start -d       # Detached (background)
 openlegion chat <agent>   # Connect to running agent (detached mode)
 ```
 
-The CLI REPL supports the full command set above plus streaming responses with tool-use progress indicators. All channels now have full command parity with the CLI REPL (except `/add`, `/edit`, and `/remove` which require interactive prompts).
+The CLI REPL supports the full command set above plus token-level streaming responses with tool-use progress indicators. All channels now have full command parity with the CLI REPL (except `/add`, `/edit`, and `/remove` which require interactive prompts).
 
 ## Telegram
 
@@ -87,10 +87,10 @@ Pairing state is stored in `config/telegram_paired.json`.
 
 ### Features
 
-- Typing indicators while agents process
-- Streaming responses with tool progress updates
+- Token-level streaming with progressive message editing (debounced at 500ms)
+- Tool progress indicators (numbered tool list with checkmarks)
 - Markdown formatting converted to Telegram HTML
-- Messages chunked at 4000 characters
+- Messages chunked at 4000 characters with overflow handling
 - Per-user agent tracking (each Telegram user has their own active agent)
 
 ## Discord
@@ -138,8 +138,9 @@ Pairing state is stored in `config/discord_paired.json`.
 
 ### Features
 
+- Token-level streaming with progressive message editing (debounced at 500ms)
 - Typing indicators during dispatch
-- Messages chunked at 1900 characters (Discord limit)
+- Messages chunked at 1900 characters (Discord limit) with overflow handling
 - Per-user agent tracking
 - Optional guild (server) allowlisting
 
@@ -187,9 +188,10 @@ Slack uses the same pairing pattern as other channels:
 
 ### Features
 
+- Token-level streaming with progressive message editing via `chat.update` (debounced at 500ms)
 - Thread-aware routing (each thread maps to its own agent context)
 - `!`-prefix commands translated to `/` internally
-- Messages chunked at 3000 characters
+- Messages chunked at 3000 characters with overflow handling
 - Per-user agent tracking via composite `user_id:thread_ts` key
 
 ## WhatsApp
@@ -293,7 +295,7 @@ The channel receives these callbacks at construction:
 | Callback | Signature | Purpose |
 |----------|-----------|---------|
 | `dispatch_fn` | `(agent, message) -> str` | Route message to agent |
-| `stream_dispatch_fn` | `(agent, message) -> AsyncIterator[dict]` | Streaming dispatch (SSE events) |
+| `stream_dispatch_fn` | `(agent, message) -> AsyncIterator[dict]` | Token-level streaming dispatch (yields `text_delta`, `tool_start`, `tool_result`, `done` events) |
 | `list_agents_fn` | `() -> dict` | List available agents |
 | `status_fn` | `(agent) -> dict \| None` | Agent health info |
 | `costs_fn` | `() -> list[dict]` | Today's spend per agent |
