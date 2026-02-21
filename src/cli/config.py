@@ -257,7 +257,10 @@ def _build_docker_image() -> None:
 # ── Agent management ────────────────────────────────────────
 
 
-def _add_agent_to_config(name: str, role: str, model: str, system_prompt: str) -> None:
+def _add_agent_to_config(
+    name: str, role: str, model: str, system_prompt: str,
+    browser_backend: str = "",
+) -> None:
     """Add an agent entry to agents.yaml."""
     agents_cfg: dict = {"agents": {}}
     if AGENTS_FILE.exists():
@@ -266,13 +269,16 @@ def _add_agent_to_config(name: str, role: str, model: str, system_prompt: str) -
     if "agents" not in agents_cfg:
         agents_cfg["agents"] = {}
 
-    agents_cfg["agents"][name] = {
+    entry: dict = {
         "role": role,
         "model": model,
         "skills_dir": f"./skills/{name}",
         "system_prompt": system_prompt,
         "resources": {"memory_limit": "512m", "cpu_limit": 0.5},
     }
+    if browser_backend:
+        entry["browser_backend"] = browser_backend
+    agents_cfg["agents"][name] = entry
     AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(AGENTS_FILE, "w") as f:
         yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
@@ -322,14 +328,16 @@ def _set_collaborative_permissions() -> None:
     _save_permissions(perms)
 
 
-def _create_agent(name: str, description: str, model: str) -> None:
+def _create_agent(
+    name: str, description: str, model: str, browser_backend: str = "",
+) -> None:
     """Create an agent: config, permissions, skills directory."""
     system_prompt = (
         f"You are the '{name}' agent. {description} "
         "Use your tools and knowledge to accomplish tasks. "
         "Check PROJECT.md for the current priorities and constraints."
     )
-    _add_agent_to_config(name, description, model, system_prompt)
+    _add_agent_to_config(name, description, model, system_prompt, browser_backend=browser_backend)
     _add_agent_permissions(name)
     skills_dir = PROJECT_ROOT / "skills" / name
     skills_dir.mkdir(parents=True, exist_ok=True)
@@ -369,6 +377,62 @@ def _ensure_pairing_code(pairing_path: Path) -> str | None:
 def _get_default_model() -> str:
     cfg = _load_config()
     return cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+
+
+# ── Browser backend data ────────────────────────────────────
+
+BROWSER_BACKENDS = [
+    {
+        "name": "basic",
+        "label": "Basic (built-in Chromium)",
+        "description": "Fast, reliable. No anti-bot evasion.",
+    },
+    {
+        "name": "stealth",
+        "label": "Stealth (Camoufox)",
+        "description": "Anti-fingerprint browser. Bypasses basic bot detection.",
+    },
+    {
+        "name": "advanced",
+        "label": "Advanced (Bright Data)",
+        "description": "Cloud proxy browser. Bypasses CAPTCHAs and geo-blocks. Requires Bright Data account.",
+    },
+]
+
+
+def _pick_model_interactive(default_model: str, label: str = "current") -> str:
+    """Show model picker for the default model's provider. Returns selected model."""
+    provider = default_model.split("/")[0] if "/" in default_model else "anthropic"
+    models = _PROVIDER_MODELS.get(provider, [default_model])
+    default_idx = 1
+    for i, m in enumerate(models, 1):
+        marker = f" ({label})" if m == default_model else ""
+        click.echo(f"  {i}. {m}{marker}")
+        if m == default_model:
+            default_idx = i
+    model_choice = click.prompt(
+        "Model",
+        type=click.IntRange(1, len(models)),
+        default=default_idx,
+    )
+    return models[model_choice - 1]
+
+
+def _pick_browser_interactive(current: str = "basic") -> str:
+    """Show browser backend picker. Returns selected backend name."""
+    default_idx = 1
+    for i, b in enumerate(BROWSER_BACKENDS, 1):
+        marker = " (current)" if b["name"] == current else ""
+        click.echo(f"  {i}. {b['label']}{marker}")
+        click.echo(f"     {b['description']}")
+        if b["name"] == current:
+            default_idx = i
+    choice = click.prompt(
+        "Browser",
+        type=click.IntRange(1, len(BROWSER_BACKENDS)),
+        default=default_idx,
+    )
+    return BROWSER_BACKENDS[choice - 1]["name"]
 
 
 def _load_templates() -> dict[str, dict]:
