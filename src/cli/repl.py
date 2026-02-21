@@ -191,8 +191,14 @@ class REPLSession:
         ready = asyncio.run(self.ctx.runtime.wait_for_agent(new_name, timeout=60))
         if ready:
             click.echo(f"Agent '{new_name}' ready.")
+            if self.ctx.event_bus:
+                self.ctx.event_bus.emit("agent_state", agent=new_name,
+                    data={"state": "added", "role": new_desc, "ready": True})
         else:
             click.echo(f"Agent '{new_name}' failed to start.", err=True)
+            if self.ctx.event_bus:
+                self.ctx.event_bus.emit("agent_state", agent=new_name,
+                    data={"state": "added", "ready": False})
 
     def _cmd_status(self, arg: str) -> None:
         agents_cfg = self.ctx.cfg.get("agents", {})
@@ -482,6 +488,9 @@ class REPLSession:
         _save_permissions(perms)
 
         click.echo(f"Removed agent '{name}'.")
+        if self.ctx.event_bus:
+            self.ctx.event_bus.emit("agent_state", agent=name,
+                data={"state": "removed"})
 
         # Switch to another agent if we removed the active one
         if name == self.current and self.ctx.agents:
@@ -537,6 +546,7 @@ class REPLSession:
             _send_message_streaming(
                 self.ctx.transport, target, message, self.ctx.dispatch_loop,
                 steer_fn=_steer_poll, trace_id=trace_id,
+                event_bus=self.ctx.event_bus,
             )
         except Exception as e:
             click.echo(f"Error: {e}")
@@ -547,6 +557,7 @@ def _send_message_streaming(
     dispatch_loop=None,
     steer_fn=None,
     trace_id: str | None = None,
+    event_bus=None,
 ) -> None:
     """Send a message via streaming endpoint, falling back to non-streaming.
 
@@ -567,6 +578,9 @@ def _send_message_streaming(
             hdrs = trace_headers()
             response_text = ""
             tool_count = 0
+            if event_bus:
+                event_bus.emit("message_received", agent=target,
+                    data={"message": message[:200], "source": "repl"})
             try:
                 async for event in transport.stream_request(
                     target, "POST", "/chat/stream",
@@ -581,11 +595,17 @@ def _send_message_streaming(
                                 event.get("input", {}),
                                 tool_count,
                             )
+                            if event_bus:
+                                event_bus.emit("tool_start", agent=target,
+                                    data={k: v for k, v in event.items() if k != "type"})
                         elif etype == "tool_result":
                             display_stream_tool_result(
                                 event.get("name", "?"),
                                 event.get("output", {}),
                             )
+                            if event_bus:
+                                event_bus.emit("tool_result", agent=target,
+                                    data={k: v for k, v in event.items() if k != "type"})
                         elif etype == "text_delta":
                             content = event.get("content", "")
                             display_stream_text_delta(target, content, not response_text)
@@ -595,7 +615,14 @@ def _send_message_streaming(
                                 resp = event.get("response", "(no response)")
                                 click.echo(f"\n{agent_prompt(target)}{resp}")
                             else:
+                                resp = response_text
                                 click.echo("")  # newline after streamed text
+                            if event_bus:
+                                event_bus.emit("message_sent", agent=target,
+                                    data={"message": message[:200],
+                                          "response_length": len(resp),
+                                          "tool_count": tool_count,
+                                          "source": "repl"})
                             return
                         elif "error" in event:
                             click.echo(f"Error: {event['error']}")
@@ -610,6 +637,12 @@ def _send_message_streaming(
                     click.echo(f"Error: {data['error']}")
                     return
                 display_response(target, data)
+                if event_bus:
+                    resp = data.get("response", "")
+                    event_bus.emit("message_sent", agent=target,
+                        data={"message": message[:200],
+                              "response_length": len(resp),
+                              "source": "repl"})
                 return
 
             click.echo("")

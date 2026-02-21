@@ -261,3 +261,26 @@ class SteerMessage(BaseModel):
     """Injected into an agent's active conversation mid-execution."""
 
     message: str
+
+
+# === Dashboard Events ===
+
+
+class DashboardEvent(BaseModel):
+    """Real-time event broadcast to connected dashboard WebSocket clients."""
+
+    id: str = Field(default_factory=lambda: f"evt_{uuid.uuid4().hex[:12]}")
+    type: Literal[
+        "agent_state",
+        "message_sent",
+        "message_received",
+        "tool_start",
+        "tool_result",
+        "llm_call",
+        "blackboard_write",
+        "cost_update",
+        "health_change",
+    ]
+    agent: str = ""
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    data: dict[str, Any] = {}

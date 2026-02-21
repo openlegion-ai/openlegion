@@ -50,10 +50,12 @@ class HealthMonitor:
         runtime: RuntimeBackend,
         transport: Transport,
         router: MessageRouter,
+        event_bus=None,
     ):
         self.runtime = runtime
         self.transport = transport
         self.router = router
+        self._event_bus = event_bus
         self.agents: dict[str, AgentHealth] = {}
         self._running = False
 
@@ -79,6 +81,7 @@ class HealthMonitor:
         if not health or health.status == "failed":
             return
 
+        prev_status = health.status
         now = time.time()
         health.last_check = now
 
@@ -88,12 +91,24 @@ class HealthMonitor:
                 health.consecutive_failures = 0
                 health.last_healthy = now
                 health.status = "healthy"
+                if health.status != prev_status and self._event_bus:
+                    self._event_bus.emit("health_change", agent=agent_id, data={
+                        "previous": prev_status, "current": health.status,
+                        "failures": health.consecutive_failures,
+                        "restart_count": health.restart_count,
+                    })
                 return
         except Exception as e:
             logger.debug("Health check transport error for '%s': %s", agent_id, e)
 
         health.consecutive_failures += 1
         health.status = "unhealthy"
+        if health.status != prev_status and self._event_bus:
+            self._event_bus.emit("health_change", agent=agent_id, data={
+                "previous": prev_status, "current": health.status,
+                "failures": health.consecutive_failures,
+                "restart_count": health.restart_count,
+            })
         logger.debug(
             f"Agent '{agent_id}' health check failed "
             f"({health.consecutive_failures}/{self.MAX_FAILURES})"
@@ -114,6 +129,11 @@ class HealthMonitor:
 
         if len(health.restart_timestamps) >= self.RESTART_LIMIT:
             health.status = "failed"
+            if self._event_bus:
+                self._event_bus.emit("health_change", agent=agent_id, data={
+                    "previous": "unhealthy", "current": "failed",
+                    "failures": health.consecutive_failures,
+                })
             logger.error(
                 f"Agent '{agent_id}' exceeded restart limit "
                 f"({self.RESTART_LIMIT} in {self.RESTART_WINDOW}s). Marking as failed."
@@ -142,9 +162,21 @@ class HealthMonitor:
             health.restart_count += 1
             health.restart_timestamps.append(now)
             health.status = "restarting"
+            if self._event_bus:
+                self._event_bus.emit("health_change", agent=agent_id, data={
+                    "previous": "unhealthy", "current": "restarting",
+                    "failures": 0, "restart_count": health.restart_count,
+                })
 
             ready = await self.runtime.wait_for_agent(agent_id, timeout=60)
+            prev = health.status
             health.status = "healthy" if ready else "unhealthy"
+            if self._event_bus:
+                self._event_bus.emit("health_change", agent=agent_id, data={
+                    "previous": prev, "current": health.status,
+                    "failures": health.consecutive_failures,
+                    "restart_count": health.restart_count,
+                })
 
             logger.info(
                 f"Agent '{agent_id}' restarted "
@@ -152,6 +184,12 @@ class HealthMonitor:
             )
         except Exception as e:
             health.status = "unhealthy"
+            if self._event_bus:
+                self._event_bus.emit("health_change", agent=agent_id, data={
+                    "previous": "restarting", "current": "unhealthy",
+                    "failures": health.consecutive_failures,
+                    "error": str(e),
+                })
             logger.error(f"Failed to restart agent '{agent_id}': {e}")
 
     def get_status(self) -> list[dict]:

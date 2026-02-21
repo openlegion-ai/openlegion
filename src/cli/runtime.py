@@ -39,6 +39,7 @@ class RuntimeContext:
         self.cron_scheduler = None
         self.lane_manager = None
         self.channel_manager = None
+        self.event_bus = None
         self.trace_store = None
         self.agent_urls: dict[str, str] = {}
         self._dispatch_loop = None
@@ -171,6 +172,7 @@ class RuntimeContext:
             _ensure_docker_image()
 
     def _create_components(self) -> None:
+        from src.dashboard.events import EventBus
         from src.host.costs import CostTracker
         from src.host.credentials import CredentialVault
         from src.host.mesh import Blackboard, MessageRouter, PubSub
@@ -185,10 +187,11 @@ class RuntimeContext:
 
         mesh_port = self.cfg["mesh"]["port"]
 
-        self.blackboard = Blackboard()
+        self.event_bus = EventBus()
+        self.blackboard = Blackboard(event_bus=self.event_bus)
         self.pubsub = PubSub(db_path="pubsub.db")
         self.permissions = PermissionMatrix()
-        self.cost_tracker = CostTracker()
+        self.cost_tracker = CostTracker(event_bus=self.event_bus)
         failover_config = self.cfg.get("llm", {}).get("failover", {})
         self.credential_vault = CredentialVault(
             cost_tracker=self.cost_tracker,
@@ -281,7 +284,12 @@ class RuntimeContext:
                 result = await self.transport.request(
                     agent_name, "POST", "/chat", json={"message": message},
                 )
-                return result.get("response", "(no response)")
+                response = result.get("response", "(no response)")
+                if self.event_bus:
+                    self.event_bus.emit("message_sent", agent=agent_name,
+                        data={"message": message[:200], "response_length": len(response),
+                              "source": "dispatch"})
+                return response
             except Exception as e:
                 return f"Error: {e}"
 
@@ -321,6 +329,7 @@ class RuntimeContext:
             self.transport, self.orchestrator,
             auth_tokens=self.runtime.auth_tokens,
             trace_store=self.trace_store,
+            event_bus=self.event_bus,
         )
         app.include_router(create_webhook_router(self.orchestrator))
         app.include_router(webhook_manager.create_router())
@@ -419,6 +428,7 @@ class RuntimeContext:
 
         self.health_monitor = HealthMonitor(
             runtime=self.runtime, transport=self.transport, router=self.router,
+            event_bus=self.event_bus,
         )
         for agent_id in agents_cfg:
             self.health_monitor.register(agent_id)
@@ -460,10 +470,18 @@ class RuntimeContext:
                 return False
 
         async def stream_dispatch_to_agent(agent_name: str, message: str):
+            if self.event_bus:
+                self.event_bus.emit("message_received", agent=agent_name,
+                    data={"message": message[:200], "source": "channel_stream"})
             async for event in self.transport.stream_request(
                 agent_name, "POST", "/chat/stream",
                 json={"message": message}, timeout=120,
             ):
+                if self.event_bus and isinstance(event, dict):
+                    etype = event.get("type", "")
+                    if etype in ("tool_start", "tool_result"):
+                        self.event_bus.emit(etype, agent=agent_name,
+                            data={k: v for k, v in event.items() if k != "type"})
                 yield event
 
         def _channel_addkey(service: str, key: str) -> None:
