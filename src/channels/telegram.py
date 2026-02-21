@@ -16,6 +16,7 @@ Config: TELEGRAM_BOT_TOKEN in .env, channels.telegram in mesh.yaml
 from __future__ import annotations
 
 import asyncio
+import time
 
 from src.channels.base import Channel, PairingManager, chunk_text
 from src.shared.utils import setup_logging
@@ -301,11 +302,14 @@ class TelegramChannel(Channel):
     async def _stream_dispatch_and_reply(
         self, chat_id: int, user_id: str, target: str, text: str,
     ) -> None:
-        """Dispatch with streaming — shows tool progress via an editable message."""
+        """Dispatch with streaming — progressive text updates + tool progress."""
         progress_msg = None
         tool_lines: list[str] = []
         response_text = ""
         tool_count = 0
+        streaming_msg = None  # Message for progressive text streaming
+        last_edit_time = 0.0
+        _EDIT_INTERVAL = 0.5  # Debounce edits to avoid Telegram rate limits
 
         try:
             async for event in self.stream_dispatch_fn(target, text):
@@ -318,6 +322,15 @@ class TelegramChannel(Channel):
                     name = event.get("name", "?")
                     tool_lines.append(f"{tool_count}. {name}")
                     progress = f"Working...\n" + "\n".join(tool_lines)
+                    # Delete streaming text msg when tools start (any round)
+                    if streaming_msg:
+                        try:
+                            await self._app.bot.delete_message(
+                                chat_id=chat_id, message_id=streaming_msg.message_id,
+                            )
+                        except Exception:
+                            pass
+                        streaming_msg = None
                     try:
                         if progress_msg is None:
                             progress_msg = await self._app.bot.send_message(
@@ -335,7 +348,6 @@ class TelegramChannel(Channel):
                 elif etype == "tool_result":
                     name = event.get("name", "?")
                     output = event.get("output", {})
-                    # Update last tool line with a checkmark
                     if tool_lines:
                         hint = ""
                         if isinstance(output, dict) and output.get("error"):
@@ -356,6 +368,24 @@ class TelegramChannel(Channel):
 
                 elif etype == "text_delta":
                     response_text += event.get("content", "")
+                    # Progressive text update (debounced)
+                    now = time.monotonic()
+                    if now - last_edit_time >= _EDIT_INTERVAL and response_text.strip():
+                        last_edit_time = now
+                        display = f"[{target}] {response_text}..."
+                        try:
+                            if streaming_msg is None:
+                                streaming_msg = await self._app.bot.send_message(
+                                    chat_id=chat_id, text=display[:4096],
+                                )
+                            else:
+                                await self._app.bot.edit_message_text(
+                                    chat_id=chat_id,
+                                    message_id=streaming_msg.message_id,
+                                    text=display[:4096],
+                                )
+                        except Exception:
+                            pass
 
                 elif etype == "done":
                     response_text = event.get("response", response_text)
@@ -364,7 +394,7 @@ class TelegramChannel(Channel):
             logger.error(f"Stream dispatch failed for user {user_id}: {e}")
             response_text = f"Error: {e}"
 
-        # Delete progress message and send final response
+        # Delete progress message
         if progress_msg:
             try:
                 await self._app.bot.delete_message(
@@ -373,8 +403,26 @@ class TelegramChannel(Channel):
             except Exception:
                 pass
 
+        # Edit streaming message with final text, or send new if none exists
         if response_text:
-            await self._send_reply(chat_id, f"[{target}] {response_text}")
+            final_text = f"[{target}] {response_text}"
+            if streaming_msg:
+                try:
+                    await self._app.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=streaming_msg.message_id,
+                        text=final_text[:4096],
+                    )
+                    # Send overflow as separate messages
+                    if len(final_text) > 4096:
+                        for chunk in chunk_text(final_text[4096:], MAX_TG_LEN):
+                            await self._app.bot.send_message(
+                                chat_id=chat_id, text=chunk,
+                            )
+                except Exception:
+                    await self._send_reply(chat_id, final_text)
+            else:
+                await self._send_reply(chat_id, final_text)
 
     async def _send_reply(self, chat_id: int, text: str) -> None:
         """Send a response, trying HTML formatting first, then plain text."""

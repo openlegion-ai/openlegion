@@ -649,8 +649,9 @@ function dashboard() {
           body: JSON.stringify({ message: msg }),
         });
         if (!resp.ok) {
-          const err = await resp.json();
-          streamEntry.content = err.detail || 'Failed';
+          let errMsg = `HTTP ${resp.status}`;
+          try { const err = await resp.json(); errMsg = err.detail || errMsg; } catch (_) {}
+          streamEntry.content = errMsg;
           streamEntry.role = 'error';
           streamEntry.streaming = false;
           this.chatLoading = false;
