@@ -471,6 +471,18 @@ class REPLSession:
         self.ctx.agent_urls.pop(name, None)
         if isinstance(self.ctx.transport, HttpTransport):
             self.ctx.transport._urls.pop(name, None)
+        if self.ctx.health_monitor:
+            self.ctx.health_monitor.unregister(name)
+
+        # Clean up PubSub subscriptions, cron jobs, and lane state
+        if self.ctx.pubsub:
+            self.ctx.pubsub.unsubscribe_agent(name)
+        if self.ctx.cron_scheduler:
+            removed = self.ctx.cron_scheduler.remove_agent_jobs(name)
+            if removed:
+                click.echo(f"  Removed {removed} cron job(s).")
+        if self.ctx.lane_manager:
+            self.ctx.lane_manager.remove_lane(name)
 
         # Remove from config and permissions
         import yaml

@@ -266,6 +266,16 @@ class PubSub:
                 )
                 self._db.commit()
 
+    def unsubscribe_agent(self, agent_id: str) -> None:
+        """Remove an agent from ALL topic subscriptions."""
+        for topic in list(self.subscriptions):
+            self.subscriptions[topic] = [a for a in self.subscriptions[topic] if a != agent_id]
+            if not self.subscriptions[topic]:
+                del self.subscriptions[topic]
+        if self._db is not None:
+            self._db.execute("DELETE FROM subscriptions WHERE agent_id = ?", (agent_id,))
+            self._db.commit()
+
     def get_subscribers(self, topic: str) -> list[str]:
         return self.subscriptions.get(topic, [])
 

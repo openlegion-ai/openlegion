@@ -210,25 +210,23 @@ def create_mesh_app(
                 error=trace_error,
                 meta=trace_meta,
             )
-        if event_bus is not None:
-            llm_data: dict = {
+        if event_bus is not None and result.success and result.data:
+            model = result.data.get("model", "")
+            tokens = result.data.get("tokens_used", 0)
+            input_tok = result.data.get("input_tokens", 0)
+            output_tok = result.data.get("output_tokens", 0)
+            from src.host.costs import estimate_cost
+            event_bus.emit("llm_call", agent=agent_id, data={
                 "service": api_request.service, "action": api_request.action,
                 "duration_ms": duration_ms,
-            }
-            if result.success and result.data:
-                model = result.data.get("model", "")
-                tokens = result.data.get("tokens_used", 0)
-                input_tok = result.data.get("input_tokens", 0)
-                output_tok = result.data.get("output_tokens", 0)
-                llm_data["model"] = model
-                llm_data["total_tokens"] = tokens
-                llm_data["input_tokens"] = input_tok
-                llm_data["output_tokens"] = output_tok
-                from src.host.costs import estimate_cost
-                llm_data["cost_usd"] = estimate_cost(
+                "model": model,
+                "total_tokens": tokens,
+                "input_tokens": input_tok,
+                "output_tokens": output_tok,
+                "cost_usd": estimate_cost(
                     model, input_tokens=input_tok, output_tokens=output_tok, total_tokens=tokens,
-                )
-            event_bus.emit("llm_call", agent=agent_id, data=llm_data)
+                ),
+            })
         return result
 
     @app.post("/mesh/api/stream")
@@ -249,12 +247,6 @@ def create_mesh_app(
                 event_type="llm_stream",
                 detail=f"{api_request.service}/{api_request.action}",
             )
-        if event_bus is not None:
-            event_bus.emit("llm_call", agent=agent_id, data={
-                "service": api_request.service, "action": api_request.action,
-                "streaming": True,
-            })
-
         return StreamingResponse(
             credential_vault.stream_llm(api_request, agent_id=agent_id),
             media_type="text/event-stream",

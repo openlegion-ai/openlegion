@@ -149,6 +149,15 @@ class CronScheduler:
         self._save()
         return True
 
+    def remove_agent_jobs(self, agent_id: str) -> int:
+        """Remove ALL jobs for a given agent. Returns count of removed jobs."""
+        to_remove = [jid for jid, job in self.jobs.items() if job.agent == agent_id]
+        for jid in to_remove:
+            del self.jobs[jid]
+        if to_remove:
+            self._save()
+        return len(to_remove)
+
     def pause_job(self, job_id: str) -> bool:
         if job_id not in self.jobs:
             return False

@@ -88,6 +88,30 @@ class TestCronScheduler:
         agents = {j["agent"] for j in jobs}
         assert agents == {"a", "b"}
 
+    def test_remove_agent_jobs(self):
+        sched = CronScheduler(config_path=self.config_path)
+        sched.add_job(agent="a", schedule="every 1h", message="m1")
+        sched.add_job(agent="a", schedule="every 2h", message="m2")
+        sched.add_job(agent="b", schedule="every 1h", message="m3")
+        assert sched.remove_agent_jobs("a") == 2
+        assert len(sched.jobs) == 1
+        assert list(sched.jobs.values())[0].agent == "b"
+
+    def test_remove_agent_jobs_none(self):
+        sched = CronScheduler(config_path=self.config_path)
+        sched.add_job(agent="a", schedule="every 1h", message="m1")
+        assert sched.remove_agent_jobs("nonexistent") == 0
+        assert len(sched.jobs) == 1
+
+    def test_remove_agent_jobs_persists(self):
+        sched = CronScheduler(config_path=self.config_path)
+        sched.add_job(agent="a", schedule="every 1h", message="m1")
+        sched.add_job(agent="b", schedule="every 1h", message="m2")
+        sched.remove_agent_jobs("a")
+        sched2 = CronScheduler(config_path=self.config_path)
+        assert len(sched2.jobs) == 1
+        assert list(sched2.jobs.values())[0].agent == "b"
+
 
 class TestCronIntervalDue:
     def setup_method(self):

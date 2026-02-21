@@ -184,6 +184,35 @@ def test_pubsub_no_db_backward_compat():
     ps.close()  # should not raise
 
 
+def test_pubsub_unsubscribe_agent():
+    """unsubscribe_agent removes agent from all topics."""
+    ps = PubSub()
+    ps.subscribe("topic1", "a1")
+    ps.subscribe("topic1", "a2")
+    ps.subscribe("topic2", "a1")
+    ps.subscribe("topic3", "a3")
+    ps.unsubscribe_agent("a1")
+    assert ps.get_subscribers("topic1") == ["a2"]
+    assert ps.get_subscribers("topic2") == []
+    assert ps.get_subscribers("topic3") == ["a3"]
+
+
+def test_pubsub_unsubscribe_agent_persistence(tmp_path):
+    """unsubscribe_agent is persisted to SQLite."""
+    db = str(tmp_path / "pubsub.db")
+    ps1 = PubSub(db_path=db)
+    ps1.subscribe("t1", "a1")
+    ps1.subscribe("t2", "a1")
+    ps1.subscribe("t1", "a2")
+    ps1.unsubscribe_agent("a1")
+    ps1.close()
+
+    ps2 = PubSub(db_path=db)
+    assert ps2.get_subscribers("t1") == ["a2"]
+    assert ps2.get_subscribers("t2") == []
+    ps2.close()
+
+
 # === Permission Tests ===
 
 

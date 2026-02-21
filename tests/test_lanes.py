@@ -232,6 +232,32 @@ async def test_status_includes_collected_and_busy():
 
 
 @pytest.mark.asyncio
+async def test_remove_lane():
+    """remove_lane cleans up all state for an agent."""
+    lm = LaneManager(dispatch_fn=AsyncMock(return_value="ok"))
+
+    await lm.enqueue("agent1", "hi")
+    await lm.enqueue("agent2", "hi")
+    assert "agent1" in lm._workers
+    assert "agent2" in lm._workers
+
+    lm.remove_lane("agent1")
+    assert "agent1" not in lm._workers
+    assert "agent1" not in lm._queues
+    assert "agent1" not in lm._pending
+    assert "agent1" not in lm._busy
+    # agent2 should be unaffected
+    assert "agent2" in lm._workers
+
+
+@pytest.mark.asyncio
+async def test_remove_lane_nonexistent():
+    """remove_lane on nonexistent agent doesn't raise."""
+    lm = LaneManager(dispatch_fn=AsyncMock(return_value="ok"))
+    lm.remove_lane("nonexistent")  # should not raise
+
+
+@pytest.mark.asyncio
 async def test_stop_cancels_workers():
     """Stop cancels all worker tasks."""
     lm = LaneManager(dispatch_fn=AsyncMock(return_value="ok"))

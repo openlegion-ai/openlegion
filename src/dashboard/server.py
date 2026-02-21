@@ -199,6 +199,16 @@ def create_dashboard_router(
         if health_monitor is not None:
             health_monitor.unregister(agent_id)
 
+        # Clean up PubSub subscriptions, cron jobs, and lane state
+        if pubsub is not None:
+            pubsub.unsubscribe_agent(agent_id)
+        if cron_scheduler is not None:
+            removed = cron_scheduler.remove_agent_jobs(agent_id)
+            if removed:
+                logger.info(f"Removed {removed} cron job(s) for agent {agent_id}")
+        if lane_manager is not None:
+            lane_manager.remove_lane(agent_id)
+
         # Remove from config and permissions (best-effort — don't fail if files are missing)
         try:
             import yaml

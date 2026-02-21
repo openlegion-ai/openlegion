@@ -109,6 +109,7 @@ function dashboard() {
     _fleetDebounce: null,
     _queueInterval: null,
     _cronInterval: null,
+    _seenEventIds: new Set(),
 
     // ── Computed ───────────────────────────────────────────
 
@@ -209,6 +210,16 @@ function dashboard() {
     // ── WebSocket event handler ───────────────────────────
 
     onWsEvent(evt) {
+      // Deduplicate by event ID (handles reconnect replays)
+      if (evt.id && this._seenEventIds.has(evt.id)) return;
+      if (evt.id) {
+        this._seenEventIds.add(evt.id);
+        if (this._seenEventIds.size > 1000) {
+          const iter = this._seenEventIds.values();
+          for (let i = 0; i < 500; i++) this._seenEventIds.delete(iter.next().value);
+        }
+      }
+
       // Append to event feed (newest first, cap at 500)
       this.events.unshift(evt);
       if (this.events.length > 500) this.events.splice(500);
@@ -829,12 +840,12 @@ function dashboard() {
       const d = evt.data || {};
       switch (evt.type) {
         case 'llm_call': {
-          const model = (d.model || '?').split('/').pop();
+          const model = (d.model || '').split('/').pop();
+          if (!model) return `${d.service || 'api'}/${d.action || '?'}${d.streaming ? ' (streaming)' : ''}`;
           const tokens = (d.total_tokens || d.tokens_used || 0).toLocaleString();
           const cost = d.cost_usd != null ? ` \u00b7 $${d.cost_usd.toFixed(4)}` : '';
           const dur = d.duration_ms ? ` \u00b7 ${d.duration_ms}ms` : '';
-          const stream = d.streaming ? ' (stream)' : '';
-          return `${model} \u00b7 ${tokens} tok${cost}${dur}${stream}`;
+          return `${model} \u00b7 ${tokens} tok${cost}${dur}`;
         }
         case 'tool_start':
           return `${d.tool || d.name || '?'}(${(d.preview || '').substring(0, 60)})`;
@@ -863,8 +874,9 @@ function dashboard() {
 
     timeAgo(ts) {
       if (!ts) return '';
-      const now = Date.now() / 1000;
-      const diff = now - ts;
+      const epoch = typeof ts === 'string' ? new Date(ts).getTime() / 1000 : ts;
+      if (isNaN(epoch)) return '';
+      const diff = Date.now() / 1000 - epoch;
       if (diff < 0) return 'just now';
       if (diff < 5) return 'just now';
       if (diff < 60) return Math.floor(diff) + 's ago';
@@ -891,10 +903,11 @@ function dashboard() {
 
     waterfall(evt, allEvents) {
       if (!allEvents || allEvents.length < 2) return '';
-      const minTs = allEvents[0].timestamp;
-      const maxTs = allEvents[allEvents.length - 1].timestamp;
+      const toEpoch = (ts) => typeof ts === 'string' ? new Date(ts).getTime() / 1000 : ts;
+      const minTs = toEpoch(allEvents[0].timestamp);
+      const maxTs = toEpoch(allEvents[allEvents.length - 1].timestamp);
       const span = maxTs - minTs || 1;
-      const left = ((evt.timestamp - minTs) / span) * 100;
+      const left = ((toEpoch(evt.timestamp) - minTs) / span) * 100;
       const width = Math.max(2, (evt.duration_ms / 1000 / span) * 100);
       return `left:${left.toFixed(1)}%;width:${Math.min(width, 100 - left).toFixed(1)}%`;
     },
