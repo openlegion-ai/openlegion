@@ -135,13 +135,17 @@ class AgentLoop:
                 break
         return messages
 
-    async def execute_task(self, assignment: TaskAssignment) -> TaskResult:
+    async def execute_task(
+        self, assignment: TaskAssignment, *, trace_id: str | None = None,
+    ) -> TaskResult:
         """Main execution method. Runs bounded loop for a single task.
 
         CRITICAL: Maintains proper LLM conversation history with correct roles.
         Messages grow across iterations:
           user -> assistant(tool_calls) -> tool(result) -> assistant(final)
         """
+        from src.shared.trace import current_trace_id
+        current_trace_id.set(trace_id)
         self.state = "working"
         self.current_task = assignment.task_id
         start = time.time()
@@ -500,7 +504,7 @@ class AgentLoop:
 
     CHAT_MAX_TOOL_ROUNDS = 30
 
-    async def chat(self, user_message: str) -> dict:
+    async def chat(self, user_message: str, *, trace_id: str | None = None) -> dict:
         """Handle a single chat turn with persistent conversation history.
 
         On first message of a session, loads workspace context (AGENTS.md,
@@ -513,6 +517,8 @@ class AgentLoop:
 
         Returns {"response": str, "tool_outputs": list[dict], "tokens_used": int}.
         """
+        from src.shared.trace import current_trace_id
+        current_trace_id.set(trace_id)
         async with self._chat_lock:
             return await self._chat_inner(user_message)
 
@@ -845,7 +851,7 @@ class AgentLoop:
 
     # ── Streaming chat ────────────────────────────────────────
 
-    async def chat_stream(self, user_message: str):
+    async def chat_stream(self, user_message: str, *, trace_id: str | None = None):
         """Streaming chat that yields SSE events as they happen.
 
         Events yielded (as dicts, caller serialises to SSE):
@@ -854,6 +860,8 @@ class AgentLoop:
           {"type": "text_delta", "content": str}
           {"type": "done", "response": str, "tool_outputs": list, "tokens_used": int}
         """
+        from src.shared.trace import current_trace_id
+        current_trace_id.set(trace_id)
         async with self._chat_lock:
             async for event in self._chat_stream_inner(user_message):
                 yield event

@@ -163,9 +163,12 @@ class Channel(abc.ABC):
 
     async def dispatch(self, agent: str, message: str) -> str:
         """Route a message to an agent and return the response."""
+        from src.shared.trace import current_trace_id, new_trace_id
+
         target = agent or self.default_agent
         if not target:
             return "No agent specified and no default agent configured."
+        current_trace_id.set(new_trace_id())
         try:
             return await self.dispatch_fn(target, message)
         except Exception as e:

@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from src.host.orchestrator import Orchestrator
     from src.host.permissions import PermissionMatrix
     from src.host.runtime import RuntimeBackend
+    from src.host.traces import TraceStore
     from src.host.transport import Transport
 
 
@@ -44,6 +45,7 @@ def create_mesh_app(
     transport: Transport | None = None,
     orchestrator: Orchestrator | None = None,
     auth_tokens: dict[str, str] | None = None,
+    trace_store: TraceStore | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
@@ -159,7 +161,20 @@ def create_mesh_app(
             raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
         if credential_vault is None:
             return APIProxyResponse(success=False, error="No credential vault configured")
-        return await credential_vault.execute_api_call(api_request, agent_id=agent_id)
+
+        req_trace_id = request.headers.get("x-trace-id")
+        t0 = time.time()
+        result = await credential_vault.execute_api_call(api_request, agent_id=agent_id)
+        if req_trace_id and trace_store:
+            trace_store.record(
+                trace_id=req_trace_id,
+                source="mesh.api_proxy",
+                agent=agent_id,
+                event_type="llm_call",
+                detail=f"{api_request.service}/{api_request.action}",
+                duration_ms=int((time.time() - t0) * 1000),
+            )
+        return result
 
     @app.post("/mesh/api/stream")
     async def proxy_api_stream(request: Request, api_request: APIProxyRequest, agent_id: str) -> StreamingResponse:
@@ -169,6 +184,17 @@ def create_mesh_app(
             raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
         if credential_vault is None:
             raise HTTPException(503, "No credential vault configured")
+
+        req_trace_id = request.headers.get("x-trace-id")
+        if req_trace_id and trace_store:
+            trace_store.record(
+                trace_id=req_trace_id,
+                source="mesh.api_proxy",
+                agent=agent_id,
+                event_type="llm_stream",
+                detail=f"{api_request.service}/{api_request.action}",
+            )
+
         return StreamingResponse(
             credential_vault.stream_llm(api_request, agent_id=agent_id),
             media_type="text/event-stream",
@@ -380,5 +406,21 @@ def create_mesh_app(
                 return resp.json()
         except Exception as e:
             raise HTTPException(502, f"Failed to fetch history from {agent_id}: {e}") from e
+
+    # === Request Traces ===
+
+    @app.get("/mesh/traces")
+    async def list_traces(limit: int = 50) -> list[dict]:
+        """Return recent trace events."""
+        if trace_store is None:
+            return []
+        return trace_store.list_recent(limit=limit)
+
+    @app.get("/mesh/traces/{trace_id}")
+    async def get_trace(trace_id: str) -> list[dict]:
+        """Return all events for a specific trace."""
+        if trace_store is None:
+            return []
+        return trace_store.get_trace(trace_id)
 
     return app

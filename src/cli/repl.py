@@ -52,6 +52,7 @@ class REPLSession:
         ]),
         ("System", [
             ("/costs",            "Show spend, context, and model health"),
+            ("/debug [trace]",    "Show recent request traces"),
             ("/addkey [service]", "Store a credential"),
             ("/help",             "Show this help"),
             ("/quit",             "Exit and stop runtime"),
@@ -73,6 +74,7 @@ class REPLSession:
             "/broadcast": (self._cmd_broadcast, "Send to all agents"),
             "/steer":     (self._cmd_steer,     "Redirect busy agent"),
             "/costs":     (self._cmd_costs,     "Show spend, context, and model health"),
+            "/debug":     (self._cmd_debug,     "Show recent request traces"),
             "/addkey":    (self._cmd_addkey,     "Store a credential"),
             "/reset":     (self._cmd_reset,     "Clear conversation history"),
             "/help":      (self._cmd_help,      "Show this help"),
@@ -98,7 +100,8 @@ class REPLSession:
                     break
                 continue
 
-            self._send_message(target, message)
+            from src.shared.trace import new_trace_id
+            self._send_message(target, message, trace_id=new_trace_id())
 
     def _parse_input(self, text: str) -> tuple[str | None, str]:
         """Parse @mentions, return (target_agent, message)."""
@@ -210,14 +213,18 @@ class REPLSession:
         if not arg.strip():
             click.echo("Usage: /broadcast <message>")
             return
+        from src.shared.trace import TRACE_HEADER, new_trace_id
+
         bc_msg = arg.strip()
         click.echo(f"Broadcasting to {len(self.ctx.agents)} agent(s)...\n")
 
         def _send(aid: str) -> tuple[str, str]:
             try:
+                hdrs = {TRACE_HEADER: new_trace_id()}
                 data = self.ctx.transport.request_sync(
                     aid, "POST", "/chat",
                     json={"message": bc_msg}, timeout=120,
+                    headers=hdrs,
                 )
                 return aid, data.get("response", "(no response)")
             except Exception as e:
@@ -236,9 +243,12 @@ class REPLSession:
         if self.ctx.lane_manager is None or self.ctx.dispatch_loop is None:
             click.echo("Steer not available in this mode.")
             return
+        from src.shared.trace import new_trace_id
         steer_msg = arg.strip()
         future = asyncio.run_coroutine_threadsafe(
-            self.ctx.lane_manager.enqueue(self.current, steer_msg, mode="steer"),
+            self.ctx.lane_manager.enqueue(
+                self.current, steer_msg, mode="steer", trace_id=new_trace_id(),
+            ),
             self.ctx.dispatch_loop,
         )
         click.echo(future.result())
@@ -283,6 +293,37 @@ class REPLSession:
                     )
         except Exception as e:
             click.echo(f"Error: {e}")
+
+    def _cmd_debug(self, arg: str) -> None:
+        if not self.ctx.trace_store:
+            click.echo("Trace store not available.")
+            return
+
+        from datetime import datetime, timezone
+
+        trace_id = arg.strip()
+        if trace_id:
+            events = self.ctx.trace_store.get_trace(trace_id)
+            if not events:
+                click.echo(f"No events for trace {trace_id}")
+                return
+            click.echo(f"\n  Trace {trace_id} ({len(events)} events)\n")
+            for ev in events:
+                ts = datetime.fromtimestamp(ev["timestamp"], tz=timezone.utc).strftime("%H:%M:%S")
+                dur = f" ({ev['duration_ms']}ms)" if ev["duration_ms"] else ""
+                agent = f" [{ev['agent']}]" if ev["agent"] else ""
+                click.echo(f"  {ts}{agent} {ev['event_type']}: {ev['detail']}{dur}")
+        else:
+            events = self.ctx.trace_store.list_recent(limit=20)
+            if not events:
+                click.echo("  No traces recorded yet.")
+                return
+            click.echo()
+            for ev in events:
+                ts = datetime.fromtimestamp(ev["timestamp"], tz=timezone.utc).strftime("%H:%M:%S")
+                agent = ev["agent"] or "-"
+                click.echo(f"  {ev['trace_id']}  {ts}  {agent:<16} {ev['event_type']}: {ev['detail'][:60]}")
+        click.echo()
 
     def _cmd_addkey(self, arg: str) -> None:
         if not arg.strip():
@@ -459,7 +500,7 @@ class REPLSession:
 
     # ── Message sending ─────────────────────────────────────
 
-    def _send_message(self, target: str, message: str) -> None:
+    def _send_message(self, target: str, message: str, trace_id: str | None = None) -> None:
         """Send via streaming transport with formatted output."""
         if target not in self.ctx.agents:
             click.echo(f"Agent '{target}' not found.")
@@ -470,6 +511,8 @@ class REPLSession:
             import select
             import sys
 
+            from src.shared.trace import new_trace_id
+
             readable, _, _ = select.select([sys.stdin], [], [], timeout)
             if readable:
                 line = sys.stdin.readline().strip()
@@ -479,6 +522,7 @@ class REPLSession:
                         sf = asyncio.run_coroutine_threadsafe(
                             self.ctx.lane_manager.enqueue(
                                 target, steer_msg, mode="steer",
+                                trace_id=new_trace_id(),
                             ),
                             self.ctx.dispatch_loop,
                         )
@@ -492,7 +536,7 @@ class REPLSession:
         try:
             _send_message_streaming(
                 self.ctx.transport, target, message, self.ctx.dispatch_loop,
-                steer_fn=_steer_poll,
+                steer_fn=_steer_poll, trace_id=trace_id,
             )
         except Exception as e:
             click.echo(f"Error: {e}")
@@ -502,6 +546,7 @@ def _send_message_streaming(
     transport, target: str, message: str,
     dispatch_loop=None,
     steer_fn=None,
+    trace_id: str | None = None,
 ) -> None:
     """Send a message via streaming endpoint, falling back to non-streaming.
 
@@ -514,15 +559,18 @@ def _send_message_streaming(
     stdin for ``/steer`` commands.
     """
     from src.host.transport import HttpTransport
+    from src.shared.trace import current_trace_id, trace_headers
 
     if isinstance(transport, HttpTransport):
         async def _stream():
+            current_trace_id.set(trace_id)
+            hdrs = trace_headers()
             response_text = ""
             tool_count = 0
             try:
                 async for event in transport.stream_request(
                     target, "POST", "/chat/stream",
-                    json={"message": message}, timeout=120,
+                    json={"message": message}, timeout=120, headers=hdrs,
                 ):
                     if isinstance(event, dict):
                         etype = event.get("type", "")
@@ -556,7 +604,7 @@ def _send_message_streaming(
                 # Fallback to non-streaming
                 data = await transport.request(
                     target, "POST", "/chat",
-                    json={"message": message}, timeout=120,
+                    json={"message": message}, timeout=120, headers=hdrs,
                 )
                 if "error" in data and "response" not in data:
                     click.echo(f"Error: {data['error']}")
@@ -578,9 +626,12 @@ def _send_message_streaming(
             asyncio.run(_stream())
     else:
         # Non-streaming fallback for SandboxTransport
+        from src.shared.trace import TRACE_HEADER
+        sync_hdrs = {TRACE_HEADER: trace_id} if trace_id else {}
         data = transport.request_sync(
             target, "POST", "/chat",
             json={"message": message}, timeout=120,
+            headers=sync_hdrs or None,
         )
         if "error" in data and "response" not in data:
             click.echo(f"Error: {data['error']}")

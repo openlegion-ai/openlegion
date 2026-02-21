@@ -303,11 +303,14 @@ class Orchestrator:
             )
 
         try:
+            from src.shared.trace import TRACE_HEADER, new_trace_id
+            step_trace_id = new_trace_id()
             client = await self._get_client()
             response = await client.post(
                 f"{agent_url}/task",
                 json=assignment.model_dump(mode="json"),
                 timeout=step.timeout,
+                headers={TRACE_HEADER: step_trace_id},
             )
             resp_data = response.json()
 
