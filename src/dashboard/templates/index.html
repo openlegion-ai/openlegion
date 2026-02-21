@@ -80,7 +80,7 @@
       <div class="flex items-center gap-4">
         <!-- Fleet total cost -->
         <div class="text-xs text-gray-400 hidden sm:block" x-show="fleetTotalCost > 0">
-          Fleet today: <span class="text-gray-200 font-medium" x-text="formatCost(fleetTotalCost)"></span>
+          Today: <span class="text-gray-200 font-medium" x-text="formatCost(fleetTotalCost)"></span>
         </div>
         <!-- Connection indicator -->
         <div class="flex items-center gap-1.5 text-xs">
@@ -107,7 +107,52 @@
             <span class="text-gray-600 mx-1">&middot;</span>
             <span x-text="fleetTotalTokens.toLocaleString()"></span> tokens
           </h2>
-          <div class="text-xs text-gray-600" x-text="'Updated ' + timeAgo(lastRefresh)"></div>
+          <div class="flex items-center gap-3">
+            <button @click="addAgentMode = !addAgentMode; fetchSettings()"
+              class="text-[11px] px-3 py-1.5 rounded-md transition-colors"
+              :class="addAgentMode ? 'bg-indigo-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white'"
+            >+ Add Agent</button>
+            <div class="text-xs text-gray-600" x-text="'Updated ' + timeAgo(lastRefresh)"></div>
+          </div>
+        </div>
+        <!-- Add agent form -->
+        <div x-show="addAgentMode" x-cloak class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
+          <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <div>
+              <label class="text-[11px] text-gray-500 mb-1 block">Name</label>
+              <input type="text" x-model="addAgentForm.name" class="dash-input w-full" placeholder="my_agent">
+            </div>
+            <div>
+              <label class="text-[11px] text-gray-500 mb-1 block">Role</label>
+              <input type="text" x-model="addAgentForm.role" class="dash-input w-full" placeholder="assistant">
+            </div>
+            <div>
+              <label class="text-[11px] text-gray-500 mb-1 block">Model</label>
+              <select x-model="addAgentForm.model" class="dash-select w-full">
+                <option value="">Default</option>
+                <template x-for="m in availableModels" :key="m">
+                  <option :value="m" x-text="m"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="text-[11px] text-gray-500 mb-1 block">Browser</label>
+              <select x-model="addAgentForm.browser_backend" class="dash-select w-full">
+                <option value="">Default</option>
+                <template x-for="b in availableBrowsers" :key="b">
+                  <option :value="b" x-text="b"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+          <div class="flex gap-2 mt-3">
+            <button @click="addAgent()" :disabled="addAgentLoading"
+              class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
+              <span x-show="!addAgentLoading">Add Agent</span>
+              <span x-show="addAgentLoading">Adding...</span>
+            </button>
+            <button @click="addAgentMode = false" class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Cancel</button>
+          </div>
         </div>
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           <template x-for="agent in agents" :key="agent.id">
@@ -115,7 +160,7 @@
               class="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-600 transition-all hover:shadow-lg hover:shadow-black/20 group"
               :class="agentStates[agent.id] === 'thinking' || agentStates[agent.id] === 'tool' ? 'pulse-border' : ''"
             >
-              <div class="flex items-center justify-between mb-3">
+              <div class="flex items-center justify-between mb-1">
                 <div class="flex items-center gap-2 cursor-pointer" @click="drillDown(agent.id)">
                   <span class="font-semibold text-white group-hover:text-indigo-300 transition-colors" x-text="agent.id"></span>
                 </div>
@@ -137,6 +182,7 @@
                   ></span>
                 </div>
               </div>
+              <div class="text-xs text-gray-500 truncate mb-2" x-show="agent.role" x-text="agent.role"></div>
               <div class="space-y-2 text-xs">
                 <div class="flex justify-between items-center">
                   <span class="text-gray-500">Activity</span>
@@ -173,20 +219,12 @@
                   <span class="text-yellow-400 font-mono text-[11px]" x-text="agent.restarts"></span>
                 </div>
               </div>
-              <!-- Agent actions -->
+              <!-- Agent actions: Chat, Edit, Restart, Remove -->
               <div class="mt-3 pt-3 border-t border-gray-800/50 flex flex-wrap gap-1.5">
                 <button
                   @click="openChat(agent.id)"
                   class="text-[11px] px-2 py-1 rounded bg-indigo-900/30 hover:bg-indigo-800/40 text-indigo-300 hover:text-indigo-200 border border-indigo-800/30 transition-colors"
                 >Chat</button>
-                <button
-                  @click="steerAgent(agent.id)"
-                  class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
-                >Steer</button>
-                <button
-                  @click="resetAgent(agent.id)"
-                  class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
-                >Reset</button>
                 <button
                   @click="openAgentConfig(agent.id)"
                   x-show="editingAgent !== agent.id"
@@ -194,8 +232,12 @@
                 >Edit</button>
                 <button
                   @click="restartAgent(agent.id)"
-                  class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-red-900/50 text-gray-400 hover:text-red-400 transition-colors"
+                  class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
                 >Restart</button>
+                <button
+                  @click="removeAgent(agent.id)"
+                  class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-red-900/50 text-gray-400 hover:text-red-400 transition-colors"
+                >Remove</button>
               </div>
               <!-- Inline edit mode -->
               <div x-show="editingAgent === agent.id" class="mt-3 pt-3 border-t border-gray-800/50 space-y-2">
@@ -226,6 +268,7 @@
                 <div class="flex gap-2 mt-2">
                   <button @click="saveAgentConfig(agent.id)" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save</button>
                   <button @click="cancelEdit()" class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Cancel</button>
+                  <button @click="resetAgent(agent.id)" class="text-xs px-3 py-1.5 rounded text-gray-600 hover:text-red-400 transition-colors ml-auto">Reset Conversation</button>
                 </div>
               </div>
             </div>
@@ -235,13 +278,15 @@
         <div x-show="agents.length === 0 && loading" class="text-center py-16" x-cloak>
           <div class="inline-flex items-center gap-2 text-gray-500">
             <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-            Loading fleet...
+            Loading agents...
           </div>
         </div>
         <!-- Empty state -->
         <div x-show="agents.length === 0 && !loading" class="text-center py-16" x-cloak>
-          <div class="text-gray-600 text-lg mb-1">No agents registered</div>
-          <div class="text-gray-700 text-sm">Start agents with <code class="bg-gray-800 px-1.5 py-0.5 rounded text-gray-400">openlegion start</code></div>
+          <div class="text-gray-600 text-lg mb-2">No agents yet</div>
+          <div class="text-gray-700 text-sm mb-4">Start agents with <code class="bg-gray-800 px-1.5 py-0.5 rounded text-gray-400">openlegion start</code> or add one here</div>
+          <button @click="addAgentMode = true; fetchSettings()"
+            class="text-sm px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">+ Add Agent</button>
         </div>
         <!-- Broadcast bar -->
         <div x-show="agents.length > 1" class="mt-6 bg-gray-900 border border-gray-800 rounded-lg p-4" x-cloak>
@@ -274,7 +319,7 @@
             <button @click="closeChat()" class="text-gray-500 hover:text-white transition-colors text-lg">&times;</button>
           </div>
           <div class="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar min-h-[200px]">
-            <template x-for="(msg, i) in chatHistory" :key="i">
+            <template x-for="(msg, i) in (chatHistories[chatAgent] || [])" :key="i">
               <div :class="msg.role === 'user' ? 'text-right' : 'text-left'">
                 <div class="inline-block max-w-[80%] px-3 py-2 rounded-lg text-sm"
                   :class="{
@@ -346,7 +391,7 @@
       <div x-show="activeTab === 'agent-detail'" x-cloak>
         <button @click="switchTab('fleet')" class="text-sm text-gray-500 hover:text-gray-300 mb-4 flex items-center gap-1 transition-colors">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-          Back to fleet
+          Back to agents
         </button>
         <!-- Loading -->
         <div x-show="!agentDetail && selectedAgent" class="text-center py-12" x-cloak>
@@ -467,7 +512,7 @@
 
       <!-- Blackboard -->
       <div x-show="activeTab === 'blackboard'" x-cloak>
-        <div class="mb-4 flex gap-2">
+        <div class="mb-3 flex gap-2">
           <input
             type="text"
             x-model="bbPrefix"
@@ -477,6 +522,23 @@
           >
           <button @click="fetchBlackboard()" class="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg text-sm font-medium transition-colors">Search</button>
           <button @click="bbWriteMode = !bbWriteMode" class="bg-gray-800 hover:bg-indigo-900/40 px-4 py-2 rounded-lg text-sm font-medium transition-colors" :class="bbWriteMode ? 'text-indigo-400 border border-indigo-500/40' : ''">+ New</button>
+        </div>
+        <!-- Namespace quick-filter buttons -->
+        <div class="flex gap-1.5 flex-wrap mb-3">
+          <template x-for="ns in ['tasks/', 'context/', 'signals/', 'goals/', 'artifacts/', 'history/']" :key="ns">
+            <button @click="bbPrefix = (bbPrefix === ns ? '' : ns); fetchBlackboard()"
+              class="text-[11px] px-2 py-1 rounded-md border transition-all"
+              :class="bbPrefix === ns ? 'border-cyan-500/60 bg-cyan-900/20 text-cyan-300' : 'border-gray-800 text-gray-600 hover:text-gray-400'"
+              x-text="ns"></button>
+          </template>
+          <!-- Writer filter -->
+          <select x-show="bbWriters.length > 0" x-model="bbWriterFilter"
+            class="text-[11px] px-2 py-1 rounded-md border border-gray-800 bg-gray-900 text-gray-400 ml-auto">
+            <option value="">All writers</option>
+            <template x-for="w in bbWriters" :key="w">
+              <option :value="w" x-text="w"></option>
+            </template>
+          </select>
         </div>
         <!-- Write form -->
         <div x-show="bbWriteMode" x-cloak class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
@@ -509,7 +571,7 @@
                 </tr>
               </thead>
               <tbody>
-                <template x-for="entry in bbEntries" :key="entry.key">
+                <template x-for="entry in filteredBbEntries" :key="entry.key">
                   <tr class="border-b border-gray-800/40 hover:bg-gray-800/30 transition-colors"
                     :class="bbHighlights.has(entry.key) ? 'flash-yellow' : ''">
                     <td class="py-2.5 px-4 font-mono text-xs text-blue-400" x-text="entry.key"></td>
@@ -532,16 +594,21 @@
             </table>
           </div>
           <!-- Loading -->
-          <div x-show="bbEntries.length === 0 && bbLoading" class="text-center py-12" x-cloak>
+          <div x-show="filteredBbEntries.length === 0 && bbLoading" class="text-center py-12" x-cloak>
             <div class="inline-flex items-center gap-2 text-gray-600">
               <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
               Loading...
             </div>
           </div>
-          <!-- Empty state -->
-          <div x-show="bbEntries.length === 0 && !bbLoading" class="text-center py-12" x-cloak>
-            <div class="text-gray-600 mb-1">No entries found</div>
-            <div class="text-gray-700 text-xs">Try a broader prefix or leave empty for all entries</div>
+          <!-- Empty state with namespace guide -->
+          <div x-show="filteredBbEntries.length === 0 && !bbLoading" class="text-center py-10 px-6" x-cloak>
+            <div class="text-gray-600 mb-3">No entries found</div>
+            <div class="text-gray-700 text-xs max-w-md mx-auto space-y-1.5">
+              <div><span class="text-cyan-400/60 font-mono">tasks/</span> <span class="text-gray-600">Active task states</span></div>
+              <div><span class="text-cyan-400/60 font-mono">context/</span> <span class="text-gray-600">Shared knowledge</span></div>
+              <div><span class="text-cyan-400/60 font-mono">signals/</span> <span class="text-gray-600">Cross-agent flags</span></div>
+              <div><span class="text-cyan-400/60 font-mono">history/</span> <span class="text-gray-600">Completed results (read-only)</span></div>
+            </div>
           </div>
         </div>
       </div>

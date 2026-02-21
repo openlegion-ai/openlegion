@@ -80,13 +80,6 @@ class CostTracker:
         )
         self.db.commit()
 
-        if self._event_bus:
-            self._event_bus.emit("cost_update", agent=agent, data={
-                "model": model, "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens, "total_tokens": total,
-                "cost_usd": round(cost, 6),
-            })
-
         return cost
 
     def check_budget(self, agent: str) -> dict:

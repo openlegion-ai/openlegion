@@ -175,6 +175,7 @@ class TestDashboardAgentsAPI:
         expected_fields = {
             "id", "url", "health_status", "failures", "restarts",
             "last_check", "last_healthy", "daily_cost", "daily_tokens",
+            "role", "model",
         }
         assert expected_fields.issubset(agent.keys())
 
@@ -199,6 +200,67 @@ class TestDashboardAgentsAPI:
         resp = self.client.get("/dashboard/api/agents")
         data = resp.json()
         assert data["agents"] == []
+
+
+class TestDashboardAgentCRUD:
+    """Tests for POST /api/agents and DELETE /api/agents/{id}."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @patch("src.cli.config._create_agent")
+    @patch("src.cli.config._load_config")
+    def test_post_agent_success(self, mock_load, mock_create):
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+            "agents": {"new_agent": {"role": "tester", "system_prompt": "test", "skills_dir": "", "model": "openai/gpt-4o-mini", "browser_backend": ""}},
+        }
+        self.components["runtime"].start_agent.return_value = "http://localhost:8403"
+        self.components["runtime"].wait_for_agent = AsyncMock(return_value=True)
+        self.components["permissions"].reload = MagicMock()
+
+        resp = self.client.post(
+            "/dashboard/api/agents",
+            json={"name": "new_agent", "role": "tester"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["created"] is True
+        assert data["agent"] == "new_agent"
+        assert data["ready"] is True
+        mock_create.assert_called_once()
+
+    def test_post_agent_missing_name(self):
+        resp = self.client.post("/dashboard/api/agents", json={"role": "tester"})
+        assert resp.status_code == 400
+        assert "name" in resp.json()["detail"].lower()
+
+    def test_post_agent_invalid_name(self):
+        resp = self.client.post("/dashboard/api/agents", json={"name": "Bad-Name!"})
+        assert resp.status_code == 400
+
+    def test_post_agent_duplicate(self):
+        resp = self.client.post("/dashboard/api/agents", json={"name": "alpha"})
+        assert resp.status_code == 409
+
+    def test_delete_agent_success(self):
+        resp = self.client.delete("/dashboard/api/agents/alpha")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["removed"] is True
+        assert data["agent"] == "alpha"
+        # Verify agent is removed from registry
+        assert "alpha" not in self.components["agent_registry"]
+
+    def test_delete_agent_not_found(self):
+        resp = self.client.delete("/dashboard/api/agents/nonexistent")
+        assert resp.status_code == 404
 
 
 class TestDashboardAgentDetail:

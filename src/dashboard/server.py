@@ -77,6 +77,11 @@ def create_dashboard_router(
 
     @api_router.get("/api/agents")
     async def api_agents() -> dict:
+        from src.cli.config import _load_config
+        cfg = _load_config()
+        agents_cfg = cfg.get("agents", {})
+        default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+
         health_list = health_monitor.get_status() if health_monitor else []
         health_map = {h["agent"]: h for h in health_list}
         cost_list = cost_tracker.get_all_agents_spend("today")
@@ -86,6 +91,7 @@ def create_dashboard_router(
         for agent_id, url in agent_registry.items():
             h = health_map.get(agent_id, {})
             c = cost_map.get(agent_id, {})
+            acfg = agents_cfg.get(agent_id, {})
             agents.append({
                 "id": agent_id,
                 "url": url,
@@ -96,8 +102,122 @@ def create_dashboard_router(
                 "last_healthy": h.get("last_healthy", 0),
                 "daily_cost": c.get("cost", 0),
                 "daily_tokens": c.get("tokens", 0),
+                "role": acfg.get("role", ""),
+                "model": acfg.get("model", default_model),
             })
         return {"agents": agents}
+
+    @api_router.post("/api/agents")
+    async def api_add_agent(request: Request) -> dict:
+        """Add a new agent: create config, start container, register."""
+        import re
+        body = await request.json()
+        name = body.get("name", "").strip()
+        role = body.get("role", "").strip()
+        model = body.get("model", "").strip()
+        browser_backend = body.get("browser_backend", "").strip()
+
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        if not re.match(r"^[a-z][a-z0-9_]{0,29}$", name):
+            raise HTTPException(status_code=400, detail="name must match ^[a-z][a-z0-9_]{0,29}$")
+        if name in agent_registry:
+            raise HTTPException(status_code=409, detail=f"Agent '{name}' already exists")
+
+        if model and model not in _valid_models:
+            raise HTTPException(status_code=400, detail=f"Invalid model: {model}")
+        if browser_backend and browser_backend not in _valid_browsers:
+            raise HTTPException(status_code=400, detail=f"Invalid browser: {browser_backend}")
+
+        if not model:
+            from src.cli.config import _load_config as _lc
+            model = _lc().get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        if not role:
+            role = "assistant"
+
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Runtime not available")
+
+        try:
+            from src.cli.config import _create_agent, _load_config as _lc2
+            _create_agent(name, role, model, browser_backend=browser_backend)
+            if permissions is not None:
+                permissions.reload()
+
+            acfg = _lc2().get("agents", {}).get(name, {})
+            import os
+            skills_dir = os.path.abspath(acfg.get("skills_dir", ""))
+            url = runtime.start_agent(
+                agent_id=name,
+                role=role,
+                skills_dir=skills_dir,
+                system_prompt=acfg.get("system_prompt", ""),
+                model=acfg.get("model", model),
+                browser_backend=acfg.get("browser_backend", ""),
+            )
+            agent_registry[name] = url
+            if router is not None:
+                router.register_agent(name, url)
+            if transport is not None:
+                from src.host.transport import HttpTransport
+                if isinstance(transport, HttpTransport):
+                    transport.register(name, url)
+            if health_monitor is not None:
+                health_monitor.register(name)
+            ready = await runtime.wait_for_agent(name, timeout=60)
+            if event_bus is not None:
+                event_bus.emit("agent_state", agent=name,
+                    data={"state": "added", "role": role, "ready": ready})
+            return {"created": True, "agent": name, "ready": ready}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to add agent {name}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @api_router.delete("/api/agents/{agent_id}")
+    async def api_remove_agent(agent_id: str) -> dict:
+        """Remove an agent: stop container, unregister, remove config."""
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        # Stop container
+        if runtime is not None:
+            try:
+                runtime.stop_agent(agent_id)
+            except Exception:
+                pass
+
+        # Unregister from router and transport
+        if router is not None:
+            router.unregister_agent(agent_id)
+        agent_registry.pop(agent_id, None)
+        if transport is not None:
+            from src.host.transport import HttpTransport
+            if isinstance(transport, HttpTransport):
+                transport._urls.pop(agent_id, None)
+
+        # Remove from config and permissions
+        import yaml
+        from src.cli.config import AGENTS_FILE
+        from src.cli.config import _load_permissions, _save_permissions
+
+        if AGENTS_FILE.exists():
+            with open(AGENTS_FILE) as f:
+                agents_data = yaml.safe_load(f) or {}
+            agents_data.get("agents", {}).pop(agent_id, None)
+            with open(AGENTS_FILE, "w") as f:
+                yaml.dump(agents_data, f, default_flow_style=False, sort_keys=False)
+
+        perms = _load_permissions()
+        perms.get("permissions", {}).pop(agent_id, None)
+        _save_permissions(perms)
+
+        if event_bus is not None:
+            event_bus.emit("agent_state", agent=agent_id,
+                data={"state": "removed"})
+
+        return {"removed": True, "agent": agent_id}
 
     # ── Agent detail ─────────────────────────────────────────
 

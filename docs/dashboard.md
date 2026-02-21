@@ -16,7 +16,7 @@ Overview of all registered agents showing health status, activity state (idle/th
 
 ### Events
 
-Real-time event feed streamed via WebSocket. Events include LLM calls, tool executions, messages sent/received, blackboard writes, cost updates, and health changes. Filter by event type using the chip toggles. Events are capped at 500 in the browser; older events are dropped.
+Real-time event feed streamed via WebSocket. Events include LLM calls, tool executions, messages sent/received, blackboard writes, agent state changes, and health changes. Filter by event type using the chip toggles. Events are capped at 500 in the browser; older events are dropped.
 
 ### Agents
 
@@ -28,7 +28,7 @@ Browse, search, write, and delete shared state entries. Filter by key prefix (e.
 
 ### Costs
 
-Per-agent LLM spend with period selector (today/week/month). Bar chart shows cost and token usage side-by-side. Budget status bars show daily spend vs. configured limits. Cost data refreshes automatically when `cost_update` events arrive.
+Per-agent LLM spend with period selector (today/week/month). Bar chart shows cost and token usage side-by-side. Budget status bars show daily spend vs. configured limits. Cost data refreshes automatically when `llm_call` events arrive.
 
 ### Traces
 
@@ -88,7 +88,9 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 |--------|------|-------------|
 | `GET` | `/dashboard/` | Serve dashboard HTML |
 | `GET` | `/dashboard/api/agents` | Fleet overview with health and costs |
+| `POST` | `/dashboard/api/agents` | Create a new agent |
 | `GET` | `/dashboard/api/agents/{id}` | Agent detail with spend and budget |
+| `DELETE` | `/dashboard/api/agents/{id}` | Remove an agent |
 | `GET` | `/dashboard/api/agents/{id}/config` | Agent configuration |
 | `PUT` | `/dashboard/api/agents/{id}/config` | Update agent configuration |
 | `POST` | `/dashboard/api/agents/{id}/restart` | Restart an agent |

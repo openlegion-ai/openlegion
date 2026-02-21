@@ -99,7 +99,8 @@ class Blackboard:
             # Truncate value preview for dashboard display
             preview = value_json[:200] if len(value_json) > 200 else value_json
             self._event_bus.emit("blackboard_write", agent=written_by,
-                data={"key": key, "version": new_version, "value_preview": preview})
+                data={"key": key, "version": new_version, "value_preview": preview,
+                      "written_by": written_by})
 
         return BlackboardEntry(
             key=key,

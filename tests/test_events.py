@@ -14,11 +14,11 @@ from src.shared.types import DashboardEvent
 
 
 def test_dashboard_event_model():
-    """DashboardEvent creation with defaults and all 9 valid types."""
+    """DashboardEvent creation with defaults and all 8 valid types."""
     valid_types = [
         "agent_state", "message_sent", "message_received",
         "tool_start", "tool_result", "llm_call",
-        "blackboard_write", "cost_update", "health_change",
+        "blackboard_write", "health_change",
     ]
     for t in valid_types:
         evt = DashboardEvent(type=t, agent="test", data={"key": "val"})
@@ -78,7 +78,7 @@ def test_ring_buffer_eviction():
 def test_recent_events_unfiltered():
     bus = EventBus()
     bus.emit("llm_call", agent="a1")
-    bus.emit("cost_update", agent="a2")
+    bus.emit("blackboard_write", agent="a2")
     bus.emit("health_change", agent="a1")
     events = bus.recent_events()
     assert len(events) == 3
@@ -87,7 +87,7 @@ def test_recent_events_unfiltered():
 def test_recent_events_filter_by_type():
     bus = EventBus()
     bus.emit("llm_call", agent="a1")
-    bus.emit("cost_update", agent="a2")
+    bus.emit("blackboard_write", agent="a2")
     bus.emit("llm_call", agent="a3")
     events = bus.recent_events(types_filter={"llm_call"})
     assert len(events) == 2
@@ -97,7 +97,7 @@ def test_recent_events_filter_by_type():
 def test_recent_events_filter_by_agent():
     bus = EventBus()
     bus.emit("llm_call", agent="a1")
-    bus.emit("cost_update", agent="a2")
+    bus.emit("blackboard_write", agent="a2")
     bus.emit("health_change", agent="a1")
     events = bus.recent_events(agents_filter={"a1"})
     assert len(events) == 2
@@ -109,7 +109,7 @@ def test_recent_events_combined_filters():
     bus = EventBus()
     bus.emit("llm_call", agent="a1")
     bus.emit("llm_call", agent="a2")
-    bus.emit("cost_update", agent="a1")
+    bus.emit("blackboard_write", agent="a1")
     events = bus.recent_events(agents_filter={"a1"}, types_filter={"llm_call"})
     assert len(events) == 1
     assert events[0]["agent"] == "a1"
@@ -142,13 +142,13 @@ def test_subscription_matches_all():
     """No filters means match everything."""
     sub = _Subscription(ws=MagicMock())
     assert sub.matches({"type": "llm_call", "agent": "a1"})
-    assert sub.matches({"type": "cost_update", "agent": ""})
+    assert sub.matches({"type": "blackboard_write", "agent": ""})
 
 
 def test_subscription_type_filter():
-    sub = _Subscription(ws=MagicMock(), types={"llm_call", "cost_update"})
+    sub = _Subscription(ws=MagicMock(), types={"llm_call", "blackboard_write"})
     assert sub.matches({"type": "llm_call", "agent": "a1"})
-    assert sub.matches({"type": "cost_update", "agent": "a2"})
+    assert sub.matches({"type": "blackboard_write", "agent": "a2"})
     assert not sub.matches({"type": "health_change", "agent": "a1"})
 
 
@@ -163,7 +163,7 @@ def test_subscription_agent_filter():
 def test_subscription_combined_filter():
     sub = _Subscription(ws=MagicMock(), agents={"a1"}, types={"llm_call"})
     assert sub.matches({"type": "llm_call", "agent": "a1"})
-    assert not sub.matches({"type": "cost_update", "agent": "a1"})
+    assert not sub.matches({"type": "blackboard_write", "agent": "a1"})
     assert not sub.matches({"type": "llm_call", "agent": "a2"})
 
 
@@ -181,7 +181,7 @@ async def test_broadcast_sends_to_matching_clients():
     ws_filtered = AsyncMock()
 
     bus.subscribe(ws_all)
-    bus.subscribe(ws_filtered, types_filter={"cost_update"})
+    bus.subscribe(ws_filtered, types_filter={"blackboard_write"})
 
     # Emit llm_call — should reach ws_all but not ws_filtered
     bus.emit("llm_call", agent="a1", data={"model": "gpt-4o"})
@@ -190,9 +190,9 @@ async def test_broadcast_sends_to_matching_clients():
     ws_all.send_text.assert_called_once()
     ws_filtered.send_text.assert_not_called()
 
-    # Emit cost_update — should reach both
+    # Emit blackboard_write — should reach both
     ws_all.send_text.reset_mock()
-    bus.emit("cost_update", agent="a1", data={"cost": 0.01})
+    bus.emit("blackboard_write", agent="a1", data={"key": "test/k"})
     await asyncio.sleep(0.05)
 
     ws_all.send_text.assert_called_once()
@@ -252,10 +252,11 @@ def test_blackboard_no_event_bus(tmp_path):
     bb.close()
 
 
-# === Integration: CostTracker emits on track ===
+# === Integration: CostTracker no longer emits ===
 
 
-def test_cost_tracker_emits_on_track(tmp_path):
+def test_cost_tracker_no_event_on_track(tmp_path):
+    """CostTracker.track() no longer emits cost_update (merged into llm_call in server.py)."""
     from src.host.costs import CostTracker
 
     bus = EventBus()
@@ -263,15 +264,7 @@ def test_cost_tracker_emits_on_track(tmp_path):
     ct.track("agent1", "openai/gpt-4o", prompt_tokens=100, completion_tokens=50)
     ct.close()
 
-    assert len(bus._buffer) == 1
-    evt = bus._buffer[0]
-    assert evt["type"] == "cost_update"
-    assert evt["agent"] == "agent1"
-    assert evt["data"]["model"] == "openai/gpt-4o"
-    assert evt["data"]["prompt_tokens"] == 100
-    assert evt["data"]["completion_tokens"] == 50
-    assert evt["data"]["total_tokens"] == 150
-    assert evt["data"]["cost_usd"] > 0
+    assert len(bus._buffer) == 0
 
 
 # === Integration: HealthMonitor emits on state change ===
@@ -401,7 +394,7 @@ async def test_websocket_replay():
 
     bus = EventBus()
     bus.emit("llm_call", agent="a1", data={"model": "gpt-4o"})
-    bus.emit("cost_update", agent="a2", data={"cost": 0.01})
+    bus.emit("blackboard_write", agent="a2", data={"key": "test/k"})
 
     bb = Blackboard(db_path=":memory:")
     ps = PubSub()
@@ -415,7 +408,7 @@ async def test_websocket_replay():
         msg1 = json.loads(ws.receive_text())
         assert msg1["type"] == "llm_call"
         msg2 = json.loads(ws.receive_text())
-        assert msg2["type"] == "cost_update"
+        assert msg2["type"] == "blackboard_write"
 
     bb.close()
 
@@ -431,7 +424,7 @@ async def test_websocket_filters():
 
     bus = EventBus()
     bus.emit("llm_call", agent="a1")
-    bus.emit("cost_update", agent="a2")
+    bus.emit("blackboard_write", agent="a2")
     bus.emit("llm_call", agent="a2")
 
     bb = Blackboard(db_path=":memory:")
