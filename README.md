@@ -5,8 +5,10 @@
 > Chat via Telegram, Discord, Slack, or WhatsApp. Built-in cost controls. 100+ LLM providers.
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-698%20passing-brightgreen.svg)]()
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
+[![Tests](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml/badge.svg)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
+[![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
 [![Docker](https://img.shields.io/badge/isolation-Docker%20%2B%20microVM-blue.svg)]()
 
@@ -52,7 +54,7 @@
 
 ## Quick Start
 
-**Requirements:** Python 3.10+, Docker (running), an LLM API key ([Anthropic](https://console.anthropic.com/) / [Moonshot](https://platform.moonshot.cn/) / [OpenAI](https://platform.openai.com/api-keys))
+**Requirements:** Python 3.11+, Docker (running), an LLM API key ([Anthropic](https://console.anthropic.com/) / [Moonshot](https://platform.moonshot.cn/) / [OpenAI](https://platform.openai.com/api-keys))
 
 **macOS / Linux:**
 
@@ -114,8 +116,8 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 698 tests including full Docker E2E |
-| **Codebase size** | 430,000+ lines | ~11,000 lines — auditable in a day |
+| **Test coverage** | Minimal | 717 tests including full Docker E2E |
+| **Codebase size** | 430,000+ lines | ~14,000 lines — auditable in a day |
 
 ---
 
@@ -129,7 +131,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, or CLI. Agents act aut
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**698 tests passing** across **~14,000 lines** of application code.
+**717 tests passing** across **~14,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
@@ -786,7 +788,7 @@ pytest tests/
 
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
-| Built-in Tools | 67 | exec, file, browser (incl. backend tiers), memory, mesh tools, discovery |
+| Built-in Tools | 72 | exec, file, browser (incl. backend tiers + screenshots), memory, mesh tools, discovery |
 | Workspace | 45 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat |
 | Agent Loop | 39 | Task execution, tool calling, cancellation, tool memory, chat helpers |
 | Sanitization | 38 | Invisible Unicode stripping, bidi overrides, tag chars, zero-width |
@@ -819,8 +821,10 @@ pytest tests/
 | File Watchers | 7 | Polling, dispatch, pattern matching |
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
+| Marketplace | 20 | Install, manifest parsing, validation, path traversal, remove |
+| Subagent | 11 | Spawn, depth/concurrent limits, TTL timeout, skill cloning, memory isolation |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **698** | |
+| **Total** | **734** | |
 
 ---
 
@@ -920,7 +924,7 @@ config/
 | The mesh is the only door | No agent has network access except through the mesh. No agent holds credentials. |
 | Private by default, shared by promotion | Agents keep knowledge private. Facts are explicitly promoted to the blackboard. |
 | Explicit failure handling | Every workflow step declares what happens on failure. No silent error swallowing. |
-| Small enough to audit | ~11,000 total lines. The entire codebase is auditable in a day. |
+| Small enough to audit | ~14,000 total lines. The entire codebase is auditable in a day. |
 | Skills over features | New capabilities are agent skills, not mesh or orchestrator code. |
 | SQLite for all state | Single-file databases. No external services. WAL mode for concurrent reads. |
 | Zero vendor lock-in | LiteLLM supports 100+ providers. Markdown workspace files. No proprietary formats. |
@@ -949,7 +953,7 @@ Looking for alternatives? OpenLegion is often compared to:
 
 OpenLegion differs from all of these in combining **fleet orchestration,
 Docker isolation, credential vaulting, and cost enforcement** in a single
-~11,000 line auditable codebase.
+~14,000 line auditable codebase.
 
 **Keywords:** autonomous AI agents, multi-agent framework, LLM agent orchestration,
 self-hosted AI agents, Docker AI agents, OpenClaw alternative, AI agent security,
