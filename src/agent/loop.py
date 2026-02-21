@@ -571,7 +571,7 @@ class AgentLoop:
                 total_tokens += llm_response.tokens_used
 
                 if not llm_response.tool_calls:
-                    content = llm_response.content
+                    content = llm_response.content or ""
                     # Suppress silent acknowledgments (heartbeat/cron filler)
                     if content and content.strip() == SILENT_REPLY_TOKEN:
                         content = ""
@@ -893,7 +893,7 @@ class AgentLoop:
                 total_tokens += llm_response.tokens_used
 
                 if not llm_response.tool_calls:
-                    content = llm_response.content
+                    content = llm_response.content or ""
                     if content and content.strip() == SILENT_REPLY_TOKEN:
                         content = ""
                     if content:
