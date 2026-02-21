@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 
+from src.agent.loop_detector import ToolLoopDetector
 from src.shared.types import AgentStatus, TaskAssignment, TaskResult
 from src.shared.utils import format_dict, generate_id, sanitize_for_prompt, setup_logging, truncate
 
@@ -121,6 +122,7 @@ class AgentLoop:
         self._steer_queue: asyncio.Queue[str] = asyncio.Queue()
         self._fleet_roster: list[dict] | None = None  # cached fleet info
         self._fleet_roster_ts: float = 0  # timestamp of last fetch
+        self._loop_detector = ToolLoopDetector()
 
     async def _fetch_fleet_roster(self) -> list[dict]:
         """Fetch and cache the fleet roster from the mesh (TTL: 10 min)."""
@@ -181,6 +183,24 @@ class AgentLoop:
                 break
         return messages
 
+    def _check_tool_loop_terminate(self, tool_calls) -> str | None:
+        """Pre-scan all tool calls in a batch for the terminate condition.
+
+        Returns an error message if any call triggers terminate, else None.
+        Called BEFORE appending the assistant message to context so we don't
+        create orphaned tool_calls without matching tool results.
+
+        Uses would_terminate() instead of check_before() to avoid duplicate
+        log messages — the per-tool check_before() will log if needed.
+        """
+        for tc in tool_calls:
+            if self._loop_detector.would_terminate(tc.name, tc.arguments):
+                return (
+                    f"Tool loop detected: {tc.name} called too many times "
+                    f"with the same arguments. Aborting to prevent wasted spend."
+                )
+        return None
+
     async def execute_task(
         self, assignment: TaskAssignment, *, trace_id: str | None = None,
     ) -> TaskResult:
@@ -192,6 +212,7 @@ class AgentLoop:
         """
         from src.shared.trace import current_trace_id
         current_trace_id.set(trace_id)
+        self._loop_detector.reset()
         self.state = "working"
         self.current_task = assignment.task_id
         start = time.time()
@@ -251,6 +272,22 @@ class AgentLoop:
 
                 # === ACT ===
                 if llm_response.tool_calls:
+                    # Pre-scan for terminate BEFORE appending assistant message
+                    terminate_msg = self._check_tool_loop_terminate(llm_response.tool_calls)
+                    if terminate_msg:
+                        self.state = "idle"
+                        self.current_task = None
+                        self.tasks_failed += 1
+                        result = TaskResult(
+                            task_id=assignment.task_id,
+                            status="failed",
+                            error=terminate_msg,
+                            tokens_used=total_tokens,
+                            duration_ms=int((time.time() - start) * 1000),
+                        )
+                        self._last_result = result
+                        return result
+
                     # Append assistant response with tool calls (correct role)
                     tool_call_entries = [
                         {
@@ -271,28 +308,48 @@ class AgentLoop:
 
                     # Execute each tool and append results with CORRECT role
                     for i, tool_call in enumerate(llm_response.tool_calls):
-                        try:
-                            result = await self.skills.execute(
-                                tool_call.name,
-                                tool_call.arguments,
-                                mesh_client=self.mesh_client,
-                                workspace_manager=self.workspace,
-                                memory_store=self.memory,
-                            )
-                            result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
-                            result_str = sanitize_for_prompt(result_str)
-                            await self._learn(tool_call.name, tool_call.arguments, result)
-                            self._maybe_reload_skills(result)
-                        except Exception as e:
-                            result_str = json.dumps({"error": str(e)})
-                            result_str = sanitize_for_prompt(result_str)
-                            result = {"error": str(e)}
-                            logger.error(f"Tool {tool_call.name} failed: {e}")
-                            self._record_failure(
-                                tool_call.name, str(e),
-                                truncate(str(tool_call.arguments), 200),
-                                arguments=tool_call.arguments,
-                            )
+                        loop_verdict = self._loop_detector.check_before(
+                            tool_call.name, tool_call.arguments,
+                        )
+
+                        if loop_verdict in ("block", "terminate"):
+                            result_str = json.dumps({
+                                "error": f"Tool loop detected: {tool_call.name} has been called "
+                                "repeatedly with the same arguments and is producing the same "
+                                "result. Try a different approach or different arguments."
+                            })
+                            self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
+                        else:
+                            try:
+                                result = await self.skills.execute(
+                                    tool_call.name,
+                                    tool_call.arguments,
+                                    mesh_client=self.mesh_client,
+                                    workspace_manager=self.workspace,
+                                    memory_store=self.memory,
+                                )
+                                result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+                                result_str = sanitize_for_prompt(result_str)
+                                self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
+                                if loop_verdict == "warn":
+                                    result_str = (
+                                        "[WARNING: You have called this tool multiple times with "
+                                        "identical arguments and received the same result. Consider "
+                                        "a different approach.]\n" + result_str
+                                    )
+                                await self._learn(tool_call.name, tool_call.arguments, result)
+                                self._maybe_reload_skills(result)
+                            except Exception as e:
+                                result_str = json.dumps({"error": str(e)})
+                                result_str = sanitize_for_prompt(result_str)
+                                self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
+                                result = {"error": str(e)}
+                                logger.error(f"Tool {tool_call.name} failed: {e}")
+                                self._record_failure(
+                                    tool_call.name, str(e),
+                                    truncate(str(tool_call.arguments), 200),
+                                    arguments=tool_call.arguments,
+                                )
 
                         messages.append({
                             "role": "tool",
@@ -637,27 +694,47 @@ class AgentLoop:
         self, tool_call, tool_call_id: str, tool_outputs: list[dict],
     ) -> dict:
         """Execute a single tool call, append result to messages, return output."""
-        try:
-            result = await self.skills.execute(
-                tool_call.name,
-                tool_call.arguments,
-                mesh_client=self.mesh_client,
-                workspace_manager=self.workspace,
-                memory_store=self.memory,
+        loop_verdict = self._loop_detector.check_before(tool_call.name, tool_call.arguments)
+
+        if loop_verdict in ("block", "terminate"):
+            block_error = (
+                f"Tool loop detected: {tool_call.name} has been called "
+                "repeatedly with the same arguments and is producing the same "
+                "result. Try a different approach or different arguments."
             )
-            result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
-            result_str = sanitize_for_prompt(result_str)
-            await self._learn(tool_call.name, tool_call.arguments, result)
-        except Exception as e:
-            result_str = json.dumps({"error": str(e)})
-            result_str = sanitize_for_prompt(result_str)
-            result = {"error": str(e)}
-            logger.error(f"Chat tool {tool_call.name} failed: {e}")
-            self._record_failure(
-                tool_call.name, str(e),
-                truncate(str(tool_call.arguments), 200),
-                arguments=tool_call.arguments,
-            )
+            result_str = json.dumps({"error": block_error})
+            result = {"error": block_error}
+            self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
+        else:
+            try:
+                result = await self.skills.execute(
+                    tool_call.name,
+                    tool_call.arguments,
+                    mesh_client=self.mesh_client,
+                    workspace_manager=self.workspace,
+                    memory_store=self.memory,
+                )
+                result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+                result_str = sanitize_for_prompt(result_str)
+                self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
+                if loop_verdict == "warn":
+                    result_str = (
+                        "[WARNING: You have called this tool multiple times with "
+                        "identical arguments and received the same result. Consider "
+                        "a different approach.]\n" + result_str
+                    )
+                await self._learn(tool_call.name, tool_call.arguments, result)
+            except Exception as e:
+                result_str = json.dumps({"error": str(e)})
+                result_str = sanitize_for_prompt(result_str)
+                self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
+                result = {"error": str(e)}
+                logger.error(f"Chat tool {tool_call.name} failed: {e}")
+                self._record_failure(
+                    tool_call.name, str(e),
+                    truncate(str(tool_call.arguments), 200),
+                    arguments=tool_call.arguments,
+                )
 
         self._chat_messages.append({
             "role": "tool",
@@ -721,6 +798,16 @@ class AgentLoop:
                         "tokens_used": total_tokens,
                     }
 
+                # Pre-scan for terminate before appending assistant message
+                terminate_msg = self._check_tool_loop_terminate(llm_response.tool_calls)
+                if terminate_msg:
+                    self.state = "idle"
+                    return {
+                        "response": f"Stopped: {terminate_msg}",
+                        "tool_outputs": tool_outputs,
+                        "tokens_used": total_tokens,
+                    }
+
                 entries = self._build_tool_call_entries(llm_response)
                 for i, tool_call in enumerate(llm_response.tool_calls):
                     await self._execute_chat_tool_call(tool_call, entries[i]["id"], tool_outputs)
@@ -766,6 +853,7 @@ class AgentLoop:
         corrupting state during an active chat turn."""
         async with self._chat_lock:
             self._chat_messages = []
+            self._loop_detector.reset()
 
     def _build_chat_system_prompt(self, goals: dict | None = None, fleet_roster: list[dict] | None = None) -> str:
         tools_desc = self.skills.get_descriptions()
@@ -969,6 +1057,18 @@ class AgentLoop:
                     yield {
                         "type": "done",
                         "response": content,
+                        "tool_outputs": tool_outputs,
+                        "tokens_used": total_tokens,
+                    }
+                    return
+
+                # Pre-scan for terminate before appending assistant message
+                terminate_msg = self._check_tool_loop_terminate(llm_response.tool_calls)
+                if terminate_msg:
+                    self.state = "idle"
+                    yield {
+                        "type": "done",
+                        "response": f"Stopped: {terminate_msg}",
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
                     }

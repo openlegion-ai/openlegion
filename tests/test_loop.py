@@ -123,12 +123,15 @@ async def test_tool_calling_message_roles():
 @pytest.mark.asyncio
 async def test_max_iterations_reached():
     """Loop should fail after MAX_ITERATIONS of tool calls."""
-    always_tool = LLMResponse(
-        content="",
-        tool_calls=[ToolCallInfo(name="search", arguments={"q": "x"})],
-        tokens_used=10,
-    )
-    responses = [always_tool] * 25
+    # Use different arguments each iteration to avoid triggering loop detection
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCallInfo(name="search", arguments={"q": f"query_{i}"})],
+            tokens_used=10,
+        )
+        for i in range(25)
+    ]
 
     loop = _make_loop(responses)
     loop.skills.get_tool_definitions = MagicMock(return_value=[{"type": "function", "function": {"name": "search"}}])
@@ -341,14 +344,18 @@ async def test_non_silent_reply_passes_through():
 @pytest.mark.asyncio
 async def test_silent_token_after_tool_rounds_exhausted():
     """__SILENT__ at max-rounds fallback should also be suppressed."""
-    tool_call = LLMResponse(
-        content="",
-        tool_calls=[ToolCallInfo(name="search", arguments={"q": "x"})],
-        tokens_used=10,
-    )
+    # Use different arguments each round to avoid triggering loop detection
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCallInfo(name="search", arguments={"q": f"q_{i}"})],
+            tokens_used=10,
+        )
+        for i in range(31)
+    ]
     # Fill CHAT_MAX_TOOL_ROUNDS with tool calls, then final __SILENT__
     silent_final = LLMResponse(content="__SILENT__", tokens_used=10)
-    responses = [tool_call] * 31 + [silent_final]
+    responses.append(silent_final)
 
     loop = _make_loop(responses)
     loop.skills.get_tool_definitions = MagicMock(
@@ -724,3 +731,271 @@ async def test_system_prompt_learnings_sanitized():
     assert "\u200B" not in prompt
     assert "\u202E" not in prompt
     assert "lesson one important" in prompt
+
+
+# === Tool Loop Detection Integration ===
+
+
+@pytest.mark.asyncio
+async def test_task_loop_detection_warns():
+    """3 identical tool calls in task mode → warning prepended to result."""
+    tool_call = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="search", arguments={"q": "stuck"})],
+        tokens_used=10,
+    )
+    final = LLMResponse(content='{"result": {"done": true}}', tokens_used=10)
+    # 3 tool-call rounds then final answer
+    responses = [tool_call, tool_call, tool_call, final]
+
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "search"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"result": "same"})
+
+    captured_messages = []
+    original_chat = loop.llm.chat
+
+    async def capturing_chat(system, messages, tools=None, **kwargs):
+        captured_messages.append([dict(m) for m in messages])
+        return await original_chat(system=system, messages=messages, tools=tools, **kwargs)
+
+    loop.llm.chat = capturing_chat
+
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research", input_data={}
+    )
+    result = await loop.execute_task(assignment)
+    assert result.status == "complete"
+
+    # The warning from the 3rd tool execution is visible in the 4th LLM call
+    # (the final answer call), since it was appended to messages after execution.
+    fourth_call = captured_messages[3]
+    tool_msgs = [m for m in fourth_call if m.get("role") == "tool"]
+    assert any("WARNING" in m.get("content", "") for m in tool_msgs)
+
+
+@pytest.mark.asyncio
+async def test_task_loop_detection_blocks():
+    """5+ identical calls in task mode → tool not executed, error returned."""
+    tool_call = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="search", arguments={"q": "stuck"})],
+        tokens_used=10,
+    )
+    final = LLMResponse(content='{"result": {"done": true}}', tokens_used=10)
+    responses = [tool_call] * 6 + [final]
+
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "search"}}]
+    )
+    execute_count = 0
+
+    async def counting_execute(*args, **kwargs):
+        nonlocal execute_count
+        execute_count += 1
+        return {"result": "same"}
+
+    loop.skills.execute = counting_execute
+
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research", input_data={}
+    )
+    result = await loop.execute_task(assignment)
+    assert result.status == "complete"
+    # Block starts at 5th call (after 4 identical), so calls 5 and 6 are blocked
+    # Calls 1-4 execute normally, calls 5-6 are blocked
+    assert execute_count == 4
+
+
+@pytest.mark.asyncio
+async def test_task_loop_detection_terminates():
+    """10+ identical calls in task mode → TaskResult failed."""
+    tool_call = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="search", arguments={"q": "stuck"})],
+        tokens_used=10,
+    )
+    # Provide plenty of responses (terminate should happen before exhausting them)
+    responses = [tool_call] * 20
+
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "search"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"result": "same"})
+
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research", input_data={}
+    )
+    result = await loop.execute_task(assignment)
+    assert result.status == "failed"
+    assert "loop detected" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_chat_loop_detection_warns():
+    """Chat mode: 3 identical tool calls → warning in result."""
+    tool_call = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="exec", arguments={"command": "fail"})],
+        tokens_used=10,
+    )
+    final = LLMResponse(content="Done", tokens_used=10)
+    responses = [tool_call, tool_call, tool_call, final]
+
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "exec"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"error": "command not found"})
+
+    result = await loop.chat("run it")
+    assert result["response"] == "Done"
+    # Check that at least one tool message contains the warning
+    tool_msgs = [m for m in loop._chat_messages if m.get("role") == "tool"]
+    assert any("WARNING" in m.get("content", "") for m in tool_msgs)
+
+
+@pytest.mark.asyncio
+async def test_chat_loop_detection_terminates():
+    """Chat mode: 10+ identical calls → response contains 'Stopped'."""
+    tool_call = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="exec", arguments={"command": "fail"})],
+        tokens_used=10,
+    )
+    # Provide plenty (terminate should kick in before all are used)
+    responses = [tool_call] * 20
+
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "exec"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"error": "command not found"})
+
+    result = await loop.chat("run it")
+    assert "Stopped" in result["response"]
+    assert "loop detected" in result["response"].lower()
+
+
+@pytest.mark.asyncio
+async def test_detector_reset_on_new_task():
+    """Loop detector is reset when starting a new task."""
+    tool_call = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="search", arguments={"q": "x"})],
+        tokens_used=10,
+    )
+    final = LLMResponse(content='{"result": {"ok": true}}', tokens_used=10)
+
+    # First task: 3 identical calls (builds up warn state)
+    loop = _make_loop([tool_call, tool_call, tool_call, final, tool_call, final])
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "search"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"result": "same"})
+
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research", input_data={}
+    )
+    result1 = await loop.execute_task(assignment)
+    assert result1.status == "complete"
+
+    # Second task: 1 identical call should NOT warn (detector was reset)
+    captured_messages = []
+    original_chat = loop.llm.chat
+
+    async def capturing_chat(system, messages, tools=None, **kwargs):
+        captured_messages.append([dict(m) for m in messages])
+        return await original_chat(system=system, messages=messages, tools=tools, **kwargs)
+
+    loop.llm.chat = capturing_chat
+
+    assignment2 = TaskAssignment(
+        workflow_id="wf2", step_id="s2", task_type="research", input_data={}
+    )
+    result2 = await loop.execute_task(assignment2)
+    assert result2.status == "complete"
+    # No warning should be present in any tool result
+    for call_msgs in captured_messages:
+        for m in call_msgs:
+            if m.get("role") == "tool":
+                assert "WARNING" not in m.get("content", "")
+
+
+@pytest.mark.asyncio
+async def test_detector_reset_on_chat_reset():
+    """Loop detector is reset when chat history is cleared."""
+    tool_call = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="exec", arguments={"command": "fail"})],
+        tokens_used=10,
+    )
+    final = LLMResponse(content="Done", tokens_used=10)
+
+    # First chat: 3 identical calls (builds up warn state)
+    loop = _make_loop([tool_call, tool_call, tool_call, final, tool_call, final])
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "exec"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"error": "command not found"})
+
+    await loop.chat("run it")
+
+    # Reset chat (should also reset detector)
+    await loop.reset_chat()
+
+    # Second chat: 1 identical call should NOT warn
+    result2 = await loop.chat("run it again")
+    assert result2["response"] == "Done"
+    # Only tool messages from the second chat (after reset)
+    tool_msgs = [m for m in loop._chat_messages if m.get("role") == "tool"]
+    assert not any("WARNING" in m.get("content", "") for m in tool_msgs)
+
+
+@pytest.mark.asyncio
+async def test_task_terminate_mid_batch_blocks_tool():
+    """If terminate threshold is hit mid-batch via recording, the tool is blocked (not executed)."""
+    # Two identical tools per batch.  After 5 batches (10 calls), batch 5's
+    # second tool should trigger terminate via check_before in per-tool loop.
+    # But the pre-scan uses would_terminate which checks BEFORE any intra-batch
+    # recording, so it may pass.  The per-tool check_before must still block.
+    two_tools = LLMResponse(
+        content="",
+        tool_calls=[
+            ToolCallInfo(name="search", arguments={"q": "stuck"}),
+            ToolCallInfo(name="search", arguments={"q": "stuck"}),
+        ],
+        tokens_used=10,
+    )
+    final = LLMResponse(content='{"result": {"ok": true}}', tokens_used=10)
+    # 5 batches of 2 = 10 tool calls, then final
+    responses = [two_tools] * 6 + [final]
+
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "search"}}]
+    )
+    execute_count = 0
+
+    async def counting_execute(*args, **kwargs):
+        nonlocal execute_count
+        execute_count += 1
+        return {"result": "same"}
+
+    loop.skills.execute = counting_execute
+
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research", input_data={}
+    )
+    result = await loop.execute_task(assignment)
+    # Should either terminate or complete, but tools should NOT all execute
+    # With 2 per batch: batch 1 (2 ok), batch 2 (2 ok=4 total), batch 3 (block+block),
+    # batch 4 (block+block), batch 5 pre-scan: 8 recorded, not 9 → pass,
+    # per-tool: first check = 8 → block, record → 9, second check = 9 → terminate (blocked)
+    # The terminate path in per-tool is handled as block, so the loop continues.
+    # Eventually the pre-scan catches it.
+    assert execute_count == 4  # Only first 4 calls execute (block kicks in at 5th)
