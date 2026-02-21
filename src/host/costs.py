@@ -35,10 +35,11 @@ _DEFAULT_COST = (0.003, 0.015)  # Conservative fallback
 class CostTracker:
     """Tracks token usage and cost per agent, enforces budgets."""
 
-    def __init__(self, db_path: str = "data/costs.db"):
+    def __init__(self, db_path: str = "data/costs.db", event_bus=None):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
+        self._event_bus = event_bus
         self._init_schema()
         self.budgets: dict[str, dict[str, float]] = {}
 
@@ -78,6 +79,14 @@ class CostTracker:
             (agent, model, prompt_tokens, completion_tokens, total, cost),
         )
         self.db.commit()
+
+        if self._event_bus:
+            self._event_bus.emit("cost_update", agent=agent, data={
+                "model": model, "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens, "total_tokens": total,
+                "cost_usd": round(cost, 6),
+            })
+
         return cost
 
     def check_budget(self, agent: str) -> dict:

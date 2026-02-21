@@ -15,7 +15,7 @@ import time
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from src.shared.types import AgentMessage, APIProxyRequest, APIProxyResponse, MeshEvent
@@ -24,6 +24,7 @@ from src.shared.utils import setup_logging
 _server_logger = setup_logging("host.server")
 
 if TYPE_CHECKING:
+    from src.dashboard.events import EventBus
     from src.host.credentials import CredentialVault
     from src.host.cron import CronScheduler
     from src.host.mesh import Blackboard, MessageRouter, PubSub
@@ -46,6 +47,7 @@ def create_mesh_app(
     orchestrator: Orchestrator | None = None,
     auth_tokens: dict[str, str] | None = None,
     trace_store: TraceStore | None = None,
+    event_bus: EventBus | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
@@ -165,6 +167,7 @@ def create_mesh_app(
         req_trace_id = request.headers.get("x-trace-id")
         t0 = time.time()
         result = await credential_vault.execute_api_call(api_request, agent_id=agent_id)
+        duration_ms = int((time.time() - t0) * 1000)
         if req_trace_id and trace_store:
             trace_store.record(
                 trace_id=req_trace_id,
@@ -172,8 +175,17 @@ def create_mesh_app(
                 agent=agent_id,
                 event_type="llm_call",
                 detail=f"{api_request.service}/{api_request.action}",
-                duration_ms=int((time.time() - t0) * 1000),
+                duration_ms=duration_ms,
             )
+        if event_bus is not None:
+            llm_data: dict = {
+                "service": api_request.service, "action": api_request.action,
+                "duration_ms": duration_ms,
+            }
+            if result.success and result.data:
+                llm_data["model"] = result.data.get("model", "")
+                llm_data["tokens_used"] = result.data.get("tokens_used", 0)
+            event_bus.emit("llm_call", agent=agent_id, data=llm_data)
         return result
 
     @app.post("/mesh/api/stream")
@@ -194,6 +206,11 @@ def create_mesh_app(
                 event_type="llm_stream",
                 detail=f"{api_request.service}/{api_request.action}",
             )
+        if event_bus is not None:
+            event_bus.emit("llm_call", agent=agent_id, data={
+                "service": api_request.service, "action": api_request.action,
+                "streaming": True,
+            })
 
         return StreamingResponse(
             credential_vault.stream_llm(api_request, agent_id=agent_id),
@@ -304,6 +321,10 @@ def create_mesh_app(
         agent_perms = permissions.get_permissions(agent_id)
         for topic in agent_perms.can_subscribe:
             pubsub.subscribe(topic, agent_id)
+        if event_bus is not None:
+            event_bus.emit("agent_state", agent=agent_id, data={
+                "state": "registered", "capabilities": capabilities,
+            })
         return {"registered": True}
 
     @app.get("/mesh/agents")
@@ -374,6 +395,10 @@ def create_mesh_app(
             )
             router.register_agent(agent_id, url)
             ready = await container_manager.wait_for_agent(agent_id, timeout=60)
+            if event_bus is not None:
+                event_bus.emit("agent_state", agent=agent_id, data={
+                    "state": "spawned", "role": role, "ready": ready,
+                })
             return {
                 "agent_id": agent_id, "url": url, "role": role,
                 "ready": ready, "spawned_by": spawned_by, "ttl": ttl,
@@ -422,5 +447,40 @@ def create_mesh_app(
         if trace_store is None:
             return []
         return trace_store.get_trace(trace_id)
+
+    # === Event Bus ===
+
+    @app.websocket("/ws/events")
+    async def ws_events(websocket: WebSocket) -> None:
+        """Stream real-time dashboard events to WebSocket clients."""
+        if event_bus is None:
+            await websocket.close(code=1013, reason="Event bus not configured")
+            return
+
+        # Lazily bind event loop on first WebSocket connect
+        import asyncio
+        event_bus.set_loop(asyncio.get_running_loop())
+
+        await websocket.accept()
+
+        # Parse optional filters from query params
+        agents_param = websocket.query_params.get("agents", "")
+        types_param = websocket.query_params.get("types", "")
+        agents_filter = set(agents_param.split(",")) - {""} if agents_param else None
+        types_filter = set(types_param.split(",")) - {""} if types_param else None
+
+        # Replay recent events
+        import json
+        for evt in event_bus.recent_events(agents_filter, types_filter):
+            await websocket.send_text(json.dumps(evt, default=str))
+
+        event_bus.subscribe(websocket, agents_filter, types_filter)
+        try:
+            while True:
+                await websocket.receive_text()  # keep-alive
+        except Exception:
+            pass
+        finally:
+            event_bus.unsubscribe(websocket)
 
     return app

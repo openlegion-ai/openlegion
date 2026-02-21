@@ -34,10 +34,11 @@ class Blackboard:
     Uses SQLite WAL mode for concurrent reads.
     """
 
-    def __init__(self, db_path: str = "blackboard.db"):
+    def __init__(self, db_path: str = "blackboard.db", event_bus=None):
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
+        self._event_bus = event_bus
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -93,6 +94,12 @@ class Blackboard:
 
         self._log_event("write", key, written_by, value_json)
         self.db.commit()
+
+        if self._event_bus:
+            # Truncate value preview for dashboard display
+            preview = value_json[:200] if len(value_json) > 200 else value_json
+            self._event_bus.emit("blackboard_write", agent=written_by,
+                data={"key": key, "version": new_version, "value_preview": preview})
 
         return BlackboardEntry(
             key=key,
