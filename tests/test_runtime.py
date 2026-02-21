@@ -312,8 +312,9 @@ class TestDefaultEmbeddingModel:
     def test_gpt_prefix(self):
         assert _default_embedding_model("gpt-4o") == "text-embedding-3-small"
 
-    def test_gemini_provider(self):
-        assert _default_embedding_model("gemini/gemini-2.0-flash") == "gemini/text-embedding-004"
+    def test_gemini_no_compatible_embeddings(self):
+        """Gemini embedding models are 768-dim, incompatible with EMBEDDING_DIM=1536."""
+        assert _default_embedding_model("gemini/gemini-2.0-flash") == "none"
 
     def test_anthropic_no_embeddings(self):
         assert _default_embedding_model("anthropic/claude-haiku-4-5-20251001") == "none"

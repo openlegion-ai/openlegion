@@ -21,13 +21,14 @@ logger = logging.getLogger("cli")
 
 # Provider prefix → default embedding model.  Providers without embedding
 # APIs (Anthropic, xAI, Groq, …) map to "none" which disables vector search.
+# Only map providers whose embedding models output 1536-dim vectors,
+# matching EMBEDDING_DIM in memory.py.  Other providers default to "none".
 _PROVIDER_EMBEDDING_DEFAULTS: list[tuple[str, str]] = [
     ("openai/",  "text-embedding-3-small"),
     ("gpt-",     "text-embedding-3-small"),
     ("o1",       "text-embedding-3-small"),
     ("o3",       "text-embedding-3-small"),
     ("o4",       "text-embedding-3-small"),
-    ("gemini/",  "gemini/text-embedding-004"),
 ]
 
 

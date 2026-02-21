@@ -6,7 +6,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
-[![Tests: 887](https://img.shields.io/badge/tests-887%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 897](https://img.shields.io/badge/tests-897%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -116,7 +116,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 887 tests including full Docker E2E |
+| **Test coverage** | Minimal | 897 tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~14,000 lines — auditable in a day |
 
 ---
@@ -131,7 +131,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, or CLI. Agents act aut
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**887 tests passing** across **~14,000 lines** of application code.
+**897 tests passing** across **~14,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
@@ -804,7 +804,7 @@ pytest tests/
 | Cron | 32 | Cron expressions, intervals, dispatch, persistence |
 | Context Manager | 31 | Token estimation (tiktoken + model-aware), compaction, flushing |
 | Events | 30 | Event streaming, filtering, WebSocket |
-| Integration | 27 | Multi-component mesh operations, notifications |
+| Integration | 28 | Multi-component mesh operations, notifications |
 | Orchestrator | 25 | Workflows, conditions, retries, failures |
 | Transcript | 24 | Transcript formatting, safety, round-trip fidelity |
 | Slack Channel | 21 | Socket Mode, thread routing, pairing, command translation |
@@ -834,7 +834,7 @@ pytest tests/
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | Health Monitor | 5 | Ephemeral cleanup, TTL expiry, event emission |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **887** | |
+| **Total** | **897** | |
 
 ---
 
