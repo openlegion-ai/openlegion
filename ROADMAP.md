@@ -106,24 +106,56 @@ Split `cli.py` (~1968 lines) into `runtime.py`, `repl.py`, `channels.py`, `forma
 
 Implemented. See Completed section.
 
-### 4.3 Tool Loop Detection
+### ~~4.3 Tool Loop Detection~~ ✅ Done (Session 22)
 
-Hard iteration limits (20 task, 30 chat) waste iterations and API spend when agents repeat identical failing tool calls. OpenClaw uses SHA-256 hash-based detection with multiple detectors and a circuit breaker. Our agents currently have no way to detect they're stuck until they exhaust the iteration cap.
+Implemented. See Completed section.
 
-**Impact:** Prevents wasted API spend on stuck agents. Saves 10-25 iterations of cost when an agent gets into a repeat loop. Improves reliability without reducing capability ceiling.
+### 4.4 Extended Thinking / Reasoning Support
+
+No support for Claude's extended thinking or OpenAI's reasoning effort parameters. OpenClaw supports configurable thinking levels (off/low/medium/high) with auto-fallback to lower levels when unsupported. Extended thinking produces dramatically better results on complex tasks (planning, debugging, multi-step reasoning) at the cost of more tokens.
+
+**Impact:** Significant quality improvement on complex tasks. Zero-effort capability boost — just passing a parameter through.
 
 **Changes:**
-- Add `ToolLoopDetector` class (new file or in `loop.py`):
-  - Sliding window of last 15 `(tool_name, params_hash, result_hash)` tuples
-  - `params_hash`: SHA-256 of `json.dumps(args, sort_keys=True)`
-  - `result_hash`: SHA-256 of `json.dumps(result, sort_keys=True)`
-- **Warn at 3 identical repeats**: inject system message "You've called `{tool}` with identical parameters 3 times with the same result. Try a different approach or different parameters."
-- **Force-break at 5 repeats**: skip tool execution, return `{"error": "Loop detected — this tool call has been made 5 times with identical results. You must try a different approach."}` as tool result
-- **Circuit breaker at 10**: terminate the current loop iteration with status `"failed"` and error `"Agent stuck in tool loop"`
-- Apply to both `execute_task()` and `_chat_inner()`/`_chat_stream_inner()`
-- Exclude from detection: `memory_search`, `memory_recall` (legitimate to re-search with same query after new facts stored)
+- Add `thinking` parameter to `LLMClient.chat()` for Anthropic models:
+  - When model starts with `anthropic/claude` and thinking is enabled, add `thinking: {"type": "enabled", "budget_tokens": N}` to the API request
+  - Budget tokens configurable, default 8192
+- Add `reasoning_effort` parameter for OpenAI o-series models:
+  - When model contains `/o3` or `/o4`, add `reasoning_effort: "medium"` (or configured level)
+- Configurable per-agent in `agents.yaml`: `thinking: "medium"` (maps to budget: low=4096, medium=8192, high=16384). Default: off (cost savings).
+- Auto-strip thinking blocks from response before tool-call parsing (Anthropic returns thinking in a separate content block)
+- Mesh proxy passes through unchanged — no credential changes needed
+- Context manager accounts for thinking tokens in usage tracking
 
-### 4.4 Web Search Upgrade + Content Extraction
+### 4.5 Multi-Chunk Compaction
+
+Current `_summarize_compact()` in `src/agent/context.py` makes a single LLM call to summarize the entire context. For long conversations (50K+ tokens), important details are lost in the single-pass summary. OpenClaw splits context into chunks, summarizes each independently, then merges — producing higher-fidelity summaries.
+
+**Impact:** Better long-conversation quality. Prevents information loss during compaction — critical for multi-hour agent sessions.
+
+**Changes:**
+- When estimated context exceeds 40K tokens at compaction time:
+  - Split messages into chunks of ~15K tokens each (respecting tool-call grouping boundaries from `_trim_context()`)
+  - Summarize each chunk independently with existing summary prompt (can run as parallel `asyncio.gather()` LLM calls)
+  - Merge summaries with instruction: "Merge these partial summaries into a single cohesive summary. Preserve all decisions, TODOs, open questions, constraints, and key facts."
+  - Replace conversation with `[merged_summary] + last_4_messages`
+- Below 40K tokens: keep current single-call approach (simpler, sufficient for shorter contexts)
+- Add retry (2 attempts with 2s backoff) for compaction LLM calls before falling through to hard prune
+- Log compaction quality metric: `ratio = len(summary) / len(original_context)`
+
+### 4.6 Agent-Level Model Fallback
+
+The mesh has fleet-level model failover (`src/host/failover.py`), but individual agents retry the same model 3 times on failure. OpenClaw rotates to a completely different model on failure, with configurable fallback chains per agent. When Claude is down, the agent should transparently switch to GPT-4o rather than failing 3 times and giving up.
+
+**Impact:** Higher agent uptime during provider outages. Cost savings by avoiding 3 retries to a dead endpoint.
+
+**Changes:**
+- Add `fallback_models` list to agent config in `agents.yaml` (e.g., `fallback_models: ["anthropic/claude-sonnet-4-6", "openai/gpt-4o"]`)
+- In `_llm_call_with_retry()`: on 2nd retry, if `fallback_models` is configured, try the next model in the chain instead of the same model
+- Propagate the actual model used back in `LLMResponse.model` so cost tracking attributes correctly (already happens via mesh failover, extend to agent-level)
+- Log model switches: `logger.warning("Falling back from %s to %s", primary, fallback)`
+
+### 4.7 Web Search Upgrade + Content Extraction
 
 DuckDuckGo is rate-limited and returns low-quality snippets. No content extraction tool exists — `http_request` returns raw HTML, wasting context tokens. OpenClaw supports 3 search providers (Brave, Perplexity, Grok) with result caching and has readability-based web content extraction. This is our weakest built-in capability.
 
@@ -142,51 +174,6 @@ DuckDuckGo is rate-limited and returns low-quality snippets. No content extracti
   - Content-type check: only process text/html responses
 - **Search result caching**: simple `dict[str, (float, list)]` with 15-minute TTL, cleared on agent restart. Key = query string, value = (timestamp, results). Check before hitting search API.
 - Add `trafilatura` to agent container dependencies
-
-### 4.5 Extended Thinking / Reasoning Support
-
-No support for Claude's extended thinking or OpenAI's reasoning effort parameters. OpenClaw supports configurable thinking levels (off/low/medium/high) with auto-fallback to lower levels when unsupported. Extended thinking produces dramatically better results on complex tasks (planning, debugging, multi-step reasoning) at the cost of more tokens.
-
-**Impact:** Significant quality improvement on complex tasks. Zero-effort capability boost — just passing a parameter through.
-
-**Changes:**
-- Add `thinking` parameter to `LLMClient.chat()` for Anthropic models:
-  - When model starts with `anthropic/claude` and thinking is enabled, add `thinking: {"type": "enabled", "budget_tokens": N}` to the API request
-  - Budget tokens configurable, default 8192
-- Add `reasoning_effort` parameter for OpenAI o-series models:
-  - When model contains `/o3` or `/o4`, add `reasoning_effort: "medium"` (or configured level)
-- Configurable per-agent in `agents.yaml`: `thinking: "medium"` (maps to budget: low=4096, medium=8192, high=16384). Default: off (cost savings).
-- Auto-strip thinking blocks from response before tool-call parsing (Anthropic returns thinking in a separate content block)
-- Mesh proxy passes through unchanged — no credential changes needed
-- Context manager accounts for thinking tokens in usage tracking
-
-### 4.6 Multi-Chunk Compaction
-
-Current `_summarize_compact()` in `src/agent/context.py` makes a single LLM call to summarize the entire context. For long conversations (50K+ tokens), important details are lost in the single-pass summary. OpenClaw splits context into chunks, summarizes each independently, then merges — producing higher-fidelity summaries.
-
-**Impact:** Better long-conversation quality. Prevents information loss during compaction — critical for multi-hour agent sessions.
-
-**Changes:**
-- When estimated context exceeds 40K tokens at compaction time:
-  - Split messages into chunks of ~15K tokens each (respecting tool-call grouping boundaries from `_trim_context()`)
-  - Summarize each chunk independently with existing summary prompt (can run as parallel `asyncio.gather()` LLM calls)
-  - Merge summaries with instruction: "Merge these partial summaries into a single cohesive summary. Preserve all decisions, TODOs, open questions, constraints, and key facts."
-  - Replace conversation with `[merged_summary] + last_4_messages`
-- Below 40K tokens: keep current single-call approach (simpler, sufficient for shorter contexts)
-- Add retry (2 attempts with 2s backoff) for compaction LLM calls before falling through to hard prune
-- Log compaction quality metric: `ratio = len(summary) / len(original_context)`
-
-### 4.7 Agent-Level Model Fallback
-
-The mesh has fleet-level model failover (`src/host/failover.py`), but individual agents retry the same model 3 times on failure. OpenClaw rotates to a completely different model on failure, with configurable fallback chains per agent. When Claude is down, the agent should transparently switch to GPT-4o rather than failing 3 times and giving up.
-
-**Impact:** Higher agent uptime during provider outages. Cost savings by avoiding 3 retries to a dead endpoint.
-
-**Changes:**
-- Add `fallback_models` list to agent config in `agents.yaml` (e.g., `fallback_models: ["anthropic/claude-sonnet-4-6", "openai/gpt-4o"]`)
-- In `_llm_call_with_retry()`: on 2nd retry, if `fallback_models` is configured, try the next model in the chain instead of the same model
-- Propagate the actual model used back in `LLMResponse.model` so cost tracking attributes correctly (already happens via mesh failover, extend to agent-level)
-- Log model switches: `logger.warning("Falling back from %s to %s", primary, fallback)`
 
 ---
 
@@ -342,6 +329,16 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 ---
 
 ## Completed
+
+### Session 22 (Tool Loop Detection)
+- [x] **4.3 Tool Loop Detection** — `ToolLoopDetector` class in `src/agent/loop_detector.py` with SHA-256 hash-based sliding window (15 entries) and 3-level escalation.
+- [x] `_hash_json()` — SHA-256 of canonically-serialised JSON, truncated to 16 hex chars (matches `MemoryStore._compute_params_hash` algorithm).
+- [x] `check_before()` returns `"ok"` / `"warn"` (>=2 prior identical) / `"block"` (>=4) / `"terminate"` (>=9 same tool+params regardless of result). `would_terminate()` for pre-scan without duplicate logging.
+- [x] Integrated into all 3 execution modes: `execute_task()` (task mode), `_chat_inner()` (non-streaming chat), `_chat_stream_inner()` (streaming chat).
+- [x] Terminate pre-scan (`_check_tool_loop_terminate`) runs BEFORE appending assistant message to context — prevents orphaned tool_calls without matching tool results.
+- [x] Exempt tools: `memory_search`, `memory_recall` (legitimate to re-search after new facts stored).
+- [x] Detector resets on `execute_task()` start and `reset_chat()`.
+- [x] 14 unit tests in `tests/test_loop_detector.py`, 8 integration tests in `tests/test_loop.py`. 891 total passing. PR #75 merged.
 
 ### Session 21 (Token-Level LLM Streaming)
 - [x] **4.2 Token-Level LLM Streaming** — True token-by-token streaming from LLM providers through the mesh proxy, through agents, to all consumers.
@@ -555,7 +552,7 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 | Model failover | **Health + cascade (fleet-level)** | Auth rotation + model fallback + thinking fallback | None | None | None | N/A | None |
 | Extended thinking | Not yet | **Configurable levels (off/low/med/high)** | None | None | Claude native | N/A | None |
 | Credential mgmt | **Blind vault + $CRED handles** | Env vars (visible to agent) | None | None | None | N/A | None |
-| Tool loop detection | Hard iteration caps (20/30) | **SHA-256 hash-based + circuit breaker** | None | None | None | N/A | None |
+| Tool loop detection | **SHA-256 hash-based + 3-level escalation (warn/block/terminate)** | SHA-256 hash-based + circuit breaker | None | None | None | N/A | None |
 | Error recovery | 3x retry with backoff | **Multi-layer: auth rotation → model fallback → thinking fallback → compaction → truncation** | None | Basic | None | N/A | None |
 | Self-authoring tools | **Yes (create_skill + AST validation)** | No | No | No | No | N/A | No |
 | Channels | 5 (CLI, TG, Discord, Slack, WA) | **12+ (WA, TG, Slack, Discord, Signal, iMessage, etc.)** | **17+** | 9 | 2 (WA, Web) | N/A | 1 (CLI) |
@@ -585,11 +582,11 @@ These are genuine architectural advantages that OpenClaw cannot easily replicate
 These are the items driving Tier 4 priority:
 
 1. ~~**Token-level streaming** (→ 4.2) — Closed. Token-level streaming implemented across CLI, dashboard, Telegram, Discord, and Slack.~~
-2. **Tool loop detection** (→ 4.3) — Hash-based repeat detection vs our blunt iteration caps. Their agents waste fewer iterations.
-3. **Web search quality** (→ 4.4) — 3 providers with caching vs our single DuckDuckGo. Plus readability content extraction.
-4. **Extended thinking** (→ 4.5) — Configurable reasoning levels vs our no support. Free quality boost on complex tasks.
-5. **Multi-chunk compaction** (→ 4.6) — Split/summarize/merge vs our single-pass. Better long-conversation fidelity.
-6. **Error recovery depth** (→ 4.7 + backlog) — 5-layer recovery vs our 3x retry on same model. Auth rotation, model fallback, thinking fallback.
+2. ~~**Tool loop detection** (→ 4.3) — Closed. SHA-256 hash-based detection with 3-level escalation (warn/block/terminate) and sliding window.~~
+3. **Extended thinking** (→ 4.4) — Configurable reasoning levels vs our no support. Free quality boost on complex tasks.
+4. **Multi-chunk compaction** (→ 4.5) — Split/summarize/merge vs our single-pass. Better long-conversation fidelity.
+5. **Error recovery depth** (→ 4.6 + backlog) — 5-layer recovery vs our 3x retry on same model. Auth rotation, model fallback, thinking fallback.
+6. **Web search quality** (→ 4.7) — 3 providers with caching vs our single DuckDuckGo. Plus readability content extraction.
 7. **Bundled skill library** (→ backlog) — 60+ integrations vs our sparse marketplace. GitHub, email, calendar, notes.
 8. **Provider breadth** — 15+ LLM providers vs our model-agnostic-but-only-2-configured setup. Less urgent since mesh proxy can route to any provider.
 
@@ -599,5 +596,5 @@ Container-isolated multi-agent orchestration with blind credential vault, fleet 
 
 ### Next Differentiators
 
-1. **Agent intelligence** (Tier 4) — Close the remaining individual agent gaps (tool loop detection, web search, extended thinking, compaction, model fallback). Token-level streaming gap already closed.
+1. **Agent intelligence** (Tier 4) — Close the remaining individual agent gaps (extended thinking, compaction, model fallback, web search). Token-level streaming and tool loop detection gaps already closed.
 2. **Real-time observability** (Tier 5) — No competitor offers fleet-level visibility into multi-agent reasoning, tool usage, and collaboration. Served from the existing mesh server — zero additional infrastructure.

@@ -93,6 +93,7 @@ function dashboard() {
     chatMessage: '',
     chatHistories: {},
     chatLoading: false,
+    chatStreaming: false,
 
     // Broadcast
     broadcastMessage: '',
@@ -623,11 +624,23 @@ function dashboard() {
     openChat(agentId) {
       this.chatAgent = agentId;
       this.chatMessage = '';
+      this.$nextTick(() => this._scrollChat());
     },
 
     closeChat() {
       this.chatAgent = null;
       this.chatMessage = '';
+      this.chatLoading = false;
+      this.chatStreaming = false;
+    },
+
+    _scrollChat() {
+      const el = document.getElementById('chat-messages');
+      if (el) el.scrollTop = el.scrollHeight;
+    },
+
+    _chatEntry(agent, idx) {
+      return this.chatHistories[agent][idx];
     },
 
     async sendChat() {
@@ -638,10 +651,12 @@ function dashboard() {
       this.chatHistories[agent].push({ role: 'user', content: msg });
       this.chatMessage = '';
       this.chatLoading = true;
+      this.chatStreaming = true;
 
-      // Add a streaming placeholder entry
-      const streamEntry = { role: 'agent', content: '', streaming: true };
-      this.chatHistories[agent].push(streamEntry);
+      // Add streaming placeholder — reference via reactive array index
+      this.chatHistories[agent].push({ role: 'agent', content: '', streaming: true, tools: [] });
+      const idx = this.chatHistories[agent].length - 1;
+      this.$nextTick(() => this._scrollChat());
 
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agent}/chat/stream`, {
@@ -651,16 +666,18 @@ function dashboard() {
         if (!resp.ok) {
           let errMsg = `HTTP ${resp.status}`;
           try { const err = await resp.json(); errMsg = err.detail || errMsg; } catch (_) {}
-          streamEntry.content = errMsg;
-          streamEntry.role = 'error';
-          streamEntry.streaming = false;
+          this.chatHistories[agent][idx].content = errMsg;
+          this.chatHistories[agent][idx].role = 'error';
+          this.chatHistories[agent][idx].streaming = false;
           this.chatLoading = false;
+          this.chatStreaming = false;
           return;
         }
 
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let firstToken = true;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -675,25 +692,42 @@ function dashboard() {
             let data;
             try { data = JSON.parse(line.slice(6)); } catch (_) { continue; }
 
+            const entry = this.chatHistories[agent][idx];
+
             if (data.type === 'text_delta') {
-              streamEntry.content += data.content || '';
+              if (firstToken) { this.chatLoading = false; firstToken = false; }
+              entry.content += data.content || '';
+              this._scrollChat();
+            } else if (data.type === 'tool_start') {
+              entry.tools.push({ name: data.name, status: 'running', input: data.input });
+              this._scrollChat();
+            } else if (data.type === 'tool_result') {
+              const tool = entry.tools.find(t => t.name === data.name && t.status === 'running');
+              if (tool) {
+                tool.status = 'done';
+                tool.output = typeof data.output === 'string'
+                  ? data.output.substring(0, 200)
+                  : JSON.stringify(data.output, null, 0).substring(0, 200);
+              }
             } else if (data.type === 'done') {
-              streamEntry.content = data.response || streamEntry.content;
-              streamEntry.streaming = false;
+              entry.content = data.response || entry.content;
+              entry.streaming = false;
             } else if (data.type === 'error') {
-              streamEntry.content = data.message || 'Stream error';
-              streamEntry.role = 'error';
-              streamEntry.streaming = false;
+              entry.content = data.message || 'Stream error';
+              entry.role = 'error';
+              entry.streaming = false;
             }
           }
         }
-        streamEntry.streaming = false;
+        this.chatHistories[agent][idx].streaming = false;
       } catch (e) {
-        streamEntry.content = e.message;
-        streamEntry.role = 'error';
-        streamEntry.streaming = false;
+        this.chatHistories[agent][idx].content = e.message;
+        this.chatHistories[agent][idx].role = 'error';
+        this.chatHistories[agent][idx].streaming = false;
       }
       this.chatLoading = false;
+      this.chatStreaming = false;
+      this.$nextTick(() => this._scrollChat());
     },
 
     // ── Broadcast ────────────────────────────────────────
