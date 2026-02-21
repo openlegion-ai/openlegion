@@ -1,4 +1,4 @@
-"""Tests for the setup wizard: full setup, quickstart, API key validation, summary."""
+"""Tests for the setup wizard: full setup, API key validation, summary."""
 
 import json
 import os
@@ -186,81 +186,6 @@ class TestSetupFull:
         assert result.exit_code == 0, result.output
         assert "invalid" in result.output.lower()
         assert "Setup Complete" in result.output
-
-
-class TestQuickstart:
-    def test_quickstart_default_model(self, tmp_path):
-        """Quickstart with just an API key creates assistant with default model."""
-        project = _make_project(tmp_path)
-
-        piped_input = "sk-test-key\n"
-
-        with _patch_all(project):
-            with patch("src.cli.config._check_docker_running", return_value=True):
-                with patch.object(SetupWizard, "_validate_api_key", return_value=True):
-                    with patch("src.cli.config._set_env_key"):
-                        runner = CliRunner()
-                        result = runner.invoke(cli, ["quickstart"], input=piped_input)
-
-        assert result.exit_code == 0, result.output
-        assert "Setup Complete" in result.output
-
-        # Check mesh.yaml has default model
-        mesh_cfg = yaml.safe_load(project["config_file"].read_text())
-        assert mesh_cfg["llm"]["default_model"] == "anthropic/claude-sonnet-4-6"
-
-        # Check agents.yaml has assistant
-        agents_cfg = yaml.safe_load(project["agents_file"].read_text())
-        assert "assistant" in agents_cfg["agents"]
-
-    def test_quickstart_custom_model(self, tmp_path):
-        """Quickstart with --model sets the specified model."""
-        project = _make_project(tmp_path)
-
-        piped_input = "sk-test-key\n"
-
-        with _patch_all(project):
-            with patch("src.cli.config._check_docker_running", return_value=True):
-                with patch.object(SetupWizard, "_validate_api_key", return_value=True):
-                    with patch("src.cli.config._set_env_key"):
-                        runner = CliRunner()
-                        result = runner.invoke(
-                            cli, ["quickstart", "--model", "openai/gpt-4.1"],
-                            input=piped_input,
-                        )
-
-        assert result.exit_code == 0, result.output
-        mesh_cfg = yaml.safe_load(project["config_file"].read_text())
-        assert mesh_cfg["llm"]["default_model"] == "openai/gpt-4.1"
-
-    def test_quickstart_existing_key(self, tmp_path):
-        """Quickstart with existing key in env doesn't prompt for key."""
-        project = _make_project(tmp_path)
-
-        env_var = "OPENLEGION_CRED_ANTHROPIC_API_KEY"
-
-        with _patch_all(project):
-            with patch("src.cli.config._check_docker_running", return_value=True):
-                with patch("src.cli.config._set_env_key"):
-                    with patch.dict(os.environ, {env_var: "sk-existing"}):
-                        runner = CliRunner()
-                        result = runner.invoke(cli, ["quickstart"], input="")
-
-        assert result.exit_code == 0, result.output
-        assert "Using existing" in result.output
-        assert "Setup Complete" in result.output
-
-    def test_quickstart_no_docker(self, tmp_path):
-        """Quickstart fails gracefully when Docker is not running."""
-        project = _make_project(tmp_path)
-
-        with _patch_all(project):
-            with patch("src.cli.config._check_docker_running", return_value=False):
-                runner = CliRunner()
-                result = runner.invoke(cli, ["quickstart"])
-
-        assert result.exit_code != 0
-        assert "Docker" in result.output
 
 
 class TestValidateApiKey:

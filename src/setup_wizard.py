@@ -2,7 +2,6 @@
 
 Extracted from cli.py to keep module size manageable. Provides:
   - SetupWizard.run_full()      Interactive multi-step setup
-  - SetupWizard.run_quickstart() Zero-prompt single-agent setup
 """
 
 from __future__ import annotations
@@ -167,6 +166,25 @@ class SetupWizard:
 
         if existing_agents:
             click.echo(f"  Existing agents: {', '.join(existing_agents)}")
+
+            # Check if model changed — offer to update existing agents
+            from src.cli.config import AGENTS_FILE
+            if AGENTS_FILE.exists():
+                with open(AGENTS_FILE) as f:
+                    agents_data = yaml.safe_load(f) or {}
+                stale = [
+                    n for n, a in agents_data.get("agents", {}).items()
+                    if a.get("model") != selected_model
+                ]
+                if stale:
+                    click.echo(f"\n  These agents use a different model: {', '.join(stale)}")
+                    if click.confirm(f"  Update all agents to {selected_model}?", default=True):
+                        for n in stale:
+                            agents_data["agents"][n]["model"] = selected_model
+                        with open(AGENTS_FILE, "w") as f:
+                            yaml.dump(agents_data, f, default_flow_style=False, sort_keys=False)
+                        click.echo(f"  Updated {len(stale)} agent(s).")
+
             if not click.confirm("  Add another agent?", default=False):
                 click.echo("  Keeping existing agents.")
                 created_agents = existing_agents
@@ -208,70 +226,6 @@ class SetupWizard:
 
         # Summary
         self._print_summary(provider, selected_model, created_agents)
-
-    def run_quickstart(self, model: str | None = None) -> None:
-        """Zero-prompt single-agent setup: key + single assistant agent."""
-        from src.cli.config import (
-            _apply_template,
-            _check_docker_running,
-            _load_templates,
-            _set_collaborative_permissions,
-            _set_env_key,
-        )
-
-        click.echo("=== OpenLegion Quickstart ===\n")
-
-        # Docker check
-        if not _check_docker_running():
-            click.echo(
-                "Docker is not running. Please start Docker first.\n"
-                "  - Linux: sudo systemctl start docker && sudo usermod -aG docker $USER\n"
-                "  - macOS/Windows: Start Docker Desktop",
-                err=True,
-            )
-            sys.exit(1)
-
-        # Default model
-        selected_model = model or "anthropic/claude-sonnet-4-6"
-
-        # Derive provider from model string
-        provider = selected_model.split("/")[0] if "/" in selected_model else "anthropic"
-
-        # API key: check existing or prompt
-        key_name = f"{provider}_api_key"
-        existing_key = os.environ.get(f"OPENLEGION_CRED_{key_name.upper()}", "")
-        if existing_key:
-            click.echo(f"  Using existing {provider} API key.\n")
-        else:
-            api_key = self._prompt_and_validate_key(provider, provider.title())
-            if api_key:
-                _set_env_key(key_name, api_key)
-
-        # Write mesh config
-        mesh_cfg: dict = {}
-        if self.config_file.exists():
-            with open(self.config_file) as f:
-                mesh_cfg = yaml.safe_load(f) or {}
-        mesh_cfg.setdefault("llm", {})["default_model"] = selected_model
-        mesh_cfg["collaboration"] = True
-        self.config_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.config_file, "w") as f:
-            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
-
-        # Create single assistant agent using starter template
-        templates = _load_templates()
-        if "starter" in templates:
-            created = _apply_template("starter", templates["starter"])
-        else:
-            # Fallback: create manually
-            from src.cli.config import _create_agent
-            _create_agent("assistant", "General-purpose assistant", selected_model)
-            created = ["assistant"]
-
-        _set_collaborative_permissions()
-
-        click.echo("")
-        self._print_summary(provider, selected_model, created)
 
     # ── API key validation ───────────────────────────────────
 
