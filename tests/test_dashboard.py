@@ -249,7 +249,11 @@ class TestDashboardAgentCRUD:
         resp = self.client.post("/dashboard/api/agents", json={"name": "alpha"})
         assert resp.status_code == 409
 
-    def test_delete_agent_success(self):
+    @patch("src.cli.config._save_permissions")
+    @patch("src.cli.config._load_permissions", return_value={"permissions": {}})
+    @patch("src.cli.config.AGENTS_FILE")
+    def test_delete_agent_success(self, mock_agents_file, mock_lp, mock_sp):
+        mock_agents_file.exists.return_value = False
         resp = self.client.delete("/dashboard/api/agents/alpha")
         assert resp.status_code == 200
         data = resp.json()
@@ -257,6 +261,8 @@ class TestDashboardAgentCRUD:
         assert data["agent"] == "alpha"
         # Verify agent is removed from registry
         assert "alpha" not in self.components["agent_registry"]
+        # Verify health monitor cleanup
+        assert "alpha" not in self.components["health_monitor"].agents
 
     def test_delete_agent_not_found(self):
         resp = self.client.delete("/dashboard/api/agents/nonexistent")
