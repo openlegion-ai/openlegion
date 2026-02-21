@@ -1,7 +1,7 @@
 """CLI entry point for OpenLegion.
 
 Core:
-  setup             One-time setup: API key, project, first agent, Docker image
+  setup             Interactive setup: API key, model, project, agents
   start             Start runtime + interactive chat REPL
   start -d          Start runtime in background (detached)
   stop              Stop all agent containers
@@ -9,7 +9,7 @@ Core:
   chat <name>       Connect to a running agent (detached mode)
 
 Agent management:
-  agent add [name]        Add a new agent
+  agent add [name]        Add a new agent (with model selection)
   agent list              List configured agents
   agent remove <name>     Remove an agent
 """
@@ -61,15 +61,6 @@ def setup():
     wizard.run_full()
 
 
-@cli.command()
-@click.option("--model", default=None, help="LLM model (default: anthropic/claude-sonnet-4-6)")
-def quickstart(model):
-    """One-command setup: API key + single assistant agent."""
-    from src.setup_wizard import SetupWizard
-    wizard = SetupWizard(cli_config.PROJECT_ROOT)
-    wizard.run_quickstart(model)
-
-
 # ── agent subgroup ───────────────────────────────────────────
 
 @cli.group()
@@ -80,13 +71,17 @@ def agent():
 
 @agent.command("add")
 @click.argument("name", required=False, default=None)
-def agent_add(name: str | None):
+@click.option("--model", "model_override", default=None, help="LLM model (default: from mesh config)")
+def agent_add(name: str | None, model_override: str | None):
     """Add a new agent.
 
     Examples:
       openlegion agent add researcher
+      openlegion agent add researcher --model anthropic/claude-haiku-4-5-20251001
       openlegion agent add              # interactive mode
     """
+    from src.cli.config import _PROVIDER_MODELS
+
     cfg = _load_config()
 
     if name is None:
@@ -100,7 +95,27 @@ def agent_add(name: str | None):
         "What should this agent do?",
         default=f"General-purpose {name} assistant",
     )
-    model = _get_default_model()
+
+    default_model = _get_default_model()
+    if model_override:
+        model = model_override
+    else:
+        # Flatten all models for display
+        provider = default_model.split("/")[0] if "/" in default_model else "anthropic"
+        models = _PROVIDER_MODELS.get(provider, [default_model])
+        default_idx = 1
+        for i, m in enumerate(models, 1):
+            marker = " (default)" if m == default_model else ""
+            click.echo(f"  {i}. {m}{marker}")
+            if m == default_model:
+                default_idx = i
+        model_choice = click.prompt(
+            "Model",
+            type=click.IntRange(1, len(models)),
+            default=default_idx,
+        )
+        model = models[model_choice - 1]
+
     _create_agent(name, description, model)
 
     click.echo(f"\nAgent '{name}' created.")

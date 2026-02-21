@@ -20,7 +20,7 @@ class TestAgentAdd:
 
         config_file.write_text(yaml.dump({
             "mesh": {"host": "0.0.0.0", "port": 8420},
-            "llm": {"default_model": "openai/gpt-4o-mini"},
+            "llm": {"default_model": "openai/gpt-4.1"},
         }))
         perms_file.write_text(json.dumps({"permissions": {}}))
 
@@ -34,7 +34,7 @@ class TestAgentAdd:
             result = runner.invoke(
                 cli,
                 ["agent", "add", "mybot"],
-                input="Code review specialist\n",
+                input="Code review specialist\n\n",  # description + accept default model
             )
             assert result.exit_code == 0, result.output
             assert "mybot" in result.output
@@ -42,10 +42,42 @@ class TestAgentAdd:
             agents_cfg = yaml.safe_load(agents_file.read_text())
             assert "mybot" in agents_cfg["agents"]
             assert agents_cfg["agents"]["mybot"]["role"] == "Code review specialist"
+            assert "openai/" in agents_cfg["agents"]["mybot"]["model"]
 
             perms = json.loads(perms_file.read_text())
             assert "mybot" in perms["permissions"]
             assert "llm" in perms["permissions"]["mybot"]["allowed_apis"]
+
+    def test_add_agent_with_model_flag(self, tmp_path):
+        """--model flag skips interactive model selection."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+        perms_file = tmp_path / "permissions.json"
+        project_root = tmp_path
+
+        config_file.write_text(yaml.dump({
+            "mesh": {"host": "0.0.0.0", "port": 8420},
+            "llm": {"default_model": "openai/gpt-4.1"},
+        }))
+        perms_file.write_text(json.dumps({"permissions": {}}))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.PROJECT_ROOT", project_root),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                ["agent", "add", "mybot", "--model", "anthropic/claude-haiku-4-5-20251001"],
+                input="Code review specialist\n",  # only description needed
+            )
+            assert result.exit_code == 0, result.output
+            assert "mybot" in result.output
+
+            agents_cfg = yaml.safe_load(agents_file.read_text())
+            assert agents_cfg["agents"]["mybot"]["model"] == "anthropic/claude-haiku-4-5-20251001"
 
     def test_add_duplicate_agent(self, tmp_path):
         config_file = tmp_path / "mesh.yaml"
