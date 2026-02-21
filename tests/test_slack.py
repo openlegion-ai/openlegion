@@ -48,7 +48,7 @@ def _make_channel(
     defaults.update(overrides)
     ch = SlackChannel(**defaults)
     if paired is not None:
-        ch._paired = paired
+        ch._pairing._data = paired
     return ch
 
 
@@ -94,7 +94,7 @@ class TestPairing:
         say = _make_say()
         event = {"user": "U1", "text": "!start abc123", "channel": "C1", "ts": "1.0"}
         await ch._on_message(event, say)
-        assert ch._paired["owner"] == "U1"
+        assert ch._pairing.owner == "U1"
         say.assert_called()
 
     @pytest.mark.asyncio
@@ -105,7 +105,7 @@ class TestPairing:
         say = _make_say()
         event = {"user": "U1", "text": "!start wrongcode", "channel": "C1", "ts": "1.0"}
         await ch._on_message(event, say)
-        assert ch._paired["owner"] is None
+        assert ch._pairing.owner is None
         # Should inform about pairing requirement
         say.assert_called()
         msg = say.call_args[1]["text"]
@@ -119,7 +119,7 @@ class TestPairing:
         say = _make_say()
         event = {"user": "U1", "text": "hello", "channel": "C1", "ts": "1.0"}
         await ch._on_message(event, say)
-        assert ch._paired["owner"] is None
+        assert ch._pairing.owner is None
         msg = say.call_args[1]["text"]
         assert "pairing" in msg.lower()
 
@@ -156,7 +156,7 @@ class TestPairing:
         say = _make_say()
         event = {"user": "U_OWNER", "text": "!allow U_FRIEND", "channel": "C1", "ts": "1.0"}
         await ch._on_message(event, say)
-        assert "U_FRIEND" in ch._paired["allowed"]
+        assert ch._pairing.is_allowed("U_FRIEND")
 
     @pytest.mark.asyncio
     async def test_non_owner_allow_rejected(self):
@@ -164,7 +164,7 @@ class TestPairing:
         say = _make_say()
         event = {"user": "U_OTHER", "text": "!allow U_SOMEONE", "channel": "C1", "ts": "1.0"}
         await ch._on_message(event, say)
-        assert "U_SOMEONE" not in ch._paired.get("allowed", [])
+        assert not ch._pairing.is_allowed("U_SOMEONE")
         msg = say.call_args[1]["text"]
         assert "owner" in msg.lower()
 
@@ -174,7 +174,7 @@ class TestPairing:
         say = _make_say()
         event = {"user": "U_OWNER", "text": "!revoke U_FRIEND", "channel": "C1", "ts": "1.0"}
         await ch._on_message(event, say)
-        assert "U_FRIEND" not in ch._paired["allowed"]
+        assert not ch._pairing.is_allowed("U_FRIEND")
 
     @pytest.mark.asyncio
     async def test_owner_paired_command(self):

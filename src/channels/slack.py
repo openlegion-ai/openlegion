@@ -17,8 +17,6 @@ Uses Socket Mode (no public URL needed).
 from __future__ import annotations
 
 import asyncio
-import json
-from pathlib import Path
 
 from src.channels.base import (
     AddKeyFn,
@@ -26,6 +24,7 @@ from src.channels.base import (
     CostsFn,
     DispatchFn,
     ListAgentsFn,
+    PairingManager,
     ResetFn,
     StatusFn,
     StreamDispatchFn,
@@ -36,22 +35,6 @@ from src.shared.utils import setup_logging
 logger = setup_logging("channels.slack")
 
 MAX_SLACK_LEN = 3000
-_PAIRING_FILE = Path("config/slack_paired.json")
-
-
-def _load_paired() -> dict:
-    """Load paired users from disk."""
-    if _PAIRING_FILE.exists():
-        try:
-            return json.loads(_PAIRING_FILE.read_text())
-        except Exception:
-            pass
-    return {"owner": None, "allowed": []}
-
-
-def _save_paired(data: dict) -> None:
-    _PAIRING_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _PAIRING_FILE.write_text(json.dumps(data, indent=2) + "\n")
 
 
 def _get_user_key(user_id: str, thread_ts: str | None) -> str:
@@ -92,7 +75,7 @@ class SlackChannel(Channel):
         self._bolt_app = None
         self._handler = None
         self._channel_ids: set[str] = set()
-        self._paired = _load_paired()
+        self._pairing = PairingManager("config/slack_paired.json")
 
     async def start(self) -> None:
         try:
@@ -117,10 +100,10 @@ class SlackChannel(Channel):
         self._handler = AsyncSocketModeHandler(self._bolt_app, self.app_token)
         await self._handler.start_async()
 
-        owner = self._paired.get("owner")
+        owner = self._pairing.owner
         if owner:
             logger.info(f"Slack channel started (owner: {owner})")
-        elif self._paired.get("pairing_code"):
+        elif self._pairing.pairing_code:
             logger.info("Slack channel started (awaiting pairing code)")
         else:
             logger.info("Slack channel started (no pairing code -- run setup again)")
@@ -144,15 +127,10 @@ class SlackChannel(Channel):
                 logger.warning(f"Failed to notify channel {ch_id}: {e}")
 
     def _is_allowed(self, user_id: str) -> bool:
-        owner = self._paired.get("owner")
-        if owner is None:
-            return False
-        if user_id == owner:
-            return True
-        return user_id in self._paired.get("allowed", [])
+        return self._pairing.is_allowed(user_id)
 
     def _is_owner(self, user_id: str) -> bool:
-        return user_id == self._paired.get("owner")
+        return self._pairing.is_owner(user_id)
 
     async def _on_message(self, event: dict, say) -> None:
         """Handle incoming Slack message events."""
@@ -169,11 +147,11 @@ class SlackChannel(Channel):
             return
 
         # Pairing: !start <code>
-        if self._paired.get("owner") is None:
+        if self._pairing.owner is None:
             if text.lower().startswith("!start") or text.lower().startswith("/start"):
                 parts = text.split(None, 1)
                 code_arg = parts[1].strip() if len(parts) > 1 else ""
-                expected = self._paired.get("pairing_code", "")
+                expected = self._pairing.pairing_code
                 if not expected or code_arg != expected:
                     await say(
                         text=(
@@ -186,10 +164,7 @@ class SlackChannel(Channel):
                         f"Rejected !start without valid pairing code from {user_id}"
                     )
                     return
-                self._paired["owner"] = user_id
-                self._paired.setdefault("allowed", [])
-                self._paired.pop("pairing_code", None)
-                _save_paired(self._paired)
+                self._pairing.claim_owner(user_id)
                 logger.info(f"Paired owner via code: {user_id}")
                 self._channel_ids.add(channel_id)
                 await say(
@@ -229,10 +204,7 @@ class SlackChannel(Channel):
                 await say(text="Usage: !allow <slack_user_id>", thread_ts=thread_ts)
                 return
             target_id = parts[1].strip()
-            allowed = self._paired.setdefault("allowed", [])
-            if target_id not in allowed:
-                allowed.append(target_id)
-                _save_paired(self._paired)
+            self._pairing.allow(target_id)
             await say(text=f"User {target_id} is now allowed.", thread_ts=thread_ts)
             logger.info(f"Owner allowed user {target_id}")
             return
@@ -246,10 +218,7 @@ class SlackChannel(Channel):
                 await say(text="Usage: !revoke <slack_user_id>", thread_ts=thread_ts)
                 return
             target_id = parts[1].strip()
-            allowed = self._paired.get("allowed", [])
-            if target_id in allowed:
-                allowed.remove(target_id)
-                _save_paired(self._paired)
+            if self._pairing.revoke(target_id):
                 await say(text=f"User {target_id} access revoked.", thread_ts=thread_ts)
             else:
                 await say(
@@ -265,8 +234,8 @@ class SlackChannel(Channel):
                     thread_ts=thread_ts,
                 )
                 return
-            owner = self._paired.get("owner")
-            allowed = self._paired.get("allowed", [])
+            owner = self._pairing.owner
+            allowed = self._pairing.allowed_list()
             lines = [f"Owner: {owner}"]
             if allowed:
                 lines.append(f"Allowed users: {', '.join(str(u) for u in allowed)}")

@@ -16,8 +16,6 @@ Config: TELEGRAM_BOT_TOKEN in .env, channels.telegram in mesh.yaml
 from __future__ import annotations
 
 import asyncio
-import json
-from pathlib import Path
 
 from src.channels.base import (
     AddKeyFn,
@@ -25,6 +23,7 @@ from src.channels.base import (
     CostsFn,
     DispatchFn,
     ListAgentsFn,
+    PairingManager,
     ResetFn,
     StatusFn,
     StreamDispatchFn,
@@ -61,22 +60,6 @@ def _md_to_html(text: str) -> str:
     # Headers: # ... → <b>...</b> (Telegram has no header tag)
     text = _re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=_re.MULTILINE)
     return text
-_PAIRING_FILE = Path("config/telegram_paired.json")
-
-
-def _load_paired() -> dict:
-    """Load paired users from disk. Returns {"owner": int|null, "allowed": [int]}."""
-    if _PAIRING_FILE.exists():
-        try:
-            return json.loads(_PAIRING_FILE.read_text())
-        except Exception:
-            pass
-    return {"owner": None, "allowed": []}
-
-
-def _save_paired(data: dict) -> None:
-    _PAIRING_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _PAIRING_FILE.write_text(json.dumps(data, indent=2) + "\n")
 
 
 class TelegramChannel(Channel):
@@ -109,7 +92,7 @@ class TelegramChannel(Channel):
         self._explicit_allowed = set(allowed_users) if allowed_users else None
         self._app = None
         self._chat_ids: set[int] = set()
-        self._paired = _load_paired()
+        self._pairing = PairingManager("config/telegram_paired.json")
 
     async def start(self) -> None:
         try:
@@ -143,10 +126,10 @@ class TelegramChannel(Channel):
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)
-        owner = self._paired.get("owner")
+        owner = self._pairing.owner
         if owner:
             logger.info(f"Telegram channel started (owner: {owner})")
-        elif self._paired.get("pairing_code"):
+        elif self._pairing.pairing_code:
             logger.info("Telegram channel started (awaiting pairing code)")
         else:
             logger.info("Telegram channel started (no pairing code — run setup again)")
@@ -172,23 +155,18 @@ class TelegramChannel(Channel):
     def _is_allowed(self, user_id: int) -> bool:
         if self._explicit_allowed is not None:
             return user_id in self._explicit_allowed
-        owner = self._paired.get("owner")
-        if owner is None:
-            return False
-        if user_id == owner:
-            return True
-        return user_id in self._paired.get("allowed", [])
+        return self._pairing.is_allowed(user_id)
 
     def _is_owner(self, user_id: int) -> bool:
-        return user_id == self._paired.get("owner")
+        return self._pairing.is_owner(user_id)
 
     async def _cmd_start(self, update, context) -> None:
         user_id = update.effective_user.id
         username = update.effective_user.username or update.effective_user.first_name
 
-        if self._paired.get("owner") is None:
+        if self._pairing.owner is None:
             code_arg = context.args[0] if context.args else ""
-            expected = self._paired.get("pairing_code", "")
+            expected = self._pairing.pairing_code
             if not expected or code_arg != expected:
                 await update.message.reply_text(
                     "Pairing required. Send:  /start <pairing_code>\n"
@@ -198,10 +176,7 @@ class TelegramChannel(Channel):
                     f"Rejected /start without valid pairing code from {username} (id: {user_id})"
                 )
                 return
-            self._paired["owner"] = user_id
-            self._paired.setdefault("allowed", [])
-            self._paired.pop("pairing_code", None)
-            _save_paired(self._paired)
+            self._pairing.claim_owner(user_id)
             logger.info(f"Paired owner via code: {username} (id: {user_id})")
             self._chat_ids.add(update.effective_chat.id)
             str_id = str(user_id)
@@ -246,10 +221,7 @@ class TelegramChannel(Channel):
         except ValueError:
             await update.message.reply_text("Invalid user ID. Must be a number.")
             return
-        allowed = self._paired.setdefault("allowed", [])
-        if target_id not in allowed:
-            allowed.append(target_id)
-            _save_paired(self._paired)
+        self._pairing.allow(target_id)
         await update.message.reply_text(f"User {target_id} is now allowed.")
         logger.info(f"Owner allowed user {target_id}")
 
@@ -267,10 +239,7 @@ class TelegramChannel(Channel):
         except ValueError:
             await update.message.reply_text("Invalid user ID. Must be a number.")
             return
-        allowed = self._paired.get("allowed", [])
-        if target_id in allowed:
-            allowed.remove(target_id)
-            _save_paired(self._paired)
+        if self._pairing.revoke(target_id):
             await update.message.reply_text(f"User {target_id} access revoked.")
         else:
             await update.message.reply_text(f"User {target_id} was not in the allowed list.")
@@ -280,8 +249,8 @@ class TelegramChannel(Channel):
         if not self._is_owner(update.effective_user.id):
             await update.message.reply_text("Only the owner can view pairing info.")
             return
-        owner = self._paired.get("owner")
-        allowed = self._paired.get("allowed", [])
+        owner = self._pairing.owner
+        allowed = self._pairing.allowed_list()
         lines = [f"Owner: {owner}"]
         if allowed:
             lines.append(f"Allowed users: {', '.join(str(u) for u in allowed)}")
