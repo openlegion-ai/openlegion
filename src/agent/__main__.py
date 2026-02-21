@@ -85,6 +85,9 @@ def main() -> None:
         context_manager=context_mgr,
     )
 
+    from src.agent.builtins.subagent_tool import register_parent_llm
+    register_parent_llm(agent_id, llm)
+
     agent_port = int(os.environ.get("AGENT_PORT", "8400"))
 
     @asynccontextmanager
