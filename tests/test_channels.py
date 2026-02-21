@@ -347,3 +347,83 @@ class TestSilentResponseSuppression:
         result = await ch.handle_message("u1", "hello")
         assert "[alpha]" in result
         assert "reply from alpha" in result
+
+
+# ── /steer command ────────────────────────────────────────────
+
+class TestSteerCommand:
+    @pytest.mark.asyncio
+    async def test_steer_command(self):
+        """'/steer msg' calls steer_fn with (current_agent, msg)."""
+        steered = []
+        def steer_fn(agent: str, msg: str) -> None:
+            steered.append((agent, msg))
+        ch = _make_channel(steer_fn=steer_fn)
+        result = await ch.handle_message("u1", "/steer focus on task X")
+        assert "Steered" in result
+        assert steered == [("alpha", "focus on task X")]
+
+    @pytest.mark.asyncio
+    async def test_steer_no_fn(self):
+        """Graceful message when steer_fn is None."""
+        ch = _make_channel()
+        result = await ch.handle_message("u1", "/steer do something")
+        assert "not available" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_steer_no_args(self):
+        """Usage hint when no message provided."""
+        steered = []
+        def steer_fn(agent: str, msg: str) -> None:
+            steered.append((agent, msg))
+        ch = _make_channel(steer_fn=steer_fn)
+        result = await ch.handle_message("u1", "/steer")
+        assert "usage" in result.lower()
+        assert len(steered) == 0
+
+
+# ── /debug command ────────────────────────────────────────────
+
+class TestDebugCommand:
+    @pytest.mark.asyncio
+    async def test_debug_command(self):
+        """'/debug' returns formatted trace list with 'Recent traces:' header."""
+        def debug_fn(trace_id=None):
+            return [
+                {"trace_id": "abc123def456", "agent": "alpha", "event_type": "chat"},
+                {"trace_id": "xyz789000111", "agent": "beta", "event_type": "tool_start"},
+            ]
+        ch = _make_channel(debug_fn=debug_fn)
+        result = await ch.handle_message("u1", "/debug")
+        assert "Recent traces:" in result
+        assert "abc123def456"[:12] in result
+        assert "alpha" in result
+        assert "chat" in result
+
+    @pytest.mark.asyncio
+    async def test_debug_with_trace_id(self):
+        """'/debug <id>' passes trace_id to debug_fn and uses trace-specific header."""
+        received_ids = []
+        def debug_fn(trace_id=None):
+            received_ids.append(trace_id)
+            return [{"trace_id": "abc123", "agent": "alpha", "event_type": "chat"}]
+        ch = _make_channel(debug_fn=debug_fn)
+        result = await ch.handle_message("u1", "/debug abc123")
+        assert received_ids == ["abc123"]
+        assert "Trace abc123:" in result
+        assert "Recent traces:" not in result
+
+    @pytest.mark.asyncio
+    async def test_debug_no_fn(self):
+        """Graceful message when debug_fn is None."""
+        ch = _make_channel()
+        result = await ch.handle_message("u1", "/debug")
+        assert "not available" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_steer_and_debug_in_help(self):
+        """'/steer' and '/debug' appear in /help output."""
+        ch = _make_channel()
+        result = await ch.handle_message("u1", "/help")
+        assert "/steer" in result
+        assert "/debug" in result

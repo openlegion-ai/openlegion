@@ -46,6 +46,9 @@
 
   <div x-data="dashboard()" x-init="init()" class="flex flex-col h-screen">
 
+    <!-- Toast notification -->
+    <div x-show="toastMessage" x-cloak class="fixed bottom-4 right-4 z-50 toast text-gray-200" x-text="toastMessage" x-transition></div>
+
     <!-- Navigation bar -->
     <nav class="bg-gray-900 border-b border-gray-800 px-4 py-2.5 flex items-center justify-between shrink-0">
       <div class="flex items-center gap-5">
@@ -209,6 +212,91 @@
         </div>
       </div>
 
+      <!-- Agents Config Panel (V2) -->
+      <div x-show="activeTab === 'agents'" x-cloak>
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-sm font-medium text-gray-400">Agent Configuration</h2>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <template x-for="agent in agents" :key="'cfg_' + agent.id">
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <div class="flex items-center justify-between mb-3">
+                <span class="font-semibold text-white" x-text="agent.id"></span>
+                <div class="flex gap-2">
+                  <button
+                    @click="openAgentConfig(agent.id)"
+                    x-show="editingAgent !== agent.id"
+                    class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
+                  >Edit</button>
+                  <button
+                    @click="restartAgent(agent.id)"
+                    class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-red-900/50 text-gray-400 hover:text-red-400 transition-colors"
+                  >Restart</button>
+                </div>
+              </div>
+              <!-- View mode -->
+              <div x-show="editingAgent !== agent.id" class="space-y-1.5 text-xs">
+                <div class="flex justify-between" x-show="agentConfigs[agent.id]">
+                  <span class="text-gray-500">Model</span>
+                  <span class="text-gray-300 font-mono" x-text="agentConfigs[agent.id]?.model || '-'"></span>
+                </div>
+                <div class="flex justify-between" x-show="agentConfigs[agent.id]">
+                  <span class="text-gray-500">Browser</span>
+                  <span class="text-gray-300" x-text="agentConfigs[agent.id]?.browser_backend || '-'"></span>
+                </div>
+                <div class="flex justify-between" x-show="agentConfigs[agent.id]">
+                  <span class="text-gray-500">Budget</span>
+                  <span class="text-gray-300 font-mono" x-text="agentConfigs[agent.id]?.budget?.daily_usd ? formatCost(agentConfigs[agent.id].budget.daily_usd) + '/day' : 'default'"></span>
+                </div>
+                <div x-show="agentConfigs[agent.id]?.role" class="mt-2">
+                  <span class="text-gray-500 text-[11px]">Role:</span>
+                  <span class="text-gray-400 text-[11px] ml-1" x-text="(agentConfigs[agent.id]?.role || '').substring(0, 80)"></span>
+                </div>
+                <div x-show="!agentConfigs[agent.id]" class="text-gray-600 text-center py-2">
+                  Click Edit to load config
+                </div>
+              </div>
+              <!-- Edit mode -->
+              <div x-show="editingAgent === agent.id" class="space-y-2">
+                <div>
+                  <label :for="'edit-model-' + agent.id" class="text-[11px] text-gray-500">Model</label>
+                  <select :id="'edit-model-' + agent.id" x-model="editForm.model" class="dash-select w-full mt-0.5">
+                    <template x-for="m in availableModels" :key="m">
+                      <option :value="m" x-text="m"></option>
+                    </template>
+                  </select>
+                </div>
+                <div>
+                  <label :for="'edit-browser-' + agent.id" class="text-[11px] text-gray-500">Browser</label>
+                  <select :id="'edit-browser-' + agent.id" x-model="editForm.browser_backend" class="dash-select w-full mt-0.5">
+                    <template x-for="b in availableBrowsers" :key="b">
+                      <option :value="b" x-text="b"></option>
+                    </template>
+                  </select>
+                </div>
+                <div>
+                  <label :for="'edit-role-' + agent.id" class="text-[11px] text-gray-500">Role</label>
+                  <input :id="'edit-role-' + agent.id" type="text" x-model="editForm.role" class="dash-input w-full mt-0.5">
+                </div>
+                <div>
+                  <label :for="'edit-prompt-' + agent.id" class="text-[11px] text-gray-500">System Prompt</label>
+                  <textarea :id="'edit-prompt-' + agent.id" x-model="editForm.system_prompt" class="dash-textarea w-full mt-0.5" rows="3"></textarea>
+                </div>
+                <div>
+                  <label :for="'edit-budget-' + agent.id" class="text-[11px] text-gray-500">Budget ($/day)</label>
+                  <input :id="'edit-budget-' + agent.id" type="number" step="0.5" min="0.1" x-model="editForm.budget_daily" class="dash-input w-full mt-0.5" placeholder="10.0">
+                </div>
+                <div class="flex gap-2 mt-3">
+                  <button @click="saveAgentConfig(agent.id)" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save</button>
+                  <button @click="cancelEdit()" class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Cancel</button>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+        <div x-show="agents.length === 0" class="text-center py-16 text-gray-600">No agents available</div>
+      </div>
+
       <!-- Agent Detail -->
       <div x-show="activeTab === 'agent-detail'" x-cloak>
         <button @click="switchTab('fleet')" class="text-sm text-gray-500 hover:text-gray-300 mb-4 flex items-center gap-1 transition-colors">
@@ -296,6 +384,21 @@
                 </div>
               </div>
             </div>
+            <!-- Per-model cost breakdown -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-5" x-show="agentDetail.spend_today?.by_model && Object.keys(agentDetail.spend_today.by_model).length > 0">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Cost by Model (Today)</div>
+              <div class="space-y-1.5">
+                <template x-for="[model, data] in Object.entries(agentDetail.spend_today?.by_model || {})" :key="model">
+                  <div class="flex justify-between text-xs">
+                    <span class="text-gray-400 font-mono" x-text="model"></span>
+                    <div class="flex gap-4">
+                      <span class="text-gray-500" x-text="(data.total || 0).toLocaleString() + ' tok'"></span>
+                      <span class="text-gray-300 font-mono" x-text="formatCost(data.cost || 0)"></span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
             <!-- Recent events for this agent -->
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
               <div class="flex items-center justify-between mb-3">
@@ -328,6 +431,24 @@
             class="bg-gray-900 border border-gray-800 rounded-lg px-3 py-2 text-sm flex-1 focus:outline-none focus:border-gray-600 focus:ring-1 focus:ring-gray-600 placeholder-gray-700 transition-colors"
           >
           <button @click="fetchBlackboard()" class="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg text-sm font-medium transition-colors">Search</button>
+          <button @click="bbWriteMode = !bbWriteMode" class="bg-gray-800 hover:bg-indigo-900/40 px-4 py-2 rounded-lg text-sm font-medium transition-colors" :class="bbWriteMode ? 'text-indigo-400 border border-indigo-500/40' : ''">+ New</button>
+        </div>
+        <!-- Write form -->
+        <div x-show="bbWriteMode" x-cloak class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label for="bb-new-key" class="text-[11px] text-gray-500 mb-1 block">Key</label>
+              <input id="bb-new-key" type="text" x-model="bbNewKey" placeholder="context/my_key" class="dash-input w-full">
+            </div>
+            <div>
+              <label for="bb-new-value" class="text-[11px] text-gray-500 mb-1 block">Value (JSON)</label>
+              <textarea id="bb-new-value" x-model="bbNewValue" class="dash-textarea w-full" rows="2" placeholder='{"key": "value"}'></textarea>
+            </div>
+          </div>
+          <div class="mt-3 flex gap-2">
+            <button @click="writeBlackboard()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save</button>
+            <button @click="bbWriteMode = false" class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Cancel</button>
+          </div>
         </div>
         <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
           <div class="overflow-x-auto">
@@ -339,6 +460,7 @@
                   <th class="py-3 px-4">Written By</th>
                   <th class="py-3 px-4">Updated</th>
                   <th class="py-3 px-4">Ver</th>
+                  <th class="py-3 px-4"></th>
                 </tr>
               </thead>
               <tbody>
@@ -347,11 +469,18 @@
                     :class="bbHighlights.has(entry.key) ? 'flash-yellow' : ''">
                     <td class="py-2.5 px-4 font-mono text-xs text-blue-400" x-text="entry.key"></td>
                     <td class="py-2.5 px-4 max-w-md">
-                      <span class="text-gray-300 text-xs font-mono truncate block" x-text="truncateJson(entry.value)"></span>
+                      <span class="text-gray-300 text-xs font-mono truncate block cursor-pointer" @click="$el.classList.toggle('truncate'); $el.classList.toggle('whitespace-pre-wrap')" x-text="truncateJson(entry.value)" :title="fullJson(entry.value)"></span>
                     </td>
                     <td class="py-2.5 px-4 text-gray-500" x-text="entry.written_by"></td>
                     <td class="py-2.5 px-4 text-gray-600 text-xs font-mono" x-text="entry.updated_at"></td>
                     <td class="py-2.5 px-4 text-gray-600 font-mono" x-text="entry.version"></td>
+                    <td class="py-2.5 px-4">
+                      <button
+                        @click="deleteBlackboard(entry.key)"
+                        :disabled="entry.key.startsWith('history/')"
+                        class="text-[10px] px-1.5 py-0.5 rounded text-gray-600 hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                      >Del</button>
+                    </td>
                   </tr>
                 </template>
               </tbody>
@@ -493,6 +622,178 @@
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- Queues (V2) -->
+      <div x-show="activeTab === 'queues'" x-cloak>
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-sm font-medium text-gray-400">Task Queues</h2>
+          <button @click="fetchQueues()" class="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Refresh</button>
+        </div>
+        <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-gray-500 text-left text-xs uppercase tracking-wider border-b border-gray-800">
+                <th class="py-3 px-4">Agent</th>
+                <th class="py-3 px-4">Queue Depth</th>
+                <th class="py-3 px-4">Pending</th>
+                <th class="py-3 px-4">Collected</th>
+                <th class="py-3 px-4">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="[agent, q] in Object.entries(queueStatus)" :key="agent">
+                <tr class="border-b border-gray-800/40 hover:bg-gray-800/30">
+                  <td class="py-2.5 px-4 font-medium text-white" x-text="agent"></td>
+                  <td class="py-2.5 px-4 font-mono text-gray-300" x-text="q.queued"></td>
+                  <td class="py-2.5 px-4 font-mono text-gray-300" x-text="q.pending"></td>
+                  <td class="py-2.5 px-4 font-mono text-gray-300" x-text="q.collected"></td>
+                  <td class="py-2.5 px-4">
+                    <span class="text-[11px] px-2 py-0.5 rounded-full font-medium"
+                      :class="q.busy ? 'bg-amber-900/30 text-amber-400 border border-amber-800/40' : 'bg-gray-800/50 text-gray-500 border border-gray-700/40'"
+                      x-text="q.busy ? 'busy' : 'idle'"
+                    ></span>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <div x-show="Object.keys(queueStatus).length === 0" class="text-center py-12 text-gray-600">
+            No active queues
+          </div>
+        </div>
+      </div>
+
+      <!-- Cron (V2) -->
+      <div x-show="activeTab === 'cron'" x-cloak>
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-sm font-medium text-gray-400">Cron Jobs</h2>
+          <button @click="fetchCronJobs()" class="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Refresh</button>
+        </div>
+        <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="text-gray-500 text-left text-xs uppercase tracking-wider border-b border-gray-800">
+                  <th class="py-3 px-4">ID</th>
+                  <th class="py-3 px-4">Agent</th>
+                  <th class="py-3 px-4">Schedule</th>
+                  <th class="py-3 px-4">Message</th>
+                  <th class="py-3 px-4">HB</th>
+                  <th class="py-3 px-4">Enabled</th>
+                  <th class="py-3 px-4">Last Run</th>
+                  <th class="py-3 px-4">Runs</th>
+                  <th class="py-3 px-4">Errors</th>
+                  <th class="py-3 px-4">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="job in cronJobs" :key="job.id">
+                  <tr class="border-b border-gray-800/40 hover:bg-gray-800/30">
+                    <td class="py-2.5 px-4 font-mono text-xs text-blue-400" x-text="job.id"></td>
+                    <td class="py-2.5 px-4 text-white" x-text="job.agent"></td>
+                    <td class="py-2.5 px-4 font-mono text-gray-300 text-xs" x-text="job.schedule"></td>
+                    <td class="py-2.5 px-4 text-gray-400 text-xs max-w-xs truncate" x-text="job.message"></td>
+                    <td class="py-2.5 px-4">
+                      <span x-show="job.heartbeat" class="text-pink-400 heartbeat-indicator text-[11px]">HB</span>
+                    </td>
+                    <td class="py-2.5 px-4">
+                      <span class="text-[11px] px-2 py-0.5 rounded-full"
+                        :class="job.enabled ? 'bg-green-900/30 text-green-400' : 'bg-gray-800/50 text-gray-500'"
+                        x-text="job.enabled ? 'on' : 'off'"
+                      ></span>
+                    </td>
+                    <td class="py-2.5 px-4 text-gray-600 text-xs font-mono" x-text="job.last_run || '-'"></td>
+                    <td class="py-2.5 px-4 font-mono text-gray-300" x-text="job.run_count"></td>
+                    <td class="py-2.5 px-4 font-mono" :class="job.error_count > 0 ? 'text-red-400' : 'text-gray-600'" x-text="job.error_count"></td>
+                    <td class="py-2.5 px-4 flex gap-1">
+                      <button @click="runCronJob(job.id)" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-colors">Run</button>
+                      <button
+                        x-show="job.enabled"
+                        @click="pauseCronJob(job.id)"
+                        class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-yellow-900/30 text-gray-400 hover:text-yellow-400 transition-colors"
+                      >Pause</button>
+                      <button
+                        x-show="!job.enabled"
+                        @click="resumeCronJob(job.id)"
+                        class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-green-900/30 text-gray-400 hover:text-green-400 transition-colors"
+                      >Resume</button>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <div x-show="cronJobs.length === 0" class="text-center py-12 text-gray-600">
+            No cron jobs configured
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings (V2) -->
+      <div x-show="activeTab === 'settings'" x-cloak>
+        <h2 class="text-sm font-medium text-gray-400 mb-4">Settings & Environment</h2>
+        <div x-show="!settingsData" class="text-center py-12 text-gray-600">Loading...</div>
+        <template x-if="settingsData">
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <!-- Credentials -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Credentials</div>
+              <div class="text-sm text-gray-400 mb-2">
+                <span x-text="settingsData.credentials.count"></span> credential(s) configured
+              </div>
+              <div class="space-y-1">
+                <template x-for="name in settingsData.credentials.names" :key="name">
+                  <div class="flex items-center gap-2 text-xs">
+                    <span class="w-2 h-2 rounded-full bg-green-500/50"></span>
+                    <span class="text-gray-300 font-mono" x-text="name"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+            <!-- PubSub subscriptions -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">PubSub Subscriptions</div>
+              <div x-show="Object.keys(settingsData.pubsub_subscriptions || {}).length === 0" class="text-gray-600 text-sm">No subscriptions</div>
+              <div class="space-y-2">
+                <template x-for="[topic, agents] in Object.entries(settingsData.pubsub_subscriptions || {})" :key="topic">
+                  <div>
+                    <span class="text-xs text-cyan-400 font-mono" x-text="topic"></span>
+                    <span class="text-gray-600 text-xs mx-1">&rarr;</span>
+                    <span class="text-xs text-gray-400" x-text="agents.join(', ')"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+            <!-- Model pricing -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Model Pricing (per 1K tokens)</div>
+              <div class="space-y-1 max-h-60 overflow-y-auto custom-scrollbar">
+                <template x-for="[model, costs] in Object.entries(settingsData.model_costs || {})" :key="model">
+                  <div class="flex justify-between text-xs">
+                    <span class="text-gray-400 font-mono" x-text="model"></span>
+                    <div class="flex gap-3">
+                      <span class="text-gray-500">in: <span class="text-gray-300" x-text="'$' + costs.input_per_1k.toFixed(5)"></span></span>
+                      <span class="text-gray-500">out: <span class="text-gray-300" x-text="'$' + costs.output_per_1k.toFixed(5)"></span></span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+            <!-- Browser backends -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Browser Backends</div>
+              <div class="space-y-2">
+                <template x-for="b in settingsData.browser_backends || []" :key="b.name">
+                  <div>
+                    <span class="text-sm text-white font-medium" x-text="b.label || b.name"></span>
+                    <div class="text-xs text-gray-500 mt-0.5" x-text="b.description || ''"></div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+        </template>
       </div>
 
     </main>

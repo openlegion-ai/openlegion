@@ -74,12 +74,14 @@ class CronScheduler:
         dispatch_fn: Optional[Callable] = None,
         workflow_trigger_fn: Optional[Callable] = None,
         blackboard: Any = None,
+        trace_store: Any = None,
     ):
         self.config_path = Path(config_path)
         self.jobs: dict[str, CronJob] = {}
         self.dispatch_fn = dispatch_fn
         self.workflow_trigger_fn = workflow_trigger_fn
         self.blackboard = blackboard
+        self._trace_store = trace_store
         self._running = False
         self._load()
 
@@ -172,6 +174,13 @@ class CronScheduler:
             job.last_run = datetime.now(UTC).isoformat()
             job.run_count += 1
             self._save()
+            if self._trace_store:
+                from src.shared.trace import new_trace_id
+                self._trace_store.record(
+                    trace_id=new_trace_id(), source="cron", agent=job.agent,
+                    event_type="cron_trigger",
+                    detail=f"job={job.id} schedule={job.schedule}",
+                )
 
             response = None
             if job.workflow and self.workflow_trigger_fn:

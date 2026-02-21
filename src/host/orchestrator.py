@@ -135,6 +135,7 @@ class Orchestrator:
         blackboard: Blackboard | None = None,
         pubsub: PubSub | None = None,
         container_manager: ContainerManager | None = None,
+        trace_store: object | None = None,
     ):
         self.mesh_url = mesh_url
         self.workflows: dict[str, WorkflowDefinition] = {}
@@ -142,6 +143,7 @@ class Orchestrator:
         self.blackboard = blackboard
         self.pubsub = pubsub
         self.container_manager = container_manager
+        self._trace_store = trace_store
         self._client: httpx.AsyncClient | None = None
         self._pending_results: dict[str, asyncio.Future] = {}
         self._load_workflows(workflows_dir)
@@ -272,6 +274,17 @@ class Orchestrator:
 
     async def _execute_step(self, execution: WorkflowExecution, step: WorkflowStep) -> TaskResult:
         """Execute a single workflow step by sending task to agent."""
+        _step_t0 = time.time()
+        if self._trace_store:
+            from src.shared.trace import new_trace_id as _nti
+            _step_trace_id = _nti()
+            self._trace_store.record(
+                trace_id=_step_trace_id, source="orchestrator", agent=step.agent or "",
+                event_type="workflow_step_start",
+                detail=f"wf={execution.workflow.name} step={step.id}",
+            )
+        else:
+            _step_trace_id = None
         input_data = self._resolve_input(execution, step)
 
         context = {}
@@ -296,11 +309,13 @@ class Orchestrator:
             agent_url = self.container_manager.get_agent_url(agent_id)
 
         if not agent_url:
-            return TaskResult(
+            result = TaskResult(
                 task_id=assignment.task_id,
                 status="failed",
                 error=f"No agent available: {agent_id}",
             )
+            self._record_step_end(_step_trace_id, step, execution, _step_t0)
+            return result
 
         try:
             from src.shared.trace import TRACE_HEADER, new_trace_id
@@ -321,22 +336,40 @@ class Orchestrator:
                 future = loop.create_future()
                 self._pending_results[assignment.task_id] = future
                 try:
-                    return await asyncio.wait_for(future, timeout=step.timeout)
+                    result = await asyncio.wait_for(future, timeout=step.timeout)
                 except asyncio.TimeoutError:
                     self._pending_results.pop(assignment.task_id, None)
                     # Fallback to polling as a last resort
-                    return await self._wait_for_task_result(agent_url, assignment, step.timeout)
+                    result = await self._wait_for_task_result(agent_url, assignment, step.timeout)
+                self._record_step_end(_step_trace_id, step, execution, _step_t0)
+                return result
             else:
-                return TaskResult(
+                result = TaskResult(
                     task_id=assignment.task_id,
                     status="failed",
                     error=resp_data.get("error", "Agent rejected task"),
                 )
+                self._record_step_end(_step_trace_id, step, execution, _step_t0)
+                return result
         except Exception as e:
+            self._record_step_end(_step_trace_id, step, execution, _step_t0)
             return TaskResult(
                 task_id=assignment.task_id,
                 status="failed",
                 error=str(e),
+            )
+
+    def _record_step_end(
+        self, trace_id: str | None, step: WorkflowStep,
+        execution: WorkflowExecution, t0: float,
+    ) -> None:
+        if trace_id and self._trace_store:
+            duration_ms = int((time.time() - t0) * 1000)
+            self._trace_store.record(
+                trace_id=trace_id, source="orchestrator", agent=step.agent or "",
+                event_type="workflow_step_end",
+                detail=f"wf={execution.workflow.name} step={step.id}",
+                duration_ms=duration_ms,
             )
 
     async def _wait_for_task_result(self, agent_url: str, assignment: TaskAssignment, timeout: int) -> TaskResult:

@@ -197,12 +197,13 @@ class RuntimeContext:
             cost_tracker=self.cost_tracker,
             failover_config=failover_config or None,
         )
-        self.router = MessageRouter(self.permissions, {})
+        self.router = MessageRouter(self.permissions, {}, trace_store=self.trace_store)
         self.orchestrator = Orchestrator(
             mesh_url=f"http://localhost:{mesh_port}",
             blackboard=self.blackboard,
             pubsub=self.pubsub,
             container_manager=self.runtime,
+            trace_store=self.trace_store,
         )
         self.trace_store = TraceStore()
 
@@ -291,11 +292,19 @@ class RuntimeContext:
                     trace_id=tid, source="dispatch", agent=agent_name,
                     event_type="chat", detail=message[:120],
                 )
+            import time as _time
+            t0 = _time.time()
             try:
                 result = await self.transport.request(
                     agent_name, "POST", "/chat", json={"message": message},
                 )
                 response = result.get("response", "(no response)")
+                duration_ms = int((_time.time() - t0) * 1000)
+                if tid and self.trace_store:
+                    self.trace_store.record(
+                        trace_id=tid, source="dispatch", agent=agent_name,
+                        event_type="chat_response", duration_ms=duration_ms,
+                    )
                 if self.event_bus:
                     self.event_bus.emit("message_sent", agent=agent_name,
                         data={"message": message[:200], "response_length": len(response),
@@ -312,7 +321,10 @@ class RuntimeContext:
             except Exception as e:
                 return {"injected": False, "error": str(e)}
 
-        self.lane_manager = LaneManager(dispatch_fn=_direct_dispatch, steer_fn=_direct_steer)
+        self.lane_manager = LaneManager(
+            dispatch_fn=_direct_dispatch, steer_fn=_direct_steer,
+            trace_store=self.trace_store,
+        )
 
         self._dispatch_loop = asyncio.new_event_loop()
 
@@ -341,6 +353,7 @@ class RuntimeContext:
             auth_tokens=self.runtime.auth_tokens,
             trace_store=self.trace_store,
             event_bus=self.event_bus,
+            health_monitor=self.health_monitor,
         )
         app.include_router(create_webhook_router(self.orchestrator))
         app.include_router(webhook_manager.create_router())
@@ -355,6 +368,15 @@ class RuntimeContext:
             event_bus=self.event_bus,
             agent_registry=self.router.agent_registry,
             mesh_port=mesh_port,
+            lane_manager=self.lane_manager,
+            cron_scheduler=self.cron_scheduler,
+            orchestrator=self.orchestrator,
+            pubsub=self.pubsub,
+            permissions=self.permissions,
+            credential_vault=self.credential_vault,
+            transport=self.transport,
+            runtime=self.runtime,
+            router=self.router,
         )
         app.include_router(dashboard_router)
         self._app = app
@@ -442,6 +464,7 @@ class RuntimeContext:
             dispatch_fn=cron_dispatch,
             workflow_trigger_fn=trigger_workflow,
             blackboard=self.blackboard,
+            trace_store=self.trace_store,
         )
         if self.cron_scheduler.jobs:
             echo_ok(f"Cron scheduler: {len(self.cron_scheduler.jobs)} jobs loaded")
@@ -487,6 +510,13 @@ class RuntimeContext:
             if self.event_bus:
                 self.event_bus.emit("message_received", agent=agent_name,
                     data={"message": message[:200], "source": "channel_stream"})
+            if self.trace_store:
+                from src.shared.trace import new_trace_id
+                self.trace_store.record(
+                    trace_id=new_trace_id(), source="channel_stream",
+                    agent=agent_name, event_type="chat",
+                    detail=message[:120],
+                )
             async for event in self.transport.stream_request(
                 agent_name, "POST", "/chat/stream",
                 json={"message": message}, timeout=120,
@@ -501,6 +531,19 @@ class RuntimeContext:
         def _channel_addkey(service: str, key: str) -> None:
             self.credential_vault.add_credential(service, key)
 
+        def _channel_steer(agent: str, msg: str) -> None:
+            if self.lane_manager:
+                asyncio.run_coroutine_threadsafe(
+                    self.lane_manager.steer(agent, msg), self._dispatch_loop
+                ).result(timeout=5)
+
+        def _channel_debug(trace_id: str | None = None) -> list[dict]:
+            if not self.trace_store:
+                return []
+            if trace_id:
+                return self.trace_store.get_trace(trace_id)
+            return self.trace_store.list_recent(10)
+
         self.channel_manager = ChannelManager(
             self.cfg, self.async_dispatch, self.router.agent_registry,
             status_fn=_channel_status,
@@ -508,6 +551,8 @@ class RuntimeContext:
             reset_fn=_channel_reset,
             stream_dispatch_fn=stream_dispatch_to_agent,
             addkey_fn=_channel_addkey,
+            steer_fn=_channel_steer,
+            debug_fn=_channel_debug,
         )
         channel_routers = self.channel_manager.start_all()
         for ch_router in channel_routers:
