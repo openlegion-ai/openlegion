@@ -88,12 +88,13 @@ function dashboard() {
     // Settings (V2)
     settingsData: null,
 
-    // Chat (persistent per agent)
+    // Chat (persistent per agent until cleared)
     chatAgent: null,
     chatMessage: '',
     chatHistories: {},
     chatLoading: false,
     chatStreaming: false,
+    _chatAbort: null,
 
     // Broadcast
     broadcastMessage: '',
@@ -628,19 +629,25 @@ function dashboard() {
     },
 
     closeChat() {
+      if (this._chatAbort) { this._chatAbort.abort(); this._chatAbort = null; }
       this.chatAgent = null;
       this.chatMessage = '';
       this.chatLoading = false;
       this.chatStreaming = false;
     },
 
+    clearChat() {
+      if (this.chatAgent && this.chatHistories[this.chatAgent]) {
+        if (this._chatAbort) { this._chatAbort.abort(); this._chatAbort = null; }
+        this.chatHistories[this.chatAgent] = [];
+        this.chatLoading = false;
+        this.chatStreaming = false;
+      }
+    },
+
     _scrollChat() {
       const el = document.getElementById('chat-messages');
       if (el) el.scrollTop = el.scrollHeight;
-    },
-
-    _chatEntry(agent, idx) {
-      return this.chatHistories[agent][idx];
     },
 
     async sendChat() {
@@ -658,10 +665,15 @@ function dashboard() {
       const idx = this.chatHistories[agent].length - 1;
       this.$nextTick(() => this._scrollChat());
 
+      // AbortController to cancel fetch when modal is closed
+      const controller = new AbortController();
+      this._chatAbort = controller;
+
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agent}/chat/stream`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ message: msg }),
+          signal: controller.signal,
         });
         if (!resp.ok) {
           let errMsg = `HTTP ${resp.status}`;
@@ -699,15 +711,16 @@ function dashboard() {
               entry.content += data.content || '';
               this._scrollChat();
             } else if (data.type === 'tool_start') {
+              if (firstToken) { this.chatLoading = false; firstToken = false; }
               entry.tools.push({ name: data.name, status: 'running', input: data.input });
               this._scrollChat();
             } else if (data.type === 'tool_result') {
               const tool = entry.tools.find(t => t.name === data.name && t.status === 'running');
               if (tool) {
                 tool.status = 'done';
-                tool.output = typeof data.output === 'string'
-                  ? data.output.substring(0, 200)
-                  : JSON.stringify(data.output, null, 0).substring(0, 200);
+                const raw = typeof data.output === 'string'
+                  ? data.output : JSON.stringify(data.output, null, 0);
+                tool.output = raw.length > 200 ? raw.substring(0, 200) + '...' : raw;
               }
             } else if (data.type === 'done') {
               entry.content = data.response || entry.content;
@@ -721,10 +734,12 @@ function dashboard() {
         }
         this.chatHistories[agent][idx].streaming = false;
       } catch (e) {
+        if (e.name === 'AbortError') return;  // Modal closed — ignore
         this.chatHistories[agent][idx].content = e.message;
         this.chatHistories[agent][idx].role = 'error';
         this.chatHistories[agent][idx].streaming = false;
       }
+      this._chatAbort = null;
       this.chatLoading = false;
       this.chatStreaming = false;
       this.$nextTick(() => this._scrollChat());
@@ -928,6 +943,75 @@ function dashboard() {
         llm_stream: 'bg-purple-300',
       };
       return map[type] || 'bg-gray-400';
+    },
+
+    eventDetail(evt) {
+      const d = evt.data || {};
+      const fields = [];
+      const add = (label, value) => {
+        if (value != null && value !== '' && value !== undefined) {
+          fields.push({ label, value: String(value) });
+        }
+      };
+
+      switch (evt.type) {
+        case 'llm_call':
+          add('Model', d.model);
+          add('Input tokens', d.input_tokens ?? d.prompt_tokens);
+          add('Output tokens', d.output_tokens ?? d.completion_tokens);
+          add('Total tokens', d.total_tokens ?? d.tokens_used);
+          if (d.cost_usd != null) add('Cost', '$' + d.cost_usd.toFixed(6));
+          if (d.duration_ms) add('Duration', d.duration_ms + 'ms');
+          add('Service', d.service);
+          add('Action', d.action);
+          if (d.streaming) add('Streaming', 'yes');
+          break;
+        case 'tool_start':
+          add('Tool', d.tool || d.name);
+          add('Arguments', d.arguments || d.args || d.preview || d.input);
+          break;
+        case 'tool_result':
+          add('Tool', d.tool || d.name);
+          add('Result', d.result || d.output || d.preview);
+          break;
+        case 'message_sent':
+        case 'message_received':
+          add('Message', d.message);
+          add('Source', d.source || d.from);
+          add('Target', d.target || d.to);
+          if (d.response_length) add('Response length', d.response_length);
+          break;
+        case 'health_change':
+          add('Previous', d.previous);
+          add('Current', d.current);
+          add('Failures', d.failures);
+          add('Restarts', d.restarts);
+          break;
+        case 'blackboard_write':
+          add('Key', d.key);
+          add('Version', d.version);
+          add('Written by', d.written_by);
+          if (d.value_preview) add('Value', d.value_preview);
+          else if (d.value !== undefined) add('Value', typeof d.value === 'string' ? d.value : JSON.stringify(d.value, null, 2));
+          break;
+        case 'agent_state':
+          add('State', d.state);
+          add('Role', d.role);
+          if (Array.isArray(d.capabilities)) add('Capabilities', d.capabilities.length + ' tools');
+          add('Reason', d.reason);
+          if (d.ready !== undefined) add('Ready', String(d.ready));
+          break;
+        default:
+          // Fallback: show all data keys
+          for (const [k, v] of Object.entries(d)) {
+            add(k, typeof v === 'object' ? JSON.stringify(v, null, 2) : v);
+          }
+      }
+
+      if (evt.agent && fields.every(f => f.label !== 'Agent')) add('Agent', evt.agent);
+      if (evt.timestamp) add('Timestamp', new Date(typeof evt.timestamp === 'number' ? evt.timestamp * 1000 : evt.timestamp).toLocaleString());
+
+      return fields;
     },
 
     eventSummary(evt) {
