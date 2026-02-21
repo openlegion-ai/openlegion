@@ -247,9 +247,13 @@ class REPLSession:
 
     def _cmd_addkey(self, arg: str) -> None:
         if not arg.strip():
-            service = click.prompt("Service name (e.g. brave_search)")
+            service = click.prompt("Service name (e.g. anthropic, openai, brave_search)")
         else:
             service = arg.split()[0]
+        # Normalize: bare provider names get _api_key suffix
+        known_providers = {"anthropic", "openai", "gemini", "deepseek", "moonshot", "xai", "groq"}
+        if service.lower() in known_providers and not service.lower().endswith("_api_key"):
+            service = f"{service}_api_key"
         inline_parts = arg.split(None, 1) if arg.strip() else []
         if len(inline_parts) > 1:
             key_value = inline_parts[1]

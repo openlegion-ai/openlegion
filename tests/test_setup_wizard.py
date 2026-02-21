@@ -34,6 +34,7 @@ def _make_project(tmp_path: Path) -> dict:
             "src.cli.config.PERMISSIONS_FILE": perms_file,
             "src.cli.config.PROJECT_FILE": project_file,
             "src.cli.config.PROJECT_ROOT": tmp_path,
+            "src.cli.config.ENV_FILE": tmp_path / ".env",
         },
     }
 

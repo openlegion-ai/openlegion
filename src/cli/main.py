@@ -45,6 +45,9 @@ logger = logging.getLogger("cli")
 @click.group()
 def cli():
     """OpenLegion -- Autonomous AI agent fleet."""
+    from dotenv import load_dotenv
+
+    load_dotenv(cli_config.ENV_FILE)
     _suppress_host_logs()
 
 
