@@ -116,6 +116,7 @@ class AgentLoop:
         self._cancel_requested: bool = False
         self._current_task_handle: Optional[asyncio.Task] = None
         self._last_result: Optional[TaskResult] = None
+        self._chat_messages: list[dict] = []
         self._chat_lock = asyncio.Lock()
         self._steer_queue: asyncio.Queue[str] = asyncio.Queue()
 
@@ -515,51 +516,137 @@ class AgentLoop:
         async with self._chat_lock:
             return await self._chat_inner(user_message)
 
+    # ── Chat helpers (shared by streaming and non-streaming) ────
+
+    async def _prepare_chat_turn(self, user_message: str) -> tuple[str, str]:
+        """Set up chat context: corrections, memory, steer, system prompt.
+
+        Returns (possibly-enriched user_message, system_prompt).
+        """
+        goals = await self._fetch_goals()
+
+        if (
+            self.workspace
+            and self._chat_messages
+            and self.workspace.looks_like_correction(user_message)
+        ):
+            prev_assistant = next(
+                (m["content"] for m in reversed(self._chat_messages) if m.get("role") == "assistant"),
+                None,
+            )
+            if prev_assistant:
+                self.workspace.record_correction(
+                    original=truncate(prev_assistant, 200),
+                    correction=user_message,
+                )
+
+        if not self._chat_messages and self.workspace:
+            memory_hits = self.workspace.search(user_message, max_results=3)
+            if memory_hits:
+                memory_context = sanitize_for_prompt("\n".join(
+                    f"- [{h['file']}] {h['snippet']}" for h in memory_hits
+                ))
+                user_message = (
+                    f"{user_message}\n\n"
+                    f"[Relevant memory auto-loaded]\n{memory_context}"
+                )
+
+        self._chat_messages.append({"role": "user", "content": user_message})
+        steered = self._drain_steer_messages()
+        if steered:
+            combined = "\n\n".join(steered)
+            self._chat_messages[-1]["content"] += f"\n\n[Additional context]: {combined}"
+
+        system = self._build_chat_system_prompt(goals=goals)
+        return user_message, system
+
+    def _build_tool_call_entries(self, llm_response) -> list[dict]:
+        """Build tool-call entry dicts and append assistant message."""
+        entries = [
+            {
+                "id": f"call_{generate_id('tc')}",
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": json.dumps(tc.arguments),
+                },
+            }
+            for tc in llm_response.tool_calls
+        ]
+        self._chat_messages.append({
+            "role": "assistant",
+            "content": llm_response.content or "",
+            "tool_calls": entries,
+        })
+        return entries
+
+    async def _execute_chat_tool_call(
+        self, tool_call, tool_call_id: str, tool_outputs: list[dict],
+    ) -> dict:
+        """Execute a single tool call, append result to messages, return output."""
+        try:
+            result = await self.skills.execute(
+                tool_call.name,
+                tool_call.arguments,
+                mesh_client=self.mesh_client,
+                workspace_manager=self.workspace,
+                memory_store=self.memory,
+            )
+            result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+            result_str = sanitize_for_prompt(result_str)
+            await self._learn(tool_call.name, tool_call.arguments, result)
+        except Exception as e:
+            result_str = json.dumps({"error": str(e)})
+            result_str = sanitize_for_prompt(result_str)
+            result = {"error": str(e)}
+            logger.error(f"Chat tool {tool_call.name} failed: {e}")
+            self._record_failure(
+                tool_call.name, str(e),
+                truncate(str(tool_call.arguments), 200),
+                arguments=tool_call.arguments,
+            )
+
+        self._chat_messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": result_str,
+        })
+        output = {"tool": tool_call.name, "input": tool_call.arguments, "output": result}
+        tool_outputs.append(output)
+        self._maybe_reload_skills(result)
+        return output
+
+    async def _compact_chat_context(self, system: str) -> None:
+        """Run context compaction and drain any pending steer messages."""
+        if self.context_manager:
+            self._chat_messages = await self.context_manager.maybe_compact(
+                system, self._chat_messages,
+            )
+        else:
+            self._chat_messages = self._trim_context(self._chat_messages, max_tokens=100_000)
+
+        steered = self._drain_steer_messages()
+        if steered:
+            combined = "\n\n".join(f"[User interjection]: {s}" for s in steered)
+            self._chat_messages.append({"role": "user", "content": combined})
+
+    @staticmethod
+    def _resolve_content(llm_response) -> str:
+        """Extract text content, suppressing silent acknowledgments."""
+        content = llm_response.content or ""
+        if content and content.strip() == SILENT_REPLY_TOKEN:
+            content = ""
+        return content
+
+    # ── Non-streaming chat ────────────────────────────────────
+
     async def _chat_inner(self, user_message: str) -> dict:
         self.state = "working"
         total_tokens = 0
         tool_outputs: list[dict] = []
 
         try:
-            if not hasattr(self, "_chat_messages"):
-                self._chat_messages: list[dict] = []
-
-            goals = await self._fetch_goals()
-
-            if (
-                self.workspace
-                and self._chat_messages
-                and self.workspace.looks_like_correction(user_message)
-            ):
-                prev_assistant = next(
-                    (m["content"] for m in reversed(self._chat_messages) if m.get("role") == "assistant"),
-                    None,
-                )
-                if prev_assistant:
-                    self.workspace.record_correction(
-                        original=truncate(prev_assistant, 200),
-                        correction=user_message,
-                    )
-
-            if not self._chat_messages and self.workspace:
-                memory_hits = self.workspace.search(user_message, max_results=3)
-                if memory_hits:
-                    memory_context = sanitize_for_prompt("\n".join(
-                        f"- [{h['file']}] {h['snippet']}" for h in memory_hits
-                    ))
-                    user_message = (
-                        f"{user_message}\n\n"
-                        f"[Relevant memory auto-loaded]\n{memory_context}"
-                    )
-
-            self._chat_messages.append({"role": "user", "content": user_message})
-            # Drain steer messages that arrived while idle
-            steered = self._drain_steer_messages()
-            if steered:
-                combined = "\n\n".join(steered)
-                self._chat_messages[-1]["content"] += f"\n\n[Additional context]: {combined}"
-
-            system = self._build_chat_system_prompt(goals=goals)
+            user_message, system = await self._prepare_chat_turn(user_message)
 
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
                 llm_response = await _llm_call_with_retry(
@@ -571,10 +658,7 @@ class AgentLoop:
                 total_tokens += llm_response.tokens_used
 
                 if not llm_response.tool_calls:
-                    content = llm_response.content or ""
-                    # Suppress silent acknowledgments (heartbeat/cron filler)
-                    if content and content.strip() == SILENT_REPLY_TOKEN:
-                        content = ""
+                    content = self._resolve_content(llm_response)
                     self._chat_messages.append({"role": "assistant", "content": content})
                     self._log_chat_turn(user_message, content)
                     self.state = "idle"
@@ -584,74 +668,13 @@ class AgentLoop:
                         "tokens_used": total_tokens,
                     }
 
-                tool_call_entries = [
-                    {
-                        "id": f"call_{generate_id('tc')}",
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments),
-                        },
-                    }
-                    for tc in llm_response.tool_calls
-                ]
-                self._chat_messages.append({
-                    "role": "assistant",
-                    "content": llm_response.content or "",
-                    "tool_calls": tool_call_entries,
-                })
-
+                entries = self._build_tool_call_entries(llm_response)
                 for i, tool_call in enumerate(llm_response.tool_calls):
-                    try:
-                        result = await self.skills.execute(
-                            tool_call.name,
-                            tool_call.arguments,
-                            mesh_client=self.mesh_client,
-                            workspace_manager=self.workspace,
-                            memory_store=self.memory,
-                        )
-                        result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
-                        result_str = sanitize_for_prompt(result_str)
-                        await self._learn(tool_call.name, tool_call.arguments, result)
-                    except Exception as e:
-                        result_str = json.dumps({"error": str(e)})
-                        result_str = sanitize_for_prompt(result_str)
-                        result = {"error": str(e)}
-                        logger.error(f"Chat tool {tool_call.name} failed: {e}")
-                        self._record_failure(
-                            tool_call.name, str(e),
-                            truncate(str(tool_call.arguments), 200),
-                            arguments=tool_call.arguments,
-                        )
+                    await self._execute_chat_tool_call(tool_call, entries[i]["id"], tool_outputs)
 
-                    self._chat_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call_entries[i]["id"],
-                        "content": result_str,
-                    })
-                    tool_outputs.append({
-                        "tool": tool_call.name,
-                        "input": tool_call.arguments,
-                        "output": result,
-                    })
-                    self._maybe_reload_skills(result)
-
-                if self.context_manager:
-                    self._chat_messages = await self.context_manager.maybe_compact(
-                        system, self._chat_messages,
-                    )
-                else:
-                    self._chat_messages = self._trim_context(self._chat_messages, max_tokens=100_000)
-
-                # Inject mid-execution steer as new user message
-                steered = self._drain_steer_messages()
-                if steered:
-                    combined = "\n\n".join(f"[User interjection]: {s}" for s in steered)
-                    self._chat_messages.append({"role": "user", "content": combined})
+                await self._compact_chat_context(system)
 
             # Max tool rounds exhausted — force final text response.
-            # Must still pass tools= when tool messages are in history
-            # (Anthropic requires it).
             llm_response = await _llm_call_with_retry(
                 self.llm.chat,
                 system=system,
@@ -659,9 +682,7 @@ class AgentLoop:
                 tools=self.skills.get_tool_definitions() or None,
             )
             total_tokens += llm_response.tokens_used
-            content = llm_response.content
-            if content and content.strip() == SILENT_REPLY_TOKEN:
-                content = ""
+            content = self._resolve_content(llm_response)
             self._chat_messages.append({"role": "assistant", "content": content})
             self._log_chat_turn(user_message, content)
             self.state = "idle"
@@ -791,7 +812,7 @@ class AgentLoop:
             parts.append(sanitize_for_prompt(tool_history))
 
         # Context usage warning at 80%+
-        if self.context_manager and hasattr(self, "_chat_messages"):
+        if self.context_manager and self._chat_messages:
             warning = self.context_manager.context_warning(self._chat_messages)
             if warning:
                 parts.append(f"## {warning}")
@@ -805,7 +826,7 @@ class AgentLoop:
         ctx_pct = 0.0
         if self.context_manager:
             ctx_max = self.context_manager.max_tokens
-            if hasattr(self, "_chat_messages") and self._chat_messages:
+            if self._chat_messages:
                 ctx_tokens = self.context_manager.token_count(self._chat_messages)
                 ctx_pct = round(ctx_tokens / ctx_max, 4) if ctx_max else 0.0
         return AgentStatus(
@@ -843,45 +864,7 @@ class AgentLoop:
         tool_outputs: list[dict] = []
 
         try:
-            if not hasattr(self, "_chat_messages"):
-                self._chat_messages: list[dict] = []
-
-            goals = await self._fetch_goals()
-
-            if (
-                self.workspace
-                and self._chat_messages
-                and self.workspace.looks_like_correction(user_message)
-            ):
-                prev_assistant = next(
-                    (m["content"] for m in reversed(self._chat_messages) if m.get("role") == "assistant"),
-                    None,
-                )
-                if prev_assistant:
-                    self.workspace.record_correction(
-                        original=truncate(prev_assistant, 200),
-                        correction=user_message,
-                    )
-
-            if not self._chat_messages and self.workspace:
-                memory_hits = self.workspace.search(user_message, max_results=3)
-                if memory_hits:
-                    memory_context = sanitize_for_prompt("\n".join(
-                        f"- [{h['file']}] {h['snippet']}" for h in memory_hits
-                    ))
-                    user_message = (
-                        f"{user_message}\n\n"
-                        f"[Relevant memory auto-loaded]\n{memory_context}"
-                    )
-
-            self._chat_messages.append({"role": "user", "content": user_message})
-            # Drain steer messages that arrived while idle
-            steered = self._drain_steer_messages()
-            if steered:
-                combined = "\n\n".join(steered)
-                self._chat_messages[-1]["content"] += f"\n\n[Additional context]: {combined}"
-
-            system = self._build_chat_system_prompt(goals=goals)
+            user_message, system = await self._prepare_chat_turn(user_message)
 
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
                 llm_response = await _llm_call_with_retry(
@@ -893,9 +876,7 @@ class AgentLoop:
                 total_tokens += llm_response.tokens_used
 
                 if not llm_response.tool_calls:
-                    content = llm_response.content or ""
-                    if content and content.strip() == SILENT_REPLY_TOKEN:
-                        content = ""
+                    content = self._resolve_content(llm_response)
                     if content:
                         yield {"type": "text_delta", "content": content}
                     self._chat_messages.append({"role": "assistant", "content": content})
@@ -909,75 +890,15 @@ class AgentLoop:
                     }
                     return
 
-                tool_call_entries = [
-                    {
-                        "id": f"call_{generate_id('tc')}",
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments),
-                        },
-                    }
-                    for tc in llm_response.tool_calls
-                ]
-                self._chat_messages.append({
-                    "role": "assistant",
-                    "content": llm_response.content or "",
-                    "tool_calls": tool_call_entries,
-                })
-
+                entries = self._build_tool_call_entries(llm_response)
                 for i, tool_call in enumerate(llm_response.tool_calls):
                     yield {"type": "tool_start", "name": tool_call.name, "input": tool_call.arguments}
-                    try:
-                        result = await self.skills.execute(
-                            tool_call.name,
-                            tool_call.arguments,
-                            mesh_client=self.mesh_client,
-                            workspace_manager=self.workspace,
-                            memory_store=self.memory,
-                        )
-                        result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
-                        result_str = sanitize_for_prompt(result_str)
-                        await self._learn(tool_call.name, tool_call.arguments, result)
-                    except Exception as e:
-                        result_str = json.dumps({"error": str(e)})
-                        result_str = sanitize_for_prompt(result_str)
-                        result = {"error": str(e)}
-                        logger.error(f"Chat tool {tool_call.name} failed: {e}")
-                        self._record_failure(
-                            tool_call.name, str(e),
-                            truncate(str(tool_call.arguments), 200),
-                            arguments=tool_call.arguments,
-                        )
+                    output = await self._execute_chat_tool_call(tool_call, entries[i]["id"], tool_outputs)
+                    yield {"type": "tool_result", "name": tool_call.name, "output": output["output"]}
 
-                    self._chat_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call_entries[i]["id"],
-                        "content": result_str,
-                    })
-                    tool_outputs.append({
-                        "tool": tool_call.name,
-                        "input": tool_call.arguments,
-                        "output": result,
-                    })
-                    yield {"type": "tool_result", "name": tool_call.name, "output": result}
-                    self._maybe_reload_skills(result)
-
-                if self.context_manager:
-                    self._chat_messages = await self.context_manager.maybe_compact(
-                        system, self._chat_messages,
-                    )
-                else:
-                    self._chat_messages = self._trim_context(self._chat_messages, max_tokens=100_000)
-
-                # Inject mid-execution steer as new user message
-                steered = self._drain_steer_messages()
-                if steered:
-                    combined = "\n\n".join(f"[User interjection]: {s}" for s in steered)
-                    self._chat_messages.append({"role": "user", "content": combined})
+                await self._compact_chat_context(system)
 
             # Max tool rounds exhausted — force final response.
-            # Must still pass tools= when tool messages are in history.
             llm_response = await _llm_call_with_retry(
                 self.llm.chat,
                 system=system,
@@ -985,9 +906,7 @@ class AgentLoop:
                 tools=self.skills.get_tool_definitions() or None,
             )
             total_tokens += llm_response.tokens_used
-            content = llm_response.content
-            if content and content.strip() == SILENT_REPLY_TOKEN:
-                content = ""
+            content = self._resolve_content(llm_response)
             if content:
                 yield {"type": "text_delta", "content": content}
             self._chat_messages.append({"role": "assistant", "content": content})
