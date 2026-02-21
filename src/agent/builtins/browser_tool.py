@@ -171,28 +171,28 @@ async def browser_cleanup():
     try:
         if _page and not _page.is_closed():
             await _page.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Error closing browser page: %s", e)
     try:
         if _context:
             await _context.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Error closing browser context: %s", e)
     try:
         if _browser:
             await _browser.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Error closing browser: %s", e)
     try:
         if _camoufox_cm:
             await _camoufox_cm.__aexit__(None, None, None)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Error closing camoufox: %s", e)
     try:
         if _pw:
             await _pw.stop()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Error stopping playwright: %s", e)
     _pw = _camoufox_cm = _browser = _context = _page = None
 
 

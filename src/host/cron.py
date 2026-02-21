@@ -230,8 +230,8 @@ class CronScheduler:
                 triggered=pct > 85,
                 detail=f"{pct:.0f}% used ({usage.free // (1024**2)}MB free)",
             ))
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("Disk usage probe failed for '%s': %s", agent, e)
 
         # Probe 2: Pending signals on blackboard
         if self.blackboard:
@@ -242,8 +242,8 @@ class CronScheduler:
                     triggered=len(signals) > 0,
                     detail=f"{len(signals)} pending signal(s)",
                 ))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Pending signals probe failed for '%s': %s", agent, e)
 
             # Probe 3: Pending tasks on blackboard
             try:
@@ -253,8 +253,8 @@ class CronScheduler:
                     triggered=len(tasks) > 0,
                     detail=f"{len(tasks)} pending task(s)",
                 ))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Pending tasks probe failed for '%s': %s", agent, e)
 
         return results
 

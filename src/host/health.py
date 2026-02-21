@@ -89,8 +89,8 @@ class HealthMonitor:
                 health.last_healthy = now
                 health.status = "healthy"
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Health check transport error for '%s': %s", agent_id, e)
 
         health.consecutive_failures += 1
         health.status = "unhealthy"

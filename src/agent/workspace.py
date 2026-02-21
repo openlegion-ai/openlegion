@@ -207,7 +207,8 @@ class WorkspaceManager:
             return None
         try:
             return p.read_text(errors="replace")[:_MAX_FILE_SIZE]
-        except Exception:
+        except Exception as e:
+            logger.debug("Failed to read external file %s: %s", absolute_path, e)
             return None
 
     # ── Writing ──────────────────────────────────────────────
@@ -335,8 +336,8 @@ class WorkspaceManager:
                 lines = path.read_text(errors="replace").splitlines()
                 half = len(lines) // 2
                 path.write_text("\n".join(lines[half:]) + "\n")
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("Failed to rotate learnings file %s: %s", path, e)
 
 
 # ── BM25 implementation (no external deps) ───────────────────

@@ -148,10 +148,10 @@ class DockerBackend(RuntimeBackend):
             for c in stale:
                 try:
                     c.remove(force=True)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as e:
+                    logger.debug("Could not remove stale container %s: %s", c.name, e)
+        except Exception as e:
+            logger.debug("Could not list stale containers: %s", e)
 
     def start_agent(
         self,
@@ -271,7 +271,8 @@ class DockerBackend(RuntimeBackend):
             container = self.agents[agent_id]["container"]
             container.reload()
             return container.status == "running"
-        except Exception:
+        except Exception as e:
+            logger.debug("Health check failed for '%s': %s", agent_id, e)
             return False
 
     def get_logs(self, agent_id: str, tail: int = 40) -> str:
@@ -281,7 +282,8 @@ class DockerBackend(RuntimeBackend):
             container = self.agents[agent_id]["container"]
             container.reload()
             return container.logs(tail=tail).decode("utf-8", errors="replace")
-        except Exception:
+        except Exception as e:
+            logger.debug("Could not get logs for '%s': %s", agent_id, e)
             return ""
 
     async def wait_for_agent(self, agent_id: str, timeout: int = 30) -> bool:
@@ -365,8 +367,8 @@ class SandboxBackend(RuntimeBackend):
                         logger.debug(f"Removed stale sandbox: {name}")
                 except (json.JSONDecodeError, KeyError):
                     pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not list stale sandboxes: %s", e)
 
     def _prepare_workspace(
         self,
@@ -518,7 +520,8 @@ class SandboxBackend(RuntimeBackend):
             info = json.loads(result.stdout)
             status = info.get("Status", "") if isinstance(info, dict) else ""
             return status.lower() in ("running", "ready")
-        except Exception:
+        except Exception as e:
+            logger.debug("Health check failed for sandbox '%s': %s", agent_id, e)
             return False
 
     def get_logs(self, agent_id: str, tail: int = 40) -> str:
@@ -534,7 +537,8 @@ class SandboxBackend(RuntimeBackend):
                 capture_output=True, text=True, timeout=10,
             )
             return result.stdout if result.returncode == 0 else ""
-        except Exception:
+        except Exception as e:
+            logger.debug("Could not get logs for sandbox '%s': %s", agent_id, e)
             return ""
 
     async def wait_for_agent(self, agent_id: str, timeout: int = 30) -> bool:

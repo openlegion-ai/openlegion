@@ -324,8 +324,8 @@ class AgentLoop:
             entry = await self.mesh_client.read_blackboard(f"goals/{self.agent_id}")
             if entry:
                 return entry.get("value", entry)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to fetch goals for '%s': %s", self.agent_id, e)
         return None
 
     async def _build_initial_context(self, assignment: TaskAssignment) -> list[dict]:
