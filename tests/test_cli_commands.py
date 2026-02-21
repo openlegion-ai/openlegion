@@ -98,6 +98,109 @@ class TestAgentAdd:
             assert "already exists" in result.output
 
 
+class TestAgentModel:
+    def test_change_model_direct(self, tmp_path):
+        """Direct model argument updates agents.yaml."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+
+        config_file.write_text(yaml.dump({
+            "mesh": {"host": "0.0.0.0", "port": 8420},
+            "llm": {"default_model": "anthropic/claude-haiku-4-5-20251001"},
+        }))
+        agents_file.write_text(yaml.dump({
+            "agents": {"mybot": {
+                "role": "test",
+                "model": "anthropic/claude-haiku-4-5-20251001",
+            }},
+        }))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                ["agent", "model", "mybot", "anthropic/claude-sonnet-4-6"],
+            )
+            assert result.exit_code == 0, result.output
+            assert "changed" in result.output
+
+            agents_cfg = yaml.safe_load(agents_file.read_text())
+            assert agents_cfg["agents"]["mybot"]["model"] == "anthropic/claude-sonnet-4-6"
+
+    def test_change_model_interactive(self, tmp_path):
+        """Interactive model picker updates agents.yaml."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+
+        config_file.write_text(yaml.dump({
+            "mesh": {"host": "0.0.0.0", "port": 8420},
+            "llm": {"default_model": "anthropic/claude-haiku-4-5-20251001"},
+        }))
+        agents_file.write_text(yaml.dump({
+            "agents": {"mybot": {
+                "role": "test",
+                "model": "anthropic/claude-haiku-4-5-20251001",
+            }},
+        }))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                ["agent", "model", "mybot"],
+                input="2\n",  # pick second model
+            )
+            assert result.exit_code == 0, result.output
+            assert "changed" in result.output
+
+    def test_change_model_nonexistent_agent(self, tmp_path):
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+        config_file.write_text(yaml.dump({"mesh": {}}))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["agent", "model", "ghost", "some/model"])
+            assert "not found" in result.output
+
+    def test_change_model_same_noop(self, tmp_path):
+        """Same model should report no change."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+
+        config_file.write_text(yaml.dump({
+            "mesh": {"host": "0.0.0.0", "port": 8420},
+            "llm": {"default_model": "anthropic/claude-haiku-4-5-20251001"},
+        }))
+        agents_file.write_text(yaml.dump({
+            "agents": {"mybot": {
+                "role": "test",
+                "model": "anthropic/claude-haiku-4-5-20251001",
+            }},
+        }))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                ["agent", "model", "mybot", "anthropic/claude-haiku-4-5-20251001"],
+            )
+            assert result.exit_code == 0
+            assert "already uses" in result.output
+
+
 class TestAgentList:
     def test_list_agents(self, tmp_path):
         config_file = tmp_path / "mesh.yaml"
@@ -121,8 +224,8 @@ class TestAgentList:
             assert result.exit_code == 0
             assert "bot1" in result.output
             assert "bot2" in result.output
-            assert "assistant" in result.output
-            assert "coder" in result.output
+            assert "openai/gpt-4o-mini" in result.output
+            assert "anthropic/claude-sonnet-4-5-20250929" in result.output
 
     def test_list_no_agents(self, tmp_path):
         config_file = tmp_path / "mesh.yaml"

@@ -116,6 +116,7 @@ class REPLSession:
         click.echo(f"Now chatting with '{self.current}'.")
 
     def _cmd_add(self, arg: str) -> None:
+        from src.cli.config import _PROVIDER_MODELS
         from src.host.transport import HttpTransport
 
         new_name = click.prompt("Agent name")
@@ -126,7 +127,21 @@ class REPLSession:
             "What should this agent do?",
             default=f"General-purpose {new_name} assistant",
         )
-        model = _get_default_model()
+        default_model = _get_default_model()
+        provider = default_model.split("/")[0] if "/" in default_model else "anthropic"
+        models = _PROVIDER_MODELS.get(provider, [default_model])
+        default_idx = 1
+        for i, m in enumerate(models, 1):
+            marker = " (default)" if m == default_model else ""
+            click.echo(f"  {i}. {m}{marker}")
+            if m == default_model:
+                default_idx = i
+        model_choice = click.prompt(
+            "Model",
+            type=click.IntRange(1, len(models)),
+            default=default_idx,
+        )
+        model = models[model_choice - 1]
         _create_agent(new_name, new_desc, model)
         # Reload permissions so the mesh grants the new agent API access
         self.ctx.permissions.reload()
