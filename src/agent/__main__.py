@@ -46,7 +46,7 @@ def main() -> None:
     system_prompt = os.environ.get("SYSTEM_PROMPT", "")
 
     llm_model = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
-    embedding_model = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+    embedding_model = os.environ.get("EMBEDDING_MODEL", "")
     llm = LLMClient(
         mesh_url=mesh_url, agent_id=agent_id,
         default_model=llm_model, embedding_model=embedding_model,

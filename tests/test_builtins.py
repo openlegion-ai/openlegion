@@ -1188,7 +1188,8 @@ class TestLLMClientEmbeddingModel:
 
     @pytest.mark.asyncio
     async def test_embed_default_model(self):
+        """Default embedding_model is empty (runtime.py sets it via env var)."""
         from src.agent.llm import LLMClient
 
         llm = LLMClient(mesh_url="http://localhost:8420", agent_id="test")
-        assert llm.embedding_model == "text-embedding-3-small"
+        assert llm.embedding_model == ""

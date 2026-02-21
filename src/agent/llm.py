@@ -26,7 +26,7 @@ class LLMClient:
         mesh_url: str,
         agent_id: str = "agent",
         default_model: str = "openai/gpt-4o-mini",
-        embedding_model: str = "text-embedding-3-small",
+        embedding_model: str = "",
     ):
         self.mesh_url = mesh_url
         self.agent_id = agent_id
