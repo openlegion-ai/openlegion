@@ -38,7 +38,7 @@ class PairingManager:
         if self._path.exists():
             try:
                 return json.loads(self._path.read_text())
-            except Exception:
+            except (json.JSONDecodeError, OSError):
                 pass
         return {"owner": None, "allowed": []}
 
