@@ -17,6 +17,7 @@ Agent management:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import subprocess
@@ -29,6 +30,8 @@ import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger("cli")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
@@ -327,7 +330,7 @@ def _ensure_pairing_code(pairing_path: Path) -> str | None:
     if pairing_path.exists():
         try:
             data = json.loads(pairing_path.read_text())
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
     if data.get("owner"):
         return None
@@ -532,8 +535,8 @@ def _stop_channels(active_channels: list) -> None:
     for ch in active_channels:
         try:
             asyncio.run(ch.stop())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Error stopping channel %s: %s", type(ch).__name__, e)
 
 
 def _get_default_model() -> str:
@@ -1088,8 +1091,8 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
             for ch in active_channels:
                 try:
                     await ch.send_notification(notification)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Cron notification to %s failed: %s", type(ch).__name__, e)
         return result
 
     async def trigger_workflow(workflow_name: str, payload: dict) -> str:
@@ -1262,13 +1265,13 @@ def _start_interactive(config_path: str, use_sandbox: bool = False) -> None:
                         result = closeable.close()
                         if hasattr(result, '__await__'):
                             await result
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Error closing %s: %s", type(closeable).__name__, e)
         try:
             future = _asyncio.run_coroutine_threadsafe(_close_clients(), _dispatch_loop)
             future.result(timeout=5)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Shutdown cleanup error: %s", e)
         _dispatch_loop.call_soon_threadsafe(_dispatch_loop.stop)
         server.should_exit = True
         click.echo("Stopped.")
@@ -1385,8 +1388,8 @@ def status(port: int):
         mesh_online = True
     except httpx.ConnectError:
         pass
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Error checking mesh: %s", e)
 
     if not configured and not mesh_agents:
         click.echo("No agents configured. Run: openlegion setup")
