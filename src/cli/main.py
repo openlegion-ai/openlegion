@@ -490,7 +490,8 @@ def skill_remove(name: str, yes: bool):
 @click.option("--config", "config_path", default="config/mesh.yaml", help="Path to mesh config")
 @click.option("--detach", "-d", is_flag=True, help="Run in background (no interactive REPL)")
 @click.option("--sandbox", is_flag=True, help="Use Docker Sandbox microVMs (requires Docker Desktop 4.58+)")
-def start(config_path: str, detach: bool, sandbox: bool):
+@click.option("--serve", is_flag=True, hidden=True, help="Headless mode (used by -d internally)")
+def start(config_path: str, detach: bool, sandbox: bool, serve: bool):
     """Start the runtime and chat with your agents.
 
     By default, starts the mesh and all agents then drops into an interactive
@@ -504,19 +505,28 @@ def start(config_path: str, detach: bool, sandbox: bool):
     """
     if detach:
         _start_detached(config_path)
-    else:
-        from src.cli.repl import REPLSession
-        from src.cli.runtime import RuntimeContext
+        return
 
-        ctx = RuntimeContext(config_path, use_sandbox=sandbox)
-        try:
-            ctx.start()
+    from src.cli.runtime import RuntimeContext
+
+    ctx = RuntimeContext(config_path, use_sandbox=sandbox)
+    try:
+        ctx.start()
+        if serve:
+            # Headless mode: keep alive via signal wait (used by -d)
+            import signal
+            shutdown_event = threading.Event()
+            signal.signal(signal.SIGTERM, lambda *_: shutdown_event.set())
+            signal.signal(signal.SIGINT, lambda *_: shutdown_event.set())
+            shutdown_event.wait()
+        else:
+            from src.cli.repl import REPLSession
             repl = REPLSession(ctx)
             repl.run()
-        except KeyboardInterrupt:
-            click.echo("")
-        finally:
-            ctx.shutdown()
+    except KeyboardInterrupt:
+        click.echo("")
+    finally:
+        ctx.shutdown()
 
 
 def _start_detached(config_path: str) -> None:
@@ -532,7 +542,7 @@ def _start_detached(config_path: str) -> None:
     log_path = cli_config.PROJECT_ROOT / ".openlegion.log"
     log_fd = open(log_path, "w")
 
-    cmd = [sys.executable, "-m", "src.cli", "start", "--config", config_path]
+    cmd = [sys.executable, "-m", "src.cli", "start", "--config", config_path, "--serve"]
 
     popen_kwargs: dict = dict(
         cwd=str(cli_config.PROJECT_ROOT),
@@ -588,6 +598,10 @@ def _start_detached(config_path: str) -> None:
         click.echo("Startup timed out. Check logs.", err=True)
         click.echo(f"  Log: {log_path}", err=True)
         return
+
+    # Write PID file so `openlegion stop` can kill the host process
+    pid_path = cli_config.PROJECT_ROOT / ".openlegion.pid"
+    pid_path.write_text(str(proc.pid))
 
     click.echo(f"\nOpenLegion running in background (PID {proc.pid}).")
     click.echo(f"  Log file:            {log_path}")
@@ -758,13 +772,28 @@ def status(port: int):
 
 @cli.command()
 def stop():
-    """Stop all agent containers."""
+    """Stop the runtime and all agent containers."""
+    import signal
+
     import docker
+
+    # Stop background host process if running
+    pid_path = cli_config.PROJECT_ROOT / ".openlegion.pid"
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            click.echo(f"Stopped host process (PID {pid}).")
+        except (ProcessLookupError, ValueError):
+            pass  # already dead or invalid
+        finally:
+            pid_path.unlink(missing_ok=True)
 
     client = docker.from_env()
     containers = client.containers.list(filters={"name": "openlegion_"})
     if not containers:
-        click.echo("No OpenLegion containers running.")
+        if not pid_path.exists():
+            click.echo("No OpenLegion containers running.")
         return
     for container in containers:
         click.echo(f"Stopping {container.name}...")
