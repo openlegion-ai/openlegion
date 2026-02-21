@@ -213,6 +213,16 @@ class LaneManager:
             }
         return result
 
+    def remove_lane(self, agent: str) -> None:
+        """Remove all lane state for an agent, cancelling its worker task."""
+        worker = self._workers.pop(agent, None)
+        if worker is not None:
+            worker.cancel()
+        self._queues.pop(agent, None)
+        self._pending.pop(agent, None)
+        self._collect_buffers.pop(agent, None)
+        self._busy.pop(agent, None)
+
     async def stop(self) -> None:
         """Cancel all worker tasks."""
         for task in self._workers.values():

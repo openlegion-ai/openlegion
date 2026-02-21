@@ -116,6 +116,34 @@ def test_recent_events_combined_filters():
     assert events[0]["type"] == "llm_call"
 
 
+def test_recent_events_before_seq():
+    """before_seq caps replay to events emitted at or before the snapshot."""
+    bus = EventBus()
+    bus.emit("llm_call", agent="a1")   # seq 1
+    bus.emit("llm_call", agent="a2")   # seq 2
+    snap = bus.current_seq              # 2
+    bus.emit("llm_call", agent="a3")   # seq 3
+    bus.emit("llm_call", agent="a4")   # seq 4
+
+    events = bus.recent_events(before_seq=snap)
+    assert len(events) == 2
+    assert events[0]["agent"] == "a1"
+    assert events[1]["agent"] == "a2"
+
+
+def test_recent_events_before_seq_with_filter():
+    """before_seq combined with type filter."""
+    bus = EventBus()
+    bus.emit("llm_call", agent="a1")         # seq 1
+    bus.emit("blackboard_write", agent="a2") # seq 2
+    snap = bus.current_seq                   # 2
+    bus.emit("llm_call", agent="a3")         # seq 3
+
+    events = bus.recent_events(types_filter={"llm_call"}, before_seq=snap)
+    assert len(events) == 1
+    assert events[0]["agent"] == "a1"
+
+
 def test_set_loop_idempotent():
     """set_loop can be called multiple times without issues."""
     bus = EventBus()

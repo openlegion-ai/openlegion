@@ -62,8 +62,8 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         orchestrator.workflows = {}
         orchestrator.active_executions = {}
 
-        from src.host.mesh import PubSub
-        pubsub = PubSub()
+        pubsub = MagicMock()
+        pubsub.subscriptions = {}
 
         permissions_mock = MagicMock()
         credential_vault = MagicMock()
@@ -263,6 +263,10 @@ class TestDashboardAgentCRUD:
         assert "alpha" not in self.components["agent_registry"]
         # Verify health monitor cleanup
         assert "alpha" not in self.components["health_monitor"].agents
+        # Verify PubSub, cron, and lane cleanup
+        self.components["pubsub"].unsubscribe_agent.assert_called_once_with("alpha")
+        self.components["cron_scheduler"].remove_agent_jobs.assert_called_once_with("alpha")
+        self.components["lane_manager"].remove_lane.assert_called_once_with("alpha")
 
     def test_delete_agent_not_found(self):
         resp = self.client.delete("/dashboard/api/agents/nonexistent")

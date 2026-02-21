@@ -126,7 +126,7 @@ class EventBus:
         result = []
         for e in self._buffer:
             if before_seq is not None and e.get("_seq", 0) > before_seq:
-                continue
+                break
             if agents_filter or types_filter:
                 if not sub.matches(e):
                     continue

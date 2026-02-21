@@ -152,8 +152,8 @@ class CredentialVault:
                     model = response.data.get(
                         "model", request.params.get("model", "unknown"),
                     )
-                    prompt_tokens = int(tokens_used * 0.7)
-                    completion_tokens = tokens_used - prompt_tokens
+                    prompt_tokens = response.data.get("input_tokens") or int(tokens_used * 0.7)
+                    completion_tokens = response.data.get("output_tokens") or (tokens_used - prompt_tokens)
                     self.cost_tracker.track(agent_id, model, prompt_tokens, completion_tokens)
 
             return response
@@ -262,11 +262,14 @@ class CredentialVault:
                 requested_model, _chat,
             )
             msg = response.choices[0].message
+            usage = response.usage
             return APIProxyResponse(
                 success=True,
                 data={
                     "content": msg.content or "",
-                    "tokens_used": response.usage.total_tokens if response.usage else 0,
+                    "tokens_used": usage.total_tokens if usage else 0,
+                    "input_tokens": usage.prompt_tokens if usage else 0,
+                    "output_tokens": usage.completion_tokens if usage else 0,
                     "model": used_model,
                     "tool_calls": [
                         {"name": tc.function.name, "arguments": tc.function.arguments}
@@ -372,16 +375,20 @@ class CredentialVault:
 
             # Emit final summary
             tokens_used = 0
+            prompt_tokens = 0
+            completion_tokens = 0
             if hasattr(response, 'usage') and response.usage:
                 tokens_used = response.usage.total_tokens
+                prompt_tokens = getattr(response.usage, 'prompt_tokens', 0) or 0
+                completion_tokens = getattr(response.usage, 'completion_tokens', 0) or 0
 
             self._health_tracker.record_success(used_model)
             yield f"data: {json.dumps({'type': 'done', 'content': collected_content, 'tool_calls': collected_tool_calls, 'tokens_used': tokens_used})}\n\n"
 
             if self.cost_tracker and agent_id and tokens_used:
-                prompt_tokens = int(tokens_used * 0.7)
-                completion_tokens = tokens_used - prompt_tokens
-                self.cost_tracker.track(agent_id, used_model, prompt_tokens, completion_tokens)
+                pt = prompt_tokens or int(tokens_used * 0.7)
+                ct = completion_tokens or (tokens_used - pt)
+                self.cost_tracker.track(agent_id, used_model, pt, ct)
 
         except Exception as e:
             logger.error(f"Streaming LLM call failed: {e}")
@@ -408,11 +415,14 @@ class CredentialVault:
                 **{k: v for k, v in request.params.items() if k not in ("model", "messages")},
             )
             msg = response.choices[0].message
+            usage = response.usage
             return APIProxyResponse(
                 success=True,
                 data={
                     "content": msg.content or "",
-                    "tokens_used": response.usage.total_tokens if response.usage else 0,
+                    "tokens_used": usage.total_tokens if usage else 0,
+                    "input_tokens": usage.prompt_tokens if usage else 0,
+                    "output_tokens": usage.completion_tokens if usage else 0,
                     "tool_calls": [
                         {"name": tc.function.name, "arguments": tc.function.arguments}
                         for tc in (msg.tool_calls or [])
