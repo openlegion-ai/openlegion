@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenLegion Dashboard</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            gray: {
+              950: '#0a0a0f',
+              900: '#111118',
+              850: '#16161f',
+              800: '#1e1e2a',
+              700: '#2a2a3a',
+              600: '#3a3a4f',
+            }
+          },
+          fontFamily: {
+            mono: ['ui-monospace', 'SFMono-Regular', '"SF Mono"', 'Menlo', 'Consolas', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="/dashboard/static/css/dashboard.css">
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+  <script>
+    window.__config = {
+      wsUrl: (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + "{{ ws_path }}",
+      apiBase: "{{ api_base }}"
+    };
+  </script>
+
+  <div x-data="dashboard()" x-init="init()" class="flex flex-col h-screen">
+
+    <!-- Navigation bar -->
+    <nav class="bg-gray-900 border-b border-gray-800 px-4 py-2.5 flex items-center justify-between shrink-0">
+      <div class="flex items-center gap-5">
+        <div class="flex items-center gap-2">
+          <div class="w-2 h-2 rounded-full bg-indigo-500"></div>
+          <span class="text-base font-bold text-white tracking-tight">OpenLegion</span>
+        </div>
+        <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
+          <template x-for="tab in tabs" :key="tab.id">
+            <button
+              @click="switchTab(tab.id)"
+              :class="activeTab === tab.id
+                ? 'bg-gray-700 text-white shadow-sm'
+                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative"
+            >
+              <span x-text="tab.label"></span>
+              <!-- Unread event count badge -->
+              <span
+                x-show="tab.id === 'events' && unreadEvents > 0 && activeTab !== 'events'"
+                x-text="unreadEvents >= 100 ? '99+' : unreadEvents"
+                class="absolute -top-1 -right-1 bg-indigo-500 text-white text-[10px] font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-1"
+                x-cloak
+              ></span>
+            </button>
+          </template>
+        </div>
+      </div>
+      <div class="flex items-center gap-4">
+        <!-- Fleet total cost -->
+        <div class="text-xs text-gray-400 hidden sm:block" x-show="fleetTotalCost > 0">
+          Fleet today: <span class="text-gray-200 font-medium" x-text="formatCost(fleetTotalCost)"></span>
+        </div>
+        <!-- Connection indicator -->
+        <div class="flex items-center gap-1.5 text-xs">
+          <span class="relative flex h-2 w-2">
+            <span :class="connected ? 'bg-green-400' : 'bg-red-400'" class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" x-show="connected"></span>
+            <span :class="connected ? 'bg-green-400' : 'bg-red-400'" class="relative inline-flex rounded-full h-2 w-2"></span>
+          </span>
+          <span :class="connected ? 'text-green-400' : 'text-red-400'" x-text="connected ? 'Live' : 'Disconnected'"></span>
+        </div>
+      </div>
+    </nav>
+
+    <!-- Main content -->
+    <main class="flex-1 overflow-auto p-4 lg:p-6">
+
+      <!-- Fleet Overview -->
+      <div x-show="activeTab === 'fleet'" x-cloak>
+        <!-- Fleet summary bar -->
+        <div class="flex items-center justify-between mb-4" x-show="agents.length > 0">
+          <h2 class="text-sm font-medium text-gray-400">
+            <span x-text="agents.length"></span> agent<span x-show="agents.length !== 1">s</span>
+            <span class="text-gray-600 mx-1">&middot;</span>
+            <span x-text="formatCost(fleetTotalCost)"></span> today
+            <span class="text-gray-600 mx-1">&middot;</span>
+            <span x-text="fleetTotalTokens.toLocaleString()"></span> tokens
+          </h2>
+          <div class="text-xs text-gray-600" x-text="'Updated ' + timeAgo(lastRefresh)"></div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <template x-for="agent in agents" :key="agent.id">
+            <div
+              @click="drillDown(agent.id)"
+              class="bg-gray-900 border border-gray-800 rounded-lg p-4 cursor-pointer hover:border-gray-600 transition-all hover:shadow-lg hover:shadow-black/20 group"
+              :class="agentStates[agent.id] === 'thinking' || agentStates[agent.id] === 'tool' ? 'pulse-border' : ''"
+            >
+              <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2">
+                  <span class="font-semibold text-white group-hover:text-indigo-300 transition-colors" x-text="agent.id"></span>
+                </div>
+                <span
+                  class="text-[11px] px-2 py-0.5 rounded-full font-medium"
+                  :class="{
+                    'bg-green-900/40 text-green-400 border border-green-800/50': agent.health_status === 'healthy',
+                    'bg-yellow-900/40 text-yellow-400 border border-yellow-800/50': agent.health_status === 'unhealthy' || agent.health_status === 'restarting',
+                    'bg-red-900/40 text-red-400 border border-red-800/50': agent.health_status === 'failed',
+                    'bg-gray-800/60 text-gray-500 border border-gray-700/50': agent.health_status === 'unknown',
+                  }"
+                  x-text="agent.health_status"
+                ></span>
+              </div>
+              <div class="space-y-2 text-xs">
+                <div class="flex justify-between items-center">
+                  <span class="text-gray-500">Activity</span>
+                  <span class="event-badge font-medium"
+                    :class="{
+                      'text-purple-400': agentStates[agent.id] === 'thinking',
+                      'text-amber-400': agentStates[agent.id] === 'tool',
+                      'text-gray-600': agentStates[agent.id] === 'idle' || !agentStates[agent.id],
+                    }"
+                    x-text="agentStates[agent.id] || 'idle'"
+                  ></span>
+                </div>
+                <div class="flex justify-between items-center">
+                  <span class="text-gray-500">Cost today</span>
+                  <span class="text-gray-200 font-mono text-[11px]" x-text="formatCost(agent.daily_cost)"></span>
+                </div>
+                <div class="flex justify-between items-center">
+                  <span class="text-gray-500">Tokens</span>
+                  <span class="text-gray-200 font-mono text-[11px]" x-text="agent.daily_tokens.toLocaleString()"></span>
+                </div>
+                <div class="flex justify-between items-center" x-show="agent.restarts > 0">
+                  <span class="text-gray-500">Restarts</span>
+                  <span class="text-yellow-400 font-mono text-[11px]" x-text="agent.restarts"></span>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+        <!-- Loading state -->
+        <div x-show="agents.length === 0 && loading" class="text-center py-16" x-cloak>
+          <div class="inline-flex items-center gap-2 text-gray-500">
+            <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+            Loading fleet...
+          </div>
+        </div>
+        <!-- Empty state -->
+        <div x-show="agents.length === 0 && !loading" class="text-center py-16" x-cloak>
+          <div class="text-gray-600 text-lg mb-1">No agents registered</div>
+          <div class="text-gray-700 text-sm">Start agents with <code class="bg-gray-800 px-1.5 py-0.5 rounded text-gray-400">openlegion start</code></div>
+        </div>
+      </div>
+
+      <!-- Events Feed -->
+      <div x-show="activeTab === 'events'" x-cloak>
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex gap-1.5 flex-wrap">
+            <template x-for="etype in eventTypes" :key="etype">
+              <button
+                @click="toggleEventFilter(etype)"
+                class="text-[11px] px-2 py-1 rounded-md border transition-all"
+                :class="eventFilters.has(etype)
+                  ? 'border-indigo-500/60 bg-indigo-900/20 text-indigo-300'
+                  : 'border-gray-800 text-gray-600 hover:text-gray-400 hover:border-gray-700'"
+                x-text="etype"
+              ></button>
+            </template>
+            <button
+              x-show="eventFilters.size > 0"
+              @click="eventFilters.clear()"
+              class="text-[11px] px-2 py-1 rounded-md text-gray-600 hover:text-gray-400"
+            >Clear</button>
+          </div>
+          <span class="text-xs text-gray-600" x-text="filteredEvents.length + ' events'"></span>
+        </div>
+        <div class="space-y-1 max-h-[calc(100vh-10rem)] overflow-y-auto custom-scrollbar">
+          <template x-for="(evt, i) in filteredEvents" :key="i">
+            <div class="bg-gray-900/70 border border-gray-800/60 rounded-md px-3 py-2 flex items-start gap-3 text-sm hover:bg-gray-900 transition-colors">
+              <span class="event-badge shrink-0 mt-0.5" :class="eventColor(evt.type)" x-text="evt.type"></span>
+              <span class="text-gray-500 shrink-0 w-20 truncate" x-text="evt.agent || '-'"></span>
+              <span class="text-gray-300 truncate flex-1" x-text="eventSummary(evt)"></span>
+              <span class="text-gray-700 text-xs shrink-0 font-mono" x-text="timeAgo(evt.timestamp)"></span>
+            </div>
+          </template>
+          <!-- Empty state -->
+          <div x-show="filteredEvents.length === 0" class="text-center py-16">
+            <div class="text-gray-600 text-lg mb-1">No events yet</div>
+            <div class="text-gray-700 text-sm">Events appear in real-time as agents work</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Agent Detail -->
+      <div x-show="activeTab === 'agent-detail'" x-cloak>
+        <button @click="switchTab('fleet')" class="text-sm text-gray-500 hover:text-gray-300 mb-4 flex items-center gap-1 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+          Back to fleet
+        </button>
+        <!-- Loading -->
+        <div x-show="!agentDetail && selectedAgent" class="text-center py-12" x-cloak>
+          <div class="inline-flex items-center gap-2 text-gray-500">
+            <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+            Loading...
+          </div>
+        </div>
+        <template x-if="agentDetail">
+          <div>
+            <div class="flex items-center gap-3 mb-5">
+              <h2 class="text-xl font-bold" x-text="agentDetail.id"></h2>
+              <span
+                class="text-[11px] px-2 py-0.5 rounded-full font-medium"
+                :class="{
+                  'bg-green-900/40 text-green-400 border border-green-800/50': agentDetail.health?.status === 'healthy',
+                  'bg-yellow-900/40 text-yellow-400 border border-yellow-800/50': agentDetail.health?.status === 'unhealthy',
+                  'bg-red-900/40 text-red-400 border border-red-800/50': agentDetail.health?.status === 'failed',
+                  'bg-gray-800/60 text-gray-500 border border-gray-700/50': !agentDetail.health?.status || agentDetail.health?.status === 'unknown',
+                }"
+                x-text="agentDetail.health?.status || 'unknown'"
+              ></span>
+              <span class="text-xs text-gray-600 font-mono" x-text="agentDetail.url"></span>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
+              <!-- Spend today card -->
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Spend Today</div>
+                <div class="text-2xl font-bold font-mono" x-text="formatCost(agentDetail.spend_today?.total_cost || 0)"></div>
+                <div class="text-xs text-gray-500 mt-1" x-text="(agentDetail.spend_today?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
+              </div>
+              <!-- Spend this week card -->
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Spend This Week</div>
+                <div class="text-2xl font-bold font-mono" x-text="formatCost(agentDetail.spend_week?.total_cost || 0)"></div>
+                <div class="text-xs text-gray-500 mt-1" x-text="(agentDetail.spend_week?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
+              </div>
+              <!-- Health card -->
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Health</div>
+                <div class="space-y-1.5 text-sm">
+                  <div class="flex justify-between">
+                    <span class="text-gray-500">Failures</span>
+                    <span class="font-mono" x-text="agentDetail.health?.failures || 0"></span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-gray-500">Restarts</span>
+                    <span class="font-mono" x-text="agentDetail.health?.restarts || 0"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Budget bar -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-5">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Budget</div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <div class="flex justify-between text-sm mb-1.5">
+                    <span class="text-gray-400">Daily</span>
+                    <span class="font-mono text-xs" x-text="formatCost(agentDetail.budget?.daily_used || 0) + ' / ' + formatCost(agentDetail.budget?.daily_limit || 0)"></span>
+                  </div>
+                  <div class="w-full bg-gray-800 rounded-full h-1.5">
+                    <div class="h-1.5 rounded-full transition-all duration-500"
+                      :class="(agentDetail.budget?.daily_used || 0) / (agentDetail.budget?.daily_limit || 1) > 0.8 ? 'bg-red-500' : 'bg-indigo-500'"
+                      :style="'width:' + Math.min(100, ((agentDetail.budget?.daily_used || 0) / (agentDetail.budget?.daily_limit || 1)) * 100) + '%'"
+                    ></div>
+                  </div>
+                </div>
+                <div>
+                  <div class="flex justify-between text-sm mb-1.5">
+                    <span class="text-gray-400">Monthly</span>
+                    <span class="font-mono text-xs" x-text="formatCost(agentDetail.budget?.monthly_used || 0) + ' / ' + formatCost(agentDetail.budget?.monthly_limit || 0)"></span>
+                  </div>
+                  <div class="w-full bg-gray-800 rounded-full h-1.5">
+                    <div class="h-1.5 rounded-full transition-all duration-500"
+                      :class="(agentDetail.budget?.monthly_used || 0) / (agentDetail.budget?.monthly_limit || 1) > 0.8 ? 'bg-red-500' : 'bg-indigo-500'"
+                      :style="'width:' + Math.min(100, ((agentDetail.budget?.monthly_used || 0) / (agentDetail.budget?.monthly_limit || 1)) * 100) + '%'"
+                    ></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Recent events for this agent -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <div class="flex items-center justify-between mb-3">
+                <div class="text-xs text-gray-500 uppercase tracking-wider">Recent Events</div>
+                <span class="text-xs text-gray-700" x-text="agentEvents.length + ' events'"></span>
+              </div>
+              <div class="space-y-1 max-h-72 overflow-y-auto custom-scrollbar">
+                <template x-for="(evt, i) in agentEvents" :key="i">
+                  <div class="flex items-center gap-2 text-sm py-1.5 border-b border-gray-800/30 last:border-0">
+                    <span class="event-badge" :class="eventColor(evt.type)" x-text="evt.type"></span>
+                    <span class="text-gray-300 truncate flex-1" x-text="eventSummary(evt)"></span>
+                    <span class="text-gray-700 text-xs ml-auto shrink-0 font-mono" x-text="timeAgo(evt.timestamp)"></span>
+                  </div>
+                </template>
+                <div x-show="agentEvents.length === 0" class="text-gray-600 text-sm py-4 text-center">No recent events for this agent</div>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- Blackboard -->
+      <div x-show="activeTab === 'blackboard'" x-cloak>
+        <div class="mb-4 flex gap-2">
+          <input
+            type="text"
+            x-model="bbPrefix"
+            @keyup.enter="fetchBlackboard()"
+            placeholder="Filter by prefix (e.g. tasks/, context/, signals/)"
+            class="bg-gray-900 border border-gray-800 rounded-lg px-3 py-2 text-sm flex-1 focus:outline-none focus:border-gray-600 focus:ring-1 focus:ring-gray-600 placeholder-gray-700 transition-colors"
+          >
+          <button @click="fetchBlackboard()" class="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg text-sm font-medium transition-colors">Search</button>
+        </div>
+        <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="text-gray-500 text-left text-xs uppercase tracking-wider border-b border-gray-800">
+                  <th class="py-3 px-4">Key</th>
+                  <th class="py-3 px-4">Value</th>
+                  <th class="py-3 px-4">Written By</th>
+                  <th class="py-3 px-4">Updated</th>
+                  <th class="py-3 px-4">Ver</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="entry in bbEntries" :key="entry.key">
+                  <tr class="border-b border-gray-800/40 hover:bg-gray-800/30 transition-colors"
+                    :class="bbHighlights.has(entry.key) ? 'flash-yellow' : ''">
+                    <td class="py-2.5 px-4 font-mono text-xs text-blue-400" x-text="entry.key"></td>
+                    <td class="py-2.5 px-4 max-w-md">
+                      <span class="text-gray-300 text-xs font-mono truncate block" x-text="truncateJson(entry.value)"></span>
+                    </td>
+                    <td class="py-2.5 px-4 text-gray-500" x-text="entry.written_by"></td>
+                    <td class="py-2.5 px-4 text-gray-600 text-xs font-mono" x-text="entry.updated_at"></td>
+                    <td class="py-2.5 px-4 text-gray-600 font-mono" x-text="entry.version"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <!-- Loading -->
+          <div x-show="bbEntries.length === 0 && bbLoading" class="text-center py-12" x-cloak>
+            <div class="inline-flex items-center gap-2 text-gray-600">
+              <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+              Loading...
+            </div>
+          </div>
+          <!-- Empty state -->
+          <div x-show="bbEntries.length === 0 && !bbLoading" class="text-center py-12" x-cloak>
+            <div class="text-gray-600 mb-1">No entries found</div>
+            <div class="text-gray-700 text-xs">Try a broader prefix or leave empty for all entries</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Costs -->
+      <div x-show="activeTab === 'costs'" x-cloak>
+        <div class="flex items-center justify-between mb-4">
+          <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
+            <template x-for="p in ['today', 'week', 'month']" :key="p">
+              <button
+                @click="costPeriod = p; fetchCosts()"
+                class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
+                :class="costPeriod === p ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-500 hover:text-gray-300'"
+                x-text="p.charAt(0).toUpperCase() + p.slice(1)"
+              ></button>
+            </template>
+          </div>
+          <div class="text-sm text-gray-400" x-show="costData.agents && costData.agents.length > 0">
+            Total: <span class="text-white font-mono font-medium" x-text="formatCost(costTotal)"></span>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="h-72" x-show="costData.agents && costData.agents.length > 0">
+              <canvas id="costChart"></canvas>
+            </div>
+            <div x-show="!costData.agents || costData.agents.length === 0" class="flex items-center justify-center h-72 text-gray-600">
+              No cost data for this period
+            </div>
+          </div>
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="text-xs text-gray-500 uppercase tracking-wider mb-4">Budget Status</div>
+            <div class="space-y-4">
+              <template x-for="item in costData.agents || []" :key="item.agent">
+                <div>
+                  <div class="flex justify-between text-sm mb-1">
+                    <span class="text-white font-medium" x-text="item.agent"></span>
+                    <div class="flex items-center gap-3">
+                      <span class="text-gray-500 text-xs font-mono" x-text="item.tokens.toLocaleString() + ' tok'"></span>
+                      <span class="text-gray-300 font-mono text-xs" x-text="formatCost(item.cost)"></span>
+                    </div>
+                  </div>
+                  <div x-show="costData.budgets && costData.budgets[item.agent]">
+                    <div class="w-full bg-gray-800 rounded-full h-1.5">
+                      <div class="h-1.5 rounded-full transition-all duration-500"
+                        :class="item.cost / (costData.budgets?.[item.agent]?.daily_limit || 1) > 0.8 ? 'bg-red-500' : 'bg-indigo-500'"
+                        :style="'width:' + Math.min(100, (item.cost / (costData.budgets?.[item.agent]?.daily_limit || 1)) * 100) + '%'"
+                      ></div>
+                    </div>
+                    <div class="text-[10px] text-gray-700 mt-1 font-mono" x-text="formatCost(item.cost) + ' / ' + formatCost(costData.budgets?.[item.agent]?.daily_limit || 0) + ' daily'"></div>
+                  </div>
+                </div>
+              </template>
+              <div x-show="!costData.agents || costData.agents.length === 0" class="text-gray-600 text-sm py-4 text-center">Budgets appear once agents incur costs</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Traces -->
+      <div x-show="activeTab === 'traces'" x-cloak>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <!-- Trace list -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="flex items-center justify-between mb-3">
+              <div class="text-xs text-gray-500 uppercase tracking-wider">Recent Traces</div>
+              <span class="text-xs text-gray-700" x-text="traces.length + ' events'"></span>
+            </div>
+            <div class="space-y-0.5 max-h-[calc(100vh-14rem)] overflow-y-auto custom-scrollbar">
+              <template x-for="t in traces" :key="t.trace_id + t.timestamp">
+                <div
+                  @click="fetchTraceDetail(t.trace_id)"
+                  class="flex items-center gap-2 px-2.5 py-2 rounded-md cursor-pointer text-sm transition-all"
+                  :class="selectedTraceId === t.trace_id ? 'bg-gray-800 border border-gray-700' : 'hover:bg-gray-800/50'"
+                >
+                  <span class="font-mono text-blue-400/80 text-xs" x-text="t.trace_id.substring(0, 12)"></span>
+                  <span class="text-gray-500 text-xs" x-text="t.agent"></span>
+                  <span class="event-badge text-[10px]" :class="eventColor(t.event_type)" x-text="t.event_type"></span>
+                  <span class="text-gray-700 text-xs ml-auto font-mono" x-text="timeAgo(t.timestamp)"></span>
+                </div>
+              </template>
+              <!-- Loading -->
+              <div x-show="traces.length === 0 && tracesLoading" class="text-center py-8" x-cloak>
+                <div class="inline-flex items-center gap-2 text-gray-600 text-sm">
+                  <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                  Loading...
+                </div>
+              </div>
+              <!-- Empty state -->
+              <div x-show="traces.length === 0 && !tracesLoading" class="text-center py-8" x-cloak>
+                <div class="text-gray-600 text-sm">No traces recorded yet</div>
+              </div>
+            </div>
+          </div>
+          <!-- Trace detail -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">
+              Trace <span class="font-mono text-blue-400 normal-case" x-text="selectedTraceId || ''"></span>
+            </div>
+            <template x-if="traceDetail && traceDetail.events">
+              <div class="space-y-0 max-h-[calc(100vh-14rem)] overflow-y-auto custom-scrollbar">
+                <template x-for="(evt, i) in traceDetail.events" :key="i">
+                  <div class="relative pl-6 border-l-2 border-gray-800 pb-3 last:pb-0">
+                    <div class="absolute left-[-5px] top-1.5 w-2 h-2 rounded-full" :class="eventBgColor(evt.event_type)"></div>
+                    <div class="flex items-center gap-2 text-sm">
+                      <span class="event-badge" :class="eventColor(evt.event_type)" x-text="evt.event_type"></span>
+                      <span class="text-gray-500 text-xs" x-text="evt.source"></span>
+                      <span x-show="evt.duration_ms > 0" class="text-gray-600 text-xs font-mono" x-text="evt.duration_ms + 'ms'"></span>
+                    </div>
+                    <div class="text-xs text-gray-500 mt-0.5" x-show="evt.agent" x-text="evt.agent"></div>
+                    <div class="text-xs text-gray-600 mt-0.5 font-mono" x-text="evt.detail" x-show="evt.detail"></div>
+                    <template x-if="evt.duration_ms > 0 && traceDetail.events.length > 1">
+                      <div class="waterfall-bar mt-1.5"
+                        :style="waterfall(evt, traceDetail.events)"
+                      ></div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <div x-show="!traceDetail" class="text-center py-12 text-gray-700 text-sm">
+              Select a trace to inspect its event timeline
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- Alpine.js (deferred) -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+  <script src="/dashboard/static/js/websocket.js"></script>
+  <script src="/dashboard/static/js/app.js"></script>
+</body>
+</html>
