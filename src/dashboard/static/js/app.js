@@ -34,7 +34,7 @@ function dashboard() {
     eventFilters: new Set(),
     eventTypes: [
       'agent_state', 'message_sent', 'message_received',
-      'tool_start', 'tool_result', 'llm_call',
+      'tool_start', 'tool_result', 'text_delta', 'llm_call',
       'blackboard_write', 'health_change',
     ],
 
@@ -265,6 +265,7 @@ function dashboard() {
         llm_call: 'thinking',
         tool_start: 'tool',
         tool_result: 'thinking',
+        text_delta: 'streaming',
         message_sent: 'thinking',
         message_received: 'thinking',
       };
@@ -553,6 +554,22 @@ function dashboard() {
       } catch (e) { console.warn('resumeCronJob failed:', e); }
     },
 
+    async deleteCronJob(jobId) {
+      if (!confirm('Delete this cron job?')) return;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/cron/${jobId}`, { method: 'DELETE' });
+        if (resp.ok) {
+          this.showToast(`Job ${jobId} deleted`);
+          this.fetchCronJobs();
+        } else {
+          try {
+            const err = await resp.json();
+            this.showToast(`Error: ${err.detail || 'Delete failed'}`);
+          } catch (_) { this.showToast('Delete failed'); }
+        }
+      } catch (e) { console.warn('deleteCronJob failed:', e); }
+    },
+
     // ── Cron inline editing ─────────────────────────────
 
     editCronJob(job) {
@@ -616,24 +633,64 @@ function dashboard() {
     async sendChat() {
       if (!this.chatMessage.trim() || !this.chatAgent) return;
       const msg = this.chatMessage.trim();
-      if (!this.chatHistories[this.chatAgent]) this.chatHistories[this.chatAgent] = [];
-      this.chatHistories[this.chatAgent].push({ role: 'user', content: msg });
+      const agent = this.chatAgent;
+      if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
+      this.chatHistories[agent].push({ role: 'user', content: msg });
       this.chatMessage = '';
       this.chatLoading = true;
+
+      // Add a streaming placeholder entry
+      const streamEntry = { role: 'agent', content: '', streaming: true };
+      this.chatHistories[agent].push(streamEntry);
+
       try {
-        const resp = await fetch(`${window.__config.apiBase}/agents/${this.chatAgent}/chat`, {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agent}/chat/stream`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ message: msg }),
         });
-        if (resp.ok) {
-          const data = await resp.json();
-          this.chatHistories[this.chatAgent].push({ role: 'agent', content: data.response });
-        } else {
+        if (!resp.ok) {
           const err = await resp.json();
-          this.chatHistories[this.chatAgent].push({ role: 'error', content: err.detail || 'Failed' });
+          streamEntry.content = err.detail || 'Failed';
+          streamEntry.role = 'error';
+          streamEntry.streaming = false;
+          this.chatLoading = false;
+          return;
         }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            let data;
+            try { data = JSON.parse(line.slice(6)); } catch (_) { continue; }
+
+            if (data.type === 'text_delta') {
+              streamEntry.content += data.content || '';
+            } else if (data.type === 'done') {
+              streamEntry.content = data.response || streamEntry.content;
+              streamEntry.streaming = false;
+            } else if (data.type === 'error') {
+              streamEntry.content = data.message || 'Stream error';
+              streamEntry.role = 'error';
+              streamEntry.streaming = false;
+            }
+          }
+        }
+        streamEntry.streaming = false;
       } catch (e) {
-        this.chatHistories[this.chatAgent].push({ role: 'error', content: e.message });
+        streamEntry.content = e.message;
+        streamEntry.role = 'error';
+        streamEntry.streaming = false;
       }
       this.chatLoading = false;
     },
@@ -792,6 +849,7 @@ function dashboard() {
         message_received: 'text-green-400',
         tool_start: 'text-amber-400',
         tool_result: 'text-amber-400',
+        text_delta: 'text-emerald-400',
         llm_call: 'text-purple-400',
         blackboard_write: 'text-cyan-400',
         health_change: 'text-red-400',
@@ -818,6 +876,7 @@ function dashboard() {
         message_received: 'bg-green-400',
         tool_start: 'bg-amber-400',
         tool_result: 'bg-amber-400',
+        text_delta: 'bg-emerald-400',
         llm_call: 'bg-purple-400',
         blackboard_write: 'bg-cyan-400',
         health_change: 'bg-red-400',
@@ -851,6 +910,8 @@ function dashboard() {
           return `${d.tool || d.name || '?'}(${(d.preview || '').substring(0, 60)})`;
         case 'tool_result':
           return `${d.tool || d.name || '?'} \u2192 ${(d.preview || d.result || d.output || '').substring(0, 60) || 'done'}`;
+        case 'text_delta':
+          return `${(d.content || '').substring(0, 80)}`;
         case 'message_sent':
           return `\u2192 ${(d.message || '').substring(0, 70)}`;
         case 'message_received':

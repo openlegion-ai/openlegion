@@ -427,10 +427,17 @@ class TestDashboardTraces:
         ts = self.components["trace_store"]
         ts.record(trace_id="tr_abc", source="dispatch", agent="alpha", event_type="chat", detail="hello")
         ts.record(trace_id="tr_abc", source="llm", agent="alpha", event_type="llm_call", duration_ms=150)
+        ts.record(trace_id="tr_def", source="dispatch", agent="beta", event_type="chat", detail="world")
         resp = self.client.get("/dashboard/api/traces?limit=50")
         assert resp.status_code == 200
         data = resp.json()
+        # Grouped by trace_id: tr_abc (2 events) + tr_def (1 event) = 2 summaries
         assert len(data["traces"]) == 2
+        # Newest first
+        assert data["traces"][0]["trace_id"] == "tr_def"
+        assert data["traces"][0]["event_count"] == 1
+        assert data["traces"][1]["trace_id"] == "tr_abc"
+        assert data["traces"][1]["event_count"] == 2
 
     def test_api_traces_limit_respected(self):
         ts = self.components["trace_store"]
@@ -696,6 +703,26 @@ class TestDashboardCron:
         resp = self.client.post("/dashboard/api/cron/cron_abc/resume")
         assert resp.status_code == 200
         assert resp.json()["resumed"] is True
+
+    def test_cron_delete_success(self):
+        self.components["cron_scheduler"].remove_job.return_value = True
+        resp = self.client.delete("/dashboard/api/cron/cron_abc")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["deleted"] is True
+        assert data["job_id"] == "cron_abc"
+        self.components["cron_scheduler"].remove_job.assert_called_once_with("cron_abc")
+
+    def test_cron_delete_not_found(self):
+        self.components["cron_scheduler"].remove_job.return_value = False
+        resp = self.client.delete("/dashboard/api/cron/nonexistent")
+        assert resp.status_code == 404
+
+    def test_cron_delete_not_available(self):
+        self.components["cron_scheduler"] = None
+        self.client = _make_client(self.components)
+        resp = self.client.delete("/dashboard/api/cron/abc")
+        assert resp.status_code == 503
 
     def test_cron_not_available(self):
         self.components["cron_scheduler"] = None

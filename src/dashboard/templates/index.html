@@ -730,6 +730,9 @@
                         @click="resumeCronJob(job.id)"
                         class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-green-900/30 text-gray-400 hover:text-green-400 transition-colors"
                       >Resume</button>
+                      <button @click="deleteCronJob(job.id)"
+                        class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors"
+                      >Del</button>
                     </td>
                   </tr>
                 </template>
@@ -754,18 +757,18 @@
               <button @click="fetchTraces()" class="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Refresh</button>
             </div>
             <div class="space-y-0.5 max-h-96 overflow-y-auto custom-scrollbar">
-              <template x-for="t in traces" :key="t.trace_id + t.timestamp">
+              <template x-for="t in traces" :key="t.trace_id">
                 <div
                   @click="fetchTraceDetail(t.trace_id)"
                   class="flex items-center gap-2 px-2.5 py-2 rounded-md cursor-pointer text-sm transition-all"
                   :class="selectedTraceId === t.trace_id ? 'bg-gray-800 border border-gray-700' : 'hover:bg-gray-800/50'"
                 >
-                  <span class="font-mono text-blue-400/80 text-xs" x-text="t.trace_id.substring(0, 12)"></span>
-                  <span class="text-gray-500 text-xs" x-text="t.agent || '-'"></span>
-                  <span class="event-badge text-[10px]" :class="eventColor(t.event_type)" x-text="t.event_type"></span>
-                  <span x-show="t.status === 'error'" class="text-red-400 text-[10px]">ERR</span>
-                  <span x-show="t.duration_ms > 0" class="text-gray-700 text-[10px] font-mono" x-text="t.duration_ms + 'ms'"></span>
-                  <span class="text-gray-700 text-xs ml-auto font-mono" x-text="timeAgo(t.timestamp)"></span>
+                  <span class="font-mono text-blue-400/80 text-xs" x-text="t.trace_id.substring(0, 8)"></span>
+                  <span class="text-gray-400 text-xs" x-text="t.agents.join(', ') || '-'"></span>
+                  <span class="text-gray-600 text-[10px] font-mono" x-text="t.event_count + ' events'"></span>
+                  <span x-show="t.has_error" class="text-red-400 text-[10px]">ERR</span>
+                  <span x-show="t.total_duration_ms > 0" class="text-gray-700 text-[10px] font-mono" x-text="t.total_duration_ms + 'ms'"></span>
+                  <span class="text-gray-700 text-xs ml-auto font-mono" x-text="timeAgo(t.started)"></span>
                 </div>
               </template>
               <div x-show="traces.length === 0 && tracesLoading" class="text-center py-8" x-cloak>

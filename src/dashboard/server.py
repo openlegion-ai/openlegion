@@ -423,6 +423,40 @@ def create_dashboard_router(
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
+    @api_router.post("/api/agents/{agent_id}/chat/stream")
+    async def api_chat_stream(agent_id: str, request: Request):
+        """SSE streaming chat with an agent."""
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        body = await request.json()
+        message = body.get("message", "").strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="Message is required")
+        from src.shared.utils import sanitize_for_prompt
+        message = sanitize_for_prompt(message)
+
+        async def event_generator():
+            try:
+                async for event in transport.stream_request(
+                    agent_id, "POST", "/chat/stream",
+                    json={"message": message}, timeout=120,
+                ):
+                    if isinstance(event, dict):
+                        import json as _json
+                        yield f"data: {_json.dumps(event, default=str)}\n\n"
+                        etype = event.get("type", "")
+                        if event_bus and etype in ("tool_start", "tool_result", "text_delta"):
+                            event_bus.emit(etype, agent=agent_id,
+                                data={k: v for k, v in event.items() if k != "type"})
+            except Exception as e:
+                import json as _json
+                yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+        from starlette.responses import StreamingResponse
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
     @api_router.post("/api/broadcast")
     async def api_broadcast(request: Request) -> dict:
         if transport is None:
@@ -548,8 +582,8 @@ def create_dashboard_router(
     async def api_traces(limit: int = 50) -> dict:
         if trace_store is None:
             return {"traces": []}
-        limit = max(1, min(limit, 500))
-        return {"traces": trace_store.list_recent(limit)}
+        limit = max(1, min(limit, 200))
+        return {"traces": trace_store.list_trace_summaries(limit)}
 
     @api_router.get("/api/traces/{trace_id}")
     async def api_trace_detail(trace_id: str) -> dict:
@@ -623,6 +657,14 @@ def create_dashboard_router(
         if not cron_scheduler.resume_job(job_id):
             raise HTTPException(status_code=404, detail="Job not found")
         return {"resumed": True, "job_id": job_id}
+
+    @api_router.delete("/api/cron/{job_id}")
+    async def api_cron_delete(job_id: str) -> dict:
+        if cron_scheduler is None:
+            raise HTTPException(status_code=503, detail="Cron scheduler not available")
+        if not cron_scheduler.remove_job(job_id):
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {"deleted": True, "job_id": job_id}
 
     # ── Settings / environment ───────────────────────────────
 
