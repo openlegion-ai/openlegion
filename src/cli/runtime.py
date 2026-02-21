@@ -168,6 +168,11 @@ class RuntimeContext:
         from src.host.orchestrator import Orchestrator
         from src.host.permissions import PermissionMatrix
 
+        # Ensure collaborative permissions are up to date before loading
+        if self.cfg.get("collaboration", False):
+            from src.cli.config import _set_collaborative_permissions
+            _set_collaborative_permissions()
+
         mesh_port = self.cfg["mesh"]["port"]
 
         self.blackboard = Blackboard()
