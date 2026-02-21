@@ -128,6 +128,8 @@ class REPLSession:
         )
         model = _get_default_model()
         _create_agent(new_name, new_desc, model)
+        # Reload permissions so the mesh grants the new agent API access
+        self.ctx.permissions.reload()
         agent_cfg_data = _load_config().get("agents", {}).get(new_name, {})
         skills_dir = os.path.abspath(agent_cfg_data.get("skills_dir", ""))
         add_mcp_servers = agent_cfg_data.get("mcp_servers") or None
