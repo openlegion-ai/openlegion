@@ -301,6 +301,7 @@ def _add_agent_permissions(name: str) -> None:
         "blackboard_read": ["context/*", "tasks/*", "goals/*", "signals/*", "artifacts/*"],
         "blackboard_write": ["context/*", "goals/*", "signals/*", "artifacts/*"],
         "allowed_apis": ["llm"],
+        "can_manage_vault": True,
     }
     _save_permissions(perms)
 
@@ -317,6 +318,7 @@ def _set_collaborative_permissions() -> None:
             p["can_publish"] = list({*p.get("can_publish", []), "*"})
         if "*" not in p.get("can_subscribe", []):
             p["can_subscribe"] = list({*p.get("can_subscribe", []), "*"})
+        p["can_manage_vault"] = True
     _save_permissions(perms)
 
 
