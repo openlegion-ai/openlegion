@@ -357,6 +357,22 @@ Accepts a user message. On the first message, loads workspace context
 searches memory for relevant facts. Executes tool calls in a bounded loop
 (max 30 rounds) and runs context compaction when needed.
 
+### Tool Loop Detection
+
+Both modes include automatic detection of stuck tool-call loops. A sliding
+window tracks recent `(tool_name, params_hash, result_hash)` tuples and
+escalates through three levels:
+
+| Level | Trigger | Action |
+|-------|---------|--------|
+| **Warn** | 3rd identical call | System message: "Try a different approach" |
+| **Block** | 5th identical call | Tool skipped, error returned to agent |
+| **Terminate** | 10th call with same params | Loop terminated with failure status |
+
+Memory retrieval tools (`memory_search`, `memory_recall`) are exempt since
+repeated searches are legitimate. Detection uses SHA-256 hashes of
+canonicalized parameters and results over a 15-call sliding window.
+
 ### Built-in Tools
 
 | Tool | Purpose |
@@ -871,6 +887,7 @@ src/
 ├── agent/
 │   ├── __main__.py                     # Container entry
 │   ├── loop.py                         # Execution loop (task + chat)
+│   ├── loop_detector.py                # Tool loop detection (warn/block/terminate)
 │   ├── skills.py                       # Skill registry + discovery
 │   ├── mcp_client.py                   # MCP server lifecycle + tool routing
 │   ├── memory.py                       # Hierarchical memory (SQLite + sqlite-vec + FTS5)
