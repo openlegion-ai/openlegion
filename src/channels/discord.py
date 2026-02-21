@@ -17,17 +17,7 @@ from __future__ import annotations
 
 import asyncio
 
-from src.channels.base import (
-    AddKeyFn,
-    Channel,
-    CostsFn,
-    DispatchFn,
-    ListAgentsFn,
-    PairingManager,
-    ResetFn,
-    StatusFn,
-    chunk_text,
-)
+from src.channels.base import Channel, PairingManager, chunk_text
 from src.shared.utils import setup_logging
 
 logger = setup_logging("channels.discord")
@@ -41,24 +31,11 @@ class DiscordChannel(Channel):
     def __init__(
         self,
         token: str,
-        dispatch_fn: DispatchFn,
         default_agent: str = "",
         allowed_guilds: list[int] | None = None,
-        list_agents_fn: ListAgentsFn | None = None,
-        status_fn: StatusFn | None = None,
-        costs_fn: CostsFn | None = None,
-        reset_fn: ResetFn | None = None,
-        addkey_fn: AddKeyFn | None = None,
+        **kwargs,
     ):
-        super().__init__(
-            dispatch_fn=dispatch_fn,
-            default_agent=default_agent,
-            list_agents_fn=list_agents_fn,
-            status_fn=status_fn,
-            costs_fn=costs_fn,
-            reset_fn=reset_fn,
-            addkey_fn=addkey_fn,
-        )
+        super().__init__(default_agent=default_agent, **kwargs)
         self.token = token
         self.allowed_guilds = set(allowed_guilds) if allowed_guilds else None
         self._client = None

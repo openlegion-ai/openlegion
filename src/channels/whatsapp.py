@@ -23,18 +23,7 @@ import asyncio
 import httpx
 from fastapi import APIRouter, Query, Request
 
-from src.channels.base import (
-    AddKeyFn,
-    Channel,
-    CostsFn,
-    DispatchFn,
-    ListAgentsFn,
-    PairingManager,
-    ResetFn,
-    StatusFn,
-    StreamDispatchFn,
-    chunk_text,
-)
+from src.channels.base import Channel, PairingManager, chunk_text
 from src.shared.utils import setup_logging
 
 logger = setup_logging("channels.whatsapp")
@@ -51,25 +40,10 @@ class WhatsAppChannel(Channel):
         access_token: str,
         phone_number_id: str,
         verify_token: str,
-        dispatch_fn: DispatchFn,
         default_agent: str = "",
-        list_agents_fn: ListAgentsFn | None = None,
-        status_fn: StatusFn | None = None,
-        costs_fn: CostsFn | None = None,
-        reset_fn: ResetFn | None = None,
-        stream_dispatch_fn: StreamDispatchFn | None = None,
-        addkey_fn: AddKeyFn | None = None,
+        **kwargs,
     ):
-        super().__init__(
-            dispatch_fn=dispatch_fn,
-            default_agent=default_agent,
-            list_agents_fn=list_agents_fn,
-            status_fn=status_fn,
-            costs_fn=costs_fn,
-            reset_fn=reset_fn,
-            stream_dispatch_fn=stream_dispatch_fn,
-            addkey_fn=addkey_fn,
-        )
+        super().__init__(default_agent=default_agent, **kwargs)
         self.access_token = access_token
         self.phone_number_id = phone_number_id
         self.verify_token = verify_token
