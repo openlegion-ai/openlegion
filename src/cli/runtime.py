@@ -19,6 +19,26 @@ from src.cli.formatting import echo_fail, echo_header, echo_ok
 
 logger = logging.getLogger("cli")
 
+# Provider prefix → default embedding model.  Providers without embedding
+# APIs (Anthropic, xAI, Groq, …) map to "none" which disables vector search.
+_PROVIDER_EMBEDDING_DEFAULTS: list[tuple[str, str]] = [
+    ("openai/",  "text-embedding-3-small"),
+    ("gpt-",     "text-embedding-3-small"),
+    ("o1",       "text-embedding-3-small"),
+    ("o3",       "text-embedding-3-small"),
+    ("o4",       "text-embedding-3-small"),
+    ("gemini/",  "gemini/text-embedding-004"),
+]
+
+
+def _default_embedding_model(llm_model: str) -> str:
+    """Pick a sensible embedding model default based on the LLM provider."""
+    lower = llm_model.lower()
+    for prefix, embed_model in _PROVIDER_EMBEDDING_DEFAULTS:
+        if lower.startswith(prefix):
+            return embed_model
+    return "none"
+
 
 class RuntimeContext:
     """Manages the full OpenLegion runtime lifecycle."""
@@ -222,7 +242,9 @@ class RuntimeContext:
 
         agents_cfg = self.cfg.get("agents", {})
         default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-        embedding_model = self.cfg.get("llm", {}).get("embedding_model", "text-embedding-3-small")
+        embedding_model = self.cfg.get("llm", {}).get(
+            "embedding_model", _default_embedding_model(default_model),
+        )
         mesh_port = self.cfg["mesh"]["port"]
 
         self.runtime.extra_env["EMBEDDING_MODEL"] = embedding_model

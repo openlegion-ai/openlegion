@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+from src.cli.runtime import _default_embedding_model
 from src.host.runtime import (
     DockerBackend,
     RuntimeBackend,
@@ -300,3 +301,22 @@ class TestSelectBackend:
             MockDocker.return_value = mock_instance
             result = select_backend(use_sandbox=True)
             assert result is mock_instance
+
+
+# ── _default_embedding_model ─────────────────────────────────
+
+class TestDefaultEmbeddingModel:
+    def test_openai_provider(self):
+        assert _default_embedding_model("openai/gpt-4o-mini") == "text-embedding-3-small"
+
+    def test_gpt_prefix(self):
+        assert _default_embedding_model("gpt-4o") == "text-embedding-3-small"
+
+    def test_gemini_provider(self):
+        assert _default_embedding_model("gemini/gemini-2.0-flash") == "gemini/text-embedding-004"
+
+    def test_anthropic_no_embeddings(self):
+        assert _default_embedding_model("anthropic/claude-haiku-4-5-20251001") == "none"
+
+    def test_unknown_provider_no_embeddings(self):
+        assert _default_embedding_model("deepseek/deepseek-chat") == "none"

@@ -111,7 +111,7 @@ collaboration: true
 | `mesh.host` | string | `0.0.0.0` | Bind address for mesh server |
 | `mesh.port` | integer | `8420` | Mesh server port |
 | `llm.default_model` | string | -- | Default model for agents without explicit model |
-| `llm.embedding_model` | string | `text-embedding-3-small` | Model for memory embeddings. Set to `"none"` to disable vector search (FTS5 keyword search still works) |
+| `llm.embedding_model` | string | *auto* | Model for memory embeddings. Auto-detected from default LLM provider (OpenAI → `text-embedding-3-small`, Gemini → `gemini/text-embedding-004`, others → `none`). Set to `"none"` to disable vector search (FTS5 keyword search still works) |
 | `llm.max_tokens` | integer | `4096` | Max output tokens per completion |
 | `llm.temperature` | float | `0.7` | Sampling temperature |
 | `llm.failover.primary` | string | -- | Primary model for failover routing |
