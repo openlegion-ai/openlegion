@@ -948,10 +948,14 @@ function dashboard() {
     eventDetail(evt) {
       const d = evt.data || {};
       const fields = [];
+      const fmt = (v) => {
+        if (v == null) return null;
+        if (typeof v === 'object') return JSON.stringify(v, null, 2);
+        return String(v);
+      };
       const add = (label, value) => {
-        if (value != null && value !== '' && value !== undefined) {
-          fields.push({ label, value: String(value) });
-        }
+        const s = fmt(value);
+        if (s != null && s !== '') fields.push({ label, value: s });
       };
 
       switch (evt.type) {
@@ -974,6 +978,9 @@ function dashboard() {
           add('Tool', d.tool || d.name);
           add('Result', d.result || d.output || d.preview);
           break;
+        case 'text_delta':
+          add('Content', d.content);
+          break;
         case 'message_sent':
         case 'message_received':
           add('Message', d.message);
@@ -991,8 +998,7 @@ function dashboard() {
           add('Key', d.key);
           add('Version', d.version);
           add('Written by', d.written_by);
-          if (d.value_preview) add('Value', d.value_preview);
-          else if (d.value !== undefined) add('Value', typeof d.value === 'string' ? d.value : JSON.stringify(d.value, null, 2));
+          add('Value', d.value_preview || d.value);
           break;
         case 'agent_state':
           add('State', d.state);
@@ -1002,14 +1008,16 @@ function dashboard() {
           if (d.ready !== undefined) add('Ready', String(d.ready));
           break;
         default:
-          // Fallback: show all data keys
           for (const [k, v] of Object.entries(d)) {
-            add(k, typeof v === 'object' ? JSON.stringify(v, null, 2) : v);
+            add(k, v);
           }
       }
 
       if (evt.agent && fields.every(f => f.label !== 'Agent')) add('Agent', evt.agent);
-      if (evt.timestamp) add('Timestamp', new Date(typeof evt.timestamp === 'number' ? evt.timestamp * 1000 : evt.timestamp).toLocaleString());
+      if (evt.timestamp) {
+        const ts = typeof evt.timestamp === 'number' ? evt.timestamp * 1000 : evt.timestamp;
+        add('Timestamp', new Date(ts).toLocaleString());
+      }
 
       return fields;
     },
