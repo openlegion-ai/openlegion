@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import json as json_module
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from src.shared.types import AgentMessage, AgentStatus, ChatMessage, ChatResponse, SteerMessage, TaskAssignment, TaskResult
@@ -32,7 +32,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     app = FastAPI(title=f"OpenLegion Agent: {loop.agent_id}")
 
     @app.post("/task")
-    async def receive_task(assignment: TaskAssignment) -> dict:
+    async def receive_task(assignment: TaskAssignment, request: Request) -> dict:
         """Accept a task. Returns immediately; result sent back via mesh."""
         if loop.state != "idle":
             return {"accepted": False, "status": "busy", "error": "Agent is working"}
@@ -41,9 +41,10 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         # sees a stale "idle" state between accept and task start.
         loop.state = "working"
         loop.current_task = assignment.task_id
+        _trace_id = request.headers.get("x-trace-id")
 
         async def run() -> None:
-            result = await loop.execute_task(assignment)
+            result = await loop.execute_task(assignment, trace_id=_trace_id)
             try:
                 await loop.mesh_client.send_system_message(
                     to="orchestrator",
@@ -94,9 +95,12 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         }
 
     @app.post("/chat", response_model=ChatResponse)
-    async def chat(msg: ChatMessage) -> ChatResponse:
+    async def chat(msg: ChatMessage, request: Request) -> ChatResponse:
         """Interactive chat with the agent. Supports tool use."""
-        result = await loop.chat(sanitize_for_prompt(msg.message))
+        result = await loop.chat(
+            sanitize_for_prompt(msg.message),
+            trace_id=request.headers.get("x-trace-id"),
+        )
         return ChatResponse(**result)
 
     @app.post("/chat/steer")
@@ -106,10 +110,13 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         return {"injected": injected, "agent_state": loop.state}
 
     @app.post("/chat/stream")
-    async def chat_stream(msg: ChatMessage) -> StreamingResponse:
+    async def chat_stream(msg: ChatMessage, request: Request) -> StreamingResponse:
         """Streaming chat. Returns SSE events for tool use and text deltas."""
+        _trace_id = request.headers.get("x-trace-id")
         async def event_generator():
-            async for event in loop.chat_stream(sanitize_for_prompt(msg.message)):
+            async for event in loop.chat_stream(
+                sanitize_for_prompt(msg.message), trace_id=_trace_id,
+            ):
                 yield f"data: {json_module.dumps(event, default=str)}\n\n"
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 

@@ -60,11 +60,14 @@ class LLMClient:
 
         request = APIProxyRequest(service="llm", action="chat", params=params, timeout=120)
 
+        from src.shared.trace import trace_headers
+
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/api",
             json=request.model_dump(mode="json"),
             params={"agent_id": self.agent_id},
+            headers=trace_headers(),
         )
         response.raise_for_status()
         data = response.json()
@@ -99,11 +102,14 @@ class LLMClient:
             params={"model": model or "text-embedding-3-small", "text": text},
             timeout=30,
         )
+        from src.shared.trace import trace_headers
+
         client = await self._get_client()
         response = await client.post(
             f"{self.mesh_url}/mesh/api",
             json=request.model_dump(mode="json"),
             params={"agent_id": self.agent_id},
+            headers=trace_headers(),
         )
         response.raise_for_status()
         data = response.json()

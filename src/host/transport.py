@@ -24,6 +24,13 @@ logger = setup_logging("host.transport")
 class Transport(abc.ABC):
     """Abstract transport for reaching an agent's HTTP API."""
 
+    def _resolve_headers(self, headers: dict[str, str] | None) -> dict[str, str]:
+        """Return *headers* if given, otherwise auto-inject from trace contextvar."""
+        if headers is not None:
+            return headers
+        from src.shared.trace import trace_headers
+        return trace_headers()
+
     @abc.abstractmethod
     async def request(
         self,
@@ -32,6 +39,7 @@ class Transport(abc.ABC):
         path: str,
         json: dict | None = None,
         timeout: int = 120,
+        headers: dict[str, str] | None = None,
     ) -> dict:
         """Send an HTTP request to an agent. Returns parsed JSON response."""
 
@@ -46,12 +54,13 @@ class Transport(abc.ABC):
         path: str,
         json: dict | None = None,
         timeout: int = 120,
+        headers: dict[str, str] | None = None,
     ):
         """Streaming HTTP request. Yields SSE lines as they arrive.
 
         Default implementation falls back to non-streaming request.
         """
-        result = await self.request(agent_id, method, path, json=json, timeout=timeout)
+        result = await self.request(agent_id, method, path, json=json, timeout=timeout, headers=headers)
         yield result
 
     @abc.abstractmethod
@@ -62,6 +71,7 @@ class Transport(abc.ABC):
         path: str,
         json: dict | None = None,
         timeout: int = 120,
+        headers: dict[str, str] | None = None,
     ) -> dict:
         """Synchronous variant for use in non-async contexts (REPL, callbacks)."""
 
@@ -104,12 +114,16 @@ class HttpTransport(Transport):
         path: str,
         json: dict | None = None,
         timeout: int = 120,
+        headers: dict[str, str] | None = None,
     ) -> dict:
         url = self._urls.get(agent_id)
         if not url:
             return {"error": f"Agent '{agent_id}' not registered in transport"}
         client = await self._get_client()
-        resp = await client.request(method, f"{url}{path}", json=json, timeout=timeout)
+        resp = await client.request(
+            method, f"{url}{path}", json=json, timeout=timeout,
+            headers=self._resolve_headers(headers),
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -132,6 +146,7 @@ class HttpTransport(Transport):
         path: str,
         json: dict | None = None,
         timeout: int = 120,
+        headers: dict[str, str] | None = None,
     ):
         """Streaming HTTP request. Yields parsed SSE data lines."""
         url = self._urls.get(agent_id)
@@ -139,7 +154,10 @@ class HttpTransport(Transport):
             yield {"error": f"Agent '{agent_id}' not registered in transport"}
             return
         client = await self._get_client()
-        async with client.stream(method, f"{url}{path}", json=json, timeout=timeout) as resp:
+        async with client.stream(
+            method, f"{url}{path}", json=json, timeout=timeout,
+            headers=self._resolve_headers(headers),
+        ) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
                 if line.startswith("data: "):
@@ -155,11 +173,15 @@ class HttpTransport(Transport):
         path: str,
         json: dict | None = None,
         timeout: int = 120,
+        headers: dict[str, str] | None = None,
     ) -> dict:
         url = self._urls.get(agent_id)
         if not url:
             return {"error": f"Agent '{agent_id}' not registered in transport"}
-        resp = httpx.request(method, f"{url}{path}", json=json, timeout=timeout)
+        resp = httpx.request(
+            method, f"{url}{path}", json=json, timeout=timeout,
+            headers=self._resolve_headers(headers),
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -180,6 +202,7 @@ class SandboxTransport(Transport):
         path: str,
         json: dict | None = None,
         timeout: int = 120,
+        headers: dict[str, str] | None = None,
     ) -> dict:
         sandbox_name = f"openlegion_{agent_id}"
         url = f"http://localhost:{self.AGENT_PORT}{path}"
@@ -188,6 +211,8 @@ class SandboxTransport(Transport):
             "curl", "-s", "-X", method, url,
             "-H", "Content-Type: application/json",
         ]
+        for hk, hv in self._resolve_headers(headers).items():
+            cmd.extend(["-H", f"{hk}: {hv}"])
         if json is not None:
             cmd.extend(["-d", json_module.dumps(json)])
 
@@ -233,6 +258,7 @@ class SandboxTransport(Transport):
         path: str,
         json: dict | None = None,
         timeout: int = 120,
+        headers: dict[str, str] | None = None,
     ) -> dict:
         import subprocess
 
@@ -243,6 +269,8 @@ class SandboxTransport(Transport):
             "curl", "-s", "-X", method, url,
             "-H", "Content-Type: application/json",
         ]
+        for hk, hv in self._resolve_headers(headers).items():
+            cmd.extend(["-H", f"{hk}: {hv}"])
         if json is not None:
             cmd.extend(["-d", json_module.dumps(json)])
 

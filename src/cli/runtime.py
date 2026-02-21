@@ -39,6 +39,7 @@ class RuntimeContext:
         self.cron_scheduler = None
         self.lane_manager = None
         self.channel_manager = None
+        self.trace_store = None
         self.agent_urls: dict[str, str] = {}
         self._dispatch_loop = None
         self._server = None
@@ -71,6 +72,8 @@ class RuntimeContext:
             self.runtime.stop_all()
         if self.cost_tracker:
             self.cost_tracker.close()
+        if self.trace_store:
+            self.trace_store.close()
         if self.pubsub:
             self.pubsub.close()
         if self.blackboard:
@@ -99,21 +102,27 @@ class RuntimeContext:
 
         click.echo(" done.")
 
-    def dispatch(self, agent: str, message: str, mode: str = "followup") -> str:
+    def dispatch(
+        self, agent: str, message: str, mode: str = "followup", trace_id: str | None = None,
+    ) -> str:
         """Thread-safe synchronous message dispatch.
 
         Schedules the coroutine on the dedicated dispatch loop and blocks
         until the result is ready.  For async callers, use async_dispatch().
         """
         future = asyncio.run_coroutine_threadsafe(
-            self.lane_manager.enqueue(agent, message, mode=mode), self._dispatch_loop,
+            self.lane_manager.enqueue(agent, message, mode=mode, trace_id=trace_id),
+            self._dispatch_loop,
         )
         return future.result()
 
-    async def async_dispatch(self, agent: str, message: str, mode: str = "followup") -> str:
+    async def async_dispatch(
+        self, agent: str, message: str, mode: str = "followup", trace_id: str | None = None,
+    ) -> str:
         """Async dispatch: schedules onto the dedicated dispatch loop."""
         future = asyncio.run_coroutine_threadsafe(
-            self.lane_manager.enqueue(agent, message, mode=mode), self._dispatch_loop,
+            self.lane_manager.enqueue(agent, message, mode=mode, trace_id=trace_id),
+            self._dispatch_loop,
         )
         try:
             running_loop = asyncio.get_running_loop()
@@ -167,6 +176,7 @@ class RuntimeContext:
         from src.host.mesh import Blackboard, MessageRouter, PubSub
         from src.host.orchestrator import Orchestrator
         from src.host.permissions import PermissionMatrix
+        from src.host.traces import TraceStore
 
         # Ensure collaborative permissions are up to date before loading
         if self.cfg.get("collaboration", False):
@@ -191,6 +201,7 @@ class RuntimeContext:
             pubsub=self.pubsub,
             container_manager=self.runtime,
         )
+        self.trace_store = TraceStore()
 
     def _start_agents(self) -> None:
         from src.host.runtime import DockerBackend, SandboxBackend
@@ -258,6 +269,14 @@ class RuntimeContext:
         from src.host.lanes import LaneManager
 
         async def _direct_dispatch(agent_name: str, message: str) -> str:
+            from src.shared.trace import current_trace_id
+
+            tid = current_trace_id.get()
+            if tid and self.trace_store:
+                self.trace_store.record(
+                    trace_id=tid, source="dispatch", agent=agent_name,
+                    event_type="chat", detail=message[:120],
+                )
             try:
                 result = await self.transport.request(
                     agent_name, "POST", "/chat", json={"message": message},
@@ -301,6 +320,7 @@ class RuntimeContext:
             self.credential_vault, self.cron_scheduler, self.runtime,
             self.transport, self.orchestrator,
             auth_tokens=self.runtime.auth_tokens,
+            trace_store=self.trace_store,
         )
         app.include_router(create_webhook_router(self.orchestrator))
         app.include_router(webhook_manager.create_router())
@@ -367,7 +387,8 @@ class RuntimeContext:
         from src.host.cron import CronScheduler
 
         async def cron_dispatch(agent_name: str, message: str) -> str:
-            result = await self.async_dispatch(agent_name, message)
+            from src.shared.trace import new_trace_id
+            result = await self.async_dispatch(agent_name, message, trace_id=new_trace_id())
             if result and result.strip():
                 notification = f"[cron -> {agent_name}] {result}"
                 sys.stdout.write(f"\n{notification}\n")

@@ -37,6 +37,11 @@ class MeshClient:
             self._client = httpx.AsyncClient(timeout=30, headers=headers)
         return self._client
 
+    def _trace_headers(self) -> dict[str, str]:
+        """Return current trace headers for per-request injection."""
+        from src.shared.trace import trace_headers
+        return trace_headers()
+
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
@@ -50,6 +55,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/register",
             json={"agent_id": self.agent_id, "capabilities": capabilities, "port": port},
             timeout=timeout,
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
 
@@ -59,6 +65,7 @@ class MeshClient:
         response = await client.get(
             f"{self.mesh_url}/mesh/blackboard/{key}",
             params={"agent_id": self.agent_id},
+            headers=self._trace_headers(),
         )
         if response.status_code == 404:
             return None
@@ -72,6 +79,7 @@ class MeshClient:
             f"{self.mesh_url}/mesh/blackboard/{key}",
             params={"agent_id": self.agent_id},
             json=value,
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -82,6 +90,7 @@ class MeshClient:
         response = await client.get(
             f"{self.mesh_url}/mesh/blackboard/",
             params={"agent_id": self.agent_id, "prefix": prefix},
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -93,6 +102,7 @@ class MeshClient:
         response = await client.post(
             f"{self.mesh_url}/mesh/message",
             json=message.model_dump(mode="json"),
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -104,6 +114,7 @@ class MeshClient:
         response = await client.post(
             f"{self.mesh_url}/mesh/publish",
             json=event.model_dump(mode="json"),
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -111,7 +122,10 @@ class MeshClient:
     async def list_agents(self) -> dict:
         """List all registered agents and their capabilities."""
         client = await self._get_client()
-        response = await client.get(f"{self.mesh_url}/mesh/agents")
+        response = await client.get(
+            f"{self.mesh_url}/mesh/agents",
+            headers=self._trace_headers(),
+        )
         response.raise_for_status()
         return response.json()
 
@@ -128,6 +142,7 @@ class MeshClient:
                 "message": message,
                 "heartbeat": heartbeat,
             },
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -138,6 +153,7 @@ class MeshClient:
         response = await client.get(
             f"{self.mesh_url}/mesh/cron",
             params={"agent_id": self.agent_id},
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -145,7 +161,10 @@ class MeshClient:
     async def remove_cron(self, job_id: str) -> dict:
         """Remove a cron job by ID."""
         client = await self._get_client()
-        response = await client.delete(f"{self.mesh_url}/mesh/cron/{job_id}")
+        response = await client.delete(
+            f"{self.mesh_url}/mesh/cron/{job_id}",
+            headers=self._trace_headers(),
+        )
         response.raise_for_status()
         return response.json()
 
@@ -168,6 +187,7 @@ class MeshClient:
                 "ttl": ttl,
             },
             timeout=90,
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -178,6 +198,7 @@ class MeshClient:
         response = await client.get(
             f"{self.mesh_url}/mesh/agents/{agent_id}/history",
             params={"requesting_agent": self.agent_id},
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -190,6 +211,7 @@ class MeshClient:
         response = await client.post(
             f"{self.mesh_url}/mesh/vault/store",
             json={"agent_id": self.agent_id, "name": name, "value": value},
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -200,6 +222,7 @@ class MeshClient:
         response = await client.get(
             f"{self.mesh_url}/mesh/vault/list",
             params={"agent_id": self.agent_id},
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json().get("credentials", [])
@@ -210,6 +233,7 @@ class MeshClient:
         response = await client.get(
             f"{self.mesh_url}/mesh/vault/status/{name}",
             params={"agent_id": self.agent_id},
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -224,6 +248,7 @@ class MeshClient:
         response = await client.post(
             f"{self.mesh_url}/mesh/vault/resolve",
             json={"agent_id": self.agent_id, "name": name},
+            headers=self._trace_headers(),
         )
         if response.status_code == 404:
             return None
@@ -241,6 +266,7 @@ class MeshClient:
             json=request.model_dump(mode="json"),
             params={"agent_id": self.agent_id},
             timeout=timeout + 5,
+            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return APIProxyResponse(**response.json())

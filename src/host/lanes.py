@@ -31,6 +31,7 @@ class QueuedTask:
     agent: str
     message: str
     mode: str = "followup"
+    trace_id: str | None = None
     future: asyncio.Future = field(default_factory=asyncio.Future)
 
 
@@ -59,7 +60,9 @@ class LaneManager:
             self._collect_buffers[agent] = []
             self._workers[agent] = asyncio.create_task(self._worker(agent))
 
-    async def enqueue(self, agent: str, message: str, *, mode: str = "followup") -> str:
+    async def enqueue(
+        self, agent: str, message: str, *, mode: str = "followup", trace_id: str | None = None,
+    ) -> str:
         """Queue a message for an agent with the specified mode.
 
         Modes:
@@ -74,15 +77,18 @@ class LaneManager:
         elif mode == "collect":
             return await self._handle_collect(agent, message)
         else:
-            return await self._handle_followup(agent, message)
+            return await self._handle_followup(agent, message, trace_id=trace_id)
 
-    async def _handle_followup(self, agent: str, message: str) -> str:
+    async def _handle_followup(
+        self, agent: str, message: str, *, trace_id: str | None = None,
+    ) -> str:
         """Standard FIFO enqueue."""
         task = QueuedTask(
             id=generate_id("lane"),
             agent=agent,
             message=message,
             mode="followup",
+            trace_id=trace_id,
         )
         self._pending[agent].append(task)
         await self._queues[agent].put(task)
@@ -155,10 +161,13 @@ class LaneManager:
 
     async def _worker(self, agent: str) -> None:
         """Worker loop: drains the queue for a single agent serially."""
+        from src.shared.trace import current_trace_id
+
         queue = self._queues[agent]
         while True:
             task = await queue.get()
             self._busy[agent] = True
+            current_trace_id.set(task.trace_id)
             try:
                 result = await self._dispatch_fn(agent, task.message)
                 task.future.set_result(result)
