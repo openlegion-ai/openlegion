@@ -16,8 +16,6 @@ Config: DISCORD_BOT_TOKEN in .env, channels.discord in mesh.yaml
 from __future__ import annotations
 
 import asyncio
-import json
-from pathlib import Path
 
 from src.channels.base import (
     AddKeyFn,
@@ -25,6 +23,7 @@ from src.channels.base import (
     CostsFn,
     DispatchFn,
     ListAgentsFn,
+    PairingManager,
     ResetFn,
     StatusFn,
     chunk_text,
@@ -34,21 +33,6 @@ from src.shared.utils import setup_logging
 logger = setup_logging("channels.discord")
 
 MAX_DC_LEN = 1900
-_PAIRING_FILE = Path("config/discord_paired.json")
-
-
-def _load_paired() -> dict:
-    if _PAIRING_FILE.exists():
-        try:
-            return json.loads(_PAIRING_FILE.read_text())
-        except Exception:
-            pass
-    return {"owner": None, "allowed": []}
-
-
-def _save_paired(data: dict) -> None:
-    _PAIRING_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _PAIRING_FILE.write_text(json.dumps(data, indent=2) + "\n")
 
 
 class DiscordChannel(Channel):
@@ -79,18 +63,13 @@ class DiscordChannel(Channel):
         self.allowed_guilds = set(allowed_guilds) if allowed_guilds else None
         self._client = None
         self._notify_channel_ids: set[int] = set()
-        self._paired = _load_paired()
+        self._pairing = PairingManager("config/discord_paired.json")
 
     def _is_allowed(self, user_id: int) -> bool:
-        owner = self._paired.get("owner")
-        if owner is None:
-            return False
-        if user_id == owner:
-            return True
-        return user_id in self._paired.get("allowed", [])
+        return self._pairing.is_allowed(user_id)
 
     def _is_owner(self, user_id: int) -> bool:
-        return user_id == self._paired.get("owner")
+        return self._pairing.is_owner(user_id)
 
     async def start(self) -> None:
         try:
@@ -126,11 +105,11 @@ class DiscordChannel(Channel):
             author_id = message.author.id
 
             # Pairing via code: !start <code>
-            if channel_ref._paired.get("owner") is None:
+            if channel_ref._pairing.owner is None:
                 if text.lower().startswith("!start") or text.lower().startswith("/start"):
                     parts = text.split(None, 1)
                     code_arg = parts[1].strip() if len(parts) > 1 else ""
-                    expected = channel_ref._paired.get("pairing_code", "")
+                    expected = channel_ref._pairing.pairing_code
                     if not expected or code_arg != expected:
                         await message.channel.send(
                             "Pairing required. Send:  `!start <pairing_code>`\n"
@@ -141,11 +120,7 @@ class DiscordChannel(Channel):
                             f"from {message.author} (id: {author_id})"
                         )
                         return
-                    channel_ref._paired["owner"] = author_id
-                    channel_ref._paired.setdefault("allowed", [])
-                    if "pairing_code" in channel_ref._paired:
-                        del channel_ref._paired["pairing_code"]
-                    _save_paired(channel_ref._paired)
+                    channel_ref._pairing.claim_owner(author_id)
                     logger.info(
                         f"Paired owner via code: {message.author} (id: {author_id})"
                     )
@@ -178,10 +153,7 @@ class DiscordChannel(Channel):
                 except (ValueError, IndexError):
                     await message.channel.send("Usage: !allow <discord_user_id>")
                     return
-                allowed = channel_ref._paired.setdefault("allowed", [])
-                if target_id not in allowed:
-                    allowed.append(target_id)
-                    _save_paired(channel_ref._paired)
+                channel_ref._pairing.allow(target_id)
                 await message.channel.send(f"User {target_id} is now allowed.")
                 return
 
@@ -194,10 +166,7 @@ class DiscordChannel(Channel):
                 except (ValueError, IndexError):
                     await message.channel.send("Usage: !revoke <discord_user_id>")
                     return
-                allowed = channel_ref._paired.setdefault("allowed", [])
-                if target_id in allowed:
-                    allowed.remove(target_id)
-                    _save_paired(channel_ref._paired)
+                if channel_ref._pairing.revoke(target_id):
                     await message.channel.send(f"User {target_id} access revoked.")
                 else:
                     await message.channel.send(f"User {target_id} was not in the allowed list.")

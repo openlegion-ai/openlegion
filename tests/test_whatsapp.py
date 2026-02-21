@@ -50,7 +50,7 @@ def _make_channel(
     defaults.update(overrides)
     ch = WhatsAppChannel(**defaults)
     if paired is not None:
-        ch._paired = paired
+        ch._pairing._data = paired
     return ch
 
 
@@ -211,7 +211,7 @@ class TestPairing:
 
         msg = {"from": "+1234", "type": "text", "text": {"body": "!start abc123"}}
         await ch._process_message(msg)
-        assert ch._paired["owner"] == "+1234"
+        assert ch._pairing.owner == "+1234"
 
     @pytest.mark.asyncio
     async def test_pairing_with_wrong_code(self):
@@ -223,7 +223,7 @@ class TestPairing:
 
         msg = {"from": "+1234", "type": "text", "text": {"body": "!start wrong"}}
         await ch._process_message(msg)
-        assert ch._paired["owner"] is None
+        assert ch._pairing.owner is None
 
     @pytest.mark.asyncio
     async def test_disallowed_user_rejected(self):
@@ -255,7 +255,7 @@ class TestPairing:
 
         msg = {"from": "+0000", "type": "text", "text": {"body": "!allow +1111"}}
         await ch._process_message(msg)
-        assert "+1111" in ch._paired["allowed"]
+        assert ch._pairing.is_allowed("+1111")
 
     @pytest.mark.asyncio
     async def test_owner_revoke_command(self):
@@ -265,7 +265,7 @@ class TestPairing:
 
         msg = {"from": "+0000", "type": "text", "text": {"body": "!revoke +1111"}}
         await ch._process_message(msg)
-        assert "+1111" not in ch._paired["allowed"]
+        assert not ch._pairing.is_allowed("+1111")
 
 
 # ── _send_text ──────────────────────────────────────────────────

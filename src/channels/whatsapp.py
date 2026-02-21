@@ -19,8 +19,6 @@ Config: WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID in .env,
 from __future__ import annotations
 
 import asyncio
-import json
-from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Query, Request
@@ -31,6 +29,7 @@ from src.channels.base import (
     CostsFn,
     DispatchFn,
     ListAgentsFn,
+    PairingManager,
     ResetFn,
     StatusFn,
     StreamDispatchFn,
@@ -41,23 +40,7 @@ from src.shared.utils import setup_logging
 logger = setup_logging("channels.whatsapp")
 
 MAX_WA_LEN = 4096
-_PAIRING_FILE = Path("config/whatsapp_paired.json")
 _GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
-
-
-def _load_paired() -> dict:
-    """Load paired users from disk."""
-    if _PAIRING_FILE.exists():
-        try:
-            return json.loads(_PAIRING_FILE.read_text())
-        except Exception:
-            pass
-    return {"owner": None, "allowed": []}
-
-
-def _save_paired(data: dict) -> None:
-    _PAIRING_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _PAIRING_FILE.write_text(json.dumps(data, indent=2) + "\n")
 
 
 class WhatsAppChannel(Channel):
@@ -92,7 +75,7 @@ class WhatsAppChannel(Channel):
         self.verify_token = verify_token
         self._http: httpx.AsyncClient | None = None
         self._phone_numbers: set[str] = set()
-        self._paired = _load_paired()
+        self._pairing = PairingManager("config/whatsapp_paired.json")
 
     async def start(self) -> None:
         self._http = httpx.AsyncClient(
@@ -100,10 +83,10 @@ class WhatsAppChannel(Channel):
             headers={"Authorization": f"Bearer {self.access_token}"},
             timeout=30,
         )
-        owner = self._paired.get("owner")
+        owner = self._pairing.owner
         if owner:
             logger.info(f"WhatsApp channel started (owner: {owner})")
-        elif self._paired.get("pairing_code"):
+        elif self._pairing.pairing_code:
             logger.info("WhatsApp channel started (awaiting pairing code)")
         else:
             logger.info("WhatsApp channel started (no pairing code -- run setup again)")
@@ -140,15 +123,10 @@ class WhatsAppChannel(Channel):
         )
 
     def _is_allowed(self, phone: str) -> bool:
-        owner = self._paired.get("owner")
-        if owner is None:
-            return False
-        if phone == owner:
-            return True
-        return phone in self._paired.get("allowed", [])
+        return self._pairing.is_allowed(phone)
 
     def _is_owner(self, phone: str) -> bool:
-        return phone == self._paired.get("owner")
+        return self._pairing.is_owner(phone)
 
     def create_router(self) -> APIRouter:
         """Create a FastAPI router for WhatsApp webhook endpoints."""
@@ -208,11 +186,11 @@ class WhatsAppChannel(Channel):
             return
 
         # Pairing: !start <code>
-        if self._paired.get("owner") is None:
+        if self._pairing.owner is None:
             if text.lower().startswith("!start") or text.lower().startswith("/start"):
                 parts = text.split(None, 1)
                 code_arg = parts[1].strip() if len(parts) > 1 else ""
-                expected = self._paired.get("pairing_code", "")
+                expected = self._pairing.pairing_code
                 if not expected or code_arg != expected:
                     await self._send_text(
                         phone,
@@ -223,10 +201,7 @@ class WhatsAppChannel(Channel):
                         f"Rejected !start without valid pairing code from {phone}"
                     )
                     return
-                self._paired["owner"] = phone
-                self._paired.setdefault("allowed", [])
-                self._paired.pop("pairing_code", None)
-                _save_paired(self._paired)
+                self._pairing.claim_owner(phone)
                 logger.info(f"Paired owner via code: {phone}")
                 self._phone_numbers.add(phone)
                 await self._send_text(
@@ -262,10 +237,7 @@ class WhatsAppChannel(Channel):
                 await self._send_text(phone, "Usage: !allow <phone_number>")
                 return
             target = parts[1].strip()
-            allowed = self._paired.setdefault("allowed", [])
-            if target not in allowed:
-                allowed.append(target)
-                _save_paired(self._paired)
+            self._pairing.allow(target)
             await self._send_text(phone, f"User {target} is now allowed.")
             logger.info(f"Owner allowed user {target}")
             return
@@ -279,10 +251,7 @@ class WhatsAppChannel(Channel):
                 await self._send_text(phone, "Usage: !revoke <phone_number>")
                 return
             target = parts[1].strip()
-            allowed = self._paired.get("allowed", [])
-            if target in allowed:
-                allowed.remove(target)
-                _save_paired(self._paired)
+            if self._pairing.revoke(target):
                 await self._send_text(phone, f"User {target} access revoked.")
             else:
                 await self._send_text(
@@ -294,8 +263,8 @@ class WhatsAppChannel(Channel):
             if not self._is_owner(phone):
                 await self._send_text(phone, "Only the owner can view pairing info.")
                 return
-            owner = self._paired.get("owner")
-            allowed = self._paired.get("allowed", [])
+            owner = self._pairing.owner
+            allowed = self._pairing.allowed_list()
             lines = [f"Owner: {owner}"]
             if allowed:
                 lines.append(f"Allowed users: {', '.join(allowed)}")

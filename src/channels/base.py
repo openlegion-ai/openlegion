@@ -9,13 +9,92 @@ agent labels on responses.
 from __future__ import annotations
 
 import abc
+import json
 import re
 from collections.abc import AsyncIterator, Callable, Coroutine
+from pathlib import Path
 from typing import Any
 
 from src.shared.utils import setup_logging
 
 logger = setup_logging("channels.base")
+
+
+class PairingManager:
+    """Shared pairing-code security for channel adapters.
+
+    Manages owner/allowed-user state persisted as a JSON file.
+    All channels use the same pairing flow: the owner enters a code
+    shown during ``openlegion setup``, then can allow/revoke others.
+    """
+
+    def __init__(self, config_path: str | Path):
+        self._path = Path(config_path)
+        self._data = self._load()
+
+    # ── persistence ───────────────────────────────────────────
+
+    def _load(self) -> dict:
+        if self._path.exists():
+            try:
+                return json.loads(self._path.read_text())
+            except Exception:
+                pass
+        return {"owner": None, "allowed": []}
+
+    def save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(self._data, indent=2) + "\n")
+
+    # ── access checks ─────────────────────────────────────────
+
+    @property
+    def owner(self):
+        return self._data.get("owner")
+
+    @property
+    def pairing_code(self) -> str:
+        return self._data.get("pairing_code", "")
+
+    def is_allowed(self, user_id) -> bool:
+        owner = self.owner
+        if owner is None:
+            return False
+        if user_id == owner:
+            return True
+        return user_id in self._data.get("allowed", [])
+
+    def is_owner(self, user_id) -> bool:
+        return user_id == self.owner
+
+    # ── mutations ─────────────────────────────────────────────
+
+    def claim_owner(self, user_id) -> None:
+        self._data["owner"] = user_id
+        self._data.setdefault("allowed", [])
+        self._data.pop("pairing_code", None)
+        self.save()
+
+    def allow(self, user_id) -> bool:
+        """Add user to allowed list. Returns True if newly added."""
+        allowed = self._data.setdefault("allowed", [])
+        if user_id not in allowed:
+            allowed.append(user_id)
+            self.save()
+            return True
+        return False
+
+    def revoke(self, user_id) -> bool:
+        """Remove user from allowed list. Returns True if was present."""
+        allowed = self._data.setdefault("allowed", [])
+        if user_id in allowed:
+            allowed.remove(user_id)
+            self.save()
+            return True
+        return False
+
+    def allowed_list(self) -> list:
+        return list(self._data.get("allowed", []))
 
 DispatchFn = Callable[[str, str], Coroutine[Any, Any, str]]
 StreamDispatchFn = Callable[[str, str], AsyncIterator[dict]]
