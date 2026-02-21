@@ -288,9 +288,35 @@ class REPLSession:
         if target not in self.ctx.agents:
             click.echo(f"Agent '{target}' not found.")
             return
+
+        def _steer_poll(timeout: float) -> None:
+            """Poll stdin during streaming; dispatch /steer commands inline."""
+            import select
+            import sys
+
+            readable, _, _ = select.select([sys.stdin], [], [], timeout)
+            if readable:
+                line = sys.stdin.readline().strip()
+                if line.startswith("/steer ") and self.ctx.lane_manager:
+                    steer_msg = line[7:].strip()
+                    if steer_msg:
+                        sf = asyncio.run_coroutine_threadsafe(
+                            self.ctx.lane_manager.enqueue(
+                                target, steer_msg, mode="steer",
+                            ),
+                            self.ctx.dispatch_loop,
+                        )
+                        try:
+                            click.echo(sf.result(timeout=10))
+                        except Exception as e:
+                            click.echo(f"Steer error: {e}")
+                elif line:
+                    click.echo("(type /steer <msg> to redirect the agent)")
+
         try:
             _send_message_streaming(
                 self.ctx.transport, target, message, self.ctx.dispatch_loop,
+                steer_fn=_steer_poll,
             )
         except Exception as e:
             click.echo(f"Error: {e}")
@@ -299,12 +325,17 @@ class REPLSession:
 def _send_message_streaming(
     transport, target: str, message: str,
     dispatch_loop=None,
+    steer_fn=None,
 ) -> None:
     """Send a message via streaming endpoint, falling back to non-streaming.
 
     When *dispatch_loop* is provided, the async work runs on that loop
     (via ``run_coroutine_threadsafe``) so the httpx client is shared with
     the lane-manager dispatch path.  Otherwise falls back to ``asyncio.run()``.
+
+    When *steer_fn* is provided, it is called with a timeout (in seconds)
+    while waiting for the stream to complete, allowing the caller to poll
+    stdin for ``/steer`` commands.
     """
     from src.host.transport import HttpTransport
 
@@ -361,7 +392,12 @@ def _send_message_streaming(
 
         if dispatch_loop is not None:
             future = asyncio.run_coroutine_threadsafe(_stream(), dispatch_loop)
-            future.result()
+            if steer_fn is not None:
+                while not future.done():
+                    steer_fn(0.2)
+                future.result()  # re-raise exceptions
+            else:
+                future.result()
         else:
             asyncio.run(_stream())
     else:
