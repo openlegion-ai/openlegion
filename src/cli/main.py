@@ -11,6 +11,7 @@ Core:
 Agent management:
   agent add [name]        Add a new agent (with model selection)
   agent list              List configured agents
+  agent model <name>      Change an agent's model
   agent remove <name>     Remove an agent
 """
 
@@ -124,6 +125,65 @@ def agent_add(name: str | None, model_override: str | None):
     click.echo("\nStart chatting: openlegion start")
 
 
+@agent.command("model")
+@click.argument("name")
+@click.argument("model", required=False, default=None)
+def agent_model(name: str, model: str | None):
+    """Change an agent's model.
+
+    Without MODEL, shows current model and offers interactive selection.
+
+    \b
+    Examples:
+      openlegion agent model assistant anthropic/claude-sonnet-4-6
+      openlegion agent model assistant    # interactive picker
+    """
+    from src.cli.config import _PROVIDER_MODELS
+
+    cfg = _load_config()
+    if name not in cfg.get("agents", {}):
+        click.echo(f"Agent '{name}' not found.")
+        return
+
+    current_model = cfg["agents"][name].get("model", _get_default_model())
+
+    if model is None:
+        click.echo(f"  Current model: {current_model}\n")
+        provider = current_model.split("/")[0] if "/" in current_model else "anthropic"
+        models = _PROVIDER_MODELS.get(provider, [current_model])
+        default_idx = 1
+        for i, m in enumerate(models, 1):
+            marker = " (current)" if m == current_model else ""
+            click.echo(f"  {i}. {m}{marker}")
+            if m == current_model:
+                default_idx = i
+        model_choice = click.prompt(
+            "\nModel",
+            type=click.IntRange(1, len(models)),
+            default=default_idx,
+        )
+        model = models[model_choice - 1]
+
+    if model == current_model:
+        click.echo(f"Agent '{name}' already uses {model}.")
+        return
+
+    # Update agents.yaml
+    if cli_config.AGENTS_FILE.exists():
+        with open(cli_config.AGENTS_FILE) as f:
+            agents_cfg = yaml.safe_load(f) or {"agents": {}}
+    else:
+        agents_cfg = {"agents": {}}
+
+    if name in agents_cfg.get("agents", {}):
+        agents_cfg["agents"][name]["model"] = model
+        with open(cli_config.AGENTS_FILE, "w") as f:
+            yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+
+    click.echo(f"Agent '{name}' model changed: {current_model} -> {model}")
+    click.echo("Restart to apply: openlegion start")
+
+
 @agent.command("list")
 def agent_list():
     """List all configured agents and their status."""
@@ -144,11 +204,13 @@ def agent_list():
     except Exception:
         pass
 
-    click.echo(f"{'Name':<16} {'Role':<24} {'Status':<10}")
-    click.echo("-" * 50)
+    default_model = _get_default_model()
+    click.echo(f"{'Name':<16} {'Model':<40} {'Status':<10}")
+    click.echo("-" * 66)
     for name, info in agents.items():
         status = "running" if name in running else "stopped"
-        click.echo(f"{name:<16} {info.get('role', 'n/a'):<24} {status:<10}")
+        model = info.get("model", default_model)
+        click.echo(f"{name:<16} {model:<40} {status:<10}")
 
 
 @agent.command("remove")
@@ -415,14 +477,24 @@ def start(config_path: str, detach: bool, sandbox: bool):
 
 
 def _start_detached(config_path: str) -> None:
-    """Start the runtime in a background subprocess."""
+    """Start the runtime in a background subprocess.
+
+    Uses a log file instead of a pipe for child stdout.  This prevents
+    the pipe buffer from filling up after the parent exits, which would
+    cause SIGPIPE to kill the background process and terminal lag while
+    the buffer is filling.
+    """
+    import time
+
+    log_path = cli_config.PROJECT_ROOT / ".openlegion.log"
+    log_fd = open(log_path, "w")
+
     cmd = [sys.executable, "-m", "src.cli", "start", "--config", config_path]
 
     popen_kwargs: dict = dict(
         cwd=str(cli_config.PROJECT_ROOT),
-        stdout=subprocess.PIPE,
+        stdout=log_fd,
         stderr=subprocess.STDOUT,
-        text=True,
     )
     if sys.platform == "win32":
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -431,34 +503,50 @@ def _start_detached(config_path: str) -> None:
 
     proc = subprocess.Popen(cmd, **popen_kwargs)
 
-    started_lines: list[str] = []
-    ready_event = threading.Event()
+    # Poll log file for startup output
+    deadline = time.time() + 90
+    printed_lines = 0
+    ready = False
 
-    def _reader() -> None:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip()
-            started_lines.append(line)
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            break
+        try:
+            lines = log_path.read_text().splitlines()
+        except OSError:
+            time.sleep(0.5)
+            continue
+
+        for line in lines[printed_lines:]:
             click.echo(line)
-            if "Chatting with" in line:
-                ready_event.set()
-                return
-        ready_event.set()
+        printed_lines = len(lines)
 
-    reader_thread = threading.Thread(target=_reader, daemon=True)
-    reader_thread.start()
-    ready_event.wait(timeout=90)
+        if any("Chatting with" in line for line in lines):
+            ready = True
+            break
+        time.sleep(0.5)
 
-    if proc.poll() is not None:
-        reader_thread.join(timeout=2)
+    log_fd.close()
 
     if proc.poll() is not None:
+        # Process died during startup
+        try:
+            lines = log_path.read_text().splitlines()
+            for line in lines[printed_lines:]:
+                click.echo(f"  {line}", err=True)
+        except OSError:
+            pass
         click.echo("Runtime failed to start. Check logs.", err=True)
-        for line in started_lines:
-            click.echo(f"  {line}", err=True)
+        click.echo(f"  Log: {log_path}", err=True)
+        return
+
+    if not ready:
+        click.echo("Startup timed out. Check logs.", err=True)
+        click.echo(f"  Log: {log_path}", err=True)
         return
 
     click.echo(f"\nOpenLegion running in background (PID {proc.pid}).")
+    click.echo(f"  Log file:            {log_path}")
     click.echo("  Chat with an agent:  openlegion chat <name>")
     click.echo("  Stop the runtime:    openlegion stop")
 
@@ -600,6 +688,9 @@ def status(port: int):
     click.echo("-" * 48)
     for name in all_names:
         role = configured.get(name, {}).get("role", "n/a")
+        # Truncate long role names to keep columns aligned
+        if len(role) > 20:
+            role = role[:17] + "..."
 
         if name in mesh_agents:
             agent_url = mesh_agents[name]
@@ -610,10 +701,8 @@ def status(port: int):
                 state = sr.json().get("state", "running")
             except Exception:
                 state = "unreachable"
-        elif mesh_online:
-            state = "stopped"
         else:
-            state = "unknown"
+            state = "stopped"
 
         click.echo(f"{name:<16} {role:<20} {state:<12}")
 
