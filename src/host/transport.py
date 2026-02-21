@@ -121,7 +121,8 @@ class HttpTransport(Transport):
             client = await self._get_client()
             resp = await client.get(f"{url}/status", timeout=timeout)
             return resp.status_code == 200
-        except Exception:
+        except Exception as e:
+            logger.debug("Reachability check failed for '%s': %s", agent_id, e)
             return False
 
     async def stream_request(

@@ -54,7 +54,8 @@ def _get_tiktoken_encoding(model: str):
         enc = tiktoken.encoding_for_model(bare)
         _encoding_cache[model] = enc
         return enc
-    except Exception:
+    except Exception as e:
+        logger.debug("tiktoken encoding unavailable for '%s': %s", model, e)
         _encoding_cache[model] = None
         return None
 

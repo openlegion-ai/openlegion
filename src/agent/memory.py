@@ -301,8 +301,8 @@ class MemoryStore:
             try:
                 last = datetime.fromisoformat(row[1].replace("Z", "+00:00"))
                 days_since = (datetime.now(UTC) - last).total_seconds() / 86400
-            except Exception:
-                pass
+            except (ValueError, TypeError) as e:
+                logger.debug("Failed to parse last_accessed timestamp: %s", e)
         boost = self._compute_boost(new_count, days_since)
         self.db.execute(
             "UPDATE facts SET access_count = ?, "
