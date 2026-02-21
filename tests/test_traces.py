@@ -79,6 +79,49 @@ class TestTraceStore:
         events = self.store.get_trace("tr_dur")
         assert events[0]["duration_ms"] == 150
 
+    def test_list_trace_summaries_groups_by_trace_id(self):
+        """Summaries return one row per trace, with correct aggregations."""
+        self.store.record("tr_a", "dispatch", "alpha", "chat", detail="hello")
+        self.store.record("tr_a", "mesh", "alpha", "llm_call", duration_ms=100)
+        self.store.record("tr_a", "mesh", "alpha", "tool_start", duration_ms=50)
+        self.store.record("tr_b", "dispatch", "beta", "chat", detail="world", status="error")
+        self.store.record("tr_b", "mesh", "beta", "llm_call", duration_ms=200)
+
+        summaries = self.store.list_trace_summaries(limit=10)
+        assert len(summaries) == 2
+
+        # Newest first (tr_b was inserted last)
+        assert summaries[0]["trace_id"] == "tr_b"
+        assert summaries[0]["event_count"] == 2
+        assert summaries[0]["agents"] == ["beta"]
+        assert summaries[0]["has_error"] is True
+        assert summaries[0]["total_duration_ms"] == 200
+
+        assert summaries[1]["trace_id"] == "tr_a"
+        assert summaries[1]["event_count"] == 3
+        assert summaries[1]["agents"] == ["alpha"]
+        assert summaries[1]["has_error"] is False
+        assert summaries[1]["total_duration_ms"] == 150
+
+    def test_list_trace_summaries_multiple_agents(self):
+        """Traces involving multiple agents list all of them."""
+        self.store.record("tr_multi", "dispatch", "alpha", "chat")
+        self.store.record("tr_multi", "mesh", "beta", "llm_call", duration_ms=100)
+        summaries = self.store.list_trace_summaries(limit=10)
+        assert len(summaries) == 1
+        assert set(summaries[0]["agents"]) == {"alpha", "beta"}
+        assert summaries[0]["event_count"] == 2
+
+    def test_list_trace_summaries_empty(self):
+        summaries = self.store.list_trace_summaries(limit=10)
+        assert summaries == []
+
+    def test_list_trace_summaries_respects_limit(self):
+        for i in range(10):
+            self.store.record(f"tr_{i:03d}", "repl", "a", "chat")
+        summaries = self.store.list_trace_summaries(limit=3)
+        assert len(summaries) == 3
+
 
 # ── Contextvar + helpers ─────────────────────────────────────
 

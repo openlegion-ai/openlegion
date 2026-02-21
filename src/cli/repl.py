@@ -53,6 +53,7 @@ class REPLSession:
         ("System", [
             ("/costs",            "Show spend, context, and model health"),
             ("/debug [trace]",    "Show recent request traces"),
+            ("/cron [del id]",    "List or delete cron jobs"),
             ("/addkey [service]", "Store a credential"),
             ("/help",             "Show this help"),
             ("/quit",             "Exit and stop runtime"),
@@ -75,6 +76,7 @@ class REPLSession:
             "/steer":     (self._cmd_steer,     "Redirect busy agent"),
             "/costs":     (self._cmd_costs,     "Show spend, context, and model health"),
             "/debug":     (self._cmd_debug,     "Show recent request traces"),
+            "/cron":      (self._cmd_cron,      "List or delete cron jobs"),
             "/addkey":    (self._cmd_addkey,     "Store a credential"),
             "/reset":     (self._cmd_reset,     "Clear conversation history"),
             "/help":      (self._cmd_help,      "Show this help"),
@@ -329,6 +331,36 @@ class REPLSession:
                 ts = datetime.fromtimestamp(ev["timestamp"], tz=timezone.utc).strftime("%H:%M:%S")
                 agent = ev["agent"] or "-"
                 click.echo(f"  {ev['trace_id']}  {ts}  {agent:<16} {ev['event_type']}: {ev['detail'][:60]}")
+        click.echo()
+
+    def _cmd_cron(self, arg: str) -> None:
+        if not self.ctx.cron_scheduler:
+            click.echo("Cron scheduler not available.")
+            return
+        parts = arg.strip().split(None, 1)
+        if parts and parts[0] in ("delete", "del", "rm"):
+            if len(parts) < 2:
+                click.echo("Usage: /cron delete <job_id>")
+                return
+            job_id = parts[1].strip()
+            if self.ctx.cron_scheduler.remove_job(job_id):
+                click.echo(f"  Deleted cron job: {job_id}")
+            else:
+                click.echo(f"  Job not found: {job_id}")
+            return
+        jobs = self.ctx.cron_scheduler.list_jobs()
+        if not jobs:
+            click.echo("  No cron jobs configured.")
+            return
+        click.echo()
+        click.echo(f"  {'ID':<24} {'Agent':<16} {'Schedule':<16} Status")
+        click.echo(f"  {'-'*24} {'-'*16} {'-'*16} {'-'*12}")
+        for j in jobs:
+            status = "active" if j["enabled"] else "paused"
+            hb = " [heartbeat]" if j.get("heartbeat") else ""
+            click.echo(f"  {j['id']:<24} {j['agent']:<16} {j['schedule']:<16} {status}{hb}")
+            if j.get("message"):
+                click.echo(f"  {'':24} {j['message'][:60]}")
         click.echo()
 
     def _cmd_addkey(self, arg: str) -> None:

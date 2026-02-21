@@ -125,6 +125,38 @@ class TraceStore:
         )
         return [self._row_to_dict(row) for row in cur.fetchall()]
 
+    def list_trace_summaries(self, limit: int = 50) -> list[dict]:
+        """Return one summary row per trace_id, newest first."""
+        cur = self._conn.execute(
+            """
+            SELECT trace_id,
+                   MIN(timestamp) AS started,
+                   MAX(timestamp) AS ended,
+                   COUNT(*) AS event_count,
+                   GROUP_CONCAT(DISTINCT agent) AS agents,
+                   MAX(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS has_error,
+                   SUM(duration_ms) AS total_duration_ms
+            FROM traces
+            GROUP BY trace_id
+            ORDER BY MAX(id) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        results = []
+        for row in cur.fetchall():
+            agents = [a for a in (row[4] or "").split(",") if a]
+            results.append({
+                "trace_id": row[0],
+                "started": row[1],
+                "ended": row[2],
+                "event_count": row[3],
+                "agents": agents,
+                "has_error": bool(row[5]),
+                "total_duration_ms": row[6] or 0,
+            })
+        return results
+
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()
