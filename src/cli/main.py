@@ -65,10 +65,27 @@ def setup():
 
 # ── agent subgroup ───────────────────────────────────────────
 
-@cli.group()
-def agent():
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def agent(ctx):
     """Manage agents (add, list, model, browser, remove)."""
-    pass
+    if ctx.invoked_subcommand is None:
+        commands = [
+            ("list", "List configured agents"),
+            ("add", "Add a new agent"),
+            ("model", "Change an agent's model"),
+            ("browser", "Change an agent's browser"),
+            ("remove", "Remove an agent"),
+        ]
+        click.echo("Agent management:\n")
+        for i, (name, desc) in enumerate(commands, 1):
+            click.echo(f"  {i}. {name:<10} {desc}")
+        choice = click.prompt(
+            "\nSelect action",
+            type=click.IntRange(1, len(commands)),
+            default=1,
+        )
+        ctx.invoke(agent.commands[commands[choice - 1][0]])
 
 
 @agent.command("add")
@@ -121,21 +138,22 @@ def agent_add(name: str | None, model_override: str | None, browser_override: st
 
 
 @agent.command("model")
-@click.argument("name")
+@click.argument("name", required=False, default=None)
 @click.argument("model", required=False, default=None)
-def agent_model(name: str, model: str | None):
+def agent_model(name: str | None, model: str | None):
     """Change an agent's LLM model.
 
     \b
     Examples:
       openlegion agent model assistant anthropic/claude-sonnet-4-6
       openlegion agent model assistant    # interactive picker
+      openlegion agent model              # pick agent then model
     """
     from src.cli.config import _pick_model_interactive
 
     cfg = _load_config()
-    if name not in cfg.get("agents", {}):
-        click.echo(f"Agent '{name}' not found.")
+    name = _resolve_agent_name(cfg, name)
+    if name is None:
         return
 
     current_model = cfg["agents"][name].get("model", _get_default_model())
@@ -154,10 +172,10 @@ def agent_model(name: str, model: str | None):
 
 
 @agent.command("browser")
-@click.argument("name")
+@click.argument("name", required=False, default=None)
 @click.argument("backend", required=False, default=None,
                 type=click.Choice(["basic", "stealth", "advanced"]))
-def agent_browser(name: str, backend: str | None):
+def agent_browser(name: str | None, backend: str | None):
     """Change an agent's browser backend.
 
     \b
@@ -170,12 +188,13 @@ def agent_browser(name: str, backend: str | None):
     Examples:
       openlegion agent browser scraper stealth
       openlegion agent browser scraper    # interactive picker
+      openlegion agent browser            # pick agent then browser
     """
     from src.cli.config import _pick_browser_interactive
 
     cfg = _load_config()
-    if name not in cfg.get("agents", {}):
-        click.echo(f"Agent '{name}' not found.")
+    name = _resolve_agent_name(cfg, name)
+    if name is None:
         return
 
     current = cfg["agents"][name].get("browser_backend", "basic") or "basic"
@@ -227,6 +246,28 @@ def _prompt_brightdata_key() -> None:
         click.echo("  Skipped. Set OPENLEGION_CRED_BRIGHTDATA_CDP_URL in .env later.\n")
 
 
+def _resolve_agent_name(cfg: dict, name: str | None) -> str | None:
+    """Resolve agent name: return as-is if valid, prompt interactively if None."""
+    agents = cfg.get("agents", {})
+    if not agents:
+        click.echo("No agents configured. Run: openlegion agent add")
+        return None
+    if name is not None:
+        if name not in agents:
+            click.echo(f"Agent '{name}' not found.")
+            return None
+        return name
+    # Interactive picker
+    names = sorted(agents.keys())
+    if len(names) == 1:
+        return names[0]
+    click.echo("Agents:")
+    for i, n in enumerate(names, 1):
+        click.echo(f"  {i}. {n}")
+    choice = click.prompt("Select agent", type=click.IntRange(1, len(names)), default=1)
+    return names[choice - 1]
+
+
 @agent.command("list")
 def agent_list():
     """List all configured agents and their status."""
@@ -257,13 +298,13 @@ def agent_list():
 
 
 @agent.command("remove")
-@click.argument("name")
+@click.argument("name", required=False, default=None)
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
-def agent_remove(name: str, yes: bool):
+def agent_remove(name: str | None, yes: bool):
     """Remove an agent from configuration."""
     cfg = _load_config()
-    if name not in cfg.get("agents", {}):
-        click.echo(f"Agent '{name}' not found.")
+    name = _resolve_agent_name(cfg, name)
+    if name is None:
         return
     if not yes:
         click.confirm(f"Remove agent '{name}'? This deletes its config and permissions.", abort=True)
@@ -612,12 +653,15 @@ def _start_detached(config_path: str) -> None:
 # ── chat (for detached mode) ─────────────────────────────────
 
 @cli.command("chat")
-@click.argument("name")
+@click.argument("name", required=False, default=None)
 @click.option("--port", default=8420, type=int, help="Mesh host port")
-def chat(name: str, port: int):
+def chat(name: str | None, port: int):
     """Connect to a running agent and start chatting.
 
-    The runtime must already be running (openlegion start -d).
+    \b
+    Examples:
+      openlegion chat              # pick from running agents
+      openlegion chat assistant    # connect directly
     """
     import httpx
 
@@ -630,6 +674,26 @@ def chat(name: str, port: int):
     except Exception as e:
         click.echo(f"Error contacting mesh: {e}", err=True)
         return
+
+    if not agents:
+        click.echo("No agents running.", err=True)
+        return
+
+    # Interactive agent selection when no name given
+    if name is None:
+        agent_names = sorted(agents.keys())
+        if len(agent_names) == 1:
+            name = agent_names[0]
+        else:
+            click.echo("Running agents:")
+            for i, n in enumerate(agent_names, 1):
+                click.echo(f"  {i}. {n}")
+            choice = click.prompt(
+                "Select agent",
+                type=click.IntRange(1, len(agent_names)),
+                default=1,
+            )
+            name = agent_names[choice - 1]
 
     agent_info = agents.get(name)
     if not agent_info:
@@ -774,32 +838,48 @@ def status(port: int):
 def stop():
     """Stop the runtime and all agent containers."""
     import signal
+    import time
 
     import docker
 
-    # Stop background host process if running
+    host_stopped = False
+
+    # Stop background host process if running — it will shut down containers
     pid_path = cli_config.PROJECT_ROOT / ".openlegion.pid"
     if pid_path.exists():
         try:
             pid = int(pid_path.read_text().strip())
             os.kill(pid, signal.SIGTERM)
-            click.echo(f"Stopped host process (PID {pid}).")
+            click.echo(f"Stopping host process (PID {pid})...", nl=False)
+            # Wait for the host to finish its shutdown (which stops containers)
+            for _ in range(20):
+                time.sleep(0.5)
+                try:
+                    os.kill(pid, 0)  # check if still alive
+                except ProcessLookupError:
+                    break
+            click.echo(" done.")
+            host_stopped = True
         except (ProcessLookupError, ValueError):
             pass  # already dead or invalid
         finally:
             pid_path.unlink(missing_ok=True)
 
+    # Clean up any containers the host didn't get to
     client = docker.from_env()
     containers = client.containers.list(filters={"name": "openlegion_"})
     if not containers:
-        if not pid_path.exists():
+        if not host_stopped:
             click.echo("No OpenLegion containers running.")
         return
     for container in containers:
-        click.echo(f"Stopping {container.name}...")
-        container.stop(timeout=10)
-        container.remove()
-    click.echo(f"Stopped {len(containers)} container(s).")
+        try:
+            click.echo(f"Stopping {container.name}...")
+            container.stop(timeout=10)
+            container.remove()
+        except docker.errors.NotFound:
+            pass  # already removed
+    click.echo(f"Stopped {len(containers)} remaining container(s).")
 
 
 if __name__ == "__main__":
