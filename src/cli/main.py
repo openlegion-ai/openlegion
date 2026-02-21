@@ -1,0 +1,626 @@
+"""CLI entry point for OpenLegion.
+
+Core:
+  setup             One-time setup: API key, project, first agent, Docker image
+  start             Start runtime + interactive chat REPL
+  start -d          Start runtime in background (detached)
+  stop              Stop all agent containers
+  status            Show agent status
+  chat <name>       Connect to a running agent (detached mode)
+
+Agent management:
+  agent add [name]        Add a new agent
+  agent list              List configured agents
+  agent remove <name>     Remove an agent
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import subprocess
+import sys
+import threading
+
+import click
+import yaml
+
+from src.cli import config as cli_config
+from src.cli.config import (
+    CHANNEL_TYPES,
+    _create_agent,
+    _get_default_model,
+    _load_config,
+    _load_permissions,
+    _save_permissions,
+    _set_env_key,
+    _suppress_host_logs,
+)
+
+logger = logging.getLogger("cli")
+
+
+# ── Main group ───────────────────────────────────────────────
+
+@click.group()
+def cli():
+    """OpenLegion -- Autonomous AI agent fleet."""
+    _suppress_host_logs()
+
+
+# ── setup ────────────────────────────────────────────────────
+
+@cli.command()
+def setup():
+    """Interactive setup: API key, project, agents, collaboration."""
+    from src.setup_wizard import SetupWizard
+    wizard = SetupWizard(cli_config.PROJECT_ROOT)
+    wizard.run_full()
+
+
+@cli.command()
+@click.option("--model", default=None, help="LLM model (default: anthropic/claude-sonnet-4-6)")
+def quickstart(model):
+    """One-command setup: API key + single assistant agent."""
+    from src.setup_wizard import SetupWizard
+    wizard = SetupWizard(cli_config.PROJECT_ROOT)
+    wizard.run_quickstart(model)
+
+
+# ── agent subgroup ───────────────────────────────────────────
+
+@cli.group()
+def agent():
+    """Add, list, or remove agents."""
+    pass
+
+
+@agent.command("add")
+@click.argument("name", required=False, default=None)
+def agent_add(name: str | None):
+    """Add a new agent.
+
+    Examples:
+      openlegion agent add researcher
+      openlegion agent add              # interactive mode
+    """
+    cfg = _load_config()
+
+    if name is None:
+        name = click.prompt("Agent name")
+
+    if name in cfg.get("agents", {}):
+        click.echo(f"Agent '{name}' already exists.")
+        return
+
+    description = click.prompt(
+        "What should this agent do?",
+        default=f"General-purpose {name} assistant",
+    )
+    model = _get_default_model()
+    _create_agent(name, description, model)
+
+    click.echo(f"\nAgent '{name}' created.")
+    click.echo(f"  Role:  {description}")
+    click.echo(f"  Model: {model}")
+    click.echo("\nStart chatting: openlegion start")
+
+
+@agent.command("list")
+def agent_list():
+    """List all configured agents and their status."""
+    cfg = _load_config()
+    agents = cfg.get("agents", {})
+    if not agents:
+        click.echo("No agents configured. Add one: openlegion agent add")
+        return
+
+    running = set()
+    try:
+        import docker
+        client = docker.from_env()
+        containers = client.containers.list(filters={"name": "openlegion_"})
+        for c in containers:
+            agent_id = c.name.replace("openlegion_", "")
+            running.add(agent_id)
+    except Exception:
+        pass
+
+    click.echo(f"{'Name':<16} {'Role':<24} {'Status':<10}")
+    click.echo("-" * 50)
+    for name, info in agents.items():
+        status = "running" if name in running else "stopped"
+        click.echo(f"{name:<16} {info.get('role', 'n/a'):<24} {status:<10}")
+
+
+@agent.command("remove")
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def agent_remove(name: str, yes: bool):
+    """Remove an agent from configuration."""
+    cfg = _load_config()
+    if name not in cfg.get("agents", {}):
+        click.echo(f"Agent '{name}' not found.")
+        return
+    if not yes:
+        click.confirm(f"Remove agent '{name}'? This deletes its config and permissions.", abort=True)
+
+    if cli_config.AGENTS_FILE.exists():
+        with open(cli_config.AGENTS_FILE) as f:
+            agents_cfg = yaml.safe_load(f) or {}
+        agents_cfg.get("agents", {}).pop(name, None)
+        with open(cli_config.AGENTS_FILE, "w") as f:
+            yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+
+    perms = _load_permissions()
+    perms.get("permissions", {}).pop(name, None)
+    _save_permissions(perms)
+
+    click.echo(f"Removed agent '{name}'.")
+
+
+# ── channels subgroup ────────────────────────────────────────
+
+@cli.group()
+def channels():
+    """Connect Telegram, Discord, or other messaging channels."""
+    pass
+
+
+@channels.command("add")
+@click.argument("channel_type", required=False, default=None)
+def channels_add(channel_type: str | None):
+    """Connect a messaging channel.
+
+    \b
+    Examples:
+      openlegion channels add telegram
+      openlegion channels add discord
+      openlegion channels add           # interactive
+    """
+    if channel_type is None:
+        click.echo("Available channels:\n")
+        for i, (key, info) in enumerate(CHANNEL_TYPES.items(), 1):
+            click.echo(f"  {i}. {info['label']}")
+        click.echo("")
+        choice = click.prompt("Select channel", type=click.IntRange(1, len(CHANNEL_TYPES)), default=1)
+        channel_type = list(CHANNEL_TYPES.keys())[choice - 1]
+
+    channel_type = channel_type.lower()
+    if channel_type not in CHANNEL_TYPES:
+        click.echo(f"Unknown channel '{channel_type}'. Available: {', '.join(CHANNEL_TYPES)}")
+        return
+
+    ch = CHANNEL_TYPES[channel_type]
+    click.echo(f"\n  {ch['label']} Setup")
+    click.echo(f"  {ch['token_help']}\n")
+
+    token = click.prompt(f"  {ch['label']} bot token", hide_input=True)
+    if not token.strip():
+        click.echo("  No token provided. Skipped.")
+        return
+
+    _set_env_key(ch["env_key"], token.strip())
+
+    # Slack needs a second token
+    if channel_type == "slack":
+        click.echo("\n  Socket Mode requires an app-level token (xapp-...).")
+        app_token = click.prompt("  Slack app-level token", hide_input=True)
+        if app_token.strip():
+            _set_env_key("slack_app_token", app_token.strip())
+        else:
+            click.echo("  No app token provided. Socket Mode will not work.")
+            return
+
+    # WhatsApp needs a phone number ID
+    if channel_type == "whatsapp":
+        phone_id = click.prompt("  WhatsApp phone number ID")
+        if phone_id.strip():
+            _set_env_key("whatsapp_phone_number_id", phone_id.strip())
+        else:
+            click.echo("  No phone number ID provided.")
+            return
+
+    # Enable in mesh config
+    mesh_cfg = {}
+    if cli_config.CONFIG_FILE.exists():
+        with open(cli_config.CONFIG_FILE) as f:
+            mesh_cfg = yaml.safe_load(f) or {}
+    mesh_cfg.setdefault("channels", {}).setdefault(ch["config_section"], {})
+    mesh_cfg["channels"][ch["config_section"]]["enabled"] = True
+    with open(cli_config.CONFIG_FILE, "w") as f:
+        yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+
+    click.echo(f"\n  {ch['label']} connected. A pairing code will appear on next `openlegion start`.")
+
+
+@channels.command("list")
+def channels_list():
+    """Show configured channels and their status."""
+    mesh_cfg = {}
+    if cli_config.CONFIG_FILE.exists():
+        with open(cli_config.CONFIG_FILE) as f:
+            mesh_cfg = yaml.safe_load(f) or {}
+
+    channel_cfg = mesh_cfg.get("channels", {})
+    if not channel_cfg:
+        click.echo("No channels configured. Add one: openlegion channels add")
+        return
+
+    click.echo(f"{'Channel':<16} {'Status':<12}")
+    click.echo("-" * 28)
+    for key, info in CHANNEL_TYPES.items():
+        section = channel_cfg.get(info["config_section"], {})
+        env_key = f"OPENLEGION_CRED_{info['env_key'].upper()}"
+        has_token = bool(os.environ.get(env_key))
+        if section.get("enabled"):
+            status = "ready" if has_token else "no token"
+            click.echo(f"{info['label']:<16} {status:<12}")
+
+
+@channels.command("remove")
+@click.argument("channel_type")
+def channels_remove(channel_type: str):
+    """Disconnect a messaging channel.
+
+    \b
+    Examples:
+      openlegion channels remove telegram
+      openlegion channels remove discord
+    """
+    channel_type = channel_type.lower()
+    if channel_type not in CHANNEL_TYPES:
+        click.echo(f"Unknown channel '{channel_type}'. Available: {', '.join(CHANNEL_TYPES)}")
+        return
+
+    ch = CHANNEL_TYPES[channel_type]
+
+    mesh_cfg = {}
+    if cli_config.CONFIG_FILE.exists():
+        with open(cli_config.CONFIG_FILE) as f:
+            mesh_cfg = yaml.safe_load(f) or {}
+    channels_section = mesh_cfg.get("channels", {})
+    if ch["config_section"] in channels_section:
+        del channels_section[ch["config_section"]]
+        with open(cli_config.CONFIG_FILE, "w") as f:
+            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+
+    click.echo(f"Removed {ch['label']} channel.")
+    click.echo(f"  Token remains in .env — delete the OPENLEGION_CRED_{ch['env_key'].upper()} line to fully remove.")
+
+
+# ── skill marketplace ─────────────────────────────────────────
+
+@cli.group()
+def skill():
+    """Install, list, or remove marketplace skills."""
+    pass
+
+
+@skill.command("install")
+@click.argument("repo_url")
+@click.option("--ref", default="", help="Git ref to pin (tag, branch, or commit)")
+def skill_install(repo_url: str, ref: str):
+    """Install a skill from a git repository.
+
+    \b
+    Examples:
+      openlegion skill install https://github.com/user/my-skill
+      openlegion skill install https://github.com/user/my-skill --ref v1.0.0
+    """
+    from src.marketplace import install_skill
+
+    click.echo(f"Installing skill from {repo_url}...")
+    result = install_skill(repo_url, cli_config.MARKETPLACE_DIR, ref=ref)
+    if "error" in result:
+        click.echo(f"Error: {result['error']}", err=True)
+        return
+    click.echo(f"Installed '{result['name']}' v{result.get('version', '?')}")
+    click.echo(f"  {result.get('description', '')}")
+    click.echo("\nRestart agents to load the new skill.")
+
+
+@skill.command("list")
+def skill_list():
+    """List installed marketplace skills."""
+    from src.marketplace import list_skills
+
+    skills = list_skills(cli_config.MARKETPLACE_DIR)
+    if not skills:
+        click.echo("No marketplace skills installed.")
+        click.echo("Install one: openlegion skill install <repo_url>")
+        return
+
+    click.echo(f"{'Name':<20} {'Version':<12} {'Description'}")
+    click.echo("-" * 60)
+    for s in skills:
+        click.echo(f"{s.get('name', '?'):<20} {s.get('version', '?'):<12} {s.get('description', '')[:40]}")
+
+
+@skill.command("remove")
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def skill_remove(name: str, yes: bool):
+    """Remove an installed marketplace skill.
+
+    \b
+    Examples:
+      openlegion skill remove my-skill
+      openlegion skill remove my-skill -y
+    """
+    from src.marketplace import remove_skill
+
+    if not yes:
+        click.confirm(f"Remove skill '{name}'?", abort=True)
+
+    result = remove_skill(name, cli_config.MARKETPLACE_DIR)
+    if "error" in result:
+        click.echo(f"Error: {result['error']}", err=True)
+        return
+    click.echo(f"Removed skill '{name}'.")
+    click.echo("Restart agents for changes to take effect.")
+
+
+# ── start ────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--config", "config_path", default="config/mesh.yaml", help="Path to mesh config")
+@click.option("--detach", "-d", is_flag=True, help="Run in background (no interactive REPL)")
+@click.option("--sandbox", is_flag=True, help="Use Docker Sandbox microVMs (requires Docker Desktop 4.58+)")
+def start(config_path: str, detach: bool, sandbox: bool):
+    """Start the runtime and chat with your agents.
+
+    By default, starts the mesh and all agents then drops into an interactive
+    REPL. Use -d to run in the background instead.
+
+    \b
+    Examples:
+      openlegion start              # interactive mode
+      openlegion start -d           # background mode
+      openlegion start --sandbox    # use microVM isolation
+    """
+    if detach:
+        _start_detached(config_path)
+    else:
+        from src.cli.repl import REPLSession
+        from src.cli.runtime import RuntimeContext
+
+        ctx = RuntimeContext(config_path, use_sandbox=sandbox)
+        try:
+            ctx.start()
+            repl = REPLSession(ctx)
+            repl.run()
+        except KeyboardInterrupt:
+            click.echo("")
+        finally:
+            ctx.shutdown()
+
+
+def _start_detached(config_path: str) -> None:
+    """Start the runtime in a background subprocess."""
+    cmd = [sys.executable, "-m", "src.cli", "start", "--config", config_path]
+
+    popen_kwargs: dict = dict(
+        cwd=str(cli_config.PROJECT_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+
+    started_lines: list[str] = []
+    ready_event = threading.Event()
+
+    def _reader() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            started_lines.append(line)
+            click.echo(line)
+            if "Chatting with" in line:
+                ready_event.set()
+                return
+        ready_event.set()
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
+    ready_event.wait(timeout=90)
+
+    if proc.poll() is not None:
+        reader_thread.join(timeout=2)
+
+    if proc.poll() is not None:
+        click.echo("Runtime failed to start. Check logs.", err=True)
+        for line in started_lines:
+            click.echo(f"  {line}", err=True)
+        return
+
+    click.echo(f"\nOpenLegion running in background (PID {proc.pid}).")
+    click.echo("  Chat with an agent:  openlegion chat <name>")
+    click.echo("  Stop the runtime:    openlegion stop")
+
+
+# ── chat (for detached mode) ─────────────────────────────────
+
+@cli.command("chat")
+@click.argument("name")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+def chat(name: str, port: int):
+    """Connect to a running agent and start chatting.
+
+    The runtime must already be running (openlegion start -d).
+    """
+    import httpx
+
+    try:
+        resp = httpx.get(f"http://localhost:{port}/mesh/agents", timeout=5)
+        agents = resp.json()
+    except httpx.ConnectError:
+        click.echo("Mesh is not running. Start it first: openlegion start", err=True)
+        return
+    except Exception as e:
+        click.echo(f"Error contacting mesh: {e}", err=True)
+        return
+
+    agent_info = agents.get(name)
+    if not agent_info:
+        available = ", ".join(agents.keys()) if agents else "(none)"
+        click.echo(f"Agent '{name}' is not running. Running agents: {available}", err=True)
+        return
+
+    agent_url = agent_info.get("url", agent_info) if isinstance(agent_info, dict) else agent_info
+    click.echo(f"Connected to '{name}' at {agent_url}")
+    click.echo("Type a message to chat. /help for commands.\n")
+
+    try:
+        _single_agent_repl(name, agent_url)
+    except KeyboardInterrupt:
+        click.echo("\nDisconnected.")
+
+
+def _single_agent_repl(agent_name: str, agent_url: str) -> None:
+    """Interactive chat REPL with a single agent (for detached mode)."""
+    import httpx
+
+    from src.cli.formatting import display_response, user_prompt
+
+    while True:
+        try:
+            user_input = input(user_prompt(agent_name)).strip()
+        except EOFError:
+            break
+
+        if not user_input:
+            continue
+
+        if user_input.startswith("/"):
+            cmd = user_input.lower()
+            if cmd in ("/quit", "/exit"):
+                break
+            elif cmd == "/reset":
+                try:
+                    httpx.post(f"{agent_url}/chat/reset", timeout=5)
+                    click.echo("Conversation reset.")
+                except Exception as e:
+                    click.echo(f"Error: {e}")
+                continue
+            elif cmd == "/status":
+                try:
+                    resp = httpx.get(f"{agent_url}/status", timeout=5)
+                    data = resp.json()
+                    click.echo(f"  State: {data['state']}")
+                    click.echo(f"  Role: {data['role']}")
+                    click.echo(f"  Tools: {', '.join(data.get('capabilities', []))}")
+                    click.echo(f"  Tasks completed: {data.get('tasks_completed', 0)}")
+                except Exception as e:
+                    click.echo(f"Error: {e}")
+                continue
+            elif cmd == "/help":
+                click.echo("Commands:")
+                click.echo(f"  {'/reset':<18} Clear conversation history")
+                click.echo(f"  {'/status':<18} Show agent status")
+                click.echo(f"  {'/quit':<18} Exit chat")
+                click.echo(f"  {'/help':<18} Show this help")
+                continue
+            else:
+                click.echo(f"Unknown command: {cmd}. Type /help for commands.")
+                continue
+
+        try:
+            resp = httpx.post(
+                f"{agent_url}/chat",
+                json={"message": user_input},
+                timeout=120,
+            )
+            if resp.status_code != 200:
+                click.echo(f"Error: HTTP {resp.status_code}: {resp.text}")
+                continue
+
+            data = resp.json()
+            display_response(agent_name, data)
+
+        except httpx.TimeoutException:
+            click.echo("Request timed out. The agent may still be processing.")
+        except Exception as e:
+            click.echo(f"Error: {e}")
+
+
+# ── status ───────────────────────────────────────────────────
+
+@cli.command("status")
+@click.option("--port", default=8420, type=int, help="Mesh host port")
+def status(port: int):
+    """Show status of all agents."""
+    import httpx
+
+    cfg = _load_config()
+    configured = cfg.get("agents", {})
+
+    mesh_agents: dict = {}
+    mesh_online = False
+    try:
+        resp = httpx.get(f"http://localhost:{port}/mesh/agents", timeout=5)
+        mesh_agents = resp.json()
+        mesh_online = True
+    except httpx.ConnectError:
+        pass
+    except Exception as e:
+        logger.debug("Error checking mesh: %s", e)
+
+    if not configured and not mesh_agents:
+        click.echo("No agents configured. Run: openlegion setup")
+        return
+
+    all_names = sorted(set(list(configured.keys()) + list(mesh_agents.keys())))
+
+    click.echo(f"{'Agent':<16} {'Role':<20} {'Status':<12}")
+    click.echo("-" * 48)
+    for name in all_names:
+        role = configured.get(name, {}).get("role", "n/a")
+
+        if name in mesh_agents:
+            agent_url = mesh_agents[name]
+            if isinstance(agent_url, dict):
+                agent_url = agent_url.get("url", "")
+            try:
+                sr = httpx.get(f"{agent_url}/status", timeout=3)
+                state = sr.json().get("state", "running")
+            except Exception:
+                state = "unreachable"
+        elif mesh_online:
+            state = "stopped"
+        else:
+            state = "unknown"
+
+        click.echo(f"{name:<16} {role:<20} {state:<12}")
+
+    if not mesh_online:
+        click.echo("\nMesh is not running. Start with: openlegion start")
+
+
+# ── stop ─────────────────────────────────────────────────────
+
+@cli.command()
+def stop():
+    """Stop all agent containers."""
+    import docker
+
+    client = docker.from_env()
+    containers = client.containers.list(filters={"name": "openlegion_"})
+    if not containers:
+        click.echo("No OpenLegion containers running.")
+        return
+    for container in containers:
+        click.echo(f"Stopping {container.name}...")
+        container.stop(timeout=10)
+        container.remove()
+    click.echo(f"Stopped {len(containers)} container(s).")
+
+
+if __name__ == "__main__":
+    cli()

@@ -15,7 +15,6 @@ from pathlib import Path
 import click
 import yaml
 
-
 # Validation models: cheapest model per provider for key checks
 _VALIDATION_MODELS = {
     "anthropic": "anthropic/claude-haiku-4-5-20251001",
@@ -44,13 +43,13 @@ class SetupWizard:
 
     def run_full(self) -> None:
         """Full interactive setup (replaces original cli.py setup body)."""
-        from src.cli import (
+        from src.cli.config import (
+            _PROVIDER_MODELS,
+            _PROVIDERS,
             _apply_template,
             _check_docker_running,
             _load_config,
             _load_templates,
-            _PROVIDER_MODELS,
-            _PROVIDERS,
             _set_collaborative_permissions,
             _set_env_key,
             _setup_agent_wizard,
@@ -212,7 +211,7 @@ class SetupWizard:
 
     def run_quickstart(self, model: str | None = None) -> None:
         """Zero-prompt single-agent setup: key + single assistant agent."""
-        from src.cli import (
+        from src.cli.config import (
             _apply_template,
             _check_docker_running,
             _load_templates,
@@ -265,7 +264,7 @@ class SetupWizard:
             created = _apply_template("starter", templates["starter"])
         else:
             # Fallback: create manually
-            from src.cli import _create_agent
+            from src.cli.config import _create_agent
             _create_agent("assistant", "General-purpose assistant", selected_model)
             created = ["assistant"]
 

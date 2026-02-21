@@ -40,7 +40,13 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `src/host/costs.py` | Per-agent cost tracking + budget enforcement |
 | `src/host/cron.py` | Cron scheduler with heartbeat support |
 | `src/channels/base.py` | Abstract channel with unified REPL-like UX |
-| `src/cli.py` | CLI entry point and interactive REPL |
+| `src/cli/` | CLI package (see below) |
+| `src/cli/main.py` | Click commands and entry point |
+| `src/cli/config.py` | Config loading, Docker helpers, agent management |
+| `src/cli/runtime.py` | RuntimeContext — full lifecycle management |
+| `src/cli/repl.py` | REPLSession — interactive command dispatch |
+| `src/cli/channels.py` | ChannelManager — messaging channel lifecycle |
+| `src/cli/formatting.py` | Tool display, styled output, response rendering |
 
 ## Non-Negotiable Rules
 
@@ -117,7 +123,7 @@ async def your_tool(param1: str, param2: int = 10, *, mesh_client=None) -> dict:
 1. Subclass `Channel` from `src/channels/base.py`
 2. Implement `start()`, `stop()`, `send_notification()`
 3. Message handling is already provided by the base class (`handle_message`) — it handles @mentions, /commands, and agent routing
-4. Add startup logic in `cli.py:_start_channels()`
+4. Add startup logic in `src/cli/channels.py:ChannelManager`
 5. Add tests in `tests/test_channels.py`
 
 ## Testing
@@ -160,7 +166,7 @@ pytest tests/test_loop.py -x -v
 | `src/host/costs.py` | `tests/test_costs.py` |
 | `src/host/cron.py` | `tests/test_cron.py` |
 | `src/channels/base.py` | `tests/test_channels.py` |
-| `src/cli.py` | `tests/test_cli_commands.py` |
+| `src/cli/` | `tests/test_cli_commands.py` |
 | `src/shared/utils.py` (sanitization) | `tests/test_sanitize.py` |
 | Chat mode | `tests/test_chat.py`, `tests/test_chat_workspace.py` |
 
@@ -172,7 +178,7 @@ pytest tests/test_loop.py -x -v
 - **Putting secrets in agent code.** Agents run in untrusted containers. API keys, tokens, credentials — all belong in the vault (`OPENLEGION_CRED_*` env vars loaded by `credentials.py`). New service integrations go through the vault proxy.
 - **Using global mutable state.** The `_skill_staging` global in `skills.py` is a known issue. Avoid adding new module-level mutable globals. Pass state through constructors.
 - **Overly broad exception handling.** Don't `except Exception: pass`. Log the error. Distinguish transient errors (network timeouts, rate limits — retry with backoff) from permanent errors (invalid input, missing config — fail fast).
-- **Monolithic functions.** `cli.py:_start_interactive` is too large. When adding features, prefer composable components over growing existing functions. Extract classes with clear lifecycle (init, start, stop).
+- **Monolithic functions.** When adding features, prefer composable components over growing existing functions. Extract classes with clear lifecycle (init, start, stop). See `src/cli/runtime.py:RuntimeContext` and `src/cli/repl.py:REPLSession` as examples.
 
 ## Design Philosophy
 
