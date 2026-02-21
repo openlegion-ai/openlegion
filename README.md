@@ -6,7 +6,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-638%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-698%20passing-brightgreen.svg)]()
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
 [![Docker](https://img.shields.io/badge/isolation-Docker%20%2B%20microVM-blue.svg)]()
 
@@ -114,7 +114,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 638 tests including full Docker E2E |
+| **Test coverage** | Minimal | 698 tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~11,000 lines — auditable in a day |
 
 ---
@@ -129,7 +129,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, or CLI. Agents act aut
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**638 tests passing** across **~11,000 lines** of application code.
+**698 tests passing** across **~14,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
@@ -596,7 +596,9 @@ openlegion
 /add                 Add a new agent (hot-adds to running system)
 /status              Show agent health
 /broadcast <msg>     Send message to all agents
-/costs               Show today's LLM spend
+/steer <msg>         Inject message into busy agent's context
+/costs               Show today's LLM spend + context usage + model health
+/addkey <svc> [key]  Add an API credential to the vault
 /reset               Clear conversation with active agent
 /quit                Exit and stop runtime
 ```
@@ -784,24 +786,30 @@ pytest tests/
 
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
-| Built-in Tools | 54 | exec, file, browser (incl. backend tiers), memory, mesh tools, discovery |
-| Workspace | 41 | File scaffold, loading, BM25 search, daily logs, learnings |
+| Built-in Tools | 67 | exec, file, browser (incl. backend tiers), memory, mesh tools, discovery |
+| Workspace | 45 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat |
+| Agent Loop | 39 | Task execution, tool calling, cancellation, tool memory, chat helpers |
+| Sanitization | 38 | Invisible Unicode stripping, bidi overrides, tag chars, zero-width |
+| Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
+| Context Manager | 31 | Token estimation (tiktoken + model-aware), compaction, flushing |
+| Mesh | 31 | Blackboard, PubSub, MessageRouter, permissions |
+| Channels (base) | 30 | Abstract channel, commands, per-user routing, chunking |
+| Orchestrator | 25 | Workflows, conditions, retries, failures |
+| Integration | 25 | Multi-component mesh operations |
+| Cron | 25 | Cron expressions, intervals, dispatch, persistence |
+| Transcript | 24 | Transcript formatting, safety, round-trip fidelity |
 | Slack Channel | 21 | Socket Mode, thread routing, pairing, command translation |
 | WhatsApp Channel | 21 | Cloud API, webhook verification, message chunking |
-| Channels (base) | 21 | Abstract channel, commands, per-user routing, chunking |
-| Mesh | 28 | Blackboard, PubSub, MessageRouter, permissions |
-| Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
-| Orchestrator | 25 | Workflows, conditions, retries, failures |
-| Cron | 25 | Cron expressions, intervals, dispatch, persistence |
-| Agent Loop | 21 | Task execution, tool calling, cancellation, tool memory |
-| Context Manager | 17 | Token estimation (tiktoken + model-aware), compaction, flushing |
 | Runtime Backend | 20 | DockerBackend, SandboxBackend, browser_backend, detection, selection |
-| Transport | 18 | HttpTransport, SandboxTransport, resolve_url |
 | Skills | 19 | Discovery, execution, injection, MCP integration |
-| Chat | 18 | Chat mode, workspace integration, cross-session |
+| Setup Wizard | 18 | Quickstart, full setup, API key validation, templates |
+| Transport | 18 | HttpTransport, SandboxTransport, resolve_url |
+| Credentials | 18 | Vault, API proxy, provider detection |
+| Vault | 16 | Credential storage, budget enforcement, failover |
 | Failover | 15 | Health tracking, chain cascade, cooldown |
-| Credentials | 13 | Vault, API proxy, provider detection |
-| Integration | 13 | Multi-component mesh operations |
+| Chat | 11 | Chat mode, streaming, workspace integration |
+| Chat Workspace | 10 | Cross-session memory, corrections, learnings |
+| Queue Modes | 11 | Steer, collect, followup queue strategies |
 | MCP Client | 10 | Tool discovery, routing, conflicts, lifecycle |
 | Costs | 10 | Usage recording, budgets, vault integration |
 | CLI | 8 | Agent add/list/remove, chat, setup |
@@ -812,8 +820,7 @@ pytest tests/
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| Queue Modes | 7 | Steer, collect, followup queue strategies |
-| **Total** | **638** | |
+| **Total** | **698** | |
 
 ---
 
