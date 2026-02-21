@@ -9,7 +9,13 @@ from typing import TYPE_CHECKING
 
 import click
 
-from src.cli.config import _create_agent, _get_default_model, _load_config
+from src.cli.config import (
+    _create_agent,
+    _get_default_model,
+    _load_config,
+    _pick_browser_interactive,
+    _pick_model_interactive,
+)
 from src.cli.formatting import (
     agent_prompt,
     display_response,
@@ -32,15 +38,15 @@ class REPLSession:
         self._commands = {
             "/quit":      (self._cmd_quit,      "Exit and stop runtime"),
             "/exit":      (self._cmd_quit,      "Exit and stop runtime"),
-            "/agents":    (self._cmd_agents,    "List all agents"),
-            "/use":       (self._cmd_use,       "Switch active agent"),
+            "/agents":    (self._cmd_agents,    "List running agents"),
+            "/use":       (self._cmd_use,       "Switch agent: /use <name>"),
             "/add":       (self._cmd_add,       "Add a new agent"),
-            "/status":    (self._cmd_status,    "Show agent health"),
-            "/broadcast": (self._cmd_broadcast, "Send to all agents"),
-            "/steer":     (self._cmd_steer,     "Inject message into busy agent"),
-            "/costs":     (self._cmd_costs,     "Show today's LLM spend"),
-            "/addkey":    (self._cmd_addkey,     "Add an API credential"),
-            "/reset":     (self._cmd_reset,     "Clear conversation"),
+            "/status":    (self._cmd_status,    "Show agent status and models"),
+            "/broadcast": (self._cmd_broadcast, "Send message to all agents"),
+            "/steer":     (self._cmd_steer,     "Redirect busy agent: /steer <msg>"),
+            "/costs":     (self._cmd_costs,     "Show spend, context, model health"),
+            "/addkey":    (self._cmd_addkey,     "Store a credential: /addkey <service>"),
+            "/reset":     (self._cmd_reset,     "Clear conversation history"),
             "/help":      (self._cmd_help,      "Show this help"),
         }
 
@@ -105,18 +111,19 @@ class REPLSession:
             click.echo(f"  {name}{marker}")
 
     def _cmd_use(self, arg: str) -> None:
+        available = ", ".join(self.ctx.agents)
         if not arg.strip():
             click.echo(f"Usage: /use <agent>  (current: {self.current})")
+            click.echo(f"  Available: {available}")
             return
         new_agent = arg.strip()
         if new_agent not in self.ctx.agents:
-            click.echo(f"Unknown agent: '{new_agent}'. Type /agents to list.")
+            click.echo(f"Unknown agent: '{new_agent}'. Available: {available}")
             return
         self.current = new_agent
         click.echo(f"Now chatting with '{self.current}'.")
 
     def _cmd_add(self, arg: str) -> None:
-        from src.cli.config import _PROVIDER_MODELS
         from src.host.transport import HttpTransport
 
         new_name = click.prompt("Agent name")
@@ -125,24 +132,13 @@ class REPLSession:
             return
         new_desc = click.prompt(
             "What should this agent do?",
-            default=f"General-purpose {new_name} assistant",
+            default=f"General-purpose {new_name} agent",
         )
         default_model = _get_default_model()
-        provider = default_model.split("/")[0] if "/" in default_model else "anthropic"
-        models = _PROVIDER_MODELS.get(provider, [default_model])
-        default_idx = 1
-        for i, m in enumerate(models, 1):
-            marker = " (default)" if m == default_model else ""
-            click.echo(f"  {i}. {m}{marker}")
-            if m == default_model:
-                default_idx = i
-        model_choice = click.prompt(
-            "Model",
-            type=click.IntRange(1, len(models)),
-            default=default_idx,
-        )
-        model = models[model_choice - 1]
-        _create_agent(new_name, new_desc, model)
+        model = _pick_model_interactive(default_model, label="default")
+        browser = _pick_browser_interactive()
+
+        _create_agent(new_name, new_desc, model, browser_backend=browser)
         # Reload permissions so the mesh grants the new agent API access
         self.ctx.permissions.reload()
         agent_cfg_data = _load_config().get("agents", {}).get(new_name, {})
@@ -264,7 +260,9 @@ class REPLSession:
 
     def _cmd_addkey(self, arg: str) -> None:
         if not arg.strip():
-            service = click.prompt("Service name (e.g. anthropic, openai, brave_search)")
+            click.echo("  Known services: anthropic, openai, gemini, deepseek, moonshot, xai, groq")
+            click.echo("  Other keys: brave_search, brightdata_cdp_url, or any custom name")
+            service = click.prompt("Service name")
         else:
             service = arg.split()[0]
         # Normalize: bare provider names get _api_key suffix
@@ -291,10 +289,10 @@ class REPLSession:
 
     def _cmd_help(self, arg: str) -> None:
         click.echo("Commands:")
-        click.echo(f"  {'@agent <msg>':<18} Send message to a specific agent")
+        click.echo(f"  {'@agent <msg>':<20} Send to a specific agent")
         for cmd, (_, desc) in self._commands.items():
             if cmd != "/exit":  # skip alias
-                click.echo(f"  {cmd:<18} {desc}")
+                click.echo(f"  {cmd:<20} {desc}")
 
     # ── Message sending ─────────────────────────────────────
 
