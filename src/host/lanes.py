@@ -176,7 +176,8 @@ class LaneManager:
             if task.trace_id and self._trace_store:
                 self._trace_store.record(
                     trace_id=task.trace_id, source="lane", agent=agent,
-                    event_type="lane_start", detail=task.message[:120],
+                    event_type="lane_start", detail=task.message[:200],
+                    meta={"mode": task.mode, "queue_depth": queue.qsize()},
                 )
             try:
                 result = await self._dispatch_fn(agent, task.message)
@@ -191,6 +192,8 @@ class LaneManager:
                     self._trace_store.record(
                         trace_id=task.trace_id, source="lane", agent=agent,
                         event_type="lane_complete", duration_ms=duration_ms,
+                        status="error" if task.future.done() and task.future.exception() else "ok",
+                        error=str(task.future.exception()) if task.future.done() and task.future.exception() else "",
                     )
                 self._busy[agent] = False
                 if agent in self._pending and task in self._pending[agent]:

@@ -185,6 +185,20 @@ def create_mesh_app(
         result = await credential_vault.execute_api_call(api_request, agent_id=agent_id)
         duration_ms = int((time.time() - t0) * 1000)
         if req_trace_id and trace_store:
+            trace_meta = {
+                "service": api_request.service,
+                "action": api_request.action,
+            }
+            trace_status = "ok"
+            trace_error = ""
+            if result.success and result.data:
+                trace_meta["model"] = result.data.get("model", "")
+                trace_meta["tokens_used"] = result.data.get("tokens_used", 0)
+                trace_meta["input_tokens"] = result.data.get("input_tokens", 0)
+                trace_meta["output_tokens"] = result.data.get("output_tokens", 0)
+            elif not result.success:
+                trace_status = "error"
+                trace_error = result.error or "Unknown error"
             trace_store.record(
                 trace_id=req_trace_id,
                 source="mesh.api_proxy",
@@ -192,6 +206,9 @@ def create_mesh_app(
                 event_type="llm_call",
                 detail=f"{api_request.service}/{api_request.action}",
                 duration_ms=duration_ms,
+                status=trace_status,
+                error=trace_error,
+                meta=trace_meta,
             )
         if event_bus is not None:
             llm_data: dict = {
@@ -345,8 +362,14 @@ def create_mesh_app(
 
     @app.get("/mesh/agents")
     async def list_agents() -> dict:
-        """List all registered agents and their URLs."""
-        return dict(router.agent_registry)
+        """List all registered agents with their URLs and roles."""
+        agents = {}
+        for agent_id, url in router.agent_registry.items():
+            agents[agent_id] = {
+                "url": url,
+                "role": router.agent_roles.get(agent_id, ""),
+            }
+        return agents
 
     # === Cron CRUD ===
 
@@ -380,6 +403,22 @@ def create_mesh_app(
         if agent_id:
             jobs = [j for j in jobs if j["agent"] == agent_id]
         return jobs
+
+    @app.put("/mesh/cron/{job_id}")
+    async def update_cron_job(job_id: str, request: Request) -> dict:
+        """Update a cron job by ID. Body: fields to update (schedule, enabled, etc)."""
+        if cron_scheduler is None:
+            raise HTTPException(503, "Cron scheduler not available")
+        body = await request.json()
+        if "schedule" in body:
+            error = cron_scheduler._validate_schedule(body["schedule"])
+            if error:
+                raise HTTPException(400, error)
+        job = cron_scheduler.update_job(job_id, **body)
+        if not job:
+            raise HTTPException(404, f"Job not found: {job_id}")
+        from dataclasses import asdict
+        return {"status": "updated", "job": asdict(job)}
 
     @app.delete("/mesh/cron/{job_id}")
     async def delete_cron_job(job_id: str) -> dict:
@@ -499,12 +538,14 @@ def create_mesh_app(
         agents_filter = set(agents_param.split(",")) - {""} if agents_param else None
         types_filter = set(types_param.split(",")) - {""} if types_param else None
 
-        # Replay recent events
+        # Subscribe first, then replay events that existed before subscribe.
+        # This eliminates the race where events emitted between replay and
+        # subscribe appear twice (once in replay, once in live feed).
         import json
-        for evt in event_bus.recent_events(agents_filter, types_filter):
-            await websocket.send_text(json.dumps(evt, default=str))
-
+        snapshot_seq = event_bus.current_seq
         event_bus.subscribe(websocket, agents_filter, types_filter)
+        for evt in event_bus.recent_events(agents_filter, types_filter, before_seq=snapshot_seq):
+            await websocket.send_text(json.dumps(evt, default=str))
         try:
             while True:
                 await websocket.receive_text()  # keep-alive

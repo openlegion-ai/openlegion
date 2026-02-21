@@ -273,7 +273,7 @@ class RuntimeContext:
                     )
                 else:
                     raise
-            self.router.register_agent(agent_id, url)
+            self.router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
             self.agent_urls[agent_id] = url
             if isinstance(self.transport, HttpTransport):
                 self.transport.register(agent_id, url)
@@ -290,7 +290,8 @@ class RuntimeContext:
             if tid and self.trace_store:
                 self.trace_store.record(
                     trace_id=tid, source="dispatch", agent=agent_name,
-                    event_type="chat", detail=message[:120],
+                    event_type="chat", detail=message[:200],
+                    meta={"message_length": len(message)},
                 )
             import time as _time
             t0 = _time.time()
@@ -304,6 +305,9 @@ class RuntimeContext:
                     self.trace_store.record(
                         trace_id=tid, source="dispatch", agent=agent_name,
                         event_type="chat_response", duration_ms=duration_ms,
+                        status="ok",
+                        meta={"response_length": len(response),
+                              "response_preview": response[:200]},
                     )
                 if self.event_bus:
                     self.event_bus.emit("message_sent", agent=agent_name,
@@ -311,6 +315,13 @@ class RuntimeContext:
                               "source": "dispatch"})
                 return response
             except Exception as e:
+                duration_ms = int((_time.time() - t0) * 1000)
+                if tid and self.trace_store:
+                    self.trace_store.record(
+                        trace_id=tid, source="dispatch", agent=agent_name,
+                        event_type="chat_response", duration_ms=duration_ms,
+                        status="error", error=str(e),
+                    )
                 return f"Error: {e}"
 
         async def _direct_steer(agent_name: str, message: str) -> dict:
@@ -469,7 +480,27 @@ class RuntimeContext:
         if self.cron_scheduler.jobs:
             echo_ok(f"Cron scheduler: {len(self.cron_scheduler.jobs)} jobs loaded")
 
+    def _reconcile_heartbeats(self) -> None:
+        """Ensure every agent in config has a heartbeat cron job."""
+        if not self.cron_scheduler:
+            return
+        agents_cfg = self.cfg.get("agents", {})
+        default_schedule = self.cfg.get("mesh", {}).get("heartbeat_schedule", "every 15m")
+        for agent_id in agents_cfg:
+            existing = self.cron_scheduler.find_heartbeat_job(agent_id)
+            if existing:
+                continue
+            self.cron_scheduler.add_job(
+                agent=agent_id,
+                schedule=default_schedule,
+                message=f"Heartbeat check for {agent_id}",
+                heartbeat=True,
+            )
+            logger.info(f"Auto-created heartbeat for {agent_id} ({default_schedule})")
+
     def _start_background(self) -> None:
+        self._reconcile_heartbeats()
+
         # Start cron
         def run_cron():
             loop = asyncio.new_event_loop()

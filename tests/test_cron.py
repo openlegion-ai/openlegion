@@ -209,8 +209,9 @@ class TestHeartbeat:
         assert signal_probes[0].triggered is False
 
     @pytest.mark.asyncio
-    async def test_heartbeat_skips_dispatch_when_clean(self):
-        dispatch = AsyncMock(return_value="should not be called")
+    async def test_heartbeat_always_dispatches_when_clean(self):
+        """Heartbeat always wakes the agent, even when probes are clean."""
+        dispatch = AsyncMock(return_value="Checked in")
         mock_bb = MagicMock()
         mock_bb.list_by_prefix.return_value = []
         sched = CronScheduler(
@@ -218,11 +219,15 @@ class TestHeartbeat:
         )
         job = sched.add_job(agent="test", schedule="every 15m", message="heartbeat", heartbeat=True)
         result = await sched._execute_job(job)
-        dispatch.assert_not_called()
-        assert result is None
+        dispatch.assert_called_once()
+        assert result == "Checked in"
+        # Message should mention routine check-in
+        call_msg = dispatch.call_args[0][1]
+        assert "routine check-in" in call_msg.lower()
 
     @pytest.mark.asyncio
-    async def test_heartbeat_dispatches_when_triggered(self):
+    async def test_heartbeat_dispatches_with_probe_context(self):
+        """Heartbeat includes probe details when probes trigger."""
         dispatch = AsyncMock(return_value="Taking action")
         mock_bb = MagicMock()
         mock_bb.list_by_prefix.side_effect = lambda prefix: [MagicMock()] if "signals" in prefix else []
@@ -233,3 +238,48 @@ class TestHeartbeat:
         result = await sched._execute_job(job)
         dispatch.assert_called_once()
         assert result == "Taking action"
+        # Message should mention probes
+        call_msg = dispatch.call_args[0][1]
+        assert "probes detected" in call_msg.lower()
+
+    def test_find_heartbeat_job(self):
+        sched = CronScheduler(config_path=self.config_path)
+        sched.add_job(agent="researcher", schedule="every 30m", message="check", heartbeat=False)
+        sched.add_job(agent="researcher", schedule="every 15m", message="heartbeat", heartbeat=True)
+        sched.add_job(agent="analyst", schedule="every 1h", message="heartbeat", heartbeat=True)
+
+        hb = sched.find_heartbeat_job("researcher")
+        assert hb is not None
+        assert hb.heartbeat is True
+        assert hb.agent == "researcher"
+
+        assert sched.find_heartbeat_job("nonexistent") is None
+
+    def test_update_job(self):
+        sched = CronScheduler(config_path=self.config_path)
+        job = sched.add_job(agent="test", schedule="every 15m", message="ping")
+        original_id = job.id
+
+        updated = sched.update_job(job.id, schedule="every 30m", message="pong")
+        assert updated is not None
+        assert updated.schedule == "every 30m"
+        assert updated.message == "pong"
+        assert updated.id == original_id  # id should not change
+
+        # Verify persistence
+        sched2 = CronScheduler(config_path=self.config_path)
+        reloaded = sched2.jobs[original_id]
+        assert reloaded.schedule == "every 30m"
+
+    def test_update_job_nonexistent(self):
+        sched = CronScheduler(config_path=self.config_path)
+        assert sched.update_job("nonexistent", schedule="every 1h") is None
+
+    def test_update_job_cannot_change_id(self):
+        sched = CronScheduler(config_path=self.config_path)
+        job = sched.add_job(agent="test", schedule="every 15m", message="ping")
+        original_id = job.id
+
+        updated = sched.update_job(job.id, id="hacked_id")
+        assert updated is not None
+        assert updated.id == original_id  # id should not change

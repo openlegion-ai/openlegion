@@ -52,11 +52,10 @@ _SCAFFOLD_FILES: dict[str, str] = {
     ),
     "HEARTBEAT.md": (
         "# Heartbeat Rules\n\n"
-        "Define what to check on each heartbeat. The agent reads this file\n"
-        "periodically and takes action when rules are triggered.\n\n"
-        "## Rules\n\n"
-        "- Check for pending tasks on the blackboard\n"
-        "- Review and summarize new information\n"
+        "You are woken periodically. On each heartbeat:\n"
+        "1. Check for pending tasks on the blackboard\n"
+        "2. Continue working toward your current goal\n"
+        "3. Send a brief status update to the user\n"
     ),
 }
 

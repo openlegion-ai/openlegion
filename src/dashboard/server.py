@@ -266,6 +266,98 @@ def create_dashboard_router(
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
+    # ── Chat with agent ────────────────────────────────────
+
+    @api_router.post("/api/agents/{agent_id}/chat")
+    async def api_chat(agent_id: str, request: Request) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        body = await request.json()
+        message = body.get("message", "").strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="Message is required")
+        from src.shared.utils import sanitize_for_prompt
+        message = sanitize_for_prompt(message)
+        try:
+            result = await transport.request(
+                agent_id, "POST", "/chat", json={"message": message}, timeout=120,
+            )
+            return {"response": result.get("response", "(no response)")}
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @api_router.post("/api/broadcast")
+    async def api_broadcast(request: Request) -> dict:
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        body = await request.json()
+        message = body.get("message", "").strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="Message is required")
+        from src.shared.utils import sanitize_for_prompt
+        message = sanitize_for_prompt(message)
+        import asyncio
+        results = {}
+        async def _send(aid: str) -> tuple[str, str]:
+            try:
+                data = await transport.request(
+                    aid, "POST", "/chat", json={"message": message}, timeout=120,
+                )
+                return aid, data.get("response", "(no response)")
+            except Exception as e:
+                return aid, f"Error: {e}"
+        tasks = [_send(aid) for aid in agent_registry]
+        for coro in asyncio.as_completed(tasks):
+            aid, resp = await coro
+            results[aid] = resp
+        return {"responses": results}
+
+    @api_router.post("/api/agents/{agent_id}/steer")
+    async def api_steer(agent_id: str, request: Request) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if lane_manager is None:
+            raise HTTPException(status_code=503, detail="Lane manager not available")
+        body = await request.json()
+        message = body.get("message", "").strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="Message is required")
+        from src.shared.utils import sanitize_for_prompt
+        message = sanitize_for_prompt(message)
+        from src.shared.trace import new_trace_id
+        result = await lane_manager.enqueue(agent_id, message, mode="steer", trace_id=new_trace_id())
+        return {"result": result}
+
+    @api_router.post("/api/agents/{agent_id}/reset")
+    async def api_reset(agent_id: str) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            await transport.request(agent_id, "POST", "/chat/reset", timeout=10)
+            return {"reset": True, "agent": agent_id}
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @api_router.post("/api/credentials")
+    async def api_add_credential(request: Request) -> dict:
+        if credential_vault is None:
+            raise HTTPException(status_code=503, detail="Credential vault not available")
+        body = await request.json()
+        service = body.get("service", "").strip()
+        key = body.get("key", "").strip()
+        if not service or not key:
+            raise HTTPException(status_code=400, detail="service and key are required")
+        # Normalize bare provider names
+        known_providers = {"anthropic", "openai", "gemini", "deepseek", "moonshot", "xai", "groq"}
+        if service.lower() in known_providers and not service.lower().endswith("_api_key"):
+            service = f"{service}_api_key"
+        credential_vault.add_credential(service, key)
+        return {"stored": True, "service": service}
+
     # ── Cost detail per agent ────────────────────────────────
 
     @api_router.get("/api/costs/{agent_id}")
@@ -337,9 +429,18 @@ def create_dashboard_router(
 
     @api_router.get("/api/queues")
     async def api_queues() -> dict:
-        if lane_manager is None:
-            return {"queues": {}}
-        return {"queues": lane_manager.get_status()}
+        lane_status = lane_manager.get_status() if lane_manager else {}
+        # Merge with agent registry so all agents appear (even idle ones)
+        queues = {}
+        for agent_id in agent_registry:
+            queues[agent_id] = lane_status.get(agent_id, {
+                "queued": 0, "pending": 0, "collected": 0, "busy": False,
+            })
+        # Include any lanes for agents not in registry (shouldn't happen, but safe)
+        for agent_id, status in lane_status.items():
+            if agent_id not in queues:
+                queues[agent_id] = status
+        return {"queues": queues}
 
     # ── Cron management ──────────────────────────────────────
 
@@ -357,6 +458,20 @@ def create_dashboard_router(
         if result is None and job_id not in cron_scheduler.jobs:
             raise HTTPException(status_code=404, detail="Job not found")
         return {"executed": True, "job_id": job_id, "result": result}
+
+    @api_router.put("/api/cron/{job_id}")
+    async def api_cron_update(job_id: str, request: Request) -> dict:
+        if cron_scheduler is None:
+            raise HTTPException(status_code=503, detail="Cron scheduler not available")
+        body = await request.json()
+        if "schedule" in body:
+            error = cron_scheduler._validate_schedule(body["schedule"])
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+        job = cron_scheduler.update_job(job_id, **body)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {"status": "updated", "job_id": job_id}
 
     @api_router.post("/api/cron/{job_id}/pause")
     async def api_cron_pause(job_id: str) -> dict:

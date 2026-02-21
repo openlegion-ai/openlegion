@@ -36,12 +36,25 @@ class TraceStore:
                 agent      TEXT NOT NULL DEFAULT '',
                 event_type TEXT NOT NULL,
                 detail     TEXT NOT NULL DEFAULT '',
-                duration_ms INTEGER NOT NULL DEFAULT 0
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                status     TEXT NOT NULL DEFAULT '',
+                error      TEXT NOT NULL DEFAULT '',
+                meta_json  TEXT NOT NULL DEFAULT ''
             )
         """)
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_traces_trace_id ON traces (trace_id)"
         )
+        # Add columns if upgrading from older schema
+        for col, typedef in [
+            ("status", "TEXT NOT NULL DEFAULT ''"),
+            ("error", "TEXT NOT NULL DEFAULT ''"),
+            ("meta_json", "TEXT NOT NULL DEFAULT ''"),
+        ]:
+            try:
+                self._conn.execute(f"ALTER TABLE traces ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
         self._conn.commit()
 
     def record(
@@ -52,12 +65,17 @@ class TraceStore:
         event_type: str,
         detail: str = "",
         duration_ms: int = 0,
+        status: str = "",
+        error: str = "",
+        meta: dict | None = None,
     ) -> None:
         """Insert a trace event and evict overflow."""
+        import json as _json
+        meta_json = _json.dumps(meta, default=str) if meta else ""
         self._conn.execute(
-            "INSERT INTO traces (trace_id, timestamp, source, agent, event_type, detail, duration_ms) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (trace_id, time.time(), source, agent, event_type, detail, duration_ms),
+            "INSERT INTO traces (trace_id, timestamp, source, agent, event_type, detail, duration_ms, status, error, meta_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (trace_id, time.time(), source, agent, event_type, detail, duration_ms, status, error, meta_json),
         )
         # Ring-buffer eviction: keep newest N rows regardless of ID gaps
         self._conn.execute(
@@ -68,45 +86,44 @@ class TraceStore:
         )
         self._conn.commit()
 
+    def _row_to_dict(self, row: tuple) -> dict:
+        """Convert a query row to a trace event dict."""
+        import json as _json
+        meta_json = row[9] if len(row) > 9 else ""
+        meta = _json.loads(meta_json) if meta_json else {}
+        return {
+            "trace_id": row[0],
+            "timestamp": row[1],
+            "source": row[2],
+            "agent": row[3],
+            "event_type": row[4],
+            "detail": row[5],
+            "duration_ms": row[6],
+            "status": row[7] if len(row) > 7 else "",
+            "error": row[8] if len(row) > 8 else "",
+            "meta": meta,
+        }
+
+    _TRACE_COLS = (
+        "trace_id, timestamp, source, agent, event_type, detail, "
+        "duration_ms, status, error, meta_json"
+    )
+
     def get_trace(self, trace_id: str) -> list[dict]:
         """Return all events for a given trace_id, ordered by time."""
         cur = self._conn.execute(
-            "SELECT trace_id, timestamp, source, agent, event_type, detail, duration_ms "
-            "FROM traces WHERE trace_id = ? ORDER BY id",
+            f"SELECT {self._TRACE_COLS} FROM traces WHERE trace_id = ? ORDER BY id",
             (trace_id,),
         )
-        return [
-            {
-                "trace_id": row[0],
-                "timestamp": row[1],
-                "source": row[2],
-                "agent": row[3],
-                "event_type": row[4],
-                "detail": row[5],
-                "duration_ms": row[6],
-            }
-            for row in cur.fetchall()
-        ]
+        return [self._row_to_dict(row) for row in cur.fetchall()]
 
     def list_recent(self, limit: int = 50) -> list[dict]:
         """Return the most recent trace events (newest first)."""
         cur = self._conn.execute(
-            "SELECT trace_id, timestamp, source, agent, event_type, detail, duration_ms "
-            "FROM traces ORDER BY id DESC LIMIT ?",
+            f"SELECT {self._TRACE_COLS} FROM traces ORDER BY id DESC LIMIT ?",
             (limit,),
         )
-        return [
-            {
-                "trace_id": row[0],
-                "timestamp": row[1],
-                "source": row[2],
-                "agent": row[3],
-                "event_type": row[4],
-                "detail": row[5],
-                "duration_ms": row[6],
-            }
-            for row in cur.fetchall()
-        ]
+        return [self._row_to_dict(row) for row in cur.fetchall()]
 
     def close(self) -> None:
         """Close the database connection."""
