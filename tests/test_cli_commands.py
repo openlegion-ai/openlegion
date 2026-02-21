@@ -196,6 +196,9 @@ class TestAgentModel:
         config_file = tmp_path / "mesh.yaml"
         agents_file = tmp_path / "agents.yaml"
         config_file.write_text(yaml.dump({"mesh": {}}))
+        agents_file.write_text(yaml.dump({
+            "agents": {"other": {"role": "test", "model": "openai/gpt-4.1"}},
+        }))
 
         with (
             patch("src.cli.config.CONFIG_FILE", config_file),
@@ -299,6 +302,9 @@ class TestAgentBrowser:
         config_file = tmp_path / "mesh.yaml"
         agents_file = tmp_path / "agents.yaml"
         config_file.write_text(yaml.dump({"mesh": {}}))
+        agents_file.write_text(yaml.dump({
+            "agents": {"other": {"role": "test", "model": "openai/gpt-4.1"}},
+        }))
 
         with (
             patch("src.cli.config.CONFIG_FILE", config_file),
@@ -413,6 +419,9 @@ class TestAgentRemove:
         config_file = tmp_path / "mesh.yaml"
         agents_file = tmp_path / "agents.yaml"
         config_file.write_text(yaml.dump({"mesh": {}}))
+        agents_file.write_text(yaml.dump({
+            "agents": {"other": {"role": "test"}},
+        }))
 
         with (
             patch("src.cli.config.CONFIG_FILE", config_file),
