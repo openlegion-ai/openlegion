@@ -29,11 +29,11 @@ def _make_project(tmp_path: Path) -> dict:
         "project_file": project_file,
         "templates_dir": templates_dir,
         "patches": {
-            "src.cli.CONFIG_FILE": config_file,
-            "src.cli.AGENTS_FILE": agents_file,
-            "src.cli.PERMISSIONS_FILE": perms_file,
-            "src.cli.PROJECT_FILE": project_file,
-            "src.cli.PROJECT_ROOT": tmp_path,
+            "src.cli.config.CONFIG_FILE": config_file,
+            "src.cli.config.AGENTS_FILE": agents_file,
+            "src.cli.config.PERMISSIONS_FILE": perms_file,
+            "src.cli.config.PROJECT_FILE": project_file,
+            "src.cli.config.PROJECT_ROOT": tmp_path,
         },
     }
 
@@ -75,9 +75,9 @@ class TestSetupFull:
         )
 
         with _patch_all(project):
-            with patch("src.cli._check_docker_running", return_value=True):
+            with patch("src.cli.config._check_docker_running", return_value=True):
                 with patch.object(SetupWizard, "_validate_api_key", return_value=True):
-                    with patch("src.cli._set_env_key"):
+                    with patch("src.cli.config._set_env_key"):
                         runner = CliRunner()
                         result = runner.invoke(cli, ["setup"], input=piped_input)
 
@@ -120,7 +120,7 @@ class TestSetupFull:
         piped_input = "n\n"
 
         with _patch_all(project):
-            with patch("src.cli._check_docker_running", return_value=True):
+            with patch("src.cli.config._check_docker_running", return_value=True):
                 runner = CliRunner()
                 result = runner.invoke(cli, ["setup"], input=piped_input)
 
@@ -143,9 +143,9 @@ class TestSetupFull:
         )
 
         with _patch_all(project):
-            with patch("src.cli._check_docker_running", return_value=True):
+            with patch("src.cli.config._check_docker_running", return_value=True):
                 with patch.object(SetupWizard, "_validate_api_key", return_value=True):
-                    with patch("src.cli._set_env_key"):
+                    with patch("src.cli.config._set_env_key"):
                         runner = CliRunner()
                         result = runner.invoke(cli, ["setup"], input=piped_input)
 
@@ -176,9 +176,9 @@ class TestSetupFull:
             return call_count["n"] >= 2  # Fail first, pass second
 
         with _patch_all(project):
-            with patch("src.cli._check_docker_running", return_value=True):
+            with patch("src.cli.config._check_docker_running", return_value=True):
                 with patch.object(SetupWizard, "_validate_api_key", _mock_validate):
-                    with patch("src.cli._set_env_key"):
+                    with patch("src.cli.config._set_env_key"):
                         runner = CliRunner()
                         result = runner.invoke(cli, ["setup"], input=piped_input)
 
@@ -195,9 +195,9 @@ class TestQuickstart:
         piped_input = "sk-test-key\n"
 
         with _patch_all(project):
-            with patch("src.cli._check_docker_running", return_value=True):
+            with patch("src.cli.config._check_docker_running", return_value=True):
                 with patch.object(SetupWizard, "_validate_api_key", return_value=True):
-                    with patch("src.cli._set_env_key"):
+                    with patch("src.cli.config._set_env_key"):
                         runner = CliRunner()
                         result = runner.invoke(cli, ["quickstart"], input=piped_input)
 
@@ -219,9 +219,9 @@ class TestQuickstart:
         piped_input = "sk-test-key\n"
 
         with _patch_all(project):
-            with patch("src.cli._check_docker_running", return_value=True):
+            with patch("src.cli.config._check_docker_running", return_value=True):
                 with patch.object(SetupWizard, "_validate_api_key", return_value=True):
-                    with patch("src.cli._set_env_key"):
+                    with patch("src.cli.config._set_env_key"):
                         runner = CliRunner()
                         result = runner.invoke(
                             cli, ["quickstart", "--model", "openai/gpt-4.1"],
@@ -239,8 +239,8 @@ class TestQuickstart:
         env_var = "OPENLEGION_CRED_ANTHROPIC_API_KEY"
 
         with _patch_all(project):
-            with patch("src.cli._check_docker_running", return_value=True):
-                with patch("src.cli._set_env_key"):
+            with patch("src.cli.config._check_docker_running", return_value=True):
+                with patch("src.cli.config._set_env_key"):
                     with patch.dict(os.environ, {env_var: "sk-existing"}):
                         runner = CliRunner()
                         result = runner.invoke(cli, ["quickstart"], input="")
@@ -254,7 +254,7 @@ class TestQuickstart:
         project = _make_project(tmp_path)
 
         with _patch_all(project):
-            with patch("src.cli._check_docker_running", return_value=False):
+            with patch("src.cli.config._check_docker_running", return_value=False):
                 runner = CliRunner()
                 result = runner.invoke(cli, ["quickstart"])
 

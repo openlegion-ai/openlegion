@@ -25,10 +25,10 @@ class TestAgentAdd:
         perms_file.write_text(json.dumps({"permissions": {}}))
 
         with (
-            patch("src.cli.CONFIG_FILE", config_file),
-            patch("src.cli.AGENTS_FILE", agents_file),
-            patch("src.cli.PERMISSIONS_FILE", perms_file),
-            patch("src.cli.PROJECT_ROOT", project_root),
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.PROJECT_ROOT", project_root),
         ):
             runner = CliRunner()
             result = runner.invoke(
@@ -58,8 +58,8 @@ class TestAgentAdd:
         }))
 
         with (
-            patch("src.cli.CONFIG_FILE", config_file),
-            patch("src.cli.AGENTS_FILE", agents_file),
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["agent", "add", "existing"])
@@ -81,8 +81,8 @@ class TestAgentList:
         }))
 
         with (
-            patch("src.cli.CONFIG_FILE", config_file),
-            patch("src.cli.AGENTS_FILE", agents_file),
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["agent", "list"])
@@ -98,8 +98,8 @@ class TestAgentList:
         config_file.write_text(yaml.dump({"mesh": {}}))
 
         with (
-            patch("src.cli.CONFIG_FILE", config_file),
-            patch("src.cli.AGENTS_FILE", agents_file),
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["agent", "list"])
@@ -123,9 +123,9 @@ class TestAgentRemove:
         }))
 
         with (
-            patch("src.cli.CONFIG_FILE", config_file),
-            patch("src.cli.AGENTS_FILE", agents_file),
-            patch("src.cli.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["agent", "remove", "mybot", "--yes"])
@@ -144,8 +144,8 @@ class TestAgentRemove:
         config_file.write_text(yaml.dump({"mesh": {}}))
 
         with (
-            patch("src.cli.CONFIG_FILE", config_file),
-            patch("src.cli.AGENTS_FILE", agents_file),
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["agent", "remove", "ghost"])
