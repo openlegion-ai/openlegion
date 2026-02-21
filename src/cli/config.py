@@ -296,7 +296,7 @@ def _add_agent_permissions(name: str) -> None:
 
     perms["permissions"][name] = {
         "can_message": can_message,
-        "can_publish": [f"{name}_complete"],
+        "can_publish": ["*"] if collab else [f"{name}_complete"],
         "can_subscribe": ["*"] if collab else [],
         "blackboard_read": ["context/*", "tasks/*", "goals/*", "signals/*", "artifacts/*"],
         "blackboard_write": ["context/*", "goals/*", "signals/*", "artifacts/*"],
@@ -306,13 +306,15 @@ def _add_agent_permissions(name: str) -> None:
 
 
 def _set_collaborative_permissions() -> None:
-    """Update all agent permissions to allow inter-agent messaging."""
+    """Update all agent permissions to allow inter-agent messaging and pub/sub."""
     perms = _load_permissions()
     for name, p in perms.get("permissions", {}).items():
         if name == "default":
             continue
         if "*" not in p.get("can_message", []):
             p["can_message"] = list({*p.get("can_message", []), "*"})
+        if "*" not in p.get("can_publish", []):
+            p["can_publish"] = list({*p.get("can_publish", []), "*"})
         if "*" not in p.get("can_subscribe", []):
             p["can_subscribe"] = list({*p.get("can_subscribe", []), "*"})
     _save_permissions(perms)
