@@ -10,7 +10,7 @@ No additional setup is required -- the dashboard starts automatically with `open
 
 ## Panels
 
-### Fleet
+### Agents
 
 Overview of all registered agents showing health status, activity state (idle/thinking/tool), daily cost, token usage, and restart count. Click any agent card to drill down into its detail view with cost breakdowns, budget bars, and recent events.
 
@@ -58,11 +58,11 @@ Environment overview showing configured credentials (names only, never values), 
 
 ### Restart Agent
 
-Click the **Restart** button on any agent card. A confirmation dialog prevents accidental restarts. The agent is stopped and restarted with its current configuration. The fleet panel updates automatically when the agent comes back online.
+Click the **Restart** button on any agent card. A confirmation dialog prevents accidental restarts. The agent is stopped and restarted with its current configuration. The agents panel updates automatically when the agent comes back online.
 
 ### Update Budget
 
-From the agent detail view (click an agent in Fleet), budget bars show current daily and monthly usage. Budget can also be updated via the Agents tab edit form.
+From the agent detail view (click an agent in Agents), budget bars show current daily and monthly usage. Budget can also be updated via the Agents tab edit form.
 
 ## Blackboard Operations
 
@@ -87,7 +87,7 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/dashboard/` | Serve dashboard HTML |
-| `GET` | `/dashboard/api/agents` | Fleet overview with health and costs |
+| `GET` | `/dashboard/api/agents` | Agent overview with health and costs |
 | `POST` | `/dashboard/api/agents` | Create a new agent |
 | `GET` | `/dashboard/api/agents/{id}` | Agent detail with spend and budget |
 | `DELETE` | `/dashboard/api/agents/{id}` | Remove an agent |
