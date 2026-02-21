@@ -100,7 +100,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | Module | Purpose |
 |--------|---------|
 | `types.py` | **THE contract** -- all Pydantic models shared between host and agents |
-| `utils.py` | ID generation, structured logging setup |
+| `utils.py` | ID generation, structured logging, prompt injection sanitization |
 
 ## Data Flow
 
@@ -147,3 +147,4 @@ Both implement `RuntimeBackend` ABC so the rest of the system is isolation-agnos
 5. **Bounded execution** -- 20 iterations for tasks, 30 tool rounds for chat
 6. **Write-then-compact** -- facts are flushed to memory before discarding context
 7. **Tool-call message grouping** -- assistant(tool_calls) and tool(results) are never separated in context trimming
+8. **Unicode sanitization** -- all untrusted text passes through `sanitize_for_prompt()` before reaching LLM context (user input, tool results, system prompt context)
