@@ -120,11 +120,13 @@ class HealthMonitor:
             return
 
         logger.info(f"Restarting agent '{agent_id}'...")
+        info = self.runtime.agents.get(agent_id, {})
         try:
-            info = self.runtime.agents.get(agent_id, {})
-
             self.runtime.stop_agent(agent_id)
+        except Exception as e:
+            logger.warning(f"Error stopping agent '{agent_id}' during restart: {e}")
 
+        try:
             url = self.runtime.start_agent(
                 agent_id=agent_id,
                 role=info.get("role", ""),

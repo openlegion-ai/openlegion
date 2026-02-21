@@ -189,7 +189,7 @@ async def save_artifact(
         return {"error": "No workspace_manager available"}
     try:
         from pathlib import Path
-        artifacts_dir = Path(workspace_manager.workspace_root) / "artifacts"
+        artifacts_dir = Path(workspace_manager.root) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         filepath = artifacts_dir / name
         filepath.write_text(content)

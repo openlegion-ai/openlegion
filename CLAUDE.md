@@ -64,7 +64,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 
 7. **Fleet model, not hierarchy.** There is no CEO agent that routes or delegates. Users talk to agents directly. Agents coordinate through the blackboard (shared state) and YAML workflows (deterministic DAGs). Do not introduce agent-to-agent direct messaging patterns that bypass the mesh.
 
-8. **Bounded execution.** Agent loops have hard limits: 20 iterations for tasks (`AgentLoop.MAX_ITERATIONS`), 10 tool rounds for chat (`CHAT_MAX_TOOL_ROUNDS`). Token budgets are enforced per task. These prevent runaway agents. Do not remove these limits.
+8. **Bounded execution.** Agent loops have hard limits: 20 iterations for tasks (`AgentLoop.MAX_ITERATIONS`), 30 tool rounds for chat (`CHAT_MAX_TOOL_ROUNDS`). Token budgets are enforced per task. These prevent runaway agents. Do not remove these limits.
 
 9. **Write-then-compact.** Before discarding any conversation context, important facts are flushed to `MEMORY.md` via the workspace (`src/agent/context.py`). No information should be silently lost during context management.
 
@@ -170,7 +170,7 @@ pytest tests/test_loop.py -x -v
 - **Polling for task completion.** Prefer push-based patterns (agent posts result back to mesh) over polling loops. The current `_wait_for_task_result` in orchestrator.py is a known area for improvement.
 - **Breaking tool-call message grouping.** When trimming context, never separate an `assistant` message with `tool_calls` from its corresponding `tool` result messages. The `_trim_context` method handles this — respect the grouping pattern.
 - **Putting secrets in agent code.** Agents run in untrusted containers. API keys, tokens, credentials — all belong in the vault (`OPENLEGION_CRED_*` env vars loaded by `credentials.py`). New service integrations go through the vault proxy.
-- **Using global mutable state.** The `_skill_registry` global in `skills.py` is a known issue. Avoid adding new module-level mutable globals. Pass state through constructors.
+- **Using global mutable state.** The `_skill_staging` global in `skills.py` is a known issue. Avoid adding new module-level mutable globals. Pass state through constructors.
 - **Overly broad exception handling.** Don't `except Exception: pass`. Log the error. Distinguish transient errors (network timeouts, rate limits — retry with backoff) from permanent errors (invalid input, missing config — fail fast).
 - **Monolithic functions.** `cli.py:_start_interactive` is too large. When adding features, prefer composable components over growing existing functions. Extract classes with clear lifecycle (init, start, stop).
 
