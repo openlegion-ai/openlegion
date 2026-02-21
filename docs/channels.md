@@ -23,6 +23,8 @@ All channels support the same command set:
 | `/agents` | List all available agents |
 | `/status` | Show agent health and task counts |
 | `/broadcast <msg>` | Send a message to all agents |
+| `/steer <msg>` | Inject message into busy agent's context |
+| `/debug [trace_id]` | Show recent traces or trace detail |
 | `/costs` | Show today's LLM spend per agent |
 | `/addkey <service> <key>` | Add an API credential to the vault |
 | `/reset` | Clear conversation with active agent |
@@ -38,7 +40,7 @@ openlegion start -d       # Detached (background)
 openlegion chat <agent>   # Connect to running agent (detached mode)
 ```
 
-The CLI REPL supports the full command set above plus streaming responses with tool-use progress indicators.
+The CLI REPL supports the full command set above plus streaming responses with tool-use progress indicators. All channels now have full command parity with the CLI REPL (except `/add`, `/edit`, and `/remove` which require interactive prompts).
 
 ## Telegram
 
@@ -297,6 +299,8 @@ The channel receives these callbacks at construction:
 | `costs_fn` | `() -> list[dict]` | Today's spend per agent |
 | `reset_fn` | `(agent) -> bool` | Clear agent conversation |
 | `addkey_fn` | `(service, key) -> None` | Store credential in vault |
+| `steer_fn` | `(agent, msg) -> None` | Inject message into agent's context |
+| `debug_fn` | `(trace_id \| None) -> list[dict]` | Retrieve recent traces or trace detail |
 
 ## Source Files
 

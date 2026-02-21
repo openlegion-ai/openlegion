@@ -73,8 +73,32 @@ class HealthMonitor:
         self._running = False
 
     async def _check_all(self) -> None:
+        await self._cleanup_ephemeral_agents()
         for agent_id in list(self.agents.keys()):
             await self._check_agent(agent_id)
+
+    async def _cleanup_ephemeral_agents(self) -> None:
+        """Remove ephemeral (spawned) agents that have exceeded their TTL."""
+        now = time.time()
+        for agent_id in list(self.agents.keys()):
+            info = self.runtime.agents.get(agent_id, {})
+            if not info.get("ephemeral"):
+                continue
+            ttl = info.get("ttl", 3600)
+            spawned_at = info.get("spawned_at", 0)
+            if now - spawned_at <= ttl:
+                continue
+            logger.info("Ephemeral agent '%s' exceeded TTL (%ss), removing", agent_id, ttl)
+            try:
+                self.runtime.stop_agent(agent_id)
+            except Exception as e:
+                logger.warning("Error stopping ephemeral agent '%s': %s", agent_id, e)
+            self.router.unregister_agent(agent_id)
+            del self.agents[agent_id]
+            if self._event_bus:
+                self._event_bus.emit("agent_state", agent=agent_id, data={
+                    "state": "removed", "reason": "ttl_expired",
+                })
 
     async def _check_agent(self, agent_id: str) -> None:
         health = self.agents.get(agent_id)
@@ -90,8 +114,9 @@ class HealthMonitor:
             if reachable:
                 health.consecutive_failures = 0
                 health.last_healthy = now
-                health.status = "healthy"
-                if health.status != prev_status and self._event_bus:
+                new_status = "healthy"
+                health.status = new_status
+                if new_status != prev_status and self._event_bus:
                     self._event_bus.emit("health_change", agent=agent_id, data={
                         "previous": prev_status, "current": health.status,
                         "failures": health.consecutive_failures,

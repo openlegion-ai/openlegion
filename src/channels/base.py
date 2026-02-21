@@ -103,6 +103,8 @@ StatusFn = Callable[[str], dict | None]
 CostsFn = Callable[[], list[dict]]
 ResetFn = Callable[[str], bool]
 AddKeyFn = Callable[[str, str], None]
+SteerFn = Callable[[str, str], None]
+DebugFn = Callable[[str | None], list[dict]]
 
 
 class Channel(abc.ABC):
@@ -126,6 +128,8 @@ class Channel(abc.ABC):
         reset_fn: ResetFn | None = None,
         stream_dispatch_fn: StreamDispatchFn | None = None,
         addkey_fn: AddKeyFn | None = None,
+        steer_fn: SteerFn | None = None,
+        debug_fn: DebugFn | None = None,
     ):
         self.dispatch_fn = dispatch_fn
         self.default_agent = default_agent
@@ -135,6 +139,8 @@ class Channel(abc.ABC):
         self.reset_fn = reset_fn
         self.stream_dispatch_fn = stream_dispatch_fn
         self.addkey_fn = addkey_fn
+        self.steer_fn = steer_fn
+        self.debug_fn = debug_fn
         self._active_agent: dict[str, str] = {}  # user_id -> agent_name
         self._notify_targets: list[Any] = []
 
@@ -301,6 +307,36 @@ class Channel(abc.ABC):
             except Exception as e:
                 return f"Error storing credential: {e}"
 
+        if cmd == "/steer":
+            if not self.steer_fn:
+                return "Steer not available."
+            if len(parts) < 2:
+                return f"Usage: /steer <message>  (injects into {current}'s context)"
+            try:
+                self.steer_fn(current, parts[1])
+                return f"Steered '{current}' with message."
+            except Exception as e:
+                return f"Error steering: {e}"
+
+        if cmd == "/debug":
+            if not self.debug_fn:
+                return "Debug not available."
+            trace_id = parts[1].strip() if len(parts) > 1 else None
+            try:
+                traces = self.debug_fn(trace_id)
+                if not traces:
+                    return "No traces found."
+                header = f"Trace {trace_id}:" if trace_id else "Recent traces:"
+                lines = [header]
+                for t in traces[:10]:
+                    tid = t.get("trace_id", "?")[:12]
+                    agent_name = t.get("agent", "-")
+                    etype = t.get("event_type", "?")
+                    lines.append(f"  {tid}  {agent_name:<16} {etype}")
+                return "\n".join(lines)
+            except Exception as e:
+                return f"Error: {e}"
+
         if cmd == "/help":
             return (
                 "Commands:\n"
@@ -309,6 +345,8 @@ class Channel(abc.ABC):
                 "  /agents           List all agents\n"
                 "  /status           Show agent health\n"
                 "  /broadcast <msg>  Send to all agents\n"
+                "  /steer <msg>      Inject message into busy agent's context\n"
+                "  /debug [trace_id] Show recent traces or trace detail\n"
                 "  /costs            Show today's LLM spend\n"
                 "  /addkey <svc> <key>  Add an API credential\n"
                 "  /reset            Clear conversation with active agent\n"

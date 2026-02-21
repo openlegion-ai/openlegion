@@ -42,9 +42,11 @@ class LaneManager:
         self,
         dispatch_fn: Callable[..., Coroutine[Any, Any, str]],
         steer_fn: Callable[..., Coroutine[Any, Any, Any]] | None = None,
+        trace_store: Any = None,
     ):
         self._dispatch_fn = dispatch_fn
         self._steer_fn = steer_fn
+        self._trace_store = trace_store
         self._queues: dict[str, asyncio.Queue[QueuedTask]] = {}
         self._workers: dict[str, asyncio.Task] = {}
         self._pending: dict[str, list[QueuedTask]] = {}
@@ -161,6 +163,8 @@ class LaneManager:
 
     async def _worker(self, agent: str) -> None:
         """Worker loop: drains the queue for a single agent serially."""
+        import time as _time
+
         from src.shared.trace import current_trace_id
 
         queue = self._queues[agent]
@@ -168,6 +172,12 @@ class LaneManager:
             task = await queue.get()
             self._busy[agent] = True
             current_trace_id.set(task.trace_id)
+            t0 = _time.time()
+            if task.trace_id and self._trace_store:
+                self._trace_store.record(
+                    trace_id=task.trace_id, source="lane", agent=agent,
+                    event_type="lane_start", detail=task.message[:120],
+                )
             try:
                 result = await self._dispatch_fn(agent, task.message)
                 task.future.set_result(result)
@@ -176,6 +186,12 @@ class LaneManager:
                     task.future.set_exception(e)
                 logger.error(f"Lane task {task.id} for '{agent}' failed: {e}")
             finally:
+                duration_ms = int((_time.time() - t0) * 1000)
+                if task.trace_id and self._trace_store:
+                    self._trace_store.record(
+                        trace_id=task.trace_id, source="lane", agent=agent,
+                        event_type="lane_complete", duration_ms=duration_ms,
+                    )
                 self._busy[agent] = False
                 if agent in self._pending and task in self._pending[agent]:
                     self._pending[agent].remove(task)

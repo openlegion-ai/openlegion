@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from src.dashboard.events import EventBus
     from src.host.credentials import CredentialVault
     from src.host.cron import CronScheduler
+    from src.host.health import HealthMonitor
     from src.host.mesh import Blackboard, MessageRouter, PubSub
     from src.host.orchestrator import Orchestrator
     from src.host.permissions import PermissionMatrix
@@ -48,6 +49,7 @@ def create_mesh_app(
     auth_tokens: dict[str, str] | None = None,
     trace_store: TraceStore | None = None,
     event_bus: EventBus | None = None,
+    health_monitor: HealthMonitor | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
@@ -122,6 +124,13 @@ def create_mesh_app(
         if not permissions.can_write_blackboard(agent_id, key):
             raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
         entry = blackboard.write(key, value, written_by=agent_id)
+        if trace_store:
+            req_trace_id = request.headers.get("x-trace-id")
+            if req_trace_id:
+                trace_store.record(
+                    trace_id=req_trace_id, source="mesh.blackboard", agent=agent_id,
+                    event_type="blackboard_write", detail=key,
+                )
         return entry.model_dump(mode="json")
 
     # === Pub/Sub ===
@@ -132,6 +141,13 @@ def create_mesh_app(
         _verify_auth(event.source, request)
         if not permissions.can_publish(event.source, event.topic):
             raise HTTPException(403, f"Agent {event.source} cannot publish to {event.topic}")
+        if trace_store:
+            req_trace_id = request.headers.get("x-trace-id")
+            if req_trace_id:
+                trace_store.record(
+                    trace_id=req_trace_id, source="mesh.pubsub", agent=event.source,
+                    event_type="pubsub_publish", detail=event.topic,
+                )
         subscribers = pubsub.get_subscribers(event.topic)
         for agent_id in subscribers:
             await router.route(
@@ -394,7 +410,21 @@ def create_mesh_app(
                 model=model, ttl=ttl,
             )
             router.register_agent(agent_id, url)
+            if health_monitor is not None:
+                health_monitor.register(agent_id)
+            # Store ephemeral metadata for TTL cleanup
+            container_manager.agents.setdefault(agent_id, {}).update({
+                "ephemeral": True, "ttl": ttl,
+                "spawned_at": time.time(), "role": role,
+            })
             ready = await container_manager.wait_for_agent(agent_id, timeout=60)
+            if trace_store:
+                from src.shared.trace import new_trace_id as _new_trace_id
+                trace_store.record(
+                    trace_id=_new_trace_id(), source="mesh.spawn", agent=agent_id,
+                    event_type="agent_spawn",
+                    detail=f"role={role} spawned_by={spawned_by}",
+                )
             if event_bus is not None:
                 event_bus.emit("agent_state", agent=agent_id, data={
                     "state": "spawned", "role": role, "ready": ready,

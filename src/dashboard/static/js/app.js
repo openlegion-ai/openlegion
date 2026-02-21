@@ -1,7 +1,7 @@
 /**
  * OpenLegion Dashboard — Alpine.js application.
  *
- * Six panels: Fleet, Events, Agent Detail, Blackboard, Costs, Traces.
+ * Nine panels: Fleet, Events, Agents, Blackboard, Costs, Traces, Queues, Cron, Settings.
  * Real-time updates via WebSocket + periodic REST polling.
  */
 function dashboard() {
@@ -11,15 +11,21 @@ function dashboard() {
     tabs: [
       { id: 'fleet', label: 'Fleet' },
       { id: 'events', label: 'Events' },
+      { id: 'agents', label: 'Agents' },
       { id: 'blackboard', label: 'Blackboard' },
       { id: 'costs', label: 'Costs' },
       { id: 'traces', label: 'Traces' },
+      { id: 'queues', label: 'Queues' },
+      { id: 'cron', label: 'Cron' },
+      { id: 'settings', label: 'Settings' },
     ],
     connected: false,
     loading: true,
     lastRefresh: 0,
     unreadEvents: 0,
     _lastSeenEventCount: 0,
+    toastMessage: '',
+    _toastTimer: null,
 
     // Fleet
     agents: [],
@@ -40,11 +46,21 @@ function dashboard() {
     agentDetail: null,
     agentEvents: [],
 
+    // Agent config (V2)
+    agentConfigs: {},
+    editingAgent: null,
+    editForm: {},
+    availableModels: [],
+    availableBrowsers: [],
+
     // Blackboard
     bbEntries: [],
     bbPrefix: '',
     bbHighlights: new Set(),
     bbLoading: false,
+    bbWriteMode: false,
+    bbNewKey: '',
+    bbNewValue: '{}',
 
     // Costs
     costData: {},
@@ -58,10 +74,21 @@ function dashboard() {
     traceDetail: null,
     tracesLoading: false,
 
+    // Queues (V2)
+    queueStatus: {},
+
+    // Cron (V2)
+    cronJobs: [],
+
+    // Settings (V2)
+    settingsData: null,
+
     // WebSocket
     _ws: null,
     _refreshInterval: null,
     _fleetDebounce: null,
+    _queueInterval: null,
+    _cronInterval: null,
 
     // ── Computed ───────────────────────────────────────────
 
@@ -100,8 +127,11 @@ function dashboard() {
     destroy() {
       if (this._ws) this._ws.disconnect();
       if (this._refreshInterval) clearInterval(this._refreshInterval);
+      if (this._queueInterval) clearInterval(this._queueInterval);
+      if (this._cronInterval) clearInterval(this._cronInterval);
       if (this._costDebounce) clearTimeout(this._costDebounce);
       if (this._fleetDebounce) clearTimeout(this._fleetDebounce);
+      if (this._toastTimer) clearTimeout(this._toastTimer);
       if (this.costChart) this.costChart.destroy();
       Object.values(this._stateTimers).forEach(clearTimeout);
     },
@@ -110,6 +140,9 @@ function dashboard() {
 
     switchTab(tab) {
       this.activeTab = tab;
+      // Clear tab-specific auto-refresh intervals
+      if (this._queueInterval) { clearInterval(this._queueInterval); this._queueInterval = null; }
+      if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
       if (tab === 'events') {
         this.unreadEvents = 0;
         this._lastSeenEventCount = this.events.length;
@@ -117,6 +150,27 @@ function dashboard() {
       if (tab === 'blackboard') this.fetchBlackboard();
       if (tab === 'costs') this.fetchCosts();
       if (tab === 'traces') this.fetchTraces();
+      if (tab === 'agents') {
+        this.fetchSettings();
+        this.agents.forEach(a => this.fetchAgentConfig(a.id));
+      }
+      if (tab === 'queues') {
+        this.fetchQueues();
+        this._queueInterval = setInterval(() => this.fetchQueues(), 5000);
+      }
+      if (tab === 'cron') {
+        this.fetchCronJobs();
+        this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
+      }
+      if (tab === 'settings') this.fetchSettings();
+    },
+
+    // ── Toast helper ──────────────────────────────────────
+
+    showToast(msg) {
+      this.toastMessage = msg;
+      if (this._toastTimer) clearTimeout(this._toastTimer);
+      this._toastTimer = setTimeout(() => { this.toastMessage = ''; }, 3000);
     },
 
     // ── WebSocket event handler ───────────────────────────
@@ -205,7 +259,7 @@ function dashboard() {
           this.agents = (await resp.json()).agents;
           this.lastRefresh = Date.now() / 1000;
         }
-      } catch (_) {}
+      } catch (e) { console.warn('fetchAgents failed:', e); }
       this.loading = false;
     },
 
@@ -214,7 +268,7 @@ function dashboard() {
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}`);
         if (resp.ok) this.agentDetail = await resp.json();
-      } catch (_) {}
+      } catch (e) { console.warn('fetchAgentDetail failed:', e); }
     },
 
     async fetchBlackboard() {
@@ -222,7 +276,7 @@ function dashboard() {
       try {
         const resp = await fetch(`${window.__config.apiBase}/blackboard?prefix=${encodeURIComponent(this.bbPrefix)}`);
         if (resp.ok) this.bbEntries = (await resp.json()).entries;
-      } catch (_) {}
+      } catch (e) { console.warn('fetchBlackboard failed:', e); }
       this.bbLoading = false;
     },
 
@@ -233,7 +287,7 @@ function dashboard() {
           this.costData = await resp.json();
           this.$nextTick(() => this.renderCostChart());
         }
-      } catch (_) {}
+      } catch (e) { console.warn('fetchCosts failed:', e); }
     },
 
     async fetchTraces() {
@@ -241,7 +295,7 @@ function dashboard() {
       try {
         const resp = await fetch(`${window.__config.apiBase}/traces?limit=50`);
         if (resp.ok) this.traces = (await resp.json()).traces;
-      } catch (_) {}
+      } catch (e) { console.warn('fetchTraces failed:', e); }
       this.tracesLoading = false;
     },
 
@@ -251,7 +305,182 @@ function dashboard() {
       try {
         const resp = await fetch(`${window.__config.apiBase}/traces/${traceId}`);
         if (resp.ok) this.traceDetail = await resp.json();
-      } catch (_) {}
+      } catch (e) { console.warn('fetchTraceDetail failed:', e); }
+    },
+
+    // ── V2: Agent config fetchers ─────────────────────────
+
+    async fetchAgentConfig(agentId) {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/config`);
+        if (resp.ok) {
+          const cfg = await resp.json();
+          this.agentConfigs[agentId] = cfg;
+          return cfg;
+        }
+      } catch (e) { console.warn('fetchAgentConfig failed:', e); }
+      return null;
+    },
+
+    startEditAgent(agentId) {
+      const cfg = this.agentConfigs[agentId];
+      if (!cfg) return;
+      this.editingAgent = agentId;
+      this.editForm = {
+        model: cfg.model || '',
+        browser_backend: cfg.browser_backend || 'basic',
+        role: cfg.role || '',
+        system_prompt: cfg.system_prompt || '',
+        budget_daily: cfg.budget?.daily_usd || '',
+      };
+    },
+
+    cancelEdit() {
+      this.editingAgent = null;
+      this.editForm = {};
+    },
+
+    async saveAgentConfig(agentId) {
+      const body = {};
+      const cfg = this.agentConfigs[agentId] || {};
+      if (this.editForm.model && this.editForm.model !== cfg.model) body.model = this.editForm.model;
+      if (this.editForm.browser_backend && this.editForm.browser_backend !== cfg.browser_backend) body.browser_backend = this.editForm.browser_backend;
+      if (this.editForm.role !== undefined && this.editForm.role !== cfg.role) body.role = this.editForm.role;
+      if (this.editForm.system_prompt !== undefined && this.editForm.system_prompt !== cfg.system_prompt) body.system_prompt = this.editForm.system_prompt;
+      if (this.editForm.budget_daily && parseFloat(this.editForm.budget_daily) > 0) {
+        body.budget = { daily_usd: parseFloat(this.editForm.budget_daily) };
+      }
+      if (Object.keys(body).length === 0) {
+        this.cancelEdit();
+        return;
+      }
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/config`, {
+          method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+          const result = await resp.json();
+          this.showToast(`Updated: ${result.updated.join(', ')}${result.restart_required ? ' (restart required)' : ''}`);
+          await this.fetchAgentConfig(agentId);
+        } else {
+          const err = await resp.json();
+          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+      this.cancelEdit();
+    },
+
+    async restartAgent(agentId) {
+      if (!confirm(`Restart agent "${agentId}"? This will interrupt any active work.`)) return;
+      this.showToast(`Restarting ${agentId}...`);
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/restart`, { method: 'POST' });
+        if (resp.ok) {
+          const data = await resp.json();
+          this.showToast(data.ready ? `${agentId} restarted and ready` : `${agentId} restarted (not ready)`);
+          this.fetchAgents();
+        } else {
+          this.showToast(`Restart failed`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
+    async updateBudget(agentId, dailyUsd) {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/budget`, {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ daily_usd: parseFloat(dailyUsd) }),
+        });
+        if (resp.ok) this.showToast(`Budget updated for ${agentId}`);
+      } catch (e) { console.warn('updateBudget failed:', e); }
+    },
+
+    // ── V2: Blackboard write/delete ───────────────────────
+
+    async writeBlackboard() {
+      if (!this.bbNewKey.trim()) return;
+      let value;
+      try { value = JSON.parse(this.bbNewValue); } catch (_) { this.showToast('Invalid JSON'); return; }
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/blackboard/${this.bbNewKey}`, {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ value }),
+        });
+        if (resp.ok) {
+          this.showToast(`Written: ${this.bbNewKey}`);
+          this.bbNewKey = ''; this.bbNewValue = '{}'; this.bbWriteMode = false;
+          this.fetchBlackboard();
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
+    async deleteBlackboard(key) {
+      if (!confirm(`Delete blackboard key "${key}"?`)) return;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/blackboard/${key}`, { method: 'DELETE' });
+        if (resp.ok) { this.showToast(`Deleted: ${key}`); this.fetchBlackboard(); }
+        else { const err = await resp.json(); this.showToast(`Error: ${err.detail}`); }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
+    // ── V2: Queue fetcher ─────────────────────────────────
+
+    async fetchQueues() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/queues`);
+        if (resp.ok) this.queueStatus = (await resp.json()).queues;
+      } catch (e) { console.warn('fetchQueues failed:', e); }
+    },
+
+    // ── V2: Cron fetchers ─────────────────────────────────
+
+    async fetchCronJobs() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/cron`);
+        if (resp.ok) this.cronJobs = (await resp.json()).jobs;
+      } catch (e) { console.warn('fetchCronJobs failed:', e); }
+    },
+
+    async runCronJob(jobId) {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/cron/${jobId}/run`, { method: 'POST' });
+        if (resp.ok) this.showToast(`Job ${jobId} triggered`);
+        this.fetchCronJobs();
+      } catch (e) { console.warn('runCronJob failed:', e); }
+    },
+
+    async pauseCronJob(jobId) {
+      try {
+        await fetch(`${window.__config.apiBase}/cron/${jobId}/pause`, { method: 'POST' });
+        this.showToast(`Job ${jobId} paused`);
+        this.fetchCronJobs();
+      } catch (e) { console.warn('pauseCronJob failed:', e); }
+    },
+
+    async resumeCronJob(jobId) {
+      try {
+        await fetch(`${window.__config.apiBase}/cron/${jobId}/resume`, { method: 'POST' });
+        this.showToast(`Job ${jobId} resumed`);
+        this.fetchCronJobs();
+      } catch (e) { console.warn('resumeCronJob failed:', e); }
+    },
+
+    // ── V2: Settings fetcher ──────────────────────────────
+
+    async fetchSettings() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/settings`);
+        if (resp.ok) {
+          this.settingsData = await resp.json();
+          // Extract models and browsers for agent edit forms
+          if (this.settingsData.provider_models) {
+            this.availableModels = Object.values(this.settingsData.provider_models).flat();
+          }
+          if (this.settingsData.browser_backends) {
+            this.availableBrowsers = this.settingsData.browser_backends.map(b => b.name);
+          }
+        }
+      } catch (e) { console.warn('fetchSettings failed:', e); }
     },
 
     // ── Agent drill-down ──────────────────────────────────
@@ -261,6 +490,14 @@ function dashboard() {
       this.agentEvents = this.events.filter(e => e.agent === agentId).slice(0, 100);
       this.fetchAgentDetail(agentId);
       this.activeTab = 'agent-detail';
+    },
+
+    // ── V2: Agents panel drill-down ───────────────────────
+
+    async openAgentConfig(agentId) {
+      await this.fetchAgentConfig(agentId);
+      this.selectedAgent = agentId;
+      this.startEditAgent(agentId);
     },
 
     // ── Chart.js rendering ────────────────────────────────
@@ -349,6 +586,18 @@ function dashboard() {
         blackboard_write: 'text-cyan-400',
         cost_update: 'text-rose-400',
         health_change: 'text-red-400',
+        // V2 trace event types
+        chat: 'text-green-400',
+        chat_response: 'text-green-300',
+        message_route: 'text-teal-400',
+        pubsub_publish: 'text-sky-400',
+        agent_spawn: 'text-indigo-400',
+        workflow_step_start: 'text-orange-400',
+        workflow_step_end: 'text-orange-300',
+        lane_start: 'text-yellow-400',
+        lane_complete: 'text-yellow-300',
+        cron_trigger: 'text-pink-400',
+        llm_stream: 'text-purple-300',
       };
       return map[type] || 'text-gray-400';
     },
@@ -365,6 +614,16 @@ function dashboard() {
         cost_update: 'bg-rose-400',
         health_change: 'bg-red-400',
         chat: 'bg-green-400',
+        chat_response: 'bg-green-300',
+        message_route: 'bg-teal-400',
+        pubsub_publish: 'bg-sky-400',
+        agent_spawn: 'bg-indigo-400',
+        workflow_step_start: 'bg-orange-400',
+        workflow_step_end: 'bg-orange-300',
+        lane_start: 'bg-yellow-400',
+        lane_complete: 'bg-yellow-300',
+        cron_trigger: 'bg-pink-400',
+        llm_stream: 'bg-purple-300',
       };
       return map[type] || 'bg-gray-400';
     },
@@ -414,6 +673,10 @@ function dashboard() {
       const s = JSON.stringify(value);
       if (s.length <= 120) return s;
       return s.substring(0, 117) + '\u2026';
+    },
+
+    fullJson(value) {
+      return JSON.stringify(value, null, 2);
     },
 
     waterfall(evt, allEvents) {

@@ -301,12 +301,18 @@ class PubSub:
 class MessageRouter:
     """Routes messages between agents with permission enforcement."""
 
-    def __init__(self, permissions: PermissionMatrix, agent_registry: dict[str, str]):
+    def __init__(
+        self,
+        permissions: PermissionMatrix,
+        agent_registry: dict[str, str],
+        trace_store: Any = None,
+    ):
         self.permissions = permissions
         self.agent_registry: dict[str, str] = agent_registry
         self.message_log: list[dict] = []
         self._capabilities_cache: dict[str, list[str]] = {}
         self._client: httpx.AsyncClient | None = None
+        self._trace_store = trace_store
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -334,6 +340,15 @@ class MessageRouter:
             "type": message.type,
             "timestamp": message.timestamp.isoformat(),
         })
+        if self._trace_store:
+            from src.shared.trace import current_trace_id
+            tid = current_trace_id.get()
+            if tid:
+                self._trace_store.record(
+                    trace_id=tid, source="router", agent=message.from_agent,
+                    event_type="message_route",
+                    detail=f"{message.from_agent}->{message.to} ({message.type})",
+                )
         if len(self.message_log) > 10_000:
             self.message_log = self.message_log[-5_000:]
 

@@ -116,7 +116,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 717 tests including full Docker E2E |
+| **Test coverage** | Minimal | 745+ tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~14,000 lines — auditable in a day |
 
 ---
@@ -131,7 +131,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, or CLI. Agents act aut
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**717 tests passing** across **~14,000 lines** of application code.
+**745+ tests passing** across **~14,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
@@ -156,11 +156,13 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
 7. **Multi-channel** — connect agents to Telegram, Discord, Slack, and WhatsApp. Also accessible via CLI and API.
 
-8. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly budget enforcement.
+8. **Real-time dashboard** — web-based fleet observability at `/dashboard` with live event streaming, agent management, cost charts, trace timelines, and cron management.
 
-9. **Runs deterministic workflows** — YAML-defined DAG workflows chain agents in sequence with conditions, retries, and failure handlers.
+9. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly budget enforcement.
 
-10. **Fails over across providers** — configurable model failover chains cascade across LLM providers with per-model health tracking and exponential cooldown.
+10. **Runs deterministic workflows** — YAML-defined DAG workflows chain agents in sequence with conditions, retries, and failure handlers.
+
+11. **Fails over across providers** — configurable model failover chains cascade across LLM providers with per-model health tracking and exponential cooldown.
 
 ---
 
@@ -795,7 +797,7 @@ pytest tests/
 | Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
 | Context Manager | 31 | Token estimation (tiktoken + model-aware), compaction, flushing |
 | Mesh | 31 | Blackboard, PubSub, MessageRouter, permissions |
-| Channels (base) | 30 | Abstract channel, commands, per-user routing, chunking |
+| Channels (base) | 37 | Abstract channel, commands, per-user routing, chunking, steer, debug |
 | Orchestrator | 25 | Workflows, conditions, retries, failures |
 | Integration | 25 | Multi-component mesh operations |
 | Cron | 25 | Cron expressions, intervals, dispatch, persistence |
@@ -823,8 +825,10 @@ pytest tests/
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | Marketplace | 20 | Install, manifest parsing, validation, path traversal, remove |
 | Subagent | 11 | Spawn, depth/concurrent limits, TTL timeout, skill cloning, memory isolation |
+| Health Monitor | 4 | Ephemeral cleanup, TTL expiry, event emission |
+| Dashboard | 57 | Index, agents, blackboard, costs, traces, queues, cron, settings, config |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **734** | |
+| **Total** | **802** | |
 
 ---
 
@@ -849,7 +853,7 @@ pytest tests/
 
 Dev: pytest, pytest-asyncio, ruff.
 
-No LangChain. No Redis. No Kubernetes. No web UI.
+No LangChain. No Redis. No Kubernetes. Real-time web dashboard at `/dashboard`.
 
 ---
 
@@ -901,6 +905,11 @@ src/
 │   ├── slack.py                        # Slack adapter (Socket Mode)
 │   ├── whatsapp.py                     # WhatsApp Cloud API adapter
 │   └── webhook.py                      # Workflow trigger webhook adapter
+├── dashboard/
+│   ├── server.py                       # Dashboard FastAPI router + API
+│   ├── events.py                       # EventBus for real-time streaming
+│   ├── templates/index.html            # Dashboard UI (Alpine.js + Tailwind)
+│   └── static/                         # CSS + JS assets
 └── templates/
     ├── starter.yaml                    # Single-agent template
     ├── sales.yaml                      # Sales pipeline team

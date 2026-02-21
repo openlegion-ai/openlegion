@@ -1,4 +1,4 @@
-"""Dashboard API router: fleet overview, costs, blackboard, traces.
+"""Dashboard API router: fleet overview, costs, blackboard, traces, management.
 
 Serves the SPA template and static files, plus JSON API endpoints
 consumed by the Alpine.js frontend.  All data comes from live Python
@@ -8,13 +8,13 @@ objects — no HTTP round-trips through mesh endpoints.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from jinja2 import Environment, FileSystemLoader
 
-from src.shared.utils import setup_logging
+from src.shared.utils import sanitize_for_prompt, setup_logging
 
 if TYPE_CHECKING:
     from src.dashboard.events import EventBus
@@ -38,18 +38,33 @@ def create_dashboard_router(
     event_bus: EventBus | None,
     agent_registry: dict[str, str],
     mesh_port: int = 8420,
+    # V2: additional dependencies (all optional for backward compat)
+    lane_manager: Any = None,
+    cron_scheduler: Any = None,
+    orchestrator: Any = None,
+    pubsub: Any = None,
+    permissions: Any = None,
+    credential_vault: Any = None,
+    transport: Any = None,
+    runtime: Any = None,
+    router: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
-    router = APIRouter(prefix="/dashboard")
+    api_router = APIRouter(prefix="/dashboard")
 
     jinja_env = Environment(
         loader=FileSystemLoader(str(_TEMPLATES_DIR)),
         autoescape=True,
     )
 
+    # Build flat valid-models list and browser backend names for validation
+    from src.cli.config import BROWSER_BACKENDS, _PROVIDER_MODELS
+    _valid_models = [m for models in _PROVIDER_MODELS.values() for m in models]
+    _valid_browsers = [b["name"] for b in BROWSER_BACKENDS]
+
     # ── SPA entry point ──────────────────────────────────────
 
-    @router.get("/", response_class=HTMLResponse)
+    @api_router.get("/", response_class=HTMLResponse)
     async def dashboard_index() -> HTMLResponse:
         template = jinja_env.get_template("index.html")
         html = template.render(
@@ -60,7 +75,7 @@ def create_dashboard_router(
 
     # ── Fleet overview ───────────────────────────────────────
 
-    @router.get("/api/agents")
+    @api_router.get("/api/agents")
     async def api_agents() -> dict:
         health_list = health_monitor.get_status() if health_monitor else []
         health_map = {h["agent"]: h for h in health_list}
@@ -86,7 +101,7 @@ def create_dashboard_router(
 
     # ── Agent detail ─────────────────────────────────────────
 
-    @router.get("/api/agents/{agent_id}")
+    @api_router.get("/api/agents/{agent_id}")
     async def api_agent_detail(agent_id: str) -> dict:
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
@@ -107,11 +122,163 @@ def create_dashboard_router(
             "budget": budget,
         }
 
+    # ── Agent config CRUD ────────────────────────────────────
+
+    @api_router.get("/api/agents/{agent_id}/config")
+    async def api_agent_config(agent_id: str) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        from src.cli.config import _load_config
+        cfg = _load_config()
+        agent_cfg = cfg.get("agents", {}).get(agent_id, {})
+        default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        return {
+            "id": agent_id,
+            "model": agent_cfg.get("model", default_model),
+            "role": agent_cfg.get("role", ""),
+            "system_prompt": agent_cfg.get("system_prompt", ""),
+            "budget": agent_cfg.get("budget", {}),
+            "browser_backend": agent_cfg.get("browser_backend", "basic") or "basic",
+        }
+
+    @api_router.put("/api/agents/{agent_id}/config")
+    async def api_update_agent_config(agent_id: str, request: Request) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        body = await request.json()
+        from src.cli.config import _load_config, _update_agent_field
+        cfg = _load_config()
+        agent_cfg = cfg.get("agents", {}).get(agent_id, {})
+        default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+
+        updated = []
+        restart_required = False
+
+        if "model" in body:
+            new_model = body["model"]
+            if new_model not in _valid_models:
+                raise HTTPException(status_code=400, detail=f"Invalid model: {new_model}")
+            old_model = agent_cfg.get("model", default_model)
+            if new_model != old_model:
+                _update_agent_field(agent_id, "model", new_model)
+                updated.append("model")
+                restart_required = True
+
+        if "browser_backend" in body:
+            new_browser = body["browser_backend"]
+            if new_browser not in _valid_browsers:
+                raise HTTPException(status_code=400, detail=f"Invalid browser: {new_browser}")
+            old_browser = agent_cfg.get("browser_backend", "basic") or "basic"
+            if new_browser != old_browser:
+                _update_agent_field(agent_id, "browser_backend", new_browser)
+                updated.append("browser_backend")
+                restart_required = True
+
+        if "role" in body:
+            _update_agent_field(agent_id, "role", body["role"])
+            updated.append("role")
+
+        if "system_prompt" in body:
+            sanitized = sanitize_for_prompt(body["system_prompt"])
+            _update_agent_field(agent_id, "system_prompt", sanitized)
+            updated.append("system_prompt")
+
+        if "budget" in body:
+            budget_val = body["budget"]
+            if isinstance(budget_val, dict):
+                daily = budget_val.get("daily_usd")
+                if daily is not None:
+                    try:
+                        daily = float(daily)
+                        if daily <= 0:
+                            raise ValueError
+                    except (ValueError, TypeError):
+                        raise HTTPException(status_code=400, detail="Budget must be a positive number")
+                    _update_agent_field(agent_id, "budget", {"daily_usd": daily})
+                    cost_tracker.set_budget(agent_id, daily_usd=daily)
+                    updated.append("budget")
+
+        return {"updated": updated, "restart_required": restart_required}
+
+    @api_router.post("/api/agents/{agent_id}/restart")
+    async def api_restart_agent(agent_id: str) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Runtime not available")
+        try:
+            from src.cli.config import _load_config
+            cfg = _load_config()
+            agent_cfg = cfg.get("agents", {}).get(agent_id, {})
+            default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+            runtime.stop_agent(agent_id)
+            url = runtime.start_agent(
+                agent_id=agent_id,
+                role=agent_cfg.get("role", "assistant"),
+                skills_dir=agent_cfg.get("skills_dir", ""),
+                system_prompt=agent_cfg.get("system_prompt", ""),
+                model=agent_cfg.get("model", default_model),
+                browser_backend=agent_cfg.get("browser_backend", ""),
+            )
+            agent_registry[agent_id] = url
+            ready = await runtime.wait_for_agent(agent_id, timeout=60)
+            return {"restarted": True, "ready": ready}
+        except Exception as e:
+            logger.error(f"Failed to restart agent {agent_id}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @api_router.put("/api/agents/{agent_id}/budget")
+    async def api_update_budget(agent_id: str, request: Request) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        body = await request.json()
+        daily_usd = body.get("daily_usd")
+        try:
+            daily_usd = float(daily_usd)
+            if daily_usd <= 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="daily_usd must be a positive number")
+        cost_tracker.set_budget(agent_id, daily_usd=daily_usd)
+        from src.cli.config import _update_agent_field
+        _update_agent_field(agent_id, "budget", {"daily_usd": daily_usd})
+        return {"updated": True, "agent": agent_id, "daily_usd": daily_usd}
+
+    @api_router.get("/api/agents/{agent_id}/status")
+    async def api_agent_live_status(agent_id: str) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            return await transport.request(agent_id, "GET", "/status", timeout=10)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @api_router.get("/api/agents/{agent_id}/capabilities")
+    async def api_agent_capabilities(agent_id: str) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            return await transport.request(agent_id, "GET", "/capabilities", timeout=10)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    # ── Cost detail per agent ────────────────────────────────
+
+    @api_router.get("/api/costs/{agent_id}")
+    async def api_agent_costs(agent_id: str, period: str = "today") -> dict:
+        if period not in {"today", "week", "month"}:
+            period = "today"
+        return cost_tracker.get_spend(agent_id, period)
+
     # ── Cost dashboard ───────────────────────────────────────
 
     _VALID_PERIODS = {"today", "week", "month"}
 
-    @router.get("/api/costs")
+    @api_router.get("/api/costs")
     async def api_costs(period: str = "today") -> dict:
         if period not in _VALID_PERIODS:
             period = "today"
@@ -121,9 +288,9 @@ def create_dashboard_router(
             budgets[item["agent"]] = cost_tracker.check_budget(item["agent"])
         return {"period": period, "agents": agents_spend, "budgets": budgets}
 
-    # ── Blackboard viewer ────────────────────────────────────
+    # ── Blackboard viewer + write/delete ─────────────────────
 
-    @router.get("/api/blackboard")
+    @api_router.get("/api/blackboard")
     async def api_blackboard(prefix: str = "") -> dict:
         entries = blackboard.list_by_prefix(prefix)
         return {
@@ -131,16 +298,33 @@ def create_dashboard_router(
             "entries": [e.model_dump(mode="json") for e in entries],
         }
 
+    @api_router.put("/api/blackboard/{key:path}")
+    async def api_blackboard_write(key: str, request: Request) -> dict:
+        body = await request.json()
+        value = body.get("value", {})
+        if not isinstance(value, dict):
+            raise HTTPException(status_code=400, detail="value must be a JSON object")
+        written_by = body.get("written_by", "dashboard")
+        entry = blackboard.write(key, value, written_by=written_by)
+        return entry.model_dump(mode="json")
+
+    @api_router.delete("/api/blackboard/{key:path}")
+    async def api_blackboard_delete(key: str) -> dict:
+        if key.startswith("history/"):
+            raise HTTPException(status_code=400, detail="Cannot delete from history namespace")
+        blackboard.delete(key, deleted_by="dashboard")
+        return {"deleted": True, "key": key}
+
     # ── Trace inspector ──────────────────────────────────────
 
-    @router.get("/api/traces")
+    @api_router.get("/api/traces")
     async def api_traces(limit: int = 50) -> dict:
         if trace_store is None:
             return {"traces": []}
         limit = max(1, min(limit, 500))
         return {"traces": trace_store.list_recent(limit)}
 
-    @router.get("/api/traces/{trace_id}")
+    @api_router.get("/api/traces/{trace_id}")
     async def api_trace_detail(trace_id: str) -> dict:
         if trace_store is None:
             raise HTTPException(status_code=404, detail="Trace store not configured")
@@ -148,6 +332,87 @@ def create_dashboard_router(
         if not events:
             raise HTTPException(status_code=404, detail="Trace not found")
         return {"trace_id": trace_id, "events": events}
+
+    # ── Queue status ─────────────────────────────────────────
+
+    @api_router.get("/api/queues")
+    async def api_queues() -> dict:
+        if lane_manager is None:
+            return {"queues": {}}
+        return {"queues": lane_manager.get_status()}
+
+    # ── Cron management ──────────────────────────────────────
+
+    @api_router.get("/api/cron")
+    async def api_cron() -> dict:
+        if cron_scheduler is None:
+            return {"jobs": []}
+        return {"jobs": cron_scheduler.list_jobs()}
+
+    @api_router.post("/api/cron/{job_id}/run")
+    async def api_cron_run(job_id: str) -> dict:
+        if cron_scheduler is None:
+            raise HTTPException(status_code=503, detail="Cron scheduler not available")
+        result = await cron_scheduler.run_job(job_id)
+        if result is None and job_id not in cron_scheduler.jobs:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {"executed": True, "job_id": job_id, "result": result}
+
+    @api_router.post("/api/cron/{job_id}/pause")
+    async def api_cron_pause(job_id: str) -> dict:
+        if cron_scheduler is None:
+            raise HTTPException(status_code=503, detail="Cron scheduler not available")
+        if not cron_scheduler.pause_job(job_id):
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {"paused": True, "job_id": job_id}
+
+    @api_router.post("/api/cron/{job_id}/resume")
+    async def api_cron_resume(job_id: str) -> dict:
+        if cron_scheduler is None:
+            raise HTTPException(status_code=503, detail="Cron scheduler not available")
+        if not cron_scheduler.resume_job(job_id):
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {"resumed": True, "job_id": job_id}
+
+    # ── Settings / environment ───────────────────────────────
+
+    @api_router.get("/api/settings")
+    async def api_settings() -> dict:
+        from src.host.costs import MODEL_COSTS
+
+        cred_names = credential_vault.list_credential_names() if credential_vault else []
+        pubsub_subs = pubsub.subscriptions if pubsub else {}
+        return {
+            "credentials": {"names": cred_names, "count": len(cred_names)},
+            "pubsub_subscriptions": pubsub_subs,
+            "model_costs": {k: {"input_per_1k": v[0], "output_per_1k": v[1]} for k, v in MODEL_COSTS.items()},
+            "provider_models": _PROVIDER_MODELS,
+            "browser_backends": BROWSER_BACKENDS,
+        }
+
+    # ── Messages log ─────────────────────────────────────────
+
+    @api_router.get("/api/messages")
+    async def api_messages() -> dict:
+        if router is None:
+            return {"messages": []}
+        return {"messages": router.message_log[-100:]}
+
+    # ── Workflows ────────────────────────────────────────────
+
+    @api_router.get("/api/workflows")
+    async def api_workflows() -> dict:
+        if orchestrator is None:
+            return {"workflows": [], "active": []}
+        wf_list = [
+            {"name": wf.name, "steps": len(wf.steps), "trigger": wf.trigger, "timeout": wf.timeout}
+            for wf in orchestrator.workflows.values()
+        ]
+        active = [
+            orchestrator.get_execution_status(eid)
+            for eid in orchestrator.active_executions
+        ]
+        return {"workflows": wf_list, "active": [a for a in active if a]}
 
     # ── Static files ─────────────────────────────────────────
 
@@ -159,7 +424,7 @@ def create_dashboard_router(
         ".ico": "image/x-icon",
     }
 
-    @router.get("/static/{file_path:path}")
+    @api_router.get("/static/{file_path:path}")
     async def static_file(file_path: str) -> FileResponse:
         full = (_STATIC_DIR / file_path).resolve()
         if not str(full).startswith(str(_STATIC_DIR)) or not full.is_file():
@@ -167,4 +432,4 @@ def create_dashboard_router(
         suffix = full.suffix.lower()
         return FileResponse(str(full), media_type=_MEDIA_TYPES.get(suffix))
 
-    return router
+    return api_router

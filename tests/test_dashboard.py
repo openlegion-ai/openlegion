@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -16,7 +18,7 @@ from src.host.mesh import Blackboard
 from src.host.traces import TraceStore
 
 
-def _make_components(tmp_path: str) -> dict:
+def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
     """Create all dashboard dependencies with tmp-dir databases."""
     bb = Blackboard(db_path=os.path.join(tmp_path, "bb.db"))
     cost_tracker = CostTracker(db_path=os.path.join(tmp_path, "costs.db"))
@@ -28,8 +30,6 @@ def _make_components(tmp_path: str) -> dict:
     }
 
     # Minimal health monitor with mocked runtime/transport/router
-    from unittest.mock import MagicMock
-
     runtime_mock = MagicMock()
     transport_mock = MagicMock()
     router_mock = MagicMock()
@@ -41,7 +41,7 @@ def _make_components(tmp_path: str) -> dict:
     health_monitor.agents["alpha"].status = "healthy"
     health_monitor.agents["beta"].status = "unknown"
 
-    return {
+    result = {
         "blackboard": bb,
         "health_monitor": health_monitor,
         "cost_tracker": cost_tracker,
@@ -49,6 +49,42 @@ def _make_components(tmp_path: str) -> dict:
         "event_bus": event_bus,
         "agent_registry": agent_registry,
     }
+
+    if include_v2:
+        lane_manager = MagicMock()
+        lane_manager.get_status.return_value = {}
+
+        cron_scheduler = MagicMock()
+        cron_scheduler.list_jobs.return_value = []
+        cron_scheduler.jobs = {}
+
+        orchestrator = MagicMock()
+        orchestrator.workflows = {}
+        orchestrator.active_executions = {}
+
+        from src.host.mesh import PubSub
+        pubsub = PubSub()
+
+        permissions_mock = MagicMock()
+        credential_vault = MagicMock()
+        credential_vault.list_credential_names.return_value = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+
+        msg_router = MagicMock()
+        msg_router.message_log = []
+
+        result.update({
+            "lane_manager": lane_manager,
+            "cron_scheduler": cron_scheduler,
+            "orchestrator": orchestrator,
+            "pubsub": pubsub,
+            "permissions": permissions_mock,
+            "credential_vault": credential_vault,
+            "transport": transport_mock,
+            "runtime": runtime_mock,
+            "router": msg_router,
+        })
+
+    return result
 
 
 def _make_client(components: dict) -> TestClient:
@@ -61,6 +97,14 @@ def _make_client(components: dict) -> TestClient:
     return TestClient(app)
 
 
+def _teardown(components: dict) -> None:
+    components["cost_tracker"].close()
+    components["trace_store"].close()
+    components["blackboard"].close()
+    if "pubsub" in components and hasattr(components["pubsub"], "close"):
+        components["pubsub"].close()
+
+
 class TestDashboardIndex:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
@@ -68,9 +112,7 @@ class TestDashboardIndex:
         self.client = _make_client(self.components)
 
     def teardown_method(self):
-        self.components["cost_tracker"].close()
-        self.components["trace_store"].close()
-        self.components["blackboard"].close()
+        _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_dashboard_index_serves_html(self):
@@ -114,9 +156,7 @@ class TestDashboardAgentsAPI:
         self.client = _make_client(self.components)
 
     def teardown_method(self):
-        self.components["cost_tracker"].close()
-        self.components["trace_store"].close()
-        self.components["blackboard"].close()
+        _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_api_agents_returns_fleet(self):
@@ -147,7 +187,7 @@ class TestDashboardAgentsAPI:
         assert beta["health_status"] == "unknown"
 
     def test_api_agents_includes_costs(self):
-        self.components["cost_tracker"].track("alpha", "openai/gpt-4o-mini", 500, 100)
+        self.components["cost_tracker"].track("alpha", "openai/gpt-4.1-mini", 500, 100)
         resp = self.client.get("/dashboard/api/agents")
         data = resp.json()
         alpha = next(a for a in data["agents"] if a["id"] == "alpha")
@@ -168,9 +208,7 @@ class TestDashboardAgentDetail:
         self.client = _make_client(self.components)
 
     def teardown_method(self):
-        self.components["cost_tracker"].close()
-        self.components["trace_store"].close()
-        self.components["blackboard"].close()
+        _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_api_agent_detail_found(self):
@@ -211,13 +249,11 @@ class TestDashboardCosts:
         self.client = _make_client(self.components)
 
     def teardown_method(self):
-        self.components["cost_tracker"].close()
-        self.components["trace_store"].close()
-        self.components["blackboard"].close()
+        _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_api_costs_today(self):
-        self.components["cost_tracker"].track("alpha", "openai/gpt-4o-mini", 1000, 200)
+        self.components["cost_tracker"].track("alpha", "openai/gpt-4.1-mini", 1000, 200)
         resp = self.client.get("/dashboard/api/costs?period=today")
         assert resp.status_code == 200
         data = resp.json()
@@ -228,7 +264,7 @@ class TestDashboardCosts:
         assert data["agents"][0]["tokens"] > 0
 
     def test_api_costs_week(self):
-        self.components["cost_tracker"].track("beta", "openai/gpt-4o", 500, 100)
+        self.components["cost_tracker"].track("beta", "openai/gpt-4.1", 500, 100)
         resp = self.client.get("/dashboard/api/costs?period=week")
         assert resp.status_code == 200
         data = resp.json()
@@ -237,7 +273,7 @@ class TestDashboardCosts:
 
     def test_api_costs_with_budgets(self):
         self.components["cost_tracker"].set_budget("alpha", daily_usd=5.0, monthly_usd=100.0)
-        self.components["cost_tracker"].track("alpha", "openai/gpt-4o-mini", 1000, 200)
+        self.components["cost_tracker"].track("alpha", "openai/gpt-4.1-mini", 1000, 200)
         resp = self.client.get("/dashboard/api/costs?period=today")
         data = resp.json()
         assert "budgets" in data
@@ -247,7 +283,7 @@ class TestDashboardCosts:
 
     def test_api_costs_invalid_period_defaults_to_today(self):
         """Invalid period parameter silently defaults to 'today'."""
-        self.components["cost_tracker"].track("alpha", "openai/gpt-4o-mini", 500, 100)
+        self.components["cost_tracker"].track("alpha", "openai/gpt-4.1-mini", 500, 100)
         resp = self.client.get("/dashboard/api/costs?period=invalid")
         assert resp.status_code == 200
         data = resp.json()
@@ -267,9 +303,7 @@ class TestDashboardBlackboard:
         self.client = _make_client(self.components)
 
     def teardown_method(self):
-        self.components["cost_tracker"].close()
-        self.components["trace_store"].close()
-        self.components["blackboard"].close()
+        _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_api_blackboard_with_entries(self):
@@ -314,9 +348,7 @@ class TestDashboardTraces:
         self.client = _make_client(self.components)
 
     def teardown_method(self):
-        self.components["cost_tracker"].close()
-        self.components["trace_store"].close()
-        self.components["blackboard"].close()
+        _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_api_traces_list(self):
@@ -367,3 +399,374 @@ class TestDashboardTraces:
     def test_api_traces_not_found(self):
         resp = self.client.get("/dashboard/api/traces/nonexistent")
         assert resp.status_code == 404
+
+
+# ── V2 Tests: Agent Config ──────────────────────────────────
+
+
+class TestDashboardAgentConfig:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @patch("src.cli.config._load_config")
+    def test_get_config(self, mock_load):
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {
+                "alpha": {
+                    "model": "openai/gpt-4.1",
+                    "role": "researcher",
+                    "system_prompt": "You research.",
+                    "budget": {"daily_usd": 5.0},
+                    "browser_backend": "stealth",
+                },
+            },
+        }
+        resp = self.client.get("/dashboard/api/agents/alpha/config")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] == "alpha"
+        assert data["model"] == "openai/gpt-4.1"
+        assert data["role"] == "researcher"
+        assert data["browser_backend"] == "stealth"
+
+    def test_get_config_not_found(self):
+        resp = self.client.get("/dashboard/api/agents/nonexistent/config")
+        assert resp.status_code == 404
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_update_model(self, mock_load, mock_update):
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+        }
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"model": "openai/gpt-4.1"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "model" in data["updated"]
+        assert data["restart_required"] is True
+        mock_update.assert_called_with("alpha", "model", "openai/gpt-4.1")
+
+    def test_put_config_invalid_model(self):
+        with patch("src.cli.config._load_config") as mock_load:
+            mock_load.return_value = {
+                "llm": {"default_model": "openai/gpt-4.1-mini"},
+                "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+            }
+            resp = self.client.put(
+                "/dashboard/api/agents/alpha/config",
+                json={"model": "invalid/model"},
+            )
+            assert resp.status_code == 400
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_sanitizes_prompt(self, mock_load, mock_update):
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {}},
+        }
+        # U+200B zero-width space should be stripped
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"system_prompt": "Hello\u200B world"},
+        )
+        assert resp.status_code == 200
+        assert "system_prompt" in resp.json()["updated"]
+        # The sanitized prompt was passed to _update_agent_field
+        call_args = mock_update.call_args_list
+        prompt_call = [c for c in call_args if c[0][1] == "system_prompt"]
+        assert len(prompt_call) == 1
+        assert "\u200b" not in prompt_call[0][0][2]
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_browser_validation(self, mock_load, mock_update):
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"browser_backend": "basic"}},
+        }
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"browser_backend": "stealth"},
+        )
+        assert resp.status_code == 200
+        assert "browser_backend" in resp.json()["updated"]
+
+    def test_put_config_invalid_browser(self):
+        with patch("src.cli.config._load_config") as mock_load:
+            mock_load.return_value = {
+                "llm": {"default_model": "openai/gpt-4.1-mini"},
+                "agents": {"alpha": {}},
+            }
+            resp = self.client.put(
+                "/dashboard/api/agents/alpha/config",
+                json={"browser_backend": "invalid_browser"},
+            )
+            assert resp.status_code == 400
+
+    def test_put_budget_quick(self):
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/budget",
+            json={"daily_usd": 7.5},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["updated"] is True
+        assert data["daily_usd"] == 7.5
+        # Verify cost_tracker budget was updated
+        budget = self.components["cost_tracker"].check_budget("alpha")
+        assert budget["daily_limit"] == 7.5
+
+    def test_put_budget_invalid(self):
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/budget",
+            json={"daily_usd": -5},
+        )
+        assert resp.status_code == 400
+
+
+# ── V2 Tests: Queues ────────────────────────────────────────
+
+
+class TestDashboardQueues:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_queues_empty(self):
+        resp = self.client.get("/dashboard/api/queues")
+        assert resp.status_code == 200
+        assert resp.json()["queues"] == {}
+
+    def test_queues_with_data(self):
+        self.components["lane_manager"].get_status.return_value = {
+            "alpha": {"queued": 2, "pending": 1, "collected": 0, "busy": True},
+        }
+        resp = self.client.get("/dashboard/api/queues")
+        data = resp.json()
+        assert "alpha" in data["queues"]
+        assert data["queues"]["alpha"]["busy"] is True
+        assert data["queues"]["alpha"]["queued"] == 2
+
+    def test_queues_no_lane_manager(self):
+        self.components["lane_manager"] = None
+        self.client = _make_client(self.components)
+        resp = self.client.get("/dashboard/api/queues")
+        assert resp.status_code == 200
+        assert resp.json()["queues"] == {}
+
+
+# ── V2 Tests: Cron ──────────────────────────────────────────
+
+
+class TestDashboardCron:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_cron_list_empty(self):
+        resp = self.client.get("/dashboard/api/cron")
+        assert resp.status_code == 200
+        assert resp.json()["jobs"] == []
+
+    def test_cron_list_with_jobs(self):
+        self.components["cron_scheduler"].list_jobs.return_value = [
+            {"id": "cron_abc", "agent": "alpha", "schedule": "every 1h", "enabled": True},
+        ]
+        resp = self.client.get("/dashboard/api/cron")
+        data = resp.json()
+        assert len(data["jobs"]) == 1
+        assert data["jobs"][0]["agent"] == "alpha"
+
+    def test_cron_run_job(self):
+        self.components["cron_scheduler"].run_job = AsyncMock(return_value="done")
+        self.components["cron_scheduler"].jobs = {"cron_abc": True}
+        resp = self.client.post("/dashboard/api/cron/cron_abc/run")
+        assert resp.status_code == 200
+        assert resp.json()["executed"] is True
+
+    def test_cron_pause_resume(self):
+        self.components["cron_scheduler"].pause_job.return_value = True
+        resp = self.client.post("/dashboard/api/cron/cron_abc/pause")
+        assert resp.status_code == 200
+        assert resp.json()["paused"] is True
+
+        self.components["cron_scheduler"].resume_job.return_value = True
+        resp = self.client.post("/dashboard/api/cron/cron_abc/resume")
+        assert resp.status_code == 200
+        assert resp.json()["resumed"] is True
+
+    def test_cron_not_available(self):
+        self.components["cron_scheduler"] = None
+        self.client = _make_client(self.components)
+        resp = self.client.post("/dashboard/api/cron/abc/run")
+        assert resp.status_code == 503
+
+
+# ── V2 Tests: Blackboard Write/Delete ────────────────────────
+
+
+class TestDashboardBlackboardWrite:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_write_creates_entry(self):
+        resp = self.client.put(
+            "/dashboard/api/blackboard/test/new_key",
+            json={"value": {"hello": "world"}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["key"] == "test/new_key"
+        assert data["value"] == {"hello": "world"}
+        assert data["written_by"] == "dashboard"
+
+    def test_delete_removes_entry(self):
+        self.components["blackboard"].write("test/del", {"v": 1}, written_by="alpha")
+        resp = self.client.delete("/dashboard/api/blackboard/test/del")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+        # Verify it's gone
+        assert self.components["blackboard"].read("test/del") is None
+
+    def test_delete_history_blocked(self):
+        resp = self.client.delete("/dashboard/api/blackboard/history/old_entry")
+        assert resp.status_code == 400
+
+    def test_write_with_custom_author(self):
+        resp = self.client.put(
+            "/dashboard/api/blackboard/test/authored",
+            json={"value": {"data": 1}, "written_by": "admin"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["written_by"] == "admin"
+
+
+# ── V2 Tests: Settings ──────────────────────────────────────
+
+
+class TestDashboardSettings:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_returns_all_sections(self):
+        resp = self.client.get("/dashboard/api/settings")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "credentials" in data
+        assert "pubsub_subscriptions" in data
+        assert "model_costs" in data
+        assert "provider_models" in data
+        assert "browser_backends" in data
+
+    def test_credentials_no_values(self):
+        resp = self.client.get("/dashboard/api/settings")
+        data = resp.json()
+        assert data["credentials"]["count"] == 2
+        assert "ANTHROPIC_API_KEY" in data["credentials"]["names"]
+        # No actual credential values exposed
+        for name in data["credentials"]["names"]:
+            assert len(name) < 100  # Names, not values
+
+    def test_includes_models(self):
+        resp = self.client.get("/dashboard/api/settings")
+        data = resp.json()
+        assert "openai" in data["provider_models"]
+        assert "anthropic" in data["provider_models"]
+        assert len(data["model_costs"]) > 0
+
+
+# ── V2 Tests: Messages ──────────────────────────────────────
+
+
+class TestDashboardMessages:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_returns_log(self):
+        self.components["router"].message_log = [
+            {"id": "m1", "from": "alpha", "to": "beta", "type": "chat"},
+            {"id": "m2", "from": "beta", "to": "alpha", "type": "response"},
+        ]
+        resp = self.client.get("/dashboard/api/messages")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["messages"]) == 2
+
+    def test_empty_log(self):
+        resp = self.client.get("/dashboard/api/messages")
+        assert resp.status_code == 200
+        assert resp.json()["messages"] == []
+
+
+# ── V2 Tests: Workflows ─────────────────────────────────────
+
+
+class TestDashboardWorkflows:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_list_empty(self):
+        resp = self.client.get("/dashboard/api/workflows")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["workflows"] == []
+        assert data["active"] == []
+
+    def test_list_with_definitions(self):
+        mock_wf = MagicMock()
+        mock_wf.name = "test_wf"
+        mock_wf.steps = [1, 2, 3]
+        mock_wf.trigger = "manual"
+        mock_wf.timeout = 300
+        self.components["orchestrator"].workflows = {"test_wf": mock_wf}
+        resp = self.client.get("/dashboard/api/workflows")
+        data = resp.json()
+        assert len(data["workflows"]) == 1
+        assert data["workflows"][0]["name"] == "test_wf"
+        assert data["workflows"][0]["steps"] == 3
