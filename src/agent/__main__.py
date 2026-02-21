@@ -46,9 +46,14 @@ def main() -> None:
     system_prompt = os.environ.get("SYSTEM_PROMPT", "")
 
     llm_model = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
-    llm = LLMClient(mesh_url=mesh_url, agent_id=agent_id, default_model=llm_model)
+    embedding_model = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+    llm = LLMClient(
+        mesh_url=mesh_url, agent_id=agent_id,
+        default_model=llm_model, embedding_model=embedding_model,
+    )
     mesh_client = MeshClient(mesh_url=mesh_url, agent_id=agent_id)
-    memory = MemoryStore(db_path=f"/data/{agent_id}.db", embed_fn=llm.embed)
+    embed_fn = llm.embed if embedding_model and embedding_model.lower() != "none" else None
+    memory = MemoryStore(db_path=f"/data/{agent_id}.db", embed_fn=embed_fn)
 
     # MCP server support — parse config from environment
     mcp_client = None

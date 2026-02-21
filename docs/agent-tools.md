@@ -65,6 +65,7 @@ The backend is selected per-agent via the `BROWSER_BACKEND` environment variable
 | `list_shared_state` | `prefix` | Browse blackboard entries by prefix |
 | `publish_event` | `topic`, `data` | Publish event to mesh pub/sub |
 | `save_artifact` | `name`, `content` | Save deliverable to workspace and register on blackboard |
+| `notify_user` | `message` | Send a notification to the user across all connected channels (CLI, Telegram, Discord, Slack, etc.) |
 
 ### Scheduling & Automation
 

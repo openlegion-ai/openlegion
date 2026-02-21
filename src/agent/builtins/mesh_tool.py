@@ -12,6 +12,32 @@ from src.agent.skills import skill
 
 
 @skill(
+    name="notify_user",
+    description=(
+        "Send a notification to the user across all connected channels "
+        "(CLI, Telegram, Discord, Slack, etc.). Use this when you have "
+        "important updates — e.g., a long-running task completed, an error "
+        "needs attention, or a scheduled check found something noteworthy. "
+        "Keep messages concise and actionable."
+    ),
+    parameters={
+        "message": {
+            "type": "string",
+            "description": "The notification message to send to the user",
+        },
+    },
+)
+async def notify_user(message: str, *, mesh_client=None) -> dict:
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    try:
+        await mesh_client.notify_user(message)
+        return {"sent": True}
+    except Exception as e:
+        return {"error": f"Failed to notify user: {e}"}
+
+
+@skill(
     name="list_agents",
     description=(
         "List all agents currently running in the fleet. Returns each agent's "

@@ -6,7 +6,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
-[![Tests: 861](https://img.shields.io/badge/tests-861%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 887](https://img.shields.io/badge/tests-887%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -116,7 +116,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 861 tests including full Docker E2E |
+| **Test coverage** | Minimal | 887 tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~14,000 lines — auditable in a day |
 
 ---
@@ -131,7 +131,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, or CLI. Agents act aut
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**861 tests passing** across **~14,000 lines** of application code.
+**887 tests passing** across **~14,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
@@ -382,6 +382,7 @@ searches memory for relevant facts. Executes tool calls in a bounded loop
 | `list_shared_state` | Browse blackboard entries by prefix |
 | `publish_event` | Publish event to mesh pub/sub |
 | `save_artifact` | Save deliverable file and register on blackboard |
+| `notify_user` | Send notification to user across all connected channels |
 | `set_cron` | Schedule a recurring job |
 | `set_heartbeat` | Enable autonomous monitoring with probes |
 | `list_cron` / `remove_cron` | Manage scheduled jobs |
@@ -792,45 +793,48 @@ pytest tests/
 
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
-| Built-in Tools | 72 | exec, file, browser (incl. backend tiers + screenshots), memory, mesh tools, discovery |
+| Built-in Tools | 77 | exec, file, browser (incl. backend tiers + screenshots), memory, mesh tools, notifications, discovery |
+| Dashboard | 66 | Index, agents, blackboard, costs, traces, queues, cron, settings, config |
+| Agent Loop | 46 | Task execution, tool calling, cancellation, tool memory, chat helpers |
 | Workspace | 45 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat |
-| Agent Loop | 39 | Task execution, tool calling, cancellation, tool memory, chat helpers |
 | Sanitization | 38 | Invisible Unicode stripping, bidi overrides, tag chars, zero-width |
-| Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
-| Context Manager | 31 | Token estimation (tiktoken + model-aware), compaction, flushing |
-| Mesh | 31 | Blackboard, PubSub, MessageRouter, permissions |
 | Channels (base) | 37 | Abstract channel, commands, per-user routing, chunking, steer, debug |
+| Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
+| Mesh | 33 | Blackboard, PubSub, MessageRouter, permissions |
+| Cron | 32 | Cron expressions, intervals, dispatch, persistence |
+| Context Manager | 31 | Token estimation (tiktoken + model-aware), compaction, flushing |
+| Events | 30 | Event streaming, filtering, WebSocket |
+| Integration | 27 | Multi-component mesh operations, notifications |
 | Orchestrator | 25 | Workflows, conditions, retries, failures |
-| Integration | 25 | Multi-component mesh operations |
-| Cron | 25 | Cron expressions, intervals, dispatch, persistence |
 | Transcript | 24 | Transcript formatting, safety, round-trip fidelity |
 | Slack Channel | 21 | Socket Mode, thread routing, pairing, command translation |
 | WhatsApp Channel | 21 | Cloud API, webhook verification, message chunking |
-| Runtime Backend | 20 | DockerBackend, SandboxBackend, browser_backend, detection, selection |
+| Traces | 21 | Trace recording, grouping, deletion |
+| Runtime Backend | 21 | DockerBackend, SandboxBackend, browser_backend, extra_env, detection, selection |
+| Marketplace | 20 | Install, manifest parsing, validation, path traversal, remove |
 | Skills | 19 | Discovery, execution, injection, MCP integration |
-| Setup Wizard | 18 | Quickstart, full setup, API key validation, templates |
 | Transport | 18 | HttpTransport, SandboxTransport, resolve_url |
 | Credentials | 18 | Vault, API proxy, provider detection |
 | Vault | 16 | Credential storage, budget enforcement, failover |
+| CLI | 16 | Agent add/list/remove, chat, setup |
 | Failover | 15 | Health tracking, chain cascade, cooldown |
+| Setup Wizard | 14 | Quickstart, full setup, API key validation, templates |
+| Lanes | 13 | Per-agent FIFO task queues |
+| Subagent | 11 | Spawn, depth/concurrent limits, TTL timeout, skill cloning, memory isolation |
+| Loop Detector | 11 | Agent loop detection and intervention |
 | Chat | 11 | Chat mode, streaming, workspace integration |
-| Chat Workspace | 10 | Cross-session memory, corrections, learnings |
-| Queue Modes | 11 | Steer, collect, followup queue strategies |
 | MCP Client | 10 | Tool discovery, routing, conflicts, lifecycle |
 | Costs | 10 | Usage recording, budgets, vault integration |
-| CLI | 8 | Agent add/list/remove, chat, setup |
+| Chat Workspace | 10 | Cross-session memory, corrections, learnings |
 | Types | 8 | Pydantic validation, serialization |
 | MCP E2E | 7 | Real MCP protocol with live server subprocess |
 | Webhooks | 7 | Add/remove, persistence, dispatch |
 | File Watchers | 7 | Polling, dispatch, pattern matching |
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
-| Marketplace | 20 | Install, manifest parsing, validation, path traversal, remove |
-| Subagent | 11 | Spawn, depth/concurrent limits, TTL timeout, skill cloning, memory isolation |
-| Health Monitor | 4 | Ephemeral cleanup, TTL expiry, event emission |
-| Dashboard | 57 | Index, agents, blackboard, costs, traces, queues, cron, settings, config |
+| Health Monitor | 5 | Ephemeral cleanup, TTL expiry, event emission |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **861** | |
+| **Total** | **887** | |
 
 ---
 

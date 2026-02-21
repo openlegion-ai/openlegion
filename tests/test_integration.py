@@ -489,3 +489,56 @@ def test_mesh_message_to_orchestrator(tmp_path):
     assert future.done()
 
     loop.close()
+
+
+# === Notify Endpoint Tests ===
+
+
+def test_notify_endpoint_success(tmp_path):
+    """POST /mesh/notify calls notify_fn and returns sent=True."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "agent1": AgentPermissions(agent_id="agent1"),
+    }
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    calls = []
+
+    async def mock_notify(agent_name: str, message: str):
+        calls.append((agent_name, message))
+
+    app = create_mesh_app(bb, pubsub, router, perms, notify_fn=mock_notify)
+    client = TestClient(app)
+
+    response = client.post("/mesh/notify", json={
+        "agent_id": "agent1",
+        "message": "Task completed: report ready",
+    })
+    assert response.status_code == 200
+    assert response.json() == {"sent": True}
+    assert len(calls) == 1
+    assert calls[0] == ("agent1", "Task completed: report ready")
+
+    bb.close()
+
+
+def test_notify_endpoint_no_notify_fn(tmp_path):
+    """POST /mesh/notify returns 503 when notify_fn is not configured."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    app = create_mesh_app(bb, pubsub, router, perms, notify_fn=None)
+    client = TestClient(app)
+
+    response = client.post("/mesh/notify", json={
+        "agent_id": "agent1",
+        "message": "hello",
+    })
+    assert response.status_code == 503
+
+    bb.close()

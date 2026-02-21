@@ -224,13 +224,23 @@ Pub/sub is permission-controlled. Agents need explicit ACLs:
 
 ## Notification Routing
 
-When cron jobs, heartbeats, or workflows produce results, notifications are pushed to connected channels:
+Cron and heartbeat results are recorded in traces but **not** automatically pushed to channels. This prevents notification spam from routine checks that have nothing to report.
 
+When an agent has something important to communicate, it uses the `notify_user` tool to explicitly push a message to all connected channels:
+
+```
+Agent: The daily report is ready.
+-> notify_user(message="Daily report generated and saved to /data/reports/2026-02-22.pdf")
+```
+
+This sends the notification to:
 1. **CLI REPL** -- printed to terminal
 2. **Telegram** -- sent to all paired users
 3. **Discord** -- sent to configured channels
+4. **Slack** -- sent to configured channels
+5. **WhatsApp** -- sent to paired users
 
-Empty responses are suppressed by default to avoid spam.
+Agents can use `notify_user` at any time -- during cron jobs, heartbeats, workflows, or regular tasks. Messages are capped at 2000 characters.
 
 ## Source Files
 

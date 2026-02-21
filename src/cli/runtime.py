@@ -222,7 +222,10 @@ class RuntimeContext:
 
         agents_cfg = self.cfg.get("agents", {})
         default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        embedding_model = self.cfg.get("llm", {}).get("embedding_model", "text-embedding-3-small")
         mesh_port = self.cfg["mesh"]["port"]
+
+        self.runtime.extra_env["EMBEDDING_MODEL"] = embedding_model
 
         for agent_id, agent_cfg in agents_cfg.items():
             budget = agent_cfg.get("budget", {})
@@ -253,6 +256,7 @@ class RuntimeContext:
                         "  Falling back to Docker container isolation...\n",
                         err=True,
                     )
+                    saved_extra_env = self.runtime.extra_env
                     self.runtime.stop_all()
                     import platform as _platform
                     self.runtime = DockerBackend(
@@ -260,6 +264,7 @@ class RuntimeContext:
                         use_host_network=_platform.system() == "Linux",
                         project_root=str(PROJECT_ROOT),
                     )
+                    self.runtime.extra_env = saved_extra_env
                     self.transport = HttpTransport()
                     _ensure_docker_image()
                     url = self.runtime.start_agent(
@@ -346,6 +351,17 @@ class RuntimeContext:
         _dispatch_thread = threading.Thread(target=_run_dispatch_loop, daemon=True)
         _dispatch_thread.start()
 
+    async def _handle_notify(self, agent_name: str, message: str) -> None:
+        """Push an agent notification to REPL and all active channels."""
+        notification = f"[{agent_name}] {message}"
+        sys.stdout.write(f"\n{notification}\n")
+        sys.stdout.flush()
+        for ch in self._active_channels:
+            try:
+                await ch.send_notification(notification)
+            except Exception as e:
+                logger.debug("Notify to %s failed: %s", type(ch).__name__, e)
+
     def _start_mesh_server(self) -> None:
         import uvicorn
 
@@ -365,6 +381,7 @@ class RuntimeContext:
             trace_store=self.trace_store,
             event_bus=self.event_bus,
             health_monitor=self.health_monitor,
+            notify_fn=self._handle_notify,
         )
         app.include_router(create_webhook_router(self.orchestrator))
         app.include_router(webhook_manager.create_router())
@@ -456,15 +473,6 @@ class RuntimeContext:
         async def cron_dispatch(agent_name: str, message: str) -> str:
             from src.shared.trace import new_trace_id
             result = await self.async_dispatch(agent_name, message, trace_id=new_trace_id())
-            if result and result.strip():
-                notification = f"[cron -> {agent_name}] {result}"
-                sys.stdout.write(f"\n{notification}\n")
-                sys.stdout.flush()
-                for ch in self._active_channels:
-                    try:
-                        await ch.send_notification(notification)
-                    except Exception as e:
-                        logger.debug("Cron notification to %s failed: %s", type(ch).__name__, e)
             return result
 
         async def trigger_workflow(workflow_name: str, payload: dict) -> str:

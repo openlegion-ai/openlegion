@@ -88,6 +88,7 @@ class TestSandboxBackend:
         backend.mesh_host_port = 8420
         backend.agents = {}
         backend.auth_tokens = {}
+        backend.extra_env = {}
         backend._workspace_root = tmp_path / ".openlegion" / "agents"
         backend._workspace_root.mkdir(parents=True)
 
@@ -122,6 +123,7 @@ class TestSandboxBackend:
         backend.mesh_host_port = 8420
         backend.agents = {}
         backend.auth_tokens = {}
+        backend.extra_env = {}
         backend._workspace_root = tmp_path / ".openlegion" / "agents"
         backend._workspace_root.mkdir(parents=True)
 
@@ -147,6 +149,7 @@ class TestSandboxBackend:
         backend.mesh_host_port = 8420
         backend.agents = {}
         backend.auth_tokens = {}
+        backend.extra_env = {}
         backend._workspace_root = tmp_path / ".openlegion" / "agents"
         backend._workspace_root.mkdir(parents=True)
 
@@ -160,6 +163,31 @@ class TestSandboxBackend:
 
         env_content = (ws / ".agent.env").read_text()
         assert "BROWSER_BACKEND" not in env_content
+
+    def test_prepare_workspace_extra_env(self, tmp_path):
+        """extra_env dict values appear in the generated .agent.env file."""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+
+        backend = SandboxBackend.__new__(SandboxBackend)
+        backend.project_root = project_root
+        backend.mesh_host_port = 8420
+        backend.agents = {}
+        backend.auth_tokens = {}
+        backend.extra_env = {"EMBEDDING_MODEL": "custom/embed-v2"}
+        backend._workspace_root = tmp_path / ".openlegion" / "agents"
+        backend._workspace_root.mkdir(parents=True)
+
+        ws = backend._prepare_workspace(
+            agent_id="delta",
+            role="helper",
+            skills_dir="",
+            system_prompt="You help",
+            model="openai/gpt-4o-mini",
+        )
+
+        env_content = (ws / ".agent.env").read_text()
+        assert "EMBEDDING_MODEL=custom/embed-v2" in env_content
 
     def test_stop_agent_removes_from_registry(self):
         backend = SandboxBackend.__new__(SandboxBackend)

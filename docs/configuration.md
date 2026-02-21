@@ -111,7 +111,7 @@ collaboration: true
 | `mesh.host` | string | `0.0.0.0` | Bind address for mesh server |
 | `mesh.port` | integer | `8420` | Mesh server port |
 | `llm.default_model` | string | -- | Default model for agents without explicit model |
-| `llm.embedding_model` | string | `text-embedding-3-small` | Model for memory embeddings |
+| `llm.embedding_model` | string | `text-embedding-3-small` | Model for memory embeddings. Set to `"none"` to disable vector search (FTS5 keyword search still works) |
 | `llm.max_tokens` | integer | `4096` | Max output tokens per completion |
 | `llm.temperature` | float | `0.7` | Sampling temperature |
 | `llm.failover.primary` | string | -- | Primary model for failover routing |
@@ -241,5 +241,6 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `MESH_AUTH_TOKEN` | -- | Agent auth token (set automatically in containers) |
 | `MESH_HOST` | -- | Mesh host URL (set automatically in containers) |
 | `AGENT_ID` | -- | Agent identifier (set automatically in containers) |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for memory vector search (set automatically from `llm.embedding_model` in mesh.yaml). Set to `"none"` to disable vector search |
 
 The mesh port is configured in `config/mesh.yaml` (`mesh.port`), not via environment variable.
