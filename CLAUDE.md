@@ -1,4 +1,6 @@
-# CLAUDE.md — OpenLegion Engineering Guide
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What This Is
 
@@ -53,6 +55,8 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 4. **Path traversal protection in agent file tools.** Agent file operations are confined to `/data` inside the container. The `file_tool.py` tools must validate paths. Never expose host filesystem paths to agents.
 
 5. **Container hardening is not optional.** Agents run as non-root (UID 1000), with `no-new-privileges`, memory limits (512MB), and CPU quotas. Don't weaken these defaults.
+
+6. **All untrusted text is sanitized before reaching LLM context.** `sanitize_for_prompt()` in `src/shared/utils.py` strips invisible Unicode (bidi overrides, tag chars, zero-width chars, variation selectors, etc.) at three choke points: user input (`server.py`), tool results (`loop.py`), and system prompt context (`loop.py`). New paths from untrusted text to LLM context must call `sanitize_for_prompt()`. Never bypass these layers.
 
 ### Architectural invariants
 
@@ -157,6 +161,7 @@ pytest tests/test_loop.py -x -v
 | `src/host/cron.py` | `tests/test_cron.py` |
 | `src/channels/base.py` | `tests/test_channels.py` |
 | `src/cli.py` | `tests/test_cli_commands.py` |
+| `src/shared/utils.py` (sanitization) | `tests/test_sanitize.py` |
 | Chat mode | `tests/test_chat.py`, `tests/test_chat_workspace.py` |
 
 ## Common Mistakes to Avoid

@@ -8,6 +8,7 @@ Uses mock LLM to verify:
 - Final output parsing
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -584,3 +585,142 @@ class TestToolMemory:
         loop.memory.store_tool_outcome("exec", {}, "ok", success=True)
         prompt = loop._build_chat_system_prompt()
         assert "Recent Tool History" in prompt
+
+
+# === Prompt Injection Sanitization (choke-point integration) ===
+
+
+@pytest.mark.asyncio
+async def test_tool_result_sanitized_in_execute_task():
+    """Tool results with invisible chars are stripped before entering LLM context."""
+    tool_call_response = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="web_search", arguments={"query": "test"})],
+        tokens_used=50,
+    )
+    final_response = LLMResponse(content='{"result": {"ok": true}}', tokens_used=30)
+    captured_messages = []
+
+    loop = _make_loop([tool_call_response, final_response])
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "web_search"}}]
+    )
+    # Return a string (non-dict) with invisible characters — goes through str() path
+    loop.skills.execute = AsyncMock(return_value="clean\u200Bvalue\u202Ehere")
+
+    original_chat = loop.llm.chat
+
+    async def capturing_chat(system, messages, tools=None, **kwargs):
+        captured_messages.append([dict(m) for m in messages])
+        return await original_chat(system=system, messages=messages, tools=tools, **kwargs)
+
+    loop.llm.chat = capturing_chat
+
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research", input_data={"q": "test"}
+    )
+    await loop.execute_task(assignment)
+
+    # The tool result message in the second LLM call should be sanitized
+    second_call = captured_messages[1]
+    tool_msg = next(m for m in second_call if m.get("role") == "tool")
+    assert "\u200B" not in tool_msg["content"]
+    assert "\u202E" not in tool_msg["content"]
+    assert "cleanvaluehere" in tool_msg["content"]
+
+
+@pytest.mark.asyncio
+async def test_tool_result_sanitized_in_chat():
+    """Chat mode tool results are sanitized before entering LLM context."""
+    tool_call_response = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="exec", arguments={"command": "echo"})],
+        tokens_used=30,
+    )
+    final_response = LLMResponse(content="Done", tokens_used=20)
+    captured_messages = []
+
+    loop = _make_loop([tool_call_response, final_response])
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "exec"}}]
+    )
+    # Return a string (non-dict) with invisible characters — goes through str() path
+    loop.skills.execute = AsyncMock(return_value="out\x00put\uFEFF")
+
+    original_chat = loop.llm.chat
+
+    async def capturing_chat(system, messages, tools=None, **kwargs):
+        captured_messages.append([dict(m) for m in messages])
+        return await original_chat(system=system, messages=messages, tools=tools, **kwargs)
+
+    loop.llm.chat = capturing_chat
+
+    await loop.chat("run something")
+
+    second_call = captured_messages[1]
+    tool_msg = next(m for m in second_call if m.get("role") == "tool")
+    assert "\x00" not in tool_msg["content"]
+    assert "\uFEFF" not in tool_msg["content"]
+    assert "output" in tool_msg["content"]
+
+
+@pytest.mark.asyncio
+async def test_memory_autoload_sanitized_in_chat():
+    """Workspace search snippets with invisible chars are sanitized before entering LLM context."""
+    normal_response = LLMResponse(content="Got it", tokens_used=30)
+    loop = _make_loop([normal_response])
+    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+
+    # Set up workspace with search results containing invisible chars
+    loop.workspace = MagicMock()
+    loop.workspace.looks_like_correction = MagicMock(return_value=False)
+    loop.workspace.search = MagicMock(return_value=[
+        {"file": "MEMORY.md", "snippet": "secret\u200B data\u202E here"},
+    ])
+    loop.workspace.append_daily_log = MagicMock()
+
+    await loop.chat("find info")
+
+    # The user message in chat history should have sanitized memory context
+    user_msg = loop._chat_messages[0]["content"]
+    assert "\u200B" not in user_msg
+    assert "\u202E" not in user_msg
+    assert "secret data here" in user_msg
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_goals_sanitized():
+    """Blackboard goals with invisible chars are sanitized in system prompt.
+
+    format_dict uses json.dumps which ASCII-escapes Unicode, so we verify
+    sanitize_for_prompt is called by monkeypatching format_dict to preserve
+    raw Unicode.
+    """
+    import src.agent.loop as loop_mod
+    loop = _make_loop()
+    goals = {"objective": "find\u200B data\u202E now"}
+    # Monkeypatch format_dict to output raw Unicode (simulates non-ASCII-safe encoding)
+    original_format = loop_mod.format_dict
+    loop_mod.format_dict = lambda d: json.dumps(d, indent=2, default=str, ensure_ascii=False)
+    try:
+        prompt = loop._build_chat_system_prompt(goals=goals)
+        assert "\u200B" not in prompt
+        assert "\u202E" not in prompt
+        assert "find data now" in prompt
+    finally:
+        loop_mod.format_dict = original_format
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_learnings_sanitized():
+    """Workspace learnings with invisible chars are sanitized in system prompt."""
+    loop = _make_loop()
+    loop.workspace = MagicMock()
+    loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.get_learnings_context = MagicMock(
+        return_value="lesson\u200B one\u202E important"
+    )
+    prompt = loop._build_chat_system_prompt()
+    assert "\u200B" not in prompt
+    assert "\u202E" not in prompt
+    assert "lesson one important" in prompt

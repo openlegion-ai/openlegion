@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import httpx
 
 from src.shared.types import AgentStatus, TaskAssignment, TaskResult
-from src.shared.utils import format_dict, generate_id, setup_logging, truncate
+from src.shared.utils import format_dict, generate_id, sanitize_for_prompt, setup_logging, truncate
 
 if TYPE_CHECKING:
     from src.agent.context import ContextManager
@@ -229,10 +229,12 @@ class AgentLoop:
                                 memory_store=self.memory,
                             )
                             result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+                            result_str = sanitize_for_prompt(result_str)
                             await self._learn(tool_call.name, tool_call.arguments, result)
                             self._maybe_reload_skills(result)
                         except Exception as e:
                             result_str = json.dumps({"error": str(e)})
+                            result_str = sanitize_for_prompt(result_str)
                             result = {"error": str(e)}
                             logger.error(f"Tool {tool_call.name} failed: {e}")
                             self._record_failure(
@@ -331,14 +333,14 @@ class AgentLoop:
 
         goals = await self._fetch_goals()
         if goals:
-            parts.append(f"## Your Current Goals\n{format_dict(goals)}")
+            parts.append(f"## Your Current Goals\n{sanitize_for_prompt(format_dict(goals))}")
 
         parts.append(f"## Task: {assignment.task_type}\n\n## Input\n{format_dict(assignment.input_data)}")
 
         high_salience = self.memory.get_high_salience_facts(top_k=10)
         if high_salience:
             memory_text = "\n".join(f"- {f.key}: {f.value}" for f in high_salience)
-            parts.append(f"## Your Memory (most relevant)\n{memory_text}")
+            parts.append(f"## Your Memory (most relevant)\n{sanitize_for_prompt(memory_text)}")
 
         query = f"{assignment.task_type} {format_dict(assignment.input_data)}"
         relevant = await self.memory.search_hierarchical(query, top_k=10)
@@ -346,10 +348,10 @@ class AgentLoop:
         novel = [f for f in relevant if f.id not in seen_ids]
         if novel:
             memory_text = "\n".join(f"- {f.key}: {f.value}" for f in novel)
-            parts.append(f"## Related Memory\n{memory_text}")
+            parts.append(f"## Related Memory\n{sanitize_for_prompt(memory_text)}")
 
         if assignment.context:
-            parts.append(f"## Shared Context from Other Agents\n{format_dict(assignment.context)}")
+            parts.append(f"## Shared Context from Other Agents\n{sanitize_for_prompt(format_dict(assignment.context))}")
 
         return [{"role": "user", "content": "\n\n".join(parts)}]
 
@@ -479,10 +481,10 @@ class AgentLoop:
         if self.workspace:
             learnings = self.workspace.get_learnings_context()
             if learnings:
-                parts.append(f"## Learnings\n\n{learnings}")
+                parts.append(f"## Learnings\n\n{sanitize_for_prompt(learnings)}")
         tool_history = self._build_tool_history_context()
         if tool_history:
-            parts.append(tool_history)
+            parts.append(sanitize_for_prompt(tool_history))
         return "\n\n".join(parts)
 
     def _parse_final_output(self, content: str) -> tuple[dict, dict]:
@@ -542,9 +544,9 @@ class AgentLoop:
             if not self._chat_messages and self.workspace:
                 memory_hits = self.workspace.search(user_message, max_results=3)
                 if memory_hits:
-                    memory_context = "\n".join(
+                    memory_context = sanitize_for_prompt("\n".join(
                         f"- [{h['file']}] {h['snippet']}" for h in memory_hits
-                    )
+                    ))
                     user_message = (
                         f"{user_message}\n\n"
                         f"[Relevant memory auto-loaded]\n{memory_context}"
@@ -609,9 +611,11 @@ class AgentLoop:
                             memory_store=self.memory,
                         )
                         result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+                        result_str = sanitize_for_prompt(result_str)
                         await self._learn(tool_call.name, tool_call.arguments, result)
                     except Exception as e:
                         result_str = json.dumps({"error": str(e)})
+                        result_str = sanitize_for_prompt(result_str)
                         result = {"error": str(e)}
                         logger.error(f"Chat tool {tool_call.name} failed: {e}")
                         self._record_failure(
@@ -694,16 +698,16 @@ class AgentLoop:
         parts = [self.system_prompt]
 
         if goals:
-            parts.append(f"## Your Current Goals\n\n{format_dict(goals)}")
+            parts.append(f"## Your Current Goals\n\n{sanitize_for_prompt(format_dict(goals))}")
 
         if self.workspace:
             bootstrap = self.workspace.get_bootstrap_content()
             if bootstrap:
-                parts.append(bootstrap)
+                parts.append(sanitize_for_prompt(bootstrap))
 
             learnings = self.workspace.get_learnings_context()
             if learnings:
-                parts.append(f"## Learnings from Past Sessions\n\n{learnings}")
+                parts.append(f"## Learnings from Past Sessions\n\n{sanitize_for_prompt(learnings)}")
 
         parts.append(
             f"You are the '{self.role}' agent in the OpenLegion fleet.\n"
@@ -784,7 +788,7 @@ class AgentLoop:
 
         tool_history = self._build_tool_history_context()
         if tool_history:
-            parts.append(tool_history)
+            parts.append(sanitize_for_prompt(tool_history))
 
         # Context usage warning at 80%+
         if self.context_manager and hasattr(self, "_chat_messages"):
@@ -862,9 +866,9 @@ class AgentLoop:
             if not self._chat_messages and self.workspace:
                 memory_hits = self.workspace.search(user_message, max_results=3)
                 if memory_hits:
-                    memory_context = "\n".join(
+                    memory_context = sanitize_for_prompt("\n".join(
                         f"- [{h['file']}] {h['snippet']}" for h in memory_hits
-                    )
+                    ))
                     user_message = (
                         f"{user_message}\n\n"
                         f"[Relevant memory auto-loaded]\n{memory_context}"
@@ -933,9 +937,11 @@ class AgentLoop:
                             memory_store=self.memory,
                         )
                         result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+                        result_str = sanitize_for_prompt(result_str)
                         await self._learn(tool_call.name, tool_call.arguments, result)
                     except Exception as e:
                         result_str = json.dumps({"error": str(e)})
+                        result_str = sanitize_for_prompt(result_str)
                         result = {"error": str(e)}
                         logger.error(f"Chat tool {tool_call.name} failed: {e}")
                         self._record_failure(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import unicodedata
 import uuid
 from datetime import UTC, datetime
 
@@ -24,6 +25,43 @@ def truncate(text: str, max_len: int = 200) -> str:
 def format_dict(d: dict) -> str:
     """Format a dict for inclusion in LLM prompts."""
     return json.dumps(d, indent=2, default=str)
+
+
+# ── Prompt injection sanitization ────────────────────────────
+
+_STRIP_CATEGORIES = frozenset({"Cc", "Cf", "Co", "Cs", "Cn"})
+_SAFE_CC = frozenset({0x09, 0x0A, 0x0D})  # TAB, LF, CR
+_SAFE_CF = frozenset({0x200C, 0x200D, 0xFE0E, 0xFE0F})  # ZWNJ, ZWJ, VS15, VS16
+_STRIP_EXTRA = frozenset({
+    *range(0xFE00, 0xFE0E),       # VS1-14
+    *range(0xE0100, 0xE01F0),     # VS17-256
+    0x034F,                        # Combining Grapheme Joiner
+    0x115F, 0x1160, 0x3164, 0xFFA0,  # Hangul fillers
+    0xFFFC,                        # Object Replacement Character
+})
+
+
+def sanitize_for_prompt(text: str) -> str:
+    """Strip invisible Unicode characters that enable prompt injection."""
+    if not isinstance(text, str) or not text:
+        return ""
+    out = []
+    for ch in text:
+        cp = ord(ch)
+        if cp == 0x2028 or cp == 0x2029:
+            out.append("\n")
+            continue
+        if cp in _STRIP_EXTRA:
+            continue
+        cat = unicodedata.category(ch)
+        if cat in _STRIP_CATEGORIES:
+            if cat == "Cc" and cp in _SAFE_CC:
+                out.append(ch)
+            elif cat == "Cf" and cp in _SAFE_CF:
+                out.append(ch)
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 class StructuredFormatter(logging.Formatter):

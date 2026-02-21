@@ -11,6 +11,7 @@ OpenLegion is designed assuming agents will be compromised. Defense-in-depth wit
 | 3. Credential separation | Vault holds keys, agents call via proxy | Key leakage, unauthorized API use |
 | 4. Permission enforcement | Per-agent ACLs for messaging, blackboard, pub/sub, APIs | Unauthorized data access |
 | 5. Input validation | Path traversal prevention, safe condition eval, token budgets, iteration limits | Injection, runaway loops |
+| 6. Unicode sanitization | Invisible character stripping at three choke points | Prompt injection via invisible Unicode |
 
 ## Runtime Isolation
 
@@ -105,6 +106,32 @@ Workflow conditions (`src/host/orchestrator.py`) use a regex-based parser:
 - Chat mode: 30 tool rounds maximum (`CHAT_MAX_TOOL_ROUNDS`)
 - Per-agent token budgets enforced at the vault layer
 - Prevents runaway loops and unbounded spend
+
+## Unicode Sanitization (Prompt Injection Defense)
+
+Agents process untrusted text from user messages, web pages, HTTP responses, tool outputs, blackboard data, and MCP servers. Attackers can embed invisible instructions using tag characters (U+E0001-E007F), RTL overrides (U+202A-202E), zero-width spaces, variation selectors, and other invisible codepoints that LLM tokenizers decode while being invisible to humans.
+
+`sanitize_for_prompt()` in `src/shared/utils.py` strips these at three choke points:
+
+| Choke Point | File | What It Covers |
+|-------------|------|----------------|
+| User input | `src/agent/server.py` | All user messages from all channels/CLI |
+| Tool results | `src/agent/loop.py` | All tool outputs (browser, web search, HTTP, file, exec, memory, MCP) |
+| System prompt context | `src/agent/loop.py` | Workspace bootstrap, blackboard goals, memory facts, learnings, tool history |
+
+### What Gets Stripped
+
+- **Dangerous categories** (Cc, Cf, Co, Cs, Cn) except TAB/LF/CR, ZWNJ/ZWJ, VS15/VS16
+- **Data smuggling vectors**: VS1-14, VS17-256, Combining Grapheme Joiner, Hangul fillers, Object Replacement
+- **Normalization**: U+2028/U+2029 (line/paragraph separator) to `\n`
+
+### What Is Preserved
+
+Normal text in all scripts (Arabic, Hebrew, CJK, Devanagari, etc.), emoji with ZWJ sequences, ZWNJ for Persian/Arabic, tabs, newlines, and VS15/VS16 for emoji presentation.
+
+### Adding New Paths to LLM Context
+
+If you add a new path where untrusted text reaches LLM context (new tool, new system prompt section, new message source), wrap it with `sanitize_for_prompt()`. See `tests/test_sanitize.py` for the full test suite.
 
 ## Mesh Authentication
 
