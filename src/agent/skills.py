@@ -46,6 +46,7 @@ class SkillRegistry:
     """
 
     CUSTOM_SKILLS_DIR = "/data/custom_skills"
+    MARKETPLACE_SKILLS_DIR = "/app/marketplace_skills"
 
     def __init__(self, skills_dir: str, mcp_client: MCPClient | None = None):
         self.skills_dir = skills_dir
@@ -54,6 +55,7 @@ class SkillRegistry:
         self._discover_builtins()
         self._discover(skills_dir)
         self._discover(self.CUSTOM_SKILLS_DIR)
+        self._discover(self.MARKETPLACE_SKILLS_DIR)
         self.skills = dict(_skill_staging)
         self._register_mcp_tools()
 
@@ -101,6 +103,7 @@ class SkillRegistry:
         self._discover_builtins()
         self._discover(self.skills_dir)
         self._discover(self.CUSTOM_SKILLS_DIR)
+        self._discover(self.MARKETPLACE_SKILLS_DIR)
         self.skills = dict(_skill_staging)
         self._register_mcp_tools()
         logger.info(f"Reloaded {len(self.skills)} skills")
