@@ -4,7 +4,7 @@ Real-time web dashboard for fleet observability and management.
 
 ## Overview
 
-The dashboard is served at `http://localhost:8420/dashboard` (or whatever port the mesh is configured on). It provides a live view of your agent fleet with nine panels for monitoring, configuration, and debugging.
+The dashboard is served at `http://localhost:8420/dashboard` (or whatever port the mesh is configured on). It provides a live view of your agent fleet across six tabs for monitoring, configuration, and debugging.
 
 No additional setup is required -- the dashboard starts automatically with `openlegion start`.
 
@@ -12,15 +12,11 @@ No additional setup is required -- the dashboard starts automatically with `open
 
 ### Agents
 
-Overview of all registered agents showing health status, activity state (idle/thinking/tool), daily cost, token usage, and restart count. Click any agent card to drill down into its detail view with cost breakdowns, budget bars, and recent events.
+Overview of all registered agents showing health status, activity state (idle/thinking/tool), daily cost, token usage, and restart count. Click any agent card to drill down into its detail view with cost breakdowns, budget bars, and recent events. Also includes agent configuration management — view and edit each agent's model, browser backend, role, system prompt, and daily budget. Changes that require a restart (model, browser) are flagged.
 
-### Events
+### Activity
 
-Real-time event feed streamed via WebSocket. Events include LLM calls, tool executions, text streaming deltas, messages sent/received, blackboard writes, agent state changes, and health changes. Filter by event type using the chip toggles. Events are capped at 500 in the browser; older events are dropped. Note: per-token `text_delta` events are delivered via the direct streaming chat endpoint (not the WebSocket event bus) to avoid flooding the event buffer.
-
-### Agents
-
-Agent configuration management. View and edit each agent's model, browser backend, role, system prompt, and daily budget. Changes that require a restart (model, browser) are flagged. Use the Restart button to apply changes. Agent configs are auto-loaded when switching to this tab.
+Real-time event feed streamed via WebSocket. Events include LLM calls, tool executions, text streaming deltas, messages sent/received, blackboard writes, agent state changes, and health changes. Filter by event type using the chip toggles. Events are capped at 500 in the browser; older events are dropped. Click any event row to expand an inline detail panel showing all available data fields with type-specific formatting (e.g. model, token breakdown, and cost for `llm_call`; full untruncated arguments for `tool_start`; complete message text for `message_sent`). The same expandable rows appear in the agent detail view's Recent Events section. Note: per-token `text_delta` events are delivered via the direct streaming chat endpoint (not the WebSocket event bus) to avoid flooding the event buffer.
 
 ### Blackboard
 
@@ -30,19 +26,17 @@ Browse, search, write, and delete shared state entries. Filter by key prefix (e.
 
 Per-agent LLM spend with period selector (today/week/month). Bar chart shows cost and token usage side-by-side. Budget status bars show daily spend vs. configured limits. Cost data refreshes automatically when `llm_call` events arrive.
 
-### Traces
+### Automation
 
-Request trace timeline. The left panel lists recent trace events; clicking one shows its full event chain in the right panel with a waterfall timing visualization. Traces cover the full request path: dispatch, LLM calls, tool executions, blackboard writes, and pub/sub events.
+Three sub-panels under a single tab:
 
-### Queues
+**Cron** — Manage scheduled jobs. View schedule, last run time, run count, error count, and heartbeat status. Actions: Run (trigger immediately), Pause, Resume. Auto-refreshes every 10 seconds while the tab is active.
 
-Live view of per-agent task queue depth, pending/collected counts, and busy/idle status. Auto-refreshes every 5 seconds while the tab is active.
+**Queues** — Live view of per-agent task queue depth, pending/collected counts, and busy/idle status. Auto-refreshes every 5 seconds while the tab is active.
 
-### Cron
+**Traces** — Request trace timeline. The left panel lists recent trace events; clicking one shows its full event chain in the right panel with a waterfall timing visualization. Traces cover the full request path: dispatch, LLM calls, tool executions, blackboard writes, and pub/sub events.
 
-Manage scheduled jobs. View schedule, last run time, run count, error count, and heartbeat status. Actions: Run (trigger immediately), Pause, Resume. Auto-refreshes every 10 seconds while the tab is active.
-
-### Settings
+### System
 
 Environment overview showing configured credentials (names only, never values), pub/sub subscriptions, model pricing tables, and available browser backends.
 
@@ -63,6 +57,37 @@ Click the **Restart** button on any agent card. A confirmation dialog prevents a
 ### Update Budget
 
 From the agent detail view (click an agent in Agents), budget bars show current daily and monthly usage. Budget can also be updated via the Agents tab edit form.
+
+## Chat
+
+### Streaming Chat
+
+Click an agent card to open the chat modal. Messages stream in real-time with token-level updates via SSE (`POST /dashboard/api/agents/{id}/chat/stream`). The response renders progressively as tokens arrive, with a pulsing cursor indicating active streaming.
+
+### Tool Call Display
+
+When an agent calls tools during a response, each tool appears as an inline pill inside the message bubble:
+- **Running** — spinning indicator with tool name
+- **Done** — green checkmark with truncated output preview (200 chars max)
+
+Tool calls appear above the text response, in the order they were executed.
+
+### Chat History
+
+Conversation history persists per agent across modal open/close — reopening the same agent shows the full conversation. Use the **Clear** button in the chat header to reset history for that agent. History is stored in browser memory and resets on page reload.
+
+### Keyboard Shortcuts
+
+- **Enter** — send message
+- **Escape** — close chat modal
+
+### Abort
+
+Closing the chat modal (click outside, X button, or Escape) while a response is streaming cancels the in-flight request. The partial response is preserved in history.
+
+## Broadcast
+
+Send a message to all agents simultaneously using the broadcast bar below the agent grid. Each agent processes the message independently. Responses display inline with expand/collapse for long replies (200+ characters).
 
 ## Blackboard Operations
 
@@ -94,6 +119,7 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `GET` | `/dashboard/api/agents/{id}/config` | Agent configuration |
 | `PUT` | `/dashboard/api/agents/{id}/config` | Update agent configuration |
 | `POST` | `/dashboard/api/agents/{id}/chat/stream` | SSE streaming chat (token-level) |
+| `POST` | `/dashboard/api/agents/{id}/steer` | Update agent system prompt live |
 | `POST` | `/dashboard/api/agents/{id}/restart` | Restart an agent |
 | `PUT` | `/dashboard/api/agents/{id}/budget` | Update agent budget |
 | `GET` | `/dashboard/api/blackboard` | List blackboard entries |
@@ -108,6 +134,7 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `POST` | `/dashboard/api/cron/{id}/pause` | Pause cron job |
 | `POST` | `/dashboard/api/cron/{id}/resume` | Resume cron job |
 | `GET` | `/dashboard/api/settings` | Environment settings |
+| `POST` | `/dashboard/api/broadcast` | Send message to all agents |
 | `GET` | `/dashboard/api/messages` | Recent message log |
 | `GET` | `/dashboard/api/workflows` | Workflow definitions |
 | `WS` | `/ws/events` | Real-time event stream |
