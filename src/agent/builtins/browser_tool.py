@@ -424,8 +424,9 @@ async def _draw_labels(image_path: str) -> dict[str, str]:
         text_bbox = draw.textbbox((0, 0), label_text, font=font) if font else (0, 0, 10, 12)
         tw = text_bbox[2] - text_bbox[0] + 6
         th = text_bbox[3] - text_bbox[1] + 4
-        draw.rectangle([x, y - th, x + tw, y], fill="red")
-        draw.text((x + 3, y - th + 2), label_text, fill="white", font=font)
+        label_y = max(0, y - th)
+        draw.rectangle([x, label_y, x + tw, label_y + th], fill="red")
+        draw.text((x + 3, label_y + 2), label_text, fill="white", font=font)
 
         labels[num] = f"{ref} at ({int(x)},{int(y)}) {int(w)}x{int(h)}"
 
