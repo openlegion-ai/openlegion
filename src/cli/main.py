@@ -213,7 +213,7 @@ def agent_edit(
             changed = True
 
         if budget_override is not None:
-            _update_agent_field(name, "daily_budget", budget_override)
+            _update_agent_field(name, "budget", {"daily_usd": budget_override})
             click.echo(f"Agent '{name}' budget: ${budget_override:.2f}/day")
             changed = True
 
@@ -222,7 +222,9 @@ def agent_edit(
         return
 
     # Interactive mode
-    _edit_agent_interactive(name, restart_hint="Restart to apply: openlegion start")
+    changed_field = _edit_agent_interactive(name)
+    if changed_field:
+        click.echo("Restart to apply: openlegion start")
 
 
 def _resolve_agent_name(cfg: dict, name: str | None) -> str | None:
@@ -541,6 +543,7 @@ def start(config_path: str, detach: bool, sandbox: bool, serve: bool):
             signal.signal(signal.SIGINT, lambda *_: shutdown_event.set())
             shutdown_event.wait()
         else:
+            _redirect_host_logs_to_file()
             from src.cli.repl import REPLSession
             repl = REPLSession(ctx)
             repl.run()
@@ -548,6 +551,31 @@ def start(config_path: str, detach: bool, sandbox: bool, serve: bool):
         click.echo("")
     finally:
         ctx.shutdown()
+
+
+def _redirect_host_logs_to_file() -> None:
+    """Redirect host-side loggers to .openlegion.log during interactive REPL.
+
+    Prevents structured JSON log lines from interleaving with chat output.
+    """
+    import logging
+
+    log_path = cli_config.PROJECT_ROOT / ".openlegion.log"
+    file_handler = logging.FileHandler(log_path, mode="a")
+    log_format = os.environ.get("OPENLEGION_LOG_FORMAT", "json").lower()
+    if log_format == "text":
+        from src.shared.utils import TextFormatter
+        file_handler.setFormatter(TextFormatter())
+    else:
+        from src.shared.utils import StructuredFormatter
+        file_handler.setFormatter(StructuredFormatter())
+
+    for name in ["host.health", "host.runtime", "host.mesh", "host.transport",
+                 "host.server", "host.costs", "host.cron", "host.credentials",
+                 "host.permissions", "host.lanes"]:
+        logger = logging.getLogger(name)
+        # Replace stderr handlers with file handler
+        logger.handlers = [file_handler]
 
 
 def _start_detached(config_path: str) -> None:

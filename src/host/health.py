@@ -94,12 +94,13 @@ class HealthMonitor:
 
         health.consecutive_failures += 1
         health.status = "unhealthy"
-        logger.warning(
+        logger.debug(
             f"Agent '{agent_id}' health check failed "
             f"({health.consecutive_failures}/{self.MAX_FAILURES})"
         )
 
         if health.consecutive_failures >= self.MAX_FAILURES:
+            logger.warning(f"Agent '{agent_id}' unreachable, restarting...")
             await self._try_restart(agent_id)
 
     async def _try_restart(self, agent_id: str) -> None:
