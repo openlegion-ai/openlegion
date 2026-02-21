@@ -287,7 +287,7 @@ class CredentialVault:
                     error=f"No API key configured for model: {requested_model}",
                 )
             response = await litellm.aembedding(
-                model=request.params.get("model", "text-embedding-3-small"),
+                model=request.params["model"],
                 input=request.params.get("text", ""),
                 api_key=api_key,
             )
@@ -432,7 +432,7 @@ class CredentialVault:
 
         elif request.action == "embed":
             response = await litellm.aembedding(
-                model=request.params.get("model", "text-embedding-3-small"),
+                model=request.params["model"],
                 input=request.params.get("text", ""),
                 api_key=api_key,
             )
@@ -452,7 +452,7 @@ class CredentialVault:
 
         if request.action == "embed":
             response = await litellm.aembedding(
-                model=request.params.get("model", "text-embedding-3-small"),
+                model=request.params["model"],
                 input=request.params.get("text", ""),
                 api_key=api_key,
             )

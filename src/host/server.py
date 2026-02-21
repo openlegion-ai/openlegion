@@ -13,12 +13,13 @@ from __future__ import annotations
 import hmac
 import time
 from collections import defaultdict
+from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
-from src.shared.types import AgentMessage, APIProxyRequest, APIProxyResponse, MeshEvent
+from src.shared.types import AgentMessage, APIProxyRequest, APIProxyResponse, MeshEvent, NotifyRequest
 from src.shared.utils import setup_logging
 
 _server_logger = setup_logging("host.server")
@@ -50,6 +51,7 @@ def create_mesh_app(
     trace_store: TraceStore | None = None,
     event_bus: EventBus | None = None,
     health_monitor: HealthMonitor | None = None,
+    notify_fn: Callable[[str, str], Coroutine] | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
@@ -361,6 +363,24 @@ def create_mesh_app(
                 "state": "registered", "capabilities": capabilities,
             })
         return {"registered": True}
+
+    # === Agent Notifications ===
+
+    _NOTIFY_MAX_LEN = 2000
+
+    @app.post("/mesh/notify")
+    async def notify_user(body: NotifyRequest, request: Request) -> dict:
+        """Push a notification from an agent to the user across all channels."""
+        _verify_auth(body.agent_id, request)
+        if notify_fn is None:
+            raise HTTPException(503, "Notifications not available")
+        message = body.message[:_NOTIFY_MAX_LEN]
+        try:
+            await notify_fn(body.agent_id, message)
+        except Exception as e:
+            _server_logger.warning("notify_user failed: %s", e)
+            raise HTTPException(500, f"Notification failed: {e}")
+        return {"sent": True}
 
     @app.get("/mesh/agents")
     async def list_agents() -> dict:

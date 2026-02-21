@@ -1114,3 +1114,81 @@ class TestLabeledScreenshot:
 
         assert labels == {}
         bt._page_refs.clear()
+
+
+# ── notify_user ──────────────────────────────────────────────
+
+
+class TestNotifyUser:
+    @pytest.mark.asyncio
+    async def test_notify_user_success(self):
+        from src.agent.builtins.mesh_tool import notify_user
+
+        mock_mesh = AsyncMock()
+        mock_mesh.notify_user = AsyncMock()
+
+        result = await notify_user(message="Task done", mesh_client=mock_mesh)
+        assert result == {"sent": True}
+        mock_mesh.notify_user.assert_awaited_once_with("Task done")
+
+    @pytest.mark.asyncio
+    async def test_notify_user_no_mesh_client(self):
+        from src.agent.builtins.mesh_tool import notify_user
+
+        result = await notify_user(message="hello", mesh_client=None)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_notify_user_failure(self):
+        from src.agent.builtins.mesh_tool import notify_user
+
+        mock_mesh = AsyncMock()
+        mock_mesh.notify_user = AsyncMock(side_effect=RuntimeError("connection refused"))
+
+        result = await notify_user(message="hello", mesh_client=mock_mesh)
+        assert "error" in result
+        assert "connection refused" in result["error"]
+
+
+# ── LLMClient embedding model ───────────────────────────────
+
+
+class TestLLMClientEmbeddingModel:
+    @pytest.mark.asyncio
+    async def test_embed_uses_configured_model(self):
+        from src.agent.llm import LLMClient
+
+        llm = LLMClient(
+            mesh_url="http://localhost:8420",
+            agent_id="test",
+            embedding_model="custom/embed-v2",
+        )
+
+        # Mock the HTTP client to capture the request
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "success": True,
+            "data": {"embedding": [0.1, 0.2, 0.3]},
+        }
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.is_closed = False
+        llm._client = mock_client
+
+        result = await llm.embed("hello world")
+        assert result == [0.1, 0.2, 0.3]
+
+        # Verify the request used the configured model
+        call_kwargs = mock_client.post.call_args
+        request_body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
+        assert request_body["params"]["model"] == "custom/embed-v2"
+
+    @pytest.mark.asyncio
+    async def test_embed_default_model(self):
+        from src.agent.llm import LLMClient
+
+        llm = LLMClient(mesh_url="http://localhost:8420", agent_id="test")
+        assert llm.embedding_model == "text-embedding-3-small"

@@ -263,6 +263,13 @@ class SteerMessage(BaseModel):
     message: str
 
 
+class NotifyRequest(BaseModel):
+    """Agent requests to send a notification to the user."""
+
+    agent_id: str
+    message: str
+
+
 # === Dashboard Events ===
 
 

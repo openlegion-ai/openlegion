@@ -95,6 +95,16 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def notify_user(self, message: str) -> None:
+        """Send an unsolicited notification to the user via all channels."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/notify",
+            json={"agent_id": self.agent_id, "message": message},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+
     async def send_system_message(self, to: str, msg_type: str, payload: dict) -> dict:
         """Send a system-level message to the orchestrator/mesh (not for agent-to-agent use)."""
         message = AgentMessage(from_agent=self.agent_id, to=to, type=msg_type, payload=payload)

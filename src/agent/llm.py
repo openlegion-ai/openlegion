@@ -21,10 +21,17 @@ logger = setup_logging("agent.llm")
 class LLMClient:
     """LLM interface that routes all calls through the mesh API proxy."""
 
-    def __init__(self, mesh_url: str, agent_id: str = "agent", default_model: str = "openai/gpt-4o-mini"):
+    def __init__(
+        self,
+        mesh_url: str,
+        agent_id: str = "agent",
+        default_model: str = "openai/gpt-4o-mini",
+        embedding_model: str = "text-embedding-3-small",
+    ):
         self.mesh_url = mesh_url
         self.agent_id = agent_id
         self.default_model = default_model
+        self.embedding_model = embedding_model
         self._client: httpx.AsyncClient | None = None
         self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
 
@@ -174,7 +181,7 @@ class LLMClient:
         request = APIProxyRequest(
             service="llm",
             action="embed",
-            params={"model": model or "text-embedding-3-small", "text": text},
+            params={"model": model or self.embedding_model, "text": text},
             timeout=30,
         )
         from src.shared.trace import trace_headers

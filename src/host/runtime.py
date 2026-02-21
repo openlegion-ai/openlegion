@@ -37,6 +37,7 @@ class RuntimeBackend(abc.ABC):
         )
         self.agents: dict[str, dict] = {}
         self.auth_tokens: dict[str, str] = {}
+        self.extra_env: dict[str, str] = {}
 
     @abc.abstractmethod
     def start_agent(
@@ -187,6 +188,7 @@ class DockerBackend(RuntimeBackend):
             environment["MCP_SERVERS"] = json.dumps(mcp_servers)
         if browser_backend:
             environment["BROWSER_BACKEND"] = browser_backend
+        environment.update(self.extra_env)
         if self.use_host_network:
             environment["AGENT_PORT"] = str(port)
 
@@ -441,6 +443,7 @@ class SandboxBackend(RuntimeBackend):
             env_cfg["MCP_SERVERS"] = json.dumps(mcp_servers)
         if browser_backend:
             env_cfg["BROWSER_BACKEND"] = browser_backend
+        env_cfg.update(self.extra_env)
 
         env_file = ws / ".agent.env"
         env_file.write_text(
