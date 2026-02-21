@@ -51,6 +51,7 @@ class RuntimeContext:
         self._create_components()
         self._start_agents()
         self._setup_dispatch()
+        self._create_cron_scheduler()
         self._start_mesh_server()
         self._wait_for_readiness()
         self._start_background()
@@ -357,17 +358,8 @@ class RuntimeContext:
                 if logs:
                     click.echo(logs, err=True)
 
-    def _start_background(self) -> None:
+    def _create_cron_scheduler(self) -> None:
         from src.host.cron import CronScheduler
-        from src.host.health import HealthMonitor
-
-        agents_cfg = self.cfg.get("agents", {})
-
-        self.health_monitor = HealthMonitor(
-            runtime=self.runtime, transport=self.transport, router=self.router,
-        )
-        for agent_id in agents_cfg:
-            self.health_monitor.register(agent_id)
 
         async def cron_dispatch(agent_name: str, message: str) -> str:
             result = await self.async_dispatch(agent_name, message)
@@ -393,6 +385,17 @@ class RuntimeContext:
         )
         if self.cron_scheduler.jobs:
             echo_ok(f"Cron scheduler: {len(self.cron_scheduler.jobs)} jobs loaded")
+
+    def _start_background(self) -> None:
+        from src.host.health import HealthMonitor
+
+        agents_cfg = self.cfg.get("agents", {})
+
+        self.health_monitor = HealthMonitor(
+            runtime=self.runtime, transport=self.transport, router=self.router,
+        )
+        for agent_id in agents_cfg:
+            self.health_monitor.register(agent_id)
 
         # Start cron
         def run_cron():
