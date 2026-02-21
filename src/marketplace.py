@@ -7,6 +7,7 @@ checker, and mounted into agent containers at runtime.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -45,6 +46,11 @@ def _parse_skill_manifest(path: Path) -> dict | None:
 
     try:
         import yaml
+    except ImportError:
+        logger.error("PyYAML is required to parse SKILL.md manifests: pip install pyyaml")
+        return None
+
+    try:
         meta = yaml.safe_load(parts[1])
     except Exception:
         return None
@@ -56,6 +62,12 @@ def _parse_skill_manifest(path: Path) -> dict | None:
     for field in ("name", "version", "description"):
         if field not in meta:
             return None
+
+    # Sanitize name to prevent path traversal
+    name = str(meta["name"])
+    if ".." in name or "/" in name or "\\" in name or not re.match(r"^[a-zA-Z0-9_-]+$", name):
+        logger.warning("Invalid skill name in manifest: %r", name)
+        return None
 
     return meta
 
@@ -168,6 +180,8 @@ def list_skills(marketplace_dir: Path) -> list[dict]:
 
 def remove_skill(name: str, marketplace_dir: Path) -> dict:
     """Remove an installed marketplace skill."""
+    if ".." in name or "/" in name or "\\" in name:
+        return {"error": "Invalid skill name"}
     skill_dir = marketplace_dir / name
     if not skill_dir.exists():
         return {"error": f"Skill '{name}' not found"}

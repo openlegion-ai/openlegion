@@ -121,6 +121,44 @@ class TestSpawnSubagentConcurrentLimit:
         _cleanup()
 
 
+class TestSpawnSubagentPrunesDoneTasks:
+    @pytest.mark.asyncio
+    async def test_done_tasks_pruned_on_spawn(self):
+        """Completed tasks are removed from _active_subagents on next spawn."""
+        _cleanup()
+
+        mock_llm = MagicMock()
+        mock_mesh = AsyncMock()
+        mock_mesh.agent_id = "prune-parent"
+        mock_mesh.write_blackboard = AsyncMock(return_value={"version": 1})
+
+        register_parent_llm("prune-parent", mock_llm)
+
+        # Add 2 done tasks and 1 active task
+        _active_subagents["prune-parent"] = {}
+        for i in range(2):
+            done_task = MagicMock()
+            done_task.done.return_value = True
+            _active_subagents["prune-parent"][f"done_{i}"] = done_task
+
+        active_task = MagicMock()
+        active_task.done.return_value = False
+        _active_subagents["prune-parent"]["active_0"] = active_task
+
+        assert len(_active_subagents["prune-parent"]) == 3
+
+        with patch("src.agent.builtins.subagent_tool._run_subagent") as mock_run:
+            mock_run.return_value = {"status": "complete", "result": "ok"}
+            await spawn_subagent(task="trigger prune", mesh_client=mock_mesh)
+
+        # Done tasks should be pruned, only active_0 + new task remain
+        assert "done_0" not in _active_subagents["prune-parent"]
+        assert "done_1" not in _active_subagents["prune-parent"]
+        assert "active_0" in _active_subagents["prune-parent"]
+
+        _cleanup()
+
+
 class TestSpawnSubagentTTLTimeout:
     @pytest.mark.asyncio
     async def test_spawn_subagent_ttl_timeout(self):
@@ -163,6 +201,8 @@ class TestSpawnSubagentTTLTimeout:
 
         assert result["status"] == "timeout"
         assert "timed out" in result["result"].lower()
+        assert "duration_ms" in result  # consistent with success path
+        assert "iterations" not in result  # should not have legacy field
         mock_mesh.write_blackboard.assert_called_once()
 
         _cleanup()

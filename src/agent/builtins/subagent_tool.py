@@ -14,8 +14,6 @@ because browser state is stored in module-level globals.
 from __future__ import annotations
 
 import asyncio
-import json
-import time
 from typing import TYPE_CHECKING
 
 from src.agent.skills import SkillRegistry, _skill_staging, skill
@@ -63,7 +61,7 @@ def _cleanup_depth(agent_id: str) -> None:
     _depth_map.pop(agent_id, None)
 
 
-def _clone_skill_registry(workspace_manager=None) -> SkillRegistry:
+def _clone_skill_registry() -> SkillRegistry:
     """Create a cloned SkillRegistry from the current staging, removing unsafe skills.
 
     The clone uses ``__new__`` to skip module re-execution, copies the current
@@ -142,14 +140,14 @@ async def _run_subagent(
             "status": "timeout",
             "result": f"Subagent timed out after {ttl_seconds}s",
             "tokens_used": 0,
-            "iterations": 0,
+            "duration_ms": 0,
         }
     except Exception as e:
         result_data = {
             "status": "error",
             "result": str(e),
             "tokens_used": 0,
-            "iterations": 0,
+            "duration_ms": 0,
         }
     finally:
         _cleanup_depth(subagent_id)
@@ -210,8 +208,13 @@ async def spawn_subagent(
     if depth >= MAX_DEPTH:
         return {"error": f"Max subagent depth ({MAX_DEPTH}) reached. Cannot spawn deeper."}
 
-    # Concurrent check
+    # Prune completed tasks to prevent memory leak
     parent_tasks = _active_subagents.get(parent_id, {})
+    done_ids = [sid for sid, t in parent_tasks.items() if t.done()]
+    for sid in done_ids:
+        del parent_tasks[sid]
+
+    # Concurrent check
     active_count = sum(1 for t in parent_tasks.values() if not t.done())
     if active_count >= MAX_CONCURRENT:
         return {"error": f"Max concurrent subagents ({MAX_CONCURRENT}) reached. Wait for one to finish."}

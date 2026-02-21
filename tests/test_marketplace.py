@@ -59,6 +59,34 @@ class TestParseManifest:
         meta = _parse_skill_manifest(tmp_path)
         assert meta is None
 
+    def test_parse_manifest_path_traversal_name(self, tmp_path):
+        """Names with path traversal characters are rejected."""
+        tmp_path.mkdir(exist_ok=True)
+        (tmp_path / "SKILL.md").write_text(
+            "---\nname: ../../etc/evil\nversion: 1.0\ndescription: Bad\n---\n"
+        )
+        meta = _parse_skill_manifest(tmp_path)
+        assert meta is None
+
+    def test_parse_manifest_slash_in_name(self, tmp_path):
+        """Names with forward slashes are rejected."""
+        tmp_path.mkdir(exist_ok=True)
+        (tmp_path / "SKILL.md").write_text(
+            "---\nname: foo/bar\nversion: 1.0\ndescription: Bad\n---\n"
+        )
+        meta = _parse_skill_manifest(tmp_path)
+        assert meta is None
+
+    def test_parse_manifest_yaml_missing(self, tmp_path):
+        """Helpful error when PyYAML is not installed."""
+        tmp_path.mkdir(exist_ok=True)
+        (tmp_path / "SKILL.md").write_text(
+            "---\nname: test\nversion: 1.0\ndescription: Test\n---\n"
+        )
+        with patch.dict("sys.modules", {"yaml": None}):
+            meta = _parse_skill_manifest(tmp_path)
+        assert meta is None
+
 
 # ── install ───────────────────────────────────────────────────
 
@@ -200,6 +228,15 @@ class TestRemoveSkill:
         result = remove_skill("ghost", marketplace_dir)
         assert "error" in result
         assert "not found" in result["error"].lower()
+
+    def test_remove_path_traversal(self, tmp_path):
+        """Path traversal in remove name is rejected."""
+        marketplace_dir = tmp_path / "marketplace"
+        marketplace_dir.mkdir(parents=True)
+
+        result = remove_skill("../../etc/passwd", marketplace_dir)
+        assert "error" in result
+        assert "invalid" in result["error"].lower()
 
 
 # ── code validation ───────────────────────────────────────────
