@@ -216,8 +216,19 @@ def create_mesh_app(
                 "duration_ms": duration_ms,
             }
             if result.success and result.data:
-                llm_data["model"] = result.data.get("model", "")
-                llm_data["tokens_used"] = result.data.get("tokens_used", 0)
+                model = result.data.get("model", "")
+                tokens = result.data.get("tokens_used", 0)
+                input_tok = result.data.get("input_tokens", 0)
+                output_tok = result.data.get("output_tokens", 0)
+                llm_data["model"] = model
+                llm_data["total_tokens"] = tokens
+                llm_data["input_tokens"] = input_tok
+                llm_data["output_tokens"] = output_tok
+                from src.host.costs import MODEL_COSTS, _DEFAULT_COST
+                ir, or_ = MODEL_COSTS.get(model, _DEFAULT_COST)
+                pt = input_tok or int(tokens * 0.7)
+                ct = output_tok or (tokens - pt)
+                llm_data["cost_usd"] = round((pt / 1000 * ir) + (ct / 1000 * or_), 6)
             event_bus.emit("llm_call", agent=agent_id, data=llm_data)
         return result
 

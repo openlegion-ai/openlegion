@@ -1,7 +1,7 @@
 /**
  * OpenLegion Dashboard — Alpine.js application.
  *
- * Six panels: Fleet, Activity, Blackboard, Costs, Automation, System.
+ * Six panels: Agents, Activity, Blackboard, Costs, Automation, System.
  * Real-time updates via WebSocket + periodic REST polling.
  */
 function dashboard() {
@@ -9,7 +9,7 @@ function dashboard() {
     // Navigation
     activeTab: 'fleet',
     tabs: [
-      { id: 'fleet', label: 'Fleet' },
+      { id: 'fleet', label: 'Agents' },
       { id: 'activity', label: 'Activity' },
       { id: 'blackboard', label: 'Blackboard' },
       { id: 'costs', label: 'Costs' },
@@ -35,7 +35,7 @@ function dashboard() {
     eventTypes: [
       'agent_state', 'message_sent', 'message_received',
       'tool_start', 'tool_result', 'llm_call',
-      'blackboard_write', 'cost_update', 'health_change',
+      'blackboard_write', 'health_change',
     ],
 
     // Agent detail
@@ -50,6 +50,11 @@ function dashboard() {
     availableModels: [],
     availableBrowsers: [],
 
+    // Add agent
+    addAgentMode: false,
+    addAgentForm: { name: '', role: '', model: '', browser_backend: '' },
+    addAgentLoading: false,
+
     // Blackboard
     bbEntries: [],
     bbPrefix: '',
@@ -58,6 +63,7 @@ function dashboard() {
     bbWriteMode: false,
     bbNewKey: '',
     bbNewValue: '{}',
+    bbWriterFilter: '',
 
     // Costs
     costData: {},
@@ -82,10 +88,10 @@ function dashboard() {
     // Settings (V2)
     settingsData: null,
 
-    // Chat
+    // Chat (persistent per agent)
     chatAgent: null,
     chatMessage: '',
-    chatHistory: [],
+    chatHistories: {},
     chatLoading: false,
 
     // Broadcast
@@ -107,7 +113,10 @@ function dashboard() {
     // ── Computed ───────────────────────────────────────────
 
     get filteredEvents() {
-      if (this.eventFilters.size === 0) return this.events;
+      if (this.eventFilters.size === 0) {
+        return this.events.filter(e =>
+          !(e.type === 'agent_state' && e.data?.state === 'registered'));
+      }
       return this.events.filter(e => this.eventFilters.has(e.type));
     },
 
@@ -121,6 +130,15 @@ function dashboard() {
 
     get costTotal() {
       return (this.costData.agents || []).reduce((sum, a) => sum + (a.cost || 0), 0);
+    },
+
+    get filteredBbEntries() {
+      if (!this.bbWriterFilter) return this.bbEntries;
+      return this.bbEntries.filter(e => e.written_by === this.bbWriterFilter);
+    },
+
+    get bbWriters() {
+      return [...new Set(this.bbEntries.map(e => e.written_by))].sort();
     },
 
     // ── Lifecycle ─────────────────────────────────────────
@@ -212,8 +230,8 @@ function dashboard() {
         }
       }
 
-      // Live-update fleet on cost/health changes (debounced)
-      if (evt.type === 'cost_update' || evt.type === 'health_change') {
+      // Live-update fleet on llm_call/health changes (debounced)
+      if (evt.type === 'llm_call' || evt.type === 'health_change') {
         this._debouncedFleetRefresh();
       }
 
@@ -224,8 +242,8 @@ function dashboard() {
         if (this.activeTab === 'blackboard') this.fetchBlackboard();
       }
 
-      // Debounced cost panel refresh on cost updates
-      if (evt.type === 'cost_update' && this.activeTab === 'costs') {
+      // Debounced cost panel refresh on llm_call events
+      if (evt.type === 'llm_call' && this.activeTab === 'costs') {
         if (this._costDebounce) clearTimeout(this._costDebounce);
         this._costDebounce = setTimeout(() => this.fetchCosts(), 2000);
       }
@@ -410,6 +428,50 @@ function dashboard() {
       } catch (e) { console.warn('updateBudget failed:', e); }
     },
 
+    // ── Add / Remove agents ──────────────────────────────
+
+    async addAgent() {
+      const f = this.addAgentForm;
+      if (!f.name.trim()) { this.showToast('Name is required'); return; }
+      this.addAgentLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            name: f.name.trim(),
+            role: f.role.trim(),
+            model: f.model,
+            browser_backend: f.browser_backend,
+          }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          this.showToast(data.ready ? `${data.agent} added and ready` : `${data.agent} added (starting)`);
+          this.addAgentMode = false;
+          this.addAgentForm = { name: '', role: '', model: '', browser_backend: '' };
+          this.fetchAgents();
+        } else {
+          const err = await resp.json();
+          this.showToast(`Error: ${err.detail || 'Failed to add agent'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+      this.addAgentLoading = false;
+    },
+
+    async removeAgent(agentId) {
+      if (!confirm(`Remove agent "${agentId}"? This will stop the container and remove its config.`)) return;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}`, { method: 'DELETE' });
+        if (resp.ok) {
+          this.showToast(`${agentId} removed`);
+          this.fetchAgents();
+        } else {
+          const err = await resp.json();
+          this.showToast(`Error: ${err.detail || 'Failed to remove agent'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
     // ── V2: Blackboard write/delete ───────────────────────
 
     async writeBlackboard() {
@@ -528,24 +590,23 @@ function dashboard() {
       } catch (e) { console.warn('fetchSettings failed:', e); }
     },
 
-    // ── Chat with agent ──────────────────────────────────
+    // ── Chat with agent (persistent per agent) ───────────
 
     openChat(agentId) {
       this.chatAgent = agentId;
-      this.chatHistory = [];
       this.chatMessage = '';
     },
 
     closeChat() {
       this.chatAgent = null;
       this.chatMessage = '';
-      this.chatHistory = [];
     },
 
     async sendChat() {
       if (!this.chatMessage.trim() || !this.chatAgent) return;
       const msg = this.chatMessage.trim();
-      this.chatHistory.push({ role: 'user', content: msg });
+      if (!this.chatHistories[this.chatAgent]) this.chatHistories[this.chatAgent] = [];
+      this.chatHistories[this.chatAgent].push({ role: 'user', content: msg });
       this.chatMessage = '';
       this.chatLoading = true;
       try {
@@ -555,13 +616,13 @@ function dashboard() {
         });
         if (resp.ok) {
           const data = await resp.json();
-          this.chatHistory.push({ role: 'agent', content: data.response });
+          this.chatHistories[this.chatAgent].push({ role: 'agent', content: data.response });
         } else {
           const err = await resp.json();
-          this.chatHistory.push({ role: 'error', content: err.detail || 'Failed' });
+          this.chatHistories[this.chatAgent].push({ role: 'error', content: err.detail || 'Failed' });
         }
       } catch (e) {
-        this.chatHistory.push({ role: 'error', content: e.message });
+        this.chatHistories[this.chatAgent].push({ role: 'error', content: e.message });
       }
       this.chatLoading = false;
     },
@@ -586,25 +647,6 @@ function dashboard() {
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
       this.broadcastLoading = false;
-    },
-
-    // ── Steer ────────────────────────────────────────────
-
-    async steerAgent(agentId) {
-      const msg = prompt(`Steer message for ${agentId}:`);
-      if (!msg) return;
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/steer`, {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ message: msg }),
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          this.showToast(data.result || 'Steered');
-        } else {
-          this.showToast('Steer failed');
-        }
-      } catch (e) { this.showToast(`Error: ${e.message}`); }
     },
 
     // ── Reset ────────────────────────────────────────────
@@ -741,7 +783,6 @@ function dashboard() {
         tool_result: 'text-amber-400',
         llm_call: 'text-purple-400',
         blackboard_write: 'text-cyan-400',
-        cost_update: 'text-rose-400',
         health_change: 'text-red-400',
         // V2 trace event types
         chat: 'text-green-400',
@@ -768,7 +809,6 @@ function dashboard() {
         tool_result: 'bg-amber-400',
         llm_call: 'bg-purple-400',
         blackboard_write: 'bg-cyan-400',
-        cost_update: 'bg-rose-400',
         health_change: 'bg-red-400',
         chat: 'bg-green-400',
         chat_response: 'bg-green-300',
@@ -788,21 +828,34 @@ function dashboard() {
     eventSummary(evt) {
       const d = evt.data || {};
       switch (evt.type) {
-        case 'llm_call':
-          return `model=${d.model || '?'} tokens=${d.total_tokens || '?'}`;
+        case 'llm_call': {
+          const model = (d.model || '?').split('/').pop();
+          const tokens = (d.total_tokens || d.tokens_used || 0).toLocaleString();
+          const cost = d.cost_usd != null ? ` \u00b7 $${d.cost_usd.toFixed(4)}` : '';
+          const dur = d.duration_ms ? ` \u00b7 ${d.duration_ms}ms` : '';
+          const stream = d.streaming ? ' (stream)' : '';
+          return `${model} \u00b7 ${tokens} tok${cost}${dur}${stream}`;
+        }
         case 'tool_start':
           return `${d.tool || d.name || '?'}(${(d.preview || '').substring(0, 60)})`;
         case 'tool_result':
-          return `${d.tool || d.name || '?'} \u2192 ${(d.preview || d.result || '').substring(0, 60)}`;
+          return `${d.tool || d.name || '?'} \u2192 ${(d.preview || d.result || d.output || '').substring(0, 60) || 'done'}`;
         case 'message_sent':
+          return `\u2192 ${(d.message || '').substring(0, 70)}`;
         case 'message_received':
-          return (d.message || '').substring(0, 80);
-        case 'cost_update':
-          return `$${(d.cost_usd || 0).toFixed(4)} (${d.model || '?'})`;
+          return `\u2190 ${(d.message || '').substring(0, 70)}`;
         case 'health_change':
-          return `${d.previous || '?'} \u2192 ${d.current || '?'}`;
+          return `${d.previous || '?'} \u2192 ${d.current || '?'}${d.failures ? ` (${d.failures} failures)` : ''}`;
         case 'blackboard_write':
-          return d.key || '';
+          return [d.key, d.version && `v${d.version}`, d.written_by && `by ${d.written_by}`].filter(Boolean).join(' \u00b7 ');
+        case 'agent_state': {
+          const s = d.state || '?';
+          if (s === 'registered' && d.capabilities) return `registered (${Array.isArray(d.capabilities) ? d.capabilities.length : '?'} tools)`;
+          if (s === 'added') return d.ready ? 'added (ready)' : 'added (starting)';
+          if (s === 'removed') return `removed${d.reason ? ` (${d.reason})` : ''}`;
+          if (s === 'spawned') return d.ready ? 'spawned (ready)' : 'spawned (starting)';
+          return s;
+        }
         default:
           return JSON.stringify(d).substring(0, 80);
       }

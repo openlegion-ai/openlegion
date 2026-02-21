@@ -278,7 +278,6 @@ class DashboardEvent(BaseModel):
         "tool_result",
         "llm_call",
         "blackboard_write",
-        "cost_update",
         "health_change",
     ]
     agent: str = ""
