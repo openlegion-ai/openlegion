@@ -383,7 +383,7 @@ class CredentialVault:
                 completion_tokens = getattr(response.usage, 'completion_tokens', 0) or 0
 
             self._health_tracker.record_success(used_model)
-            yield f"data: {json.dumps({'type': 'done', 'content': collected_content, 'tool_calls': collected_tool_calls, 'tokens_used': tokens_used})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'content': collected_content, 'tool_calls': collected_tool_calls, 'tokens_used': tokens_used, 'model': used_model})}\n\n"
 
             if self.cost_tracker and agent_id and tokens_used:
                 pt = prompt_tokens or int(tokens_used * 0.7)

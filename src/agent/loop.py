@@ -928,17 +928,40 @@ class AgentLoop:
             user_message, system = await self._prepare_chat_turn(user_message)
 
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
-                llm_response = await _llm_call_with_retry(
-                    self.llm.chat,
-                    system=system,
-                    messages=self._chat_messages,
-                    tools=self.skills.get_tool_definitions() or None,
-                )
+                # Try token-level streaming, fall back to non-streaming on error
+                llm_response = None
+                used_streaming = False
+                any_text_streamed = False
+                tools = self.skills.get_tool_definitions() or None
+                try:
+                    async for event in self.llm.chat_stream(
+                        system=system, messages=self._chat_messages, tools=tools,
+                    ):
+                        etype = event.get("type", "")
+                        if etype == "text_delta":
+                            any_text_streamed = True
+                            yield event  # Forward token to caller immediately
+                        elif etype == "done":
+                            llm_response = event["response"]
+                    used_streaming = True
+                except Exception as e:
+                    logger.warning(f"LLM streaming failed ({e}), falling back to non-streaming")
+
+                streamed = llm_response is not None
+                if llm_response is None:
+                    if used_streaming:
+                        logger.warning("LLM stream ended without done event, falling back")
+                    llm_response = await _llm_call_with_retry(
+                        self.llm.chat, system=system, messages=self._chat_messages, tools=tools,
+                    )
+
                 total_tokens += llm_response.tokens_used
 
                 if not llm_response.tool_calls:
                     content = self._resolve_content(llm_response)
-                    if content:
+                    # Emit text_delta for non-streaming fallback only if no tokens
+                    # were already streamed (avoids doubled content on partial failure)
+                    if not streamed and not any_text_streamed and content:
                         yield {"type": "text_delta", "content": content}
                     self._chat_messages.append({"role": "assistant", "content": content})
                     self._log_chat_turn(user_message, content)
@@ -959,7 +982,7 @@ class AgentLoop:
 
                 await self._compact_chat_context(system)
 
-            # Max tool rounds exhausted — force final response.
+            # Max tool rounds exhausted — force final response (non-streaming ok).
             llm_response = await _llm_call_with_retry(
                 self.llm.chat,
                 system=system,

@@ -437,6 +437,8 @@ def create_dashboard_router(
         from src.shared.utils import sanitize_for_prompt
         message = sanitize_for_prompt(message)
 
+        import json as _json
+
         async def event_generator():
             try:
                 async for event in transport.stream_request(
@@ -444,14 +446,12 @@ def create_dashboard_router(
                     json={"message": message}, timeout=120,
                 ):
                     if isinstance(event, dict):
-                        import json as _json
                         yield f"data: {_json.dumps(event, default=str)}\n\n"
                         etype = event.get("type", "")
-                        if event_bus and etype in ("tool_start", "tool_result", "text_delta"):
+                        if event_bus and etype in ("tool_start", "tool_result"):
                             event_bus.emit(etype, agent=agent_id,
                                 data={k: v for k, v in event.items() if k != "type"})
             except Exception as e:
-                import json as _json
                 yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
         from starlette.responses import StreamingResponse

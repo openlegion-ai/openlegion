@@ -16,6 +16,7 @@ Config: DISCORD_BOT_TOKEN in .env, channels.discord in mesh.yaml
 from __future__ import annotations
 
 import asyncio
+import time
 
 from src.channels.base import Channel, PairingManager, chunk_text
 from src.shared.utils import setup_logging
@@ -163,6 +164,28 @@ class DiscordChannel(Channel):
 
     async def _dispatch_and_reply(self, channel, user_id: str, text: str) -> None:
         """Process a message in the background with a typing indicator."""
+        # Resolve target agent for streaming (same logic as Telegram)
+        current = self._get_active_agent(user_id)
+        target = current
+
+        import re as _re
+        match = _re.match(r"^@(\w+)\s+(.+)$", text, _re.DOTALL)
+        if match:
+            agents = self._get_agent_names()
+            if match.group(1) in agents:
+                target = match.group(1)
+
+        # Use streaming dispatch if available for regular messages (not commands)
+        # Note: ! commands are already converted to / before reaching here
+        first_word = text.lstrip("/").split()[0] if text.strip() else ""
+        is_command = text.startswith("/") and first_word in (
+            "use", "agents", "status", "broadcast", "costs", "reset", "help",
+            "addkey", "steer", "paired", "allow", "revoke", "debug",
+        )
+        if self.stream_dispatch_fn and target and not is_command:
+            await self._stream_dispatch_and_reply(channel, user_id, target, text)
+            return
+
         try:
             async with channel.typing():
                 response = await self.handle_message(user_id, text)
@@ -175,6 +198,71 @@ class DiscordChannel(Channel):
                     await channel.send(chunk)
                 except Exception as e:
                     logger.warning(f"Failed to send response: {e}")
+
+    async def _stream_dispatch_and_reply(
+        self, channel, user_id: str, target: str, text: str,
+    ) -> None:
+        """Dispatch with streaming — progressive text updates + tool progress."""
+        streaming_msg = None
+        response_text = ""
+        tool_lines: list[str] = []
+        tool_count = 0
+        last_edit_time = 0.0
+        _EDIT_INTERVAL = 0.5
+
+        try:
+            async with channel.typing():
+                async for event in self.stream_dispatch_fn(target, text):
+                    if not isinstance(event, dict):
+                        continue
+                    etype = event.get("type", "")
+
+                    if etype == "tool_start":
+                        tool_count += 1
+                        name = event.get("name", "?")
+                        tool_lines.append(f"{tool_count}. {name}")
+
+                    elif etype == "tool_result":
+                        output = event.get("output", {})
+                        if tool_lines:
+                            hint = " ✗" if isinstance(output, dict) and output.get("error") else " ✓"
+                            tool_lines[-1] += hint
+
+                    elif etype == "text_delta":
+                        response_text += event.get("content", "")
+                        now = time.monotonic()
+                        if now - last_edit_time >= _EDIT_INTERVAL and response_text.strip():
+                            last_edit_time = now
+                            display = f"[{target}] {response_text}..."
+                            try:
+                                if streaming_msg is None:
+                                    streaming_msg = await channel.send(display[:MAX_DC_LEN])
+                                else:
+                                    await streaming_msg.edit(content=display[:MAX_DC_LEN])
+                            except Exception:
+                                pass
+
+                    elif etype == "done":
+                        response_text = event.get("response", response_text)
+
+        except Exception as e:
+            logger.error(f"Stream dispatch failed for user {user_id}: {e}")
+            response_text = f"Error: {e}"
+
+        if response_text:
+            final_text = f"[{target}] {response_text}"
+            if streaming_msg:
+                try:
+                    await streaming_msg.edit(content=final_text[:MAX_DC_LEN])
+                    if len(final_text) > MAX_DC_LEN:
+                        for chunk in chunk_text(final_text[MAX_DC_LEN:], MAX_DC_LEN):
+                            await channel.send(chunk)
+                except Exception:
+                    for chunk in chunk_text(final_text, MAX_DC_LEN):
+                        await channel.send(chunk)
+            else:
+                for chunk in chunk_text(final_text, MAX_DC_LEN):
+                    await channel.send(chunk)
 
     async def stop(self) -> None:
         if self._client:

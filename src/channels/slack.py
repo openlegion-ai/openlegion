@@ -17,6 +17,7 @@ Uses Socket Mode (no public URL needed).
 from __future__ import annotations
 
 import asyncio
+import time
 
 from src.channels.base import Channel, PairingManager, chunk_text
 from src.shared.utils import setup_logging
@@ -234,6 +235,27 @@ class SlackChannel(Channel):
         self, say, user_key: str, text: str, thread_ts: str | None,
     ) -> None:
         """Process a message in the background."""
+        # Resolve target agent for streaming
+        current = self._get_active_agent(user_key)
+        target = current
+
+        import re as _re
+        match = _re.match(r"^@(\w+)\s+(.+)$", text, _re.DOTALL)
+        if match:
+            agents = self._get_agent_names()
+            if match.group(1) in agents:
+                target = match.group(1)
+
+        # Use streaming for regular messages (not commands)
+        first_word = text.lstrip("/").split()[0] if text.strip() else ""
+        is_command = text.startswith("/") and first_word in (
+            "use", "agents", "status", "broadcast", "costs", "reset", "help",
+            "addkey", "steer", "paired", "allow", "revoke", "debug",
+        )
+        if self.stream_dispatch_fn and target and not is_command:
+            await self._stream_dispatch_and_reply(say, user_key, target, text, thread_ts)
+            return
+
         try:
             response = await self.handle_message(user_key, text)
         except Exception as e:
@@ -245,3 +267,87 @@ class SlackChannel(Channel):
                     await say(text=part, thread_ts=thread_ts)
                 except Exception as e:
                     logger.warning(f"Failed to send response: {e}")
+
+    async def _stream_dispatch_and_reply(
+        self, say, user_key: str, target: str, text: str, thread_ts: str | None,
+    ) -> None:
+        """Dispatch with streaming — progressive text updates via chat.update."""
+        streaming_ts = None  # Slack message ts for editing
+        streaming_channel = None  # Channel where the streaming message lives
+        response_text = ""
+        tool_lines: list[str] = []
+        tool_count = 0
+        last_edit_time = 0.0
+        _EDIT_INTERVAL = 0.5
+
+        try:
+            async for event in self.stream_dispatch_fn(target, text):
+                if not isinstance(event, dict):
+                    continue
+                etype = event.get("type", "")
+
+                if etype == "tool_start":
+                    tool_count += 1
+                    name = event.get("name", "?")
+                    tool_lines.append(f"{tool_count}. {name}")
+
+                elif etype == "tool_result":
+                    output = event.get("output", {})
+                    if tool_lines:
+                        hint = " :x:" if isinstance(output, dict) and output.get("error") else " :white_check_mark:"
+                        tool_lines[-1] += hint
+
+                elif etype == "text_delta":
+                    response_text += event.get("content", "")
+                    now = time.monotonic()
+                    if now - last_edit_time >= _EDIT_INTERVAL and response_text.strip():
+                        last_edit_time = now
+                        display = f"[{target}] {response_text}..."
+                        try:
+                            if streaming_ts is None:
+                                result = await say(
+                                    text=display[:MAX_SLACK_LEN], thread_ts=thread_ts,
+                                )
+                                # Extract ts and channel from say() response
+                                if hasattr(result, "data"):
+                                    result = result.data  # SlackResponse → dict
+                                if isinstance(result, dict):
+                                    streaming_ts = result.get("ts")
+                                    streaming_channel = result.get("channel")
+                            elif self._bolt_app and streaming_ts and streaming_channel:
+                                await self._bolt_app.client.chat_update(
+                                    channel=streaming_channel,
+                                    ts=streaming_ts,
+                                    text=display[:MAX_SLACK_LEN],
+                                )
+                        except Exception:
+                            pass
+
+                elif etype == "done":
+                    response_text = event.get("response", response_text)
+
+        except Exception as e:
+            logger.error(f"Stream dispatch failed for user {user_key}: {e}")
+            response_text = f"Error: {e}"
+
+        if response_text:
+            final_text = f"[{target}] {response_text}"
+            if streaming_ts and streaming_channel and self._bolt_app:
+                try:
+                    await self._bolt_app.client.chat_update(
+                        channel=streaming_channel,
+                        ts=streaming_ts,
+                        text=final_text[:MAX_SLACK_LEN],
+                    )
+                    if len(final_text) > MAX_SLACK_LEN:
+                        for part in chunk_text(final_text[MAX_SLACK_LEN:], MAX_SLACK_LEN):
+                            await say(text=part, thread_ts=thread_ts)
+                except Exception:
+                    for part in chunk_text(final_text, MAX_SLACK_LEN):
+                        await say(text=part, thread_ts=thread_ts)
+            else:
+                for part in chunk_text(final_text, MAX_SLACK_LEN):
+                    try:
+                        await say(text=part, thread_ts=thread_ts)
+                    except Exception as e:
+                        logger.warning(f"Failed to send response: {e}")
