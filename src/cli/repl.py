@@ -314,12 +314,75 @@ class REPLSession:
             click.echo(f"Error: {e}")
 
     def _cmd_edit(self, arg: str) -> None:
-        """Interactive property editor for an agent."""
+        """Interactive property editor for an agent. Auto-applies changes."""
         name = arg.strip() if arg.strip() else self.current
         if name not in self.ctx.agents:
             click.echo(f"Agent '{name}' not found.")
             return
-        _edit_agent_interactive(name, restart_hint="Restart to apply.")
+
+        changed_field = _edit_agent_interactive(name)
+        if not changed_field:
+            return
+
+        if changed_field == "budget":
+            # Budget is enforced by the mesh host — no container restart needed.
+            fresh_cfg = _load_config()
+            budget = fresh_cfg.get("agents", {}).get(name, {}).get("budget", {})
+            if budget and self.ctx.cost_tracker:
+                self.ctx.cost_tracker.set_budget(
+                    name,
+                    daily_usd=budget.get("daily_usd", 10.0),
+                    monthly_usd=budget.get("monthly_usd", 200.0),
+                )
+            click.echo("Applied.")
+        else:
+            # Model, browser, description, system prompt — restart the container.
+            self._restart_agent(name)
+
+    def _restart_agent(self, name: str) -> None:
+        """Stop and restart an agent container with fresh config."""
+        from src.host.transport import HttpTransport
+
+        click.echo(f"Restarting '{name}'...", nl=False)
+
+        # Stop old container
+        try:
+            self.ctx.runtime.stop_agent(name)
+        except Exception:
+            pass
+
+        # Read fresh config
+        fresh_cfg = _load_config()
+        agent_cfg = fresh_cfg.get("agents", {}).get(name, {})
+        default_model = fresh_cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        skills_dir = os.path.abspath(agent_cfg.get("skills_dir", ""))
+        agent_model = agent_cfg.get("model", default_model)
+        agent_mcp_servers = agent_cfg.get("mcp_servers") or None
+        agent_browser_backend = agent_cfg.get("browser_backend", "")
+
+        # Start new container
+        url = self.ctx.runtime.start_agent(
+            agent_id=name,
+            role=agent_cfg.get("role", ""),
+            skills_dir=skills_dir,
+            system_prompt=agent_cfg.get("system_prompt", ""),
+            model=agent_model,
+            mcp_servers=agent_mcp_servers,
+            browser_backend=agent_browser_backend,
+        )
+
+        # Update router and transport
+        self.ctx.router.register_agent(name, url)
+        self.ctx.agent_urls[name] = url
+        if isinstance(self.ctx.transport, HttpTransport):
+            self.ctx.transport.register(name, url)
+
+        # Wait for readiness
+        ready = asyncio.run(self.ctx.runtime.wait_for_agent(name, timeout=60))
+        if ready:
+            click.echo(" ready.")
+        else:
+            click.echo(" failed to start.", err=True)
 
     def _cmd_remove(self, arg: str) -> None:
         """Remove an agent from config and stop its container."""

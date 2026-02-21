@@ -518,8 +518,14 @@ def _prompt_brightdata_key() -> None:
         click.echo("  Skipped. Set OPENLEGION_CRED_BRIGHTDATA_CDP_URL in .env later.\n")
 
 
-def _edit_agent_interactive(name: str, restart_hint: str = "Restart to apply.") -> None:
-    """Interactive property editor for an agent. Reads fresh config."""
+def _edit_agent_interactive(name: str) -> str | None:
+    """Interactive property editor for an agent. Reads fresh config.
+
+    Returns the field name that was changed (``"model"``, ``"browser"``,
+    ``"role"``, ``"system_prompt"``, ``"budget"``), or ``None`` if nothing
+    changed.  Callers decide how to apply the change (restart hint, live
+    restart, cost-tracker update, etc.).
+    """
     cfg = _load_config()
     agent_cfg = cfg.get("agents", {}).get(name, {})
     default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
@@ -528,7 +534,8 @@ def _edit_agent_interactive(name: str, restart_hint: str = "Restart to apply.") 
     current_browser = agent_cfg.get("browser_backend", "basic") or "basic"
     current_desc = agent_cfg.get("role", "")
     current_sysprompt = agent_cfg.get("system_prompt", "")
-    current_budget = agent_cfg.get("daily_budget")
+    budget_cfg = agent_cfg.get("budget", {})
+    current_budget = budget_cfg.get("daily_usd") if budget_cfg else None
 
     click.echo(f"\n  {name}")
     click.echo(f"  Model:       {current_model}")
@@ -559,30 +566,30 @@ def _edit_agent_interactive(name: str, restart_hint: str = "Restart to apply.") 
         new_model = _pick_model_interactive(current_model, label="current")
         if new_model == current_model:
             click.echo(f"Agent '{name}' already uses {current_model}.")
-        else:
-            _update_agent_field(name, "model", new_model)
-            click.echo(f"Agent '{name}' model: {current_model} -> {new_model}")
-            click.echo(restart_hint)
+            return None
+        _update_agent_field(name, "model", new_model)
+        click.echo(f"Agent '{name}' model: {current_model} -> {new_model}")
+        return "model"
 
     elif choice == 2:  # browser
         new_browser = _pick_browser_interactive(current_browser)
         if new_browser == current_browser:
             click.echo(f"Agent '{name}' already uses {current_browser} browser.")
-        else:
-            if new_browser == "advanced":
-                _prompt_brightdata_key()
-            _update_agent_field(name, "browser_backend", new_browser)
-            click.echo(f"Agent '{name}' browser: {current_browser} -> {new_browser}")
-            click.echo(restart_hint)
+            return None
+        if new_browser == "advanced":
+            _prompt_brightdata_key()
+        _update_agent_field(name, "browser_backend", new_browser)
+        click.echo(f"Agent '{name}' browser: {current_browser} -> {new_browser}")
+        return "browser"
 
     elif choice == 3:  # description
         new_desc = click.prompt("  Description", default=current_desc)
         if new_desc != current_desc:
             _update_agent_field(name, "role", new_desc)
             click.echo(f"Agent '{name}' description updated.")
-            click.echo(restart_hint)
-        else:
-            click.echo("No change.")
+            return "role"
+        click.echo("No change.")
+        return None
 
     elif choice == 4:  # system prompt
         if current_sysprompt:
@@ -591,23 +598,26 @@ def _edit_agent_interactive(name: str, restart_hint: str = "Restart to apply.") 
         if new_sysprompt != current_sysprompt:
             _update_agent_field(name, "system_prompt", new_sysprompt)
             click.echo(f"Agent '{name}' system prompt updated.")
-            click.echo(restart_hint)
-        else:
-            click.echo("No change.")
+            return "system_prompt"
+        click.echo("No change.")
+        return None
 
     elif choice == 5:  # budget
         default_budget = str(current_budget) if current_budget is not None else ""
         new_budget_str = click.prompt("  Daily budget (USD)", default=default_budget)
         if not new_budget_str.strip():
             click.echo("No change.")
-            return
+            return None
         try:
             new_budget = float(new_budget_str)
-            _update_agent_field(name, "daily_budget", new_budget)
+            _update_agent_field(name, "budget", {"daily_usd": new_budget})
             click.echo(f"Agent '{name}' budget: ${new_budget:.2f}/day")
-            click.echo(restart_hint)
+            return "budget"
         except ValueError:
             click.echo("Invalid number. Budget not changed.")
+            return None
+
+    return None
 
 
 def _truncate(text: str, length: int) -> str:
