@@ -1,0 +1,87 @@
+/* OpenLegion Dashboard — custom styles beyond Tailwind */
+
+/* Hide panels until Alpine.js initializes */
+[x-cloak] {
+  display: none !important;
+}
+
+/* Pulse animation for active agent cards */
+@keyframes pulse-border {
+  0%, 100% { border-color: rgba(99, 102, 241, 0.2); }
+  50% { border-color: rgba(99, 102, 241, 0.6); }
+}
+
+.pulse-border {
+  animation: pulse-border 2s ease-in-out infinite;
+}
+
+/* Event type badge — monospace pill */
+.event-badge {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.65rem;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+/* Flash highlight for recent blackboard writes */
+@keyframes flash-yellow {
+  0% { background-color: rgba(234, 179, 8, 0.15); }
+  100% { background-color: transparent; }
+}
+
+.flash-yellow {
+  animation: flash-yellow 5s ease-out forwards;
+}
+
+/* Waterfall bar for trace inspector */
+.waterfall-bar {
+  position: relative;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(99, 102, 241, 0.4);
+  min-width: 4px;
+  transition: width 0.3s ease;
+}
+
+/* Dark scrollbar — WebKit */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 5px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(55, 55, 75, 0.6);
+  border-radius: 3px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(75, 75, 100, 0.8);
+}
+
+/* Dark scrollbar — Firefox */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(55, 55, 75, 0.6) transparent;
+}
+
+/* Smooth transitions for panel switching */
+main > div {
+  animation: fade-in 0.15s ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Keyboard focus — visible ring on tab-navigation only */
+button:focus-visible,
+input:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.6);
+  outline-offset: 2px;
+  border-radius: 4px;
+}

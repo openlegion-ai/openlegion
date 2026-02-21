@@ -206,6 +206,15 @@ class RuntimeContext:
         )
         self.trace_store = TraceStore()
 
+        # Create HealthMonitor early so the dashboard router can reference it.
+        # Only register() is called here; start() happens in _start_background().
+        from src.host.health import HealthMonitor
+
+        self.health_monitor = HealthMonitor(
+            runtime=self.runtime, transport=self.transport, router=self.router,
+            event_bus=self.event_bus,
+        )
+
     def _start_agents(self) -> None:
         from src.host.runtime import DockerBackend, SandboxBackend
         from src.host.transport import HttpTransport
@@ -267,6 +276,8 @@ class RuntimeContext:
             self.agent_urls[agent_id] = url
             if isinstance(self.transport, HttpTransport):
                 self.transport.register(agent_id, url)
+            if self.health_monitor:
+                self.health_monitor.register(agent_id)
 
     def _setup_dispatch(self) -> None:
         from src.host.lanes import LaneManager
@@ -333,6 +344,19 @@ class RuntimeContext:
         )
         app.include_router(create_webhook_router(self.orchestrator))
         app.include_router(webhook_manager.create_router())
+
+        from src.dashboard.server import create_dashboard_router
+
+        dashboard_router = create_dashboard_router(
+            blackboard=self.blackboard,
+            health_monitor=self.health_monitor,
+            cost_tracker=self.cost_tracker,
+            trace_store=self.trace_store,
+            event_bus=self.event_bus,
+            agent_registry=self.router.agent_registry,
+            mesh_port=mesh_port,
+        )
+        app.include_router(dashboard_router)
         self._app = app
 
         server_config = uvicorn.Config(app, host="0.0.0.0", port=mesh_port, log_level="warning")
@@ -368,6 +392,7 @@ class RuntimeContext:
         click.echo()
         echo_ok(f"Mesh host on port {mesh_port}")
         echo_ok(f"Isolation: {self._backend_label}")
+        echo_ok(f"Dashboard: http://localhost:{mesh_port}/dashboard")
 
         # Wait for agents
         async def _wait_all_agents():
@@ -422,17 +447,6 @@ class RuntimeContext:
             echo_ok(f"Cron scheduler: {len(self.cron_scheduler.jobs)} jobs loaded")
 
     def _start_background(self) -> None:
-        from src.host.health import HealthMonitor
-
-        agents_cfg = self.cfg.get("agents", {})
-
-        self.health_monitor = HealthMonitor(
-            runtime=self.runtime, transport=self.transport, router=self.router,
-            event_bus=self.event_bus,
-        )
-        for agent_id in agents_cfg:
-            self.health_monitor.register(agent_id)
-
         # Start cron
         def run_cron():
             loop = asyncio.new_event_loop()
