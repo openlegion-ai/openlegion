@@ -221,7 +221,7 @@ class ContextManager:
                 return 0
 
             # Write human-readable summary to MEMORY.md
-            lines = [f"- **{f['key']}**: {f['value']}" for f in facts if "key" in f and "value" in f]
+            lines = [f"- **{f['key']}**: {f['value']}" for f in facts if f.get("key") and f.get("value")]
             if lines and self.workspace:
                 self.workspace.append_memory(
                     f"\n## {label} ({_now_str()})\n\n" + "\n".join(lines),
@@ -245,7 +245,12 @@ class ContextManager:
         self, system_prompt: str, messages: list[dict],
     ) -> None:
         """Extract structured facts at 60% and save to workspace + memory store."""
-        await self._extract_and_store_facts(messages, label="Proactive Flush")
+        try:
+            await self._extract_and_store_facts(messages, label="Proactive Flush")
+        except Exception as e:
+            # Reset so flush can be retried on the next call
+            self._flush_triggered = False
+            logger.warning(f"Proactive flush failed, will retry: {e}")
 
     async def _flush_to_memory(
         self, system_prompt: str, messages: list[dict],
@@ -287,8 +292,18 @@ class ContextManager:
             "content": f"## Conversation Summary (auto-compacted)\n\n{summary}",
         }
 
-        recent = messages[-4:] if len(messages) > 4 else messages
-        result = [summary_msg] + recent
+        # Check if the message right after the summary would be "user" role,
+        # which would create two consecutive user messages (breaking LLM APIs).
+        # If so, insert a bridge assistant message and keep 3 recent to stay compact.
+        tail_start = -4 if len(messages) > 4 else 0
+        needs_bridge = messages[tail_start:] and messages[tail_start].get("role") == "user"
+        if needs_bridge:
+            recent = messages[-3:] if len(messages) > 3 else messages
+            bridge = {"role": "assistant", "content": "Understood, continuing from the summary above."}
+            result = [summary_msg, bridge] + recent
+        else:
+            recent = messages[-4:] if len(messages) > 4 else messages
+            result = [summary_msg] + recent
         logger.info(
             f"Compacted {len(messages)} messages -> {len(result)} "
             f"(usage: {int(self.usage(result) * 100)}%)"
@@ -296,11 +311,37 @@ class ContextManager:
         return result
 
     def _hard_prune(self, messages: list[dict]) -> list[dict]:
-        """Emergency: keep only the first and last few messages."""
-        if len(messages) <= 6:
+        """Emergency: keep first message and last N messages (group-aware).
+
+        Groups tool_calls with their tool results so we never orphan a
+        tool_call without its matching tool responses.
+        """
+        if len(messages) <= 8:
             return messages
-        pruned = messages[:1] + messages[-4:]
-        logger.warning(f"Hard-pruned {len(messages)} -> {len(pruned)} messages")
+
+        # Build groups: assistant(tool_calls) + following tool messages stay together
+        groups: list[list[dict]] = []
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                group = [msg]
+                i += 1
+                while i < len(messages) and messages[i].get("role") == "tool":
+                    group.append(messages[i])
+                    i += 1
+                groups.append(group)
+            else:
+                groups.append([msg])
+                i += 1
+
+        if len(groups) <= 5:
+            return messages
+
+        # Keep first group + last 4 groups
+        kept = groups[:1] + groups[-4:]
+        pruned = [msg for group in kept for msg in group]
+        logger.warning(f"Hard-pruned {len(messages)} -> {len(pruned)} messages (group-aware)")
         return pruned
 
     @staticmethod

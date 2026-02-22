@@ -33,6 +33,7 @@ SILENT_REPLY_TOKEN = "__SILENT__"
 _RETRYABLE_STATUS_CODES = {429, 502, 503}
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1  # seconds: 1, 2, 4
+_TOOL_TIMEOUT = 300  # seconds — hard ceiling for a single tool execution
 
 
 async def _llm_call_with_retry(llm_chat_fn, *, system, messages, tools, **kwargs):
@@ -333,12 +334,15 @@ class AgentLoop:
                             self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
                         else:
                             try:
-                                result = await self.skills.execute(
-                                    tool_call.name,
-                                    tool_call.arguments,
-                                    mesh_client=self.mesh_client,
-                                    workspace_manager=self.workspace,
-                                    memory_store=self.memory,
+                                result = await asyncio.wait_for(
+                                    self.skills.execute(
+                                        tool_call.name,
+                                        tool_call.arguments,
+                                        mesh_client=self.mesh_client,
+                                        workspace_manager=self.workspace,
+                                        memory_store=self.memory,
+                                    ),
+                                    timeout=_TOOL_TIMEOUT,
                                 )
                                 result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
                                 result_str = sanitize_for_prompt(result_str)
@@ -349,8 +353,22 @@ class AgentLoop:
                                         "identical arguments and received the same result. Consider "
                                         "a different approach.]\n" + result_str
                                     )
-                                await self._learn(tool_call.name, tool_call.arguments, result)
-                                self._maybe_reload_skills(result)
+                                try:
+                                    await self._learn(tool_call.name, tool_call.arguments, result)
+                                    self._maybe_reload_skills(result)
+                                except Exception as learn_err:
+                                    logger.warning("Post-tool learning failed for %s: %s", tool_call.name, learn_err)
+                            except asyncio.TimeoutError:
+                                result_str = json.dumps({"error": f"Tool {tool_call.name} timed out after {_TOOL_TIMEOUT}s"})
+                                result_str = sanitize_for_prompt(result_str)
+                                self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
+                                result = {"error": f"Timed out after {_TOOL_TIMEOUT}s"}
+                                logger.error(f"Tool {tool_call.name} timed out after {_TOOL_TIMEOUT}s")
+                                self._record_failure(
+                                    tool_call.name, f"Timed out after {_TOOL_TIMEOUT}s",
+                                    truncate(str(tool_call.arguments), 200),
+                                    arguments=tool_call.arguments,
+                                )
                             except Exception as e:
                                 result_str = json.dumps({"error": str(e)})
                                 result_str = sanitize_for_prompt(result_str)
@@ -768,12 +786,15 @@ class AgentLoop:
             self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
         else:
             try:
-                result = await self.skills.execute(
-                    tool_call.name,
-                    tool_call.arguments,
-                    mesh_client=self.mesh_client,
-                    workspace_manager=self.workspace,
-                    memory_store=self.memory,
+                result = await asyncio.wait_for(
+                    self.skills.execute(
+                        tool_call.name,
+                        tool_call.arguments,
+                        mesh_client=self.mesh_client,
+                        workspace_manager=self.workspace,
+                        memory_store=self.memory,
+                    ),
+                    timeout=_TOOL_TIMEOUT,
                 )
                 result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
                 result_str = sanitize_for_prompt(result_str)
@@ -784,7 +805,21 @@ class AgentLoop:
                         "identical arguments and received the same result. Consider "
                         "a different approach.]\n" + result_str
                     )
-                await self._learn(tool_call.name, tool_call.arguments, result)
+                try:
+                    await self._learn(tool_call.name, tool_call.arguments, result)
+                except Exception as learn_err:
+                    logger.warning("Post-tool learning failed for %s: %s", tool_call.name, learn_err)
+            except asyncio.TimeoutError:
+                result_str = json.dumps({"error": f"Tool {tool_call.name} timed out after {_TOOL_TIMEOUT}s"})
+                result_str = sanitize_for_prompt(result_str)
+                self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
+                result = {"error": f"Timed out after {_TOOL_TIMEOUT}s"}
+                logger.error(f"Chat tool {tool_call.name} timed out after {_TOOL_TIMEOUT}s")
+                self._record_failure(
+                    tool_call.name, f"Timed out after {_TOOL_TIMEOUT}s",
+                    truncate(str(tool_call.arguments), 200),
+                    arguments=tool_call.arguments,
+                )
             except Exception as e:
                 result_str = json.dumps({"error": str(e)})
                 result_str = sanitize_for_prompt(result_str)

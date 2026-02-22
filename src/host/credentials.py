@@ -10,6 +10,7 @@ Env var format: OPENLEGION_CRED_<SERVICE>_<KEY_NAME>
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import Callable
@@ -92,6 +93,7 @@ class CredentialVault:
         self.service_handlers: dict[str, Callable] = {}
         self.cost_tracker = cost_tracker
         self._http_client: httpx.AsyncClient | None = None
+        self._budget_locks: dict[str, asyncio.Lock] = {}
         self._load_credentials()
         self._register_handlers()
 
@@ -169,38 +171,59 @@ class CredentialVault:
     async def execute_api_call(
         self, request: APIProxyRequest, agent_id: str = "",
     ) -> APIProxyResponse:
-        """Execute an API call on behalf of an agent."""
-        if self.cost_tracker and agent_id and request.service in ("llm", "anthropic", "openai"):
-            budget = self.cost_tracker.check_budget(agent_id)
-            if not budget["allowed"]:
-                return APIProxyResponse(
-                    success=False,
-                    error=(
-                        f"Budget exceeded: ${budget['daily_used']:.2f}/${budget['daily_limit']:.2f} daily, "
-                        f"${budget['monthly_used']:.2f}/${budget['monthly_limit']:.2f} monthly"
-                    ),
-                )
+        """Execute an API call on behalf of an agent.
 
-        handler = self.service_handlers.get(request.service)
-        if not handler:
-            return APIProxyResponse(success=False, error=f"Unknown service: {request.service}")
-        try:
-            response = await handler(request)
+        Budget check + execute + cost track are serialized per-agent to
+        prevent two concurrent calls from both passing the budget check
+        before either is charged.
+        """
+        is_llm = request.service in ("llm", "anthropic", "openai")
+        use_budget_lock = bool(self.cost_tracker and agent_id and is_llm)
 
-            if self.cost_tracker and agent_id and response.success and response.data:
-                tokens_used = response.data.get("tokens_used", 0)
-                if tokens_used:
-                    model = response.data.get(
-                        "model", request.params.get("model", "unknown"),
+        if use_budget_lock:
+            if agent_id not in self._budget_locks:
+                self._budget_locks[agent_id] = asyncio.Lock()
+            lock = self._budget_locks[agent_id]
+        else:
+            lock = None
+
+        async def _execute() -> APIProxyResponse:
+            if self.cost_tracker and agent_id and is_llm:
+                budget = self.cost_tracker.check_budget(agent_id)
+                if not budget["allowed"]:
+                    return APIProxyResponse(
+                        success=False,
+                        error=(
+                            f"Budget exceeded: ${budget['daily_used']:.2f}/${budget['daily_limit']:.2f} daily, "
+                            f"${budget['monthly_used']:.2f}/${budget['monthly_limit']:.2f} monthly"
+                        ),
                     )
-                    prompt_tokens = response.data.get("input_tokens") or int(tokens_used * 0.7)
-                    completion_tokens = response.data.get("output_tokens") or (tokens_used - prompt_tokens)
-                    self.cost_tracker.track(agent_id, model, prompt_tokens, completion_tokens)
 
-            return response
-        except Exception as e:
-            logger.error(f"API call failed for {request.service}/{request.action}: {e}")
-            return APIProxyResponse(success=False, error=str(e))
+            handler = self.service_handlers.get(request.service)
+            if not handler:
+                return APIProxyResponse(success=False, error=f"Unknown service: {request.service}")
+            try:
+                response = await handler(request)
+
+                if self.cost_tracker and agent_id and response.success and response.data:
+                    tokens_used = response.data.get("tokens_used", 0)
+                    if tokens_used:
+                        model = response.data.get(
+                            "model", request.params.get("model", "unknown"),
+                        )
+                        prompt_tokens = response.data.get("input_tokens") or int(tokens_used * 0.7)
+                        completion_tokens = response.data.get("output_tokens") or (tokens_used - prompt_tokens)
+                        self.cost_tracker.track(agent_id, model, prompt_tokens, completion_tokens)
+
+                return response
+            except Exception as e:
+                logger.error(f"API call failed for {request.service}/{request.action}: {e}")
+                return APIProxyResponse(success=False, error=str(e))
+
+        if lock is not None:
+            async with lock:
+                return await _execute()
+        return await _execute()
 
     # Provider prefix → credential key mapping (shared by key + base lookups)
     _PROVIDER_KEY_MAP = {

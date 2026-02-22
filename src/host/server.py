@@ -75,11 +75,47 @@ def create_mesh_app(
 
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
 
-    # Vault resolve rate limiting: max 5 resolves per agent per 60 seconds
-    _VAULT_RESOLVE_LIMIT = 5
-    _VAULT_RESOLVE_WINDOW = 60
-    _vault_resolve_ts: dict[str, list[float]] = defaultdict(list)
-    _vault_rate_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+    # -- Input validation helpers ------------------------------------------------
+    import re as _re
+
+    _AGENT_ID_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+    _MAX_SYSTEM_PROMPT = 10_000
+
+    def _validate_agent_id(agent_id: str) -> str:
+        if not agent_id or not _AGENT_ID_RE.match(agent_id):
+            raise HTTPException(400, f"Invalid agent_id: must be 1-64 alphanumeric/hyphen/underscore chars")
+        return agent_id
+
+    def _validate_port(port: int) -> int:
+        if not isinstance(port, int) or port < 1024 or port > 65535:
+            raise HTTPException(400, f"Invalid port: must be 1024-65535, got {port}")
+        return port
+
+    # -- Per-agent rate limiting --------------------------------------------------
+    # Each bucket is keyed by (endpoint_name, agent_id).
+    _rate_ts: dict[str, list[float]] = defaultdict(list)
+    _rate_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+    _RATE_LIMITS: dict[str, tuple[int, int]] = {
+        # (max_requests, window_seconds)
+        "vault_resolve": (5, 60),
+        "blackboard_read": (200, 60),
+        "blackboard_write": (100, 60),
+        "publish": (200, 60),
+        "cron_create": (10, 3600),
+    }
+
+    async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
+        """Enforce per-agent rate limit. Raises 429 if exceeded."""
+        limit, window = _RATE_LIMITS.get(endpoint, (100, 60))
+        bucket_key = f"{endpoint}:{agent_id}"
+        async with _rate_locks[bucket_key]:
+            now = time.time()
+            ts_list = _rate_ts[bucket_key]
+            ts_list[:] = [t for t in ts_list if now - t < window]
+            if len(ts_list) >= limit:
+                raise HTTPException(429, f"Rate limit exceeded for {endpoint}")
+            ts_list.append(now)
 
     def _verify_auth(agent_id: str, request: Request) -> None:
         """Verify agent identity via auth token. No-op when auth is not configured."""
@@ -121,6 +157,7 @@ def create_mesh_app(
     async def list_blackboard(prefix: str, agent_id: str, request: Request) -> list[dict]:
         """List blackboard entries by prefix."""
         _verify_auth(agent_id, request)
+        await _check_rate_limit("blackboard_read", agent_id)
         if not permissions.can_read_blackboard(agent_id, prefix):
             raise HTTPException(403, f"Agent {agent_id} cannot read {prefix}")
         entries = blackboard.list_by_prefix(prefix)
@@ -130,6 +167,7 @@ def create_mesh_app(
     async def read_blackboard(key: str, agent_id: str, request: Request) -> dict:
         """Read a blackboard entry. Agent must have read permission."""
         _verify_auth(agent_id, request)
+        await _check_rate_limit("blackboard_read", agent_id)
         if not permissions.can_read_blackboard(agent_id, key):
             raise HTTPException(403, f"Agent {agent_id} cannot read {key}")
         entry = blackboard.read(key)
@@ -141,6 +179,7 @@ def create_mesh_app(
     async def write_blackboard(key: str, agent_id: str, value: dict, request: Request) -> dict:
         """Write to blackboard. Agent must have write permission."""
         _verify_auth(agent_id, request)
+        await _check_rate_limit("blackboard_write", agent_id)
         if not permissions.can_write_blackboard(agent_id, key):
             raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
         entry = blackboard.write(key, value, written_by=agent_id)
@@ -159,6 +198,7 @@ def create_mesh_app(
     async def publish_event(event: MeshEvent, request: Request) -> dict:
         """Publish an event to a topic."""
         _verify_auth(event.source, request)
+        await _check_rate_limit("publish", event.source)
         if not permissions.can_publish(event.source, event.topic):
             raise HTTPException(403, f"Agent {event.source} cannot publish to {event.topic}")
         if trace_store:
@@ -361,18 +401,7 @@ def create_mesh_app(
         if not name:
             raise HTTPException(400, "name is required")
 
-        # Rate limit: max N resolves per agent per window
-        async with _vault_rate_locks[agent_id]:
-            now = time.time()
-            ts_list = _vault_resolve_ts[agent_id]
-            ts_list[:] = [t for t in ts_list if now - t < _VAULT_RESOLVE_WINDOW]
-            if len(ts_list) >= _VAULT_RESOLVE_LIMIT:
-                _server_logger.warning(
-                    "Vault resolve rate limit hit",
-                    extra={"extra_data": {"agent_id": agent_id, "name": name}},
-                )
-                raise HTTPException(429, "Vault resolve rate limit exceeded")
-            ts_list.append(now)
+        await _check_rate_limit("vault_resolve", agent_id)
 
         # Audit log every resolve
         _server_logger.info(
@@ -390,10 +419,12 @@ def create_mesh_app(
     @app.post("/mesh/register")
     async def register_agent(data: dict, request: Request) -> dict:
         """Agent registers itself with the mesh on startup."""
-        agent_id = data["agent_id"]
+        agent_id = _validate_agent_id(data.get("agent_id", ""))
         _verify_auth(agent_id, request)
         capabilities = data.get("capabilities", [])
-        port = data.get("port", 8400)
+        if not isinstance(capabilities, list) or len(capabilities) > 50:
+            raise HTTPException(400, "capabilities must be a list of at most 50 items")
+        port = _validate_port(data.get("port", 8400))
 
         existing = router.agent_registry.get(agent_id)
         if existing:
@@ -447,9 +478,11 @@ def create_mesh_app(
         """Create a cron job. Body: {agent_id, schedule, message, heartbeat?}."""
         if cron_scheduler is None:
             raise HTTPException(503, "Cron scheduler not available")
-        agent_id = data.get("agent_id")
+        agent_id = data.get("agent_id", "")
         if agent_id:
+            _validate_agent_id(agent_id)
             _verify_auth(agent_id, request)
+            await _check_rate_limit("cron_create", agent_id)
         schedule = data.get("schedule")
         message = data.get("message", "")
         heartbeat = data.get("heartbeat", False)
@@ -506,10 +539,16 @@ def create_mesh_app(
         if container_manager is None:
             raise HTTPException(503, "Container manager not available")
         role = data.get("role", "assistant")
+        if not isinstance(role, str) or len(role) > 64:
+            raise HTTPException(400, "role must be a string of at most 64 chars")
         spawned_by = data.get("spawned_by", "unknown")
         model = data.get("model", "")
         ttl = data.get("ttl", 3600)
+        if not isinstance(ttl, (int, float)) or ttl < 60 or ttl > 86400:
+            raise HTTPException(400, "ttl must be 60-86400 seconds")
         system_prompt = data.get("system_prompt", f"You are a '{role}' agent.")
+        if len(system_prompt) > _MAX_SYSTEM_PROMPT:
+            raise HTTPException(400, f"system_prompt exceeds {_MAX_SYSTEM_PROMPT} char limit")
         from src.shared.utils import generate_id
         agent_id = generate_id("spawn")
         try:
@@ -547,10 +586,17 @@ def create_mesh_app(
     # === Agent History Access ===
 
     @app.get("/mesh/agents/{agent_id}/history")
-    async def get_agent_history(agent_id: str, requesting_agent: str = "") -> dict:
+    async def get_agent_history(agent_id: str, request: Request, requesting_agent: str = "") -> dict:
         """Retrieve an agent's daily logs. Permission-checked."""
-        if requesting_agent and not permissions.can_message(requesting_agent, agent_id):
-            raise HTTPException(403, f"Agent {requesting_agent} cannot read history of {agent_id}")
+        if requesting_agent:
+            _verify_auth(requesting_agent, request)
+            if not permissions.can_message(requesting_agent, agent_id):
+                raise HTTPException(403, f"Agent {requesting_agent} cannot read history of {agent_id}")
+        else:
+            # Internal/mesh callers must provide a requesting_agent for audit.
+            # Allow mesh-internal calls (from dashboard, health monitor, etc.)
+            # but log the unauthenticated access.
+            _server_logger.debug("History access for %s without requesting_agent (mesh-internal)", agent_id)
         agent_entry = router.agent_registry.get(agent_id)
         if not agent_entry:
             raise HTTPException(404, f"Agent not found: {agent_id}")

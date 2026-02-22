@@ -328,12 +328,31 @@ def _set_collaborative_permissions() -> None:
     _save_permissions(perms)
 
 
+def _validate_agent_name(name: str) -> str:
+    """Validate and return a safe agent name.
+
+    Rejects path traversal, slashes, and non-alphanumeric chars
+    (aside from hyphens and underscores).
+    """
+    import re
+
+    if not name or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", name):
+        raise ValueError(
+            f"Invalid agent name '{name}': must be 1–64 alphanumeric chars, "
+            "hyphens, or underscores (must start with a letter or digit)."
+        )
+    return name
+
+
 def _create_agent(
     name: str, description: str, model: str, browser_backend: str = "",
 ) -> None:
     """Create an agent: config, permissions, skills directory."""
+    name = _validate_agent_name(name)
+    from src.shared.utils import sanitize_for_prompt
+    safe_desc = sanitize_for_prompt(description)
     system_prompt = (
-        f"You are the '{name}' agent. {description} "
+        f"You are the '{name}' agent. {safe_desc} "
         "Use your tools and knowledge to accomplish tasks. "
         "Check PROJECT.md for the current priorities and constraints."
     )

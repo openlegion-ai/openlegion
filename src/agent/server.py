@@ -37,17 +37,19 @@ logger = setup_logging("agent.server")
 def create_agent_app(loop: AgentLoop) -> FastAPI:
     """Create the FastAPI application for an agent container."""
     app = FastAPI(title=f"OpenLegion Agent: {loop.agent_id}")
+    _task_accept_lock = asyncio.Lock()
 
     @app.post("/task")
     async def receive_task(assignment: TaskAssignment, request: Request) -> dict:
         """Accept a task. Returns immediately; result sent back via mesh."""
-        if loop.state != "idle":
-            return {"accepted": False, "status": "busy", "error": "Agent is working"}
+        async with _task_accept_lock:
+            if loop.state != "idle":
+                return {"accepted": False, "status": "busy", "error": "Agent is working"}
 
-        # Transition to "working" immediately so the orchestrator never
-        # sees a stale "idle" state between accept and task start.
-        loop.state = "working"
-        loop.current_task = assignment.task_id
+            # Transition to "working" immediately so the orchestrator never
+            # sees a stale "idle" state between accept and task start.
+            loop.state = "working"
+            loop.current_task = assignment.task_id
         _trace_id = request.headers.get("x-trace-id")
 
         async def run() -> None:
@@ -158,7 +160,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             f"Message from {msg.from_agent} ({msg.type}): "
             f"{_summarize_payload(msg.payload)}"
         )
-        loop.workspace.append_daily_log(content)
+        if loop.workspace:
+            loop.workspace.append_daily_log(content)
         logger.info(f"Received message from {msg.from_agent}: {msg.type}")
         return {"received": True, "from": msg.from_agent, "type": msg.type}
 

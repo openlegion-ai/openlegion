@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -105,9 +106,32 @@ class CronScheduler:
             logger.warning(f"Failed to load cron config: {e}")
 
     def _save(self) -> None:
+        """Persist jobs to cron.json atomically (write-to-temp + rename)."""
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         data = {"jobs": [asdict(j) for j in self.jobs.values()]}
-        self.config_path.write_text(json.dumps(data, indent=2) + "\n")
+        content = json.dumps(data, indent=2) + "\n"
+        # Atomic write: write to a temp file in the same directory, then rename.
+        # This prevents partial reads if two async tasks save concurrently.
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.config_path.parent), suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+        except BaseException:
+            # os.fdopen failed or write failed — close fd if still open
+            try:
+                os.close(fd)
+            except OSError:
+                pass  # already closed by fdopen
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
+        try:
+            Path(tmp_path).replace(self.config_path)
+        except Exception:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
 
     def add_job(
         self, agent: str, schedule: str, message: str,
