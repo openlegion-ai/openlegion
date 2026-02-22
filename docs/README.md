@@ -13,7 +13,7 @@ Comprehensive documentation for the OpenLegion multi-agent runtime.
 | [Memory System](memory.md) | Five-layer memory architecture, write-then-compact pattern |
 | [Workflows](workflows.md) | DAG-based orchestration, step dependencies, conditions |
 | [Configuration](configuration.md) | All config files, environment variables, agent definitions |
-| [Channels](channels.md) | Telegram, Discord, and webhook channel setup |
+| [Channels](channels.md) | Telegram, Discord, Slack, WhatsApp, and webhook channel setup |
 | [Dashboard](dashboard.md) | Real-time web dashboard for fleet observability and management |
 | [Triggering & Automation](triggering.md) | Cron, heartbeats, webhooks, file watchers |
 | [Development & Testing](development.md) | Testing guide, code patterns, adding new components |

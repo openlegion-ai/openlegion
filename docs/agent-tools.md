@@ -67,6 +67,12 @@ The backend is selected per-agent via the `BROWSER_BACKEND` environment variable
 | `save_artifact` | `name`, `content` | Save deliverable to workspace and register on blackboard |
 | `notify_user` | `message` | Send a notification to the user across all connected channels (CLI, Telegram, Discord, Slack, etc.) |
 
+### Workspace
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `update_workspace` | `filename`, `content` | Update a writable workspace file (HEARTBEAT.md, USER.md, MEMORY.md) to persist learnings across sessions |
+
 ### Scheduling & Automation
 
 | Tool | Parameters | Description |
@@ -89,7 +95,16 @@ The backend is selected per-agent via the `BROWSER_BACKEND` environment variable
 | `create_skill` | `name`, `code` | Write a new Python skill at runtime |
 | `list_custom_skills` | -- | List all custom skills the agent has created |
 | `reload_skills` | -- | Hot-reload all skills from disk |
-| `spawn_agent` | `role`, `system_prompt`, `ttl` | Spawn an ephemeral sub-agent (default TTL: 3600s) |
+| `spawn_agent` | `role`, `system_prompt`, `ttl` | Spawn an ephemeral sub-agent in a new container (default TTL: 3600s) |
+
+### Subagents (In-Container)
+
+Lightweight subagents that run inside the same container as the parent agent, sharing the same environment but with their own memory and workspace.
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `spawn_subagent` | `role`, `task`, `system_prompt`, `ttl` | Spawn a lightweight subagent to handle a subtask in parallel |
+| `list_subagents` | -- | List active subagents spawned by this agent and their status |
 
 ### Credential Vault
 

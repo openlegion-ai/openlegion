@@ -5,8 +5,8 @@
 > Chat via Telegram, Discord, Slack, or WhatsApp. Built-in cost controls. 100+ LLM providers.
 
 [![AGPLv3 License](https://img.shields.io/badge/license-AGPLv3-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
-[![Tests: 954](https://img.shields.io/badge/tests-954%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
+[![Tests: 1102](https://img.shields.io/badge/tests-1102%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -54,7 +54,7 @@
 
 ## Quick Start
 
-**Requirements:** Python 3.11+, Docker (running), an LLM API key ([Anthropic](https://console.anthropic.com/) / [Moonshot](https://platform.moonshot.cn/) / [OpenAI](https://platform.openai.com/api-keys))
+**Requirements:** Python 3.10+, Docker (running), an LLM API key ([Anthropic](https://console.anthropic.com/) / [Moonshot](https://platform.moonshot.cn/) / [OpenAI](https://platform.openai.com/api-keys))
 
 **macOS / Linux:**
 
@@ -116,8 +116,8 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 954 tests including full Docker E2E |
-| **Codebase size** | 430,000+ lines | ~14,000 lines — auditable in a day |
+| **Test coverage** | Minimal | 1102 tests including full Docker E2E |
+| **Codebase size** | 430,000+ lines | ~19,000 lines — auditable in a day |
 
 ---
 
@@ -127,11 +127,11 @@ OpenLegion is an open-source **autonomous AI agent framework** for running multi
 fleets in isolated Docker containers. Each agent gets its own memory, tools, schedule,
 and budget — coordinated through deterministic YAML workflows with no LLM routing layer.
 
-Chat with your agent fleet via **Telegram**, **Discord**, or CLI. Agents act autonomously
+Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp**, or CLI. Agents act autonomously
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**954 tests passing** across **~14,000 lines** of application code.
+**1102 tests passing** across **~19,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. AGPLv3 License.
 
@@ -400,6 +400,7 @@ canonicalized parameters and results over a 15-call sliding window.
 | `list_shared_state` | Browse blackboard entries by prefix |
 | `publish_event` | Publish event to mesh pub/sub |
 | `save_artifact` | Save deliverable file and register on blackboard |
+| `update_workspace` | Update identity files (HEARTBEAT.md, USER.md) |
 | `notify_user` | Send notification to user across all connected channels |
 | `set_cron` | Schedule a recurring job |
 | `set_heartbeat` | Enable autonomous monitoring with probes |
@@ -609,6 +610,7 @@ openlegion
 │
 ├── agent
 │   ├── add [name]                       # Add a new agent
+│   ├── edit <name>                      # Edit agent settings (model, browser, budget)
 │   ├── list                             # List configured agents
 │   └── remove <name> [--yes]            # Remove an agent
 │
@@ -625,10 +627,17 @@ openlegion
 /use <agent>         Switch active agent
 /agents              List all running agents
 /add                 Add a new agent (hot-adds to running system)
+/edit [name]         Edit agent settings (model, browser, budget)
+/remove [name]       Remove an agent
 /status              Show agent health
 /broadcast <msg>     Send message to all agents
 /steer <msg>         Inject message into busy agent's context
 /costs               Show today's LLM spend + context usage + model health
+/blackboard [cmd]    View/edit shared blackboard entries
+/queue               Show agent task queue status
+/workflow [cmd]      List or trigger workflows
+/cron [cmd]          Manage cron jobs (list, add, pause, resume, run, remove)
+/debug [trace]       Show recent request traces
 /addkey <svc> [key]  Add an API credential to the vault
 /reset               Clear conversation with active agent
 /quit                Exit and stop runtime
@@ -818,50 +827,50 @@ pytest tests/
 
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
-| Built-in Tools | 77 | exec, file, browser (incl. backend tiers + screenshots), memory, mesh tools, notifications, discovery |
+| Built-in Tools | 98 | exec, file, browser (incl. backend tiers + screenshots), memory, mesh tools, notifications, path traversal, discovery |
 | Dashboard | 66 | Index, agents, blackboard, costs, traces, queues, cron, settings, config |
-| Agent Loop | 55 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
-| Workspace | 45 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat |
-| Cron | 39 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM optimization |
+| CLI | 61 | Agent add/list/edit/remove, chat, setup, REPL commands, cron management |
+| Agent Loop | 57 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
+| Workspace | 55 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files |
+| Cron | 42 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM, concurrent mutations |
+| Credentials | 42 | Vault, API proxy, provider detection, credential lifecycle |
 | Sanitization | 38 | Invisible Unicode stripping, bidi overrides, tag chars, zero-width |
 | Channels (base) | 37 | Abstract channel, commands, per-user routing, chunking, steer, debug |
 | Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
+| Context Manager | 34 | Token estimation (tiktoken + model-aware), compaction, flushing, flush reset |
 | Mesh | 33 | Blackboard, PubSub, MessageRouter, permissions |
 | Runtime Backend | 31 | DockerBackend, SandboxBackend, browser_backend, extra_env, name sanitization, detection, selection |
-| Context Manager | 31 | Token estimation (tiktoken + model-aware), compaction, flushing |
 | Traces | 30 | Trace recording, grouping, summaries, prompt preview extraction |
 | Events | 30 | Event streaming, filtering, WebSocket |
 | Integration | 28 | Multi-component mesh operations, notifications |
 | Orchestrator | 25 | Workflows, conditions, retries, failures |
-| Credentials | 24 | Vault, API proxy, provider detection |
 | Transcript | 24 | Transcript formatting, safety, round-trip fidelity |
+| Agent Server | 21 | Workspace API, heartbeat-context endpoint, content sanitization, file allowlist |
 | Slack Channel | 21 | Socket Mode, thread routing, pairing, command translation |
 | WhatsApp Channel | 21 | Cloud API, webhook verification, message chunking |
+| Skills | 20 | Discovery, execution, injection, MCP integration |
 | Setup Wizard | 20 | Quickstart, full setup, API key validation, templates |
 | Marketplace | 20 | Install, manifest parsing, validation, path traversal, remove |
-| Skills | 19 | Discovery, execution, injection, MCP integration |
 | Transport | 18 | HttpTransport, SandboxTransport, resolve_url |
+| Dashboard Workspace | 17 | Workspace proxy endpoints, filename validation, transport forwarding, sanitization |
 | Vault | 16 | Credential storage, budget enforcement, failover |
-| CLI | 16 | Agent add/list/remove, chat, setup |
 | Failover | 15 | Health tracking, chain cascade, cooldown |
 | Loop Detector | 14 | Agent loop detection and intervention |
 | Lanes | 13 | Per-agent FIFO task queues |
+| Costs | 13 | Usage recording, budgets, vault integration, budget overrun warnings |
+| Chat | 12 | Chat mode, streaming, workspace integration |
 | Subagent | 11 | Spawn, depth/concurrent limits, TTL timeout, skill cloning, memory isolation |
-| Chat | 11 | Chat mode, streaming, workspace integration |
 | MCP Client | 10 | Tool discovery, routing, conflicts, lifecycle |
-| Costs | 10 | Usage recording, budgets, vault integration |
 | Chat Workspace | 10 | Cross-session memory, corrections, learnings |
-| Agent Server | 9 | Workspace API, heartbeat-context endpoint, content sanitization, file allowlist |
 | Types | 8 | Pydantic validation, serialization |
-| Dashboard Workspace | 7 | Workspace proxy endpoints, filename validation, transport forwarding, sanitization |
 | MCP E2E | 7 | Real MCP protocol with live server subprocess |
 | Webhooks | 7 | Add/remove, persistence, dispatch |
 | File Watchers | 7 | Polling, dispatch, pattern matching |
+| Health Monitor | 7 | Ephemeral cleanup, TTL expiry, event emission, restart with missing config |
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
-| Health Monitor | 5 | Ephemeral cleanup, TTL expiry, event emission |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **971** | |
+| **Total** | **1102** | |
 
 ---
 
@@ -894,7 +903,13 @@ No LangChain. No Redis. No Kubernetes. Real-time web dashboard at `/dashboard`.
 
 ```
 src/
-├── cli.py                              # CLI entry point
+├── cli/
+│   ├── main.py                         # Click commands and entry point
+│   ├── config.py                       # Config loading, Docker helpers, agent management
+│   ├── runtime.py                      # RuntimeContext — full lifecycle management
+│   ├── repl.py                         # REPLSession — interactive command dispatch
+│   ├── channels.py                     # ChannelManager — messaging channel lifecycle
+│   └── formatting.py                   # Tool display, styled output, response rendering
 ├── agent/
 │   ├── __main__.py                     # Container entry
 │   ├── loop.py                         # Execution loop (task + chat)
@@ -911,10 +926,15 @@ src/
 │       ├── exec_tool.py                # Shell execution
 │       ├── file_tool.py                # File I/O (read, write, list)
 │       ├── http_tool.py                # HTTP requests
-│       ├── browser_tool.py             # Playwright automation
+│       ├── browser_tool.py             # Playwright automation (basic/stealth/advanced)
+│       ├── web_search_tool.py          # Web search via DuckDuckGo
 │       ├── memory_tool.py              # Memory search, save, recall
-│       └── mesh_tool.py               # Shared state, fleet awareness, artifacts
+│       ├── mesh_tool.py                # Shared state, fleet awareness, artifacts
+│       ├── vault_tool.py               # Credential vault operations
+│       ├── skill_tool.py               # Runtime skill creation + hot-reload
+│       └── subagent_tool.py            # Spawn ephemeral sub-agents
 ├── host/
+│   ├── server.py                       # Mesh FastAPI server
 │   ├── mesh.py                         # Blackboard, PubSub, MessageRouter
 │   ├── orchestrator.py                 # Workflow DAG executor
 │   ├── permissions.py                  # Permission matrix
@@ -922,16 +942,19 @@ src/
 │   ├── failover.py                     # Model health tracking + failover chains
 │   ├── runtime.py                      # RuntimeBackend ABC + Docker/Sandbox backends
 │   ├── transport.py                    # Transport ABC + Http/Sandbox transports
-│   ├── server.py                       # Mesh FastAPI server
-│   ├── cron.py                         # Cron scheduler
+│   ├── containers.py                   # Docker image build + management
+│   ├── cron.py                         # Cron scheduler + heartbeats
 │   ├── webhooks.py                     # Named webhook endpoints
 │   ├── watchers.py                     # File watchers (polling)
 │   ├── costs.py                        # Cost tracking + budgets (SQLite)
 │   ├── health.py                       # Health monitor + auto-restart
-│   └── lanes.py                        # Per-agent task queues
+│   ├── lanes.py                        # Per-agent FIFO task queues
+│   ├── traces.py                       # Request tracing + grouped summaries
+│   └── transcript.py                   # Conversation transcript formatting
 ├── shared/
 │   ├── types.py                        # All Pydantic models (the contract)
-│   └── utils.py                        # ID generation, logging
+│   ├── utils.py                        # ID generation, logging, sanitization
+│   └── trace.py                        # Trace ID generation + correlation
 ├── channels/
 │   ├── base.py                         # Abstract channel with unified UX
 │   ├── telegram.py                     # Telegram adapter
@@ -967,7 +990,7 @@ config/
 | The mesh is the only door | No agent has network access except through the mesh. No agent holds credentials. |
 | Private by default, shared by promotion | Agents keep knowledge private. Facts are explicitly promoted to the blackboard. |
 | Explicit failure handling | Every workflow step declares what happens on failure. No silent error swallowing. |
-| Small enough to audit | ~14,000 total lines. The entire codebase is auditable in a day. |
+| Small enough to audit | ~19,000 total lines. The entire codebase is auditable in a day. |
 | Skills over features | New capabilities are agent skills, not mesh or orchestrator code. |
 | SQLite for all state | Single-file databases. No external services. WAL mode for concurrent reads. |
 | Zero vendor lock-in | LiteLLM supports 100+ providers. Markdown workspace files. No proprietary formats. |
@@ -996,7 +1019,7 @@ Looking for alternatives? OpenLegion is often compared to:
 
 OpenLegion differs from all of these in combining **fleet orchestration,
 Docker isolation, credential vaulting, and cost enforcement** in a single
-~14,000 line auditable codebase.
+~19,000 line auditable codebase.
 
 **Keywords:** autonomous AI agents, multi-agent framework, LLM agent orchestration,
 self-hosted AI agents, Docker AI agents, OpenClaw alternative, AI agent security,
