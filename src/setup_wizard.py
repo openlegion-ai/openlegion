@@ -41,7 +41,18 @@ class SetupWizard:
     # ── Public entry points ──────────────────────────────────
 
     def run_full(self) -> None:
-        """Full interactive setup (replaces original cli.py setup body)."""
+        """Full interactive setup (replaces original cli.py setup body).
+
+        Supports Ctrl+C to exit cleanly and 'back' to return to the previous step.
+        """
+        try:
+            self._run_full_inner()
+        except KeyboardInterrupt:
+            click.echo("\n\n  Setup cancelled.")
+            sys.exit(0)
+
+    def _run_full_inner(self) -> None:
+        """Inner setup logic with step-loop for back navigation."""
         from src.cli.config import (
             _PROVIDER_MODELS,
             _PROVIDERS,
@@ -54,7 +65,8 @@ class SetupWizard:
             _setup_agent_wizard,
         )
 
-        click.echo("=== OpenLegion Setup ===\n")
+        click.echo("=== OpenLegion Setup ===")
+        click.echo("  (Ctrl+C to quit, 'back' to return to previous step)\n")
 
         # Check prerequisites
         if not _check_docker_running():
@@ -81,8 +93,61 @@ class SetupWizard:
                 return
 
         total_steps = 4
+        # State accumulated across steps
+        state: dict = {}
 
-        # Step 1: LLM provider + model + API key
+        step = 1
+        while step <= total_steps:
+            if step == 1:
+                result = self._step_provider(total_steps, _PROVIDERS, _PROVIDER_MODELS, _set_env_key)
+                if result is None:
+                    click.echo("\n  Already at the first step.\n")
+                    continue
+                state.update(result)
+                step = 2
+
+            elif step == 2:
+                result = self._step_project(total_steps)
+                if result is None:
+                    step = 1
+                    continue
+                step = 3
+
+            elif step == 3:
+                result = self._step_agents(
+                    total_steps,
+                    state["selected_model"],
+                    _load_config,
+                    _load_templates,
+                    _apply_template,
+                    _setup_agent_wizard,
+                )
+                if result is None:
+                    step = 2
+                    continue
+                state["created_agents"] = result["created_agents"]
+                step = 4
+
+            elif step == 4:
+                result = self._step_collaboration(total_steps, _set_collaborative_permissions)
+                if result is None:
+                    step = 3
+                    continue
+                step = 5
+
+        # Summary
+        self._print_summary(state["provider"], state["selected_model"], state.get("created_agents", []))
+
+    @staticmethod
+    def _prompt_with_back(prompt_text: str, **kwargs) -> str | None:
+        """Wrapper around click.prompt that returns None when user types 'back'."""
+        value = click.prompt(prompt_text, **kwargs)
+        if isinstance(value, str) and value.strip().lower() == "back":
+            return None
+        return value
+
+    def _step_provider(self, total_steps, _PROVIDERS, _PROVIDER_MODELS, _set_env_key) -> dict | None:
+        """Step 1: LLM provider + model + API key. Returns None for 'back' (no-op at step 1)."""
         self._print_step_header(1, total_steps, "LLM Provider")
 
         for i, p in enumerate(_PROVIDERS, 1):
@@ -92,11 +157,14 @@ class SetupWizard:
             "  tasks (browser automation, web interaction, tool use). They have\n"
             "  built-in computer use training and strong tool-calling support.\n"
         )
-        choice = click.prompt(
+        raw = self._prompt_with_back(
             "  Select provider",
             type=click.IntRange(1, len(_PROVIDERS)),
             default=1,
         )
+        if raw is None:
+            return None  # 'back' at step 1
+        choice = raw
         provider = _PROVIDERS[choice - 1]["name"]
         click.echo(f"  Selected: {_PROVIDERS[choice - 1]['label']}\n")
 
@@ -105,18 +173,20 @@ class SetupWizard:
         click.echo("  Available models:")
         for i, m in enumerate(models, 1):
             click.echo(f"  {i}. {m}")
-        model_choice = click.prompt(
+        raw = self._prompt_with_back(
             "\n  Select model",
             type=click.IntRange(1, len(models)),
             default=1,
         )
+        if raw is None:
+            return None
+        model_choice = raw
         selected_model = models[model_choice - 1]
         click.echo(f"  Selected: {selected_model}\n")
 
         # API key with validation
         key_name = f"{provider}_api_key"
         existing_key = os.environ.get(f"OPENLEGION_CRED_{key_name.upper()}", "")
-        api_key = ""
         if existing_key:
             click.echo(f"  API key already set for {provider}.")
             if click.confirm("  Replace it?", default=False):
@@ -138,14 +208,19 @@ class SetupWizard:
         with open(self.config_file, "w") as f:
             yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
 
-        # Step 2: Project definition
+        return {"provider": provider, "selected_model": selected_model, "choice": choice}
+
+    def _step_project(self, total_steps) -> dict | None:
+        """Step 2: Project definition. Returns None for 'back'."""
         self._print_step_header(2, total_steps, "Your Project (optional)")
 
-        project_desc = click.prompt(
-            "  What are you building? (press Enter to skip)",
+        project_desc = self._prompt_with_back(
+            "  What are you building? (press Enter to skip, 'back' for previous step)",
             default="",
             show_default=False,
         )
+        if project_desc is None:
+            return None
         if project_desc:
             self.project_file.write_text(
                 f"# PROJECT.md\n\n"
@@ -157,7 +232,10 @@ class SetupWizard:
         elif not self.project_file.exists():
             click.echo("  Skipped. You can define it later by editing PROJECT.md.")
 
-        # Step 3: Agents
+        return {}
+
+    def _step_agents(self, total_steps, selected_model, _load_config, _load_templates, _apply_template, _setup_agent_wizard) -> dict | None:
+        """Step 3: Agent setup. Returns None for 'back'."""
         self._print_step_header(3, total_steps, "Your Agents")
 
         cfg = _load_config()
@@ -167,7 +245,6 @@ class SetupWizard:
         if existing_agents:
             click.echo(f"  Existing agents: {', '.join(existing_agents)}")
 
-            # Check if model changed — offer to update existing agents
             from src.cli.config import AGENTS_FILE
             if AGENTS_FILE.exists():
                 with open(AGENTS_FILE) as f:
@@ -196,10 +273,13 @@ class SetupWizard:
             if templates:
                 tpl_names = list(templates.keys())
                 tpl_display = ", ".join(tpl_names)
-                use_template = click.prompt(
+                raw = self._prompt_with_back(
                     f"  Start from a template? ({tpl_display}) or 'none' for custom",
                     default="none",
                 )
+                if raw is None:
+                    return None
+                use_template = raw
                 if use_template != "none" and use_template in templates:
                     created_agents = _apply_template(use_template, templates[use_template])
                     click.echo(f"  Created agents: {', '.join(created_agents)}")
@@ -210,7 +290,10 @@ class SetupWizard:
                 name = _setup_agent_wizard(selected_model)
                 created_agents = [name]
 
-        # Step 4: Collaboration
+        return {"created_agents": created_agents}
+
+    def _step_collaboration(self, total_steps, _set_collaborative_permissions) -> dict | None:
+        """Step 4: Collaboration. Returns None for 'back'."""
         self._print_step_header(4, total_steps, "Collaboration")
 
         mesh_cfg = {}
@@ -224,8 +307,7 @@ class SetupWizard:
             _set_collaborative_permissions()
         click.echo("  Inter-agent collaboration enabled.\n")
 
-        # Summary
-        self._print_summary(provider, selected_model, created_agents)
+        return {}
 
     # ── API key validation ───────────────────────────────────
 

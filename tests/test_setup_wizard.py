@@ -312,3 +312,44 @@ class TestStepHeader:
         captured = capsys.readouterr()
         assert "[2/4]" in captured.out
         assert "Your Project" in captured.out
+
+
+class TestPromptWithBack:
+    def test_back_returns_none(self):
+        """Typing 'back' returns None."""
+        with patch("click.prompt", return_value="back"):
+            result = SetupWizard._prompt_with_back("prompt")
+            assert result is None
+
+    def test_back_case_insensitive(self):
+        """'Back', 'BACK', ' back ' all return None."""
+        for val in ["Back", "BACK", " back "]:
+            with patch("click.prompt", return_value=val):
+                result = SetupWizard._prompt_with_back("prompt")
+                assert result is None
+
+    def test_normal_input_passes_through(self):
+        """Normal input is returned unchanged."""
+        with patch("click.prompt", return_value="hello"):
+            result = SetupWizard._prompt_with_back("prompt")
+            assert result == "hello"
+
+    def test_numeric_input_passes_through(self):
+        """Non-string return values pass through (e.g. IntRange)."""
+        with patch("click.prompt", return_value=2):
+            result = SetupWizard._prompt_with_back("prompt", type=int)
+            assert result == 2
+
+
+class TestKeyboardInterrupt:
+    def test_ctrl_c_exits_cleanly(self, tmp_path):
+        """Ctrl+C during setup prints cancellation message and exits 0."""
+        project = _make_project(tmp_path)
+
+        with _patch_all(project):
+            with patch("src.cli.config._check_docker_running", return_value=True):
+                with patch("click.prompt", side_effect=KeyboardInterrupt):
+                    runner = CliRunner()
+                    result = runner.invoke(cli, ["setup"])
+
+        assert "Setup cancelled" in result.output
