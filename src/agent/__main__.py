@@ -143,6 +143,7 @@ def main() -> None:
             await mcp_client.stop()
         from src.agent.builtins.browser_tool import browser_cleanup
         await browser_cleanup()
+        await mesh_client.close()
         await llm.close()
         memory.close()
         logger.info(f"Agent '{agent_id}' shut down")

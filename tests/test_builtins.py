@@ -1208,7 +1208,7 @@ class TestLabeledScreenshot:
         bt._page_refs.clear()
         snapshot_called = []
 
-        original_snapshot = bt.browser_snapshot_func
+        original_snapshot = bt._browser_snapshot_inner
 
         async def mock_snapshot(*, mesh_client=None):
             snapshot_called.append(True)
@@ -1216,7 +1216,7 @@ class TestLabeledScreenshot:
             bt._page_refs["e1"].bounding_box = AsyncMock(return_value=None)
             return {"element_count": 1}
 
-        bt.browser_snapshot_func = mock_snapshot
+        bt._browser_snapshot_inner = mock_snapshot
 
         try:
             with patch.object(bt, "_get_page", return_value=mock_page):
@@ -1237,7 +1237,7 @@ class TestLabeledScreenshot:
             assert len(snapshot_called) == 1
             assert result.get("labeled") is True
         finally:
-            bt.browser_snapshot_func = original_snapshot
+            bt._browser_snapshot_inner = original_snapshot
             bt._page_refs.clear()
 
     @pytest.mark.asyncio

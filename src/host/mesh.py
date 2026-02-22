@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
+from collections import deque
 from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
@@ -79,21 +81,23 @@ class Blackboard:
         """Write or update a blackboard entry (atomic upsert)."""
         value_json = json.dumps(value, default=str)
 
-        self.db.execute(
+        cursor = self.db.execute(
             "INSERT INTO entries (key, value, written_by, workflow_id, ttl, version) "
             "VALUES (?, ?, ?, ?, ?, 1) "
             "ON CONFLICT(key) DO UPDATE SET "
             "value = excluded.value, written_by = excluded.written_by, "
             "workflow_id = excluded.workflow_id, updated_at = datetime('now'), "
-            "ttl = excluded.ttl, version = version + 1",
+            "ttl = excluded.ttl, version = version + 1 "
+            "RETURNING version",
             (key, value_json, written_by, workflow_id, ttl),
         )
-
-        row = self.db.execute("SELECT version FROM entries WHERE key = ?", (key,)).fetchone()
+        row = cursor.fetchone()
         new_version = row[0] if row else 1
 
         self._log_event("write", key, written_by, value_json)
         self.db.commit()
+        self._maybe_gc_event_log()
+        self._maybe_gc_ttl()
 
         if self._event_bus:
             # Truncate value preview for dashboard display
@@ -160,6 +164,8 @@ class Blackboard:
         self.db.execute("DELETE FROM entries WHERE key = ?", (key,))
         self._log_event("delete", key, deleted_by)
         self.db.commit()
+        self._maybe_gc_event_log()
+        self._maybe_gc_ttl()
 
     def gc_expired(self) -> int:
         """Garbage-collect entries that have exceeded their TTL. Returns count deleted."""
@@ -171,11 +177,43 @@ class Blackboard:
         self.db.commit()
         return cursor.rowcount
 
+    _EVENT_LOG_GC_THRESHOLD = 10_000
+    _EVENT_LOG_GC_KEEP = 5_000
+    _TTL_GC_INTERVAL = 60  # seconds between TTL garbage collection runs
+    _last_ttl_gc: float = 0.0
+
     def _log_event(self, event_type: str, key: str, agent_id: str, data: str | None = None) -> None:
         self.db.execute(
             "INSERT INTO event_log (event_type, key, agent_id, data) VALUES (?, ?, ?, ?)",
             (event_type, key, agent_id, data),
         )
+
+    def _maybe_gc_event_log(self) -> None:
+        """Garbage-collect old event_log rows when exceeding threshold.
+
+        Must be called AFTER the caller's commit() so the GC DELETE
+        doesn't accidentally commit unrelated pending writes.
+        """
+        count = self.db.execute("SELECT COUNT(*) FROM event_log").fetchone()[0]
+        if count > self._EVENT_LOG_GC_THRESHOLD:
+            self.db.execute(
+                "DELETE FROM event_log WHERE id NOT IN "
+                "(SELECT id FROM event_log ORDER BY id DESC LIMIT ?)",
+                (self._EVENT_LOG_GC_KEEP,),
+            )
+            self.db.commit()
+
+    def _maybe_gc_ttl(self) -> None:
+        """Garbage-collect TTL-expired entries, throttled to once per 60s.
+
+        Must be called AFTER the caller's commit() so the GC DELETE
+        doesn't accidentally commit unrelated pending writes.
+        """
+        now = time.monotonic()
+        if now - Blackboard._last_ttl_gc < self._TTL_GC_INTERVAL:
+            return
+        Blackboard._last_ttl_gc = now
+        self.gc_expired()
 
     def close(self) -> None:
         self.db.close()
@@ -282,6 +320,9 @@ class PubSub:
     def publish(self, topic: str, event: Any) -> list[str]:
         """Record an event and return the list of subscribers for it."""
         self.event_log.append({"topic": topic, "event": event})
+        # Cap in-memory event log
+        if len(self.event_log) > self._EVENT_GC_THRESHOLD:
+            self.event_log = self.event_log[-self._EVENT_GC_KEEP:]
         if self._db is not None:
             self._db.execute(
                 "INSERT INTO events (topic, data) VALUES (?, ?)",
@@ -321,7 +362,7 @@ class MessageRouter:
         self.permissions = permissions
         self.agent_registry: dict[str, str] = agent_registry
         self.agent_roles: dict[str, str] = {}
-        self.message_log: list[dict] = []
+        self.message_log: deque[dict] = deque(maxlen=10_000)
         self._capabilities_cache: dict[str, list[str]] = {}
         self._client: httpx.AsyncClient | None = None
         self._trace_store = trace_store
@@ -361,9 +402,6 @@ class MessageRouter:
                     event_type="message_route",
                     detail=f"{message.from_agent}->{message.to} ({message.type})",
                 )
-        if len(self.message_log) > 10_000:
-            self.message_log = self.message_log[-5_000:]
-
         try:
             client = await self._get_client()
             response = await client.post(

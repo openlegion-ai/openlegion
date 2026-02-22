@@ -110,12 +110,16 @@ class WorkflowExecution:
         self.started_at: float = time.time()
 
     def is_step_ready(self, step: WorkflowStep) -> bool:
-        """Check if all dependencies for a step are satisfied."""
+        """Check if all dependencies for a step have a result.
+
+        Any terminal status (complete, failed, skipped) counts as resolved.
+        The workflow loop decides whether to skip downstream steps when a
+        dependency failed — without this, failed deps deadlock the DAG.
+        """
         for dep_id in step.depends_on:
             if dep_id not in self.step_results:
                 return False
-            if self.step_results[dep_id].status != "complete":
-                return False
+            # Dep is resolved (complete, failed, or skipped) — ready to proceed
         return True
 
     def evaluate_condition(self, step: WorkflowStep) -> bool:
@@ -181,12 +185,60 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Failed to load workflow {yaml_file}: {e}")
 
+    @staticmethod
+    def _detect_cycle(steps: list[WorkflowStep]) -> list[str] | None:
+        """Return a list of step IDs forming a cycle, or None if acyclic.
+
+        Uses iterative DFS with three-colour marking (white/grey/black).
+        """
+        adj: dict[str, list[str]] = {s.id: list(s.depends_on) for s in steps}
+        WHITE, GREY, BLACK = 0, 1, 2
+        colour: dict[str, int] = {s.id: WHITE for s in steps}
+        parent: dict[str, str | None] = {s.id: None for s in steps}
+
+        for start in adj:
+            if colour[start] != WHITE:
+                continue
+            stack = [start]
+            while stack:
+                node = stack[-1]
+                if colour[node] == WHITE:
+                    colour[node] = GREY
+                    for dep in adj.get(node, []):
+                        if dep not in colour:
+                            continue  # dangling ref — will fail elsewhere
+                        if colour[dep] == GREY:
+                            # Back edge found — reconstruct cycle
+                            cycle = [dep, node]
+                            p = parent.get(node)
+                            while p is not None and p != dep:
+                                cycle.append(p)
+                                p = parent.get(p)
+                            cycle.reverse()
+                            return cycle
+                        if colour[dep] == WHITE:
+                            parent[dep] = node
+                            stack.append(dep)
+                else:
+                    stack.pop()
+                    colour[node] = BLACK
+        return None
+
     async def trigger_workflow(self, workflow_name: str, payload: dict) -> str:
         """Start a workflow execution. Returns workflow execution ID."""
         if workflow_name not in self.workflows:
             raise ValueError(f"Unknown workflow: {workflow_name}")
 
         wf = self.workflows[workflow_name]
+
+        # Validate DAG is acyclic before executing
+        cycle = self._detect_cycle(wf.steps)
+        if cycle:
+            raise ValueError(
+                f"Workflow '{workflow_name}' contains a dependency cycle: "
+                f"{' -> '.join(cycle)}"
+            )
+
         execution = WorkflowExecution(wf, payload)
         self.active_executions[execution.id] = execution
 
@@ -219,6 +271,20 @@ class Orchestrator:
                 tasks = []
                 steps_for_tasks = []
                 for step in ready:
+                    # Skip if any dependency failed
+                    has_failed_dep = any(
+                        execution.step_results.get(dep_id, TaskResult(task_id="", status="pending")).status == "failed"
+                        for dep_id in step.depends_on
+                    )
+                    if has_failed_dep:
+                        execution.step_results[step.id] = TaskResult(
+                            task_id=f"skipped_{step.id}",
+                            status="skipped",
+                            error="Dependency failed",
+                        )
+                        del pending_steps[step.id]
+                        continue
+
                     if execution.evaluate_condition(step):
                         tasks.append(self._execute_step(execution, step))
                         steps_for_tasks.append(step)
@@ -242,9 +308,10 @@ class Orchestrator:
                         else:
                             execution.step_results[step.id] = result
 
-                        if execution.step_results[step.id].status != "complete":
+                        step_status = execution.step_results[step.id].status
+                        if step_status in ("failed", "timeout", "cancelled"):
                             await self._handle_failure(execution, step)
-                        elif self.blackboard:
+                        elif step_status == "complete" and self.blackboard:
                             promotions = execution.step_results[step.id].promote_to_blackboard
                             for key, value in promotions.items():
                                 self.blackboard.write(
@@ -271,6 +338,13 @@ class Orchestrator:
         except Exception as e:
             execution.status = "failed"
             logger.error(f"Workflow {execution.id} failed: {e}", exc_info=True)
+        finally:
+            # Clean up completed/failed executions after a delay to allow
+            # status queries, but prevent unbounded memory growth.
+            async def _cleanup():
+                await asyncio.sleep(300)  # keep for 5 minutes for status queries
+                self.active_executions.pop(execution.id, None)
+            asyncio.create_task(_cleanup())
 
     async def _execute_step(self, execution: WorkflowExecution, step: WorkflowStep) -> TaskResult:
         """Execute a single workflow step by sending task to agent."""
@@ -338,9 +412,10 @@ class Orchestrator:
                 try:
                     result = await asyncio.wait_for(future, timeout=step.timeout)
                 except asyncio.TimeoutError:
-                    self._pending_results.pop(assignment.task_id, None)
                     # Fallback to polling as a last resort
                     result = await self._wait_for_task_result(agent_url, assignment, step.timeout)
+                finally:
+                    self._pending_results.pop(assignment.task_id, None)
                 self._record_step_end(_step_trace_id, step, execution, _step_t0)
                 return result
             else:
@@ -377,8 +452,11 @@ class Orchestrator:
 
         Deprecated: prefer push-based resolve_task_result() via _pending_results.
         Kept as fallback for cases where the push path is unavailable.
+        Uses exponential backoff: 1s, 2s, 4s, ... up to 30s between polls.
         """
         start = time.time()
+        poll_delay = 1.0
+        _MAX_POLL_DELAY = 30.0
         while time.time() - start < timeout:
             try:
                 client = await self._get_client()
@@ -399,9 +477,12 @@ class Orchestrator:
                         status="failed",
                         error=f"Agent state={agent_state}, no result (HTTP {result_resp.status_code})",
                     )
+                # Agent still working — reset backoff on successful polls
+                poll_delay = 1.0
             except Exception as e:
                 logger.warning(f"Polling agent at {agent_url}: {e}")
-            await asyncio.sleep(1)
+                poll_delay = min(poll_delay * 2, _MAX_POLL_DELAY)
+            await asyncio.sleep(poll_delay)
 
         return TaskResult(
             task_id=assignment.task_id,
