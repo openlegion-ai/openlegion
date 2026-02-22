@@ -47,9 +47,11 @@ def main() -> None:
 
     llm_model = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
     embedding_model = os.environ.get("EMBEDDING_MODEL", "")
+    thinking = os.environ.get("THINKING", "off")
     llm = LLMClient(
         mesh_url=mesh_url, agent_id=agent_id,
         default_model=llm_model, embedding_model=embedding_model,
+        thinking=thinking,
     )
     mesh_client = MeshClient(mesh_url=mesh_url, agent_id=agent_id)
     embed_fn = llm.embed if embedding_model and embedding_model.lower() != "none" else None

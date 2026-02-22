@@ -156,7 +156,7 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
 7. **Multi-channel** — connect agents to Telegram, Discord, Slack, and WhatsApp. Also accessible via CLI and API.
 
-8. **Real-time dashboard** — web-based fleet observability at `/dashboard` with grouped request traces, live event streaming, token-level streaming chat, LLM prompt/response previews, agent management, workspace file editing, cost charts, and cron management.
+8. **Real-time dashboard** — web-based fleet observability at `/dashboard` with grouped request traces, live event streaming, token-level streaming chat, LLM prompt/response previews, agent management, agent identity editor (personality, instructions, preferences, heartbeat rules, memory, activity logs, learnings), cost charts, and cron management.
 
 9. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly budget enforcement.
 

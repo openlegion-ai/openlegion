@@ -9,6 +9,8 @@ Exposes endpoints for the mesh/orchestrator to interact with:
   GET  /workspace - list workspace files
   GET  /workspace/{filename} - read workspace file
   PUT  /workspace/{filename} - write workspace file
+  GET  /workspace-logs - read daily logs (read-only)
+  GET  /workspace-learnings - read errors and corrections (read-only)
   GET  /heartbeat-context - single-call heartbeat bootstrap data
 """
 
@@ -164,18 +166,45 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     _WORKSPACE_ALLOWLIST = frozenset({"SOUL.md", "HEARTBEAT.md", "USER.md", "AGENTS.md", "MEMORY.md"})
     _DEFAULT_HEARTBEAT_PREFIX = "# Heartbeat Rules\n\nYou are woken periodically"
 
+    _FILE_CAPS = {
+        "SOUL.md": 4000,
+        "AGENTS.md": 8000,
+        "USER.md": 4000,
+        "MEMORY.md": 16000,
+        "HEARTBEAT.md": None,
+    }
+    _DEFAULT_PREFIXES = {
+        "SOUL.md": "# Identity\n\nDefine personality",
+        "AGENTS.md": "# Agent Instructions\n\nAdd operating",
+        "USER.md": "# User Context\n\nRecord user",
+        "MEMORY.md": "# Long-Term Memory\n\nCurated facts",
+        "HEARTBEAT.md": "# Heartbeat Rules\n\nYou are woken periodically",
+    }
+
     @app.get("/workspace")
     async def list_workspace() -> dict:
-        """List editable workspace files with sizes."""
+        """List editable workspace files with sizes, caps, and default status."""
         if not loop.workspace:
             return {"files": []}
         files = []
         for filename in sorted(_WORKSPACE_ALLOWLIST):
             path = loop.workspace.root / filename
-            if path.exists():
-                files.append({"name": filename, "size": path.stat().st_size})
-            else:
-                files.append({"name": filename, "size": 0})
+            size = path.stat().st_size if path.exists() else 0
+            # Detect default/empty files
+            is_default = True
+            if size > 0:
+                content = loop.workspace._read_file(filename)
+                if content:
+                    prefix = _DEFAULT_PREFIXES.get(filename)
+                    is_default = not content.strip() or (
+                        prefix and content.strip().startswith(prefix)
+                    )
+            files.append({
+                "name": filename,
+                "size": size,
+                "cap": _FILE_CAPS.get(filename),
+                "is_default": is_default,
+            })
         return {"files": files}
 
     @app.get("/workspace/{filename}")
@@ -203,6 +232,30 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         path = loop.workspace.root / filename
         path.write_text(content)
         return {"filename": filename, "size": path.stat().st_size}
+
+    @app.get("/workspace-logs")
+    async def workspace_logs(days: int = 3) -> dict:
+        """Return daily logs for the dashboard (read-only)."""
+        if not loop.workspace:
+            return {"logs": ""}
+        days = max(1, min(days, 14))
+        content = loop.workspace.load_daily_logs(days=days)
+        if len(content) > 16000:
+            content = content[:16000] + "\n\n... (truncated)"
+        return {"logs": content}
+
+    @app.get("/workspace-learnings")
+    async def workspace_learnings() -> dict:
+        """Return errors and corrections for the dashboard (read-only)."""
+        if not loop.workspace:
+            return {"errors": "", "corrections": ""}
+        errors = loop.workspace._read_file("learnings/errors.md") or ""
+        corrections = loop.workspace._read_file("learnings/corrections.md") or ""
+        if len(errors) > 8000:
+            errors = errors[-8000:]
+        if len(corrections) > 8000:
+            corrections = corrections[-8000:]
+        return {"errors": errors, "corrections": corrections}
 
     @app.get("/heartbeat-context")
     async def heartbeat_context() -> dict:

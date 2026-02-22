@@ -262,6 +262,7 @@ class RuntimeContext:
             agent_model = agent_cfg.get("model", default_model)
             agent_mcp_servers = agent_cfg.get("mcp_servers") or None
             agent_browser_backend = agent_cfg.get("browser_backend", "")
+            agent_thinking = agent_cfg.get("thinking", "")
             try:
                 url = self.runtime.start_agent(
                     agent_id=agent_id,
@@ -271,6 +272,7 @@ class RuntimeContext:
                     model=agent_model,
                     mcp_servers=agent_mcp_servers,
                     browser_backend=agent_browser_backend,
+                    thinking=agent_thinking,
                 )
             except (subprocess.TimeoutExpired, RuntimeError) as exc:
                 if isinstance(self.runtime, SandboxBackend):
@@ -298,6 +300,7 @@ class RuntimeContext:
                         model=agent_model,
                         mcp_servers=agent_mcp_servers,
                         browser_backend=agent_browser_backend,
+                        thinking=agent_thinking,
                     )
                 else:
                     raise

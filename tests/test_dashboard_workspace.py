@@ -164,3 +164,74 @@ class TestWorkspaceProxy:
             assert "\u200B" not in forwarded_content
             assert "\u202E" not in forwarded_content
             assert "cleanvaluehere" in forwarded_content
+
+
+class TestLogsProxy:
+    @pytest.mark.asyncio
+    async def test_logs_proxy(self):
+        """GET /workspace-logs proxies to agent transport."""
+        transport = AsyncMock()
+        transport.request = AsyncMock(return_value={"logs": "- [10:00] Did work"})
+        app = _make_dashboard_app(transport=transport)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get(
+                "/dashboard/api/agents/test_agent/workspace-logs?days=5",
+            )
+            assert resp.status_code == 200
+            assert "Did work" in resp.json()["logs"]
+            transport.request.assert_called_once_with(
+                "test_agent", "GET", "/workspace-logs?days=5", timeout=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_logs_agent_not_found(self):
+        """Non-existent agent returns 404."""
+        transport = AsyncMock()
+        app = _make_dashboard_app(transport=transport)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get(
+                "/dashboard/api/agents/nonexistent/workspace-logs",
+            )
+            assert resp.status_code == 404
+
+
+class TestLearningsProxy:
+    @pytest.mark.asyncio
+    async def test_learnings_proxy(self):
+        """GET /workspace-learnings proxies to agent transport."""
+        transport = AsyncMock()
+        transport.request = AsyncMock(return_value={
+            "errors": "- timeout error",
+            "corrections": "- use duckduckgo",
+        })
+        app = _make_dashboard_app(transport=transport)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get(
+                "/dashboard/api/agents/test_agent/workspace-learnings",
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "timeout" in data["errors"]
+            assert "duckduckgo" in data["corrections"]
+            transport.request.assert_called_once_with(
+                "test_agent", "GET", "/workspace-learnings", timeout=10,
+            )
+
+    @pytest.mark.asyncio
+    async def test_learnings_agent_not_found(self):
+        """Non-existent agent returns 404."""
+        transport = AsyncMock()
+        app = _make_dashboard_app(transport=transport)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get(
+                "/dashboard/api/agents/nonexistent/workspace-learnings",
+            )
+            assert resp.status_code == 404

@@ -757,6 +757,34 @@ def create_dashboard_router(
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
+    # ── Agent Workspace Logs + Learnings (proxy to agent) ─────
+
+    @api_router.get("/api/agents/{agent_id}/workspace-logs")
+    async def api_agent_workspace_logs(agent_id: str, days: int = 3) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            return await transport.request(
+                agent_id, "GET", f"/workspace-logs?days={days}", timeout=10,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @api_router.get("/api/agents/{agent_id}/workspace-learnings")
+    async def api_agent_workspace_learnings(agent_id: str) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            return await transport.request(
+                agent_id, "GET", "/workspace-learnings", timeout=10,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
     # ── Static files ─────────────────────────────────────────
 
     _MEDIA_TYPES = {

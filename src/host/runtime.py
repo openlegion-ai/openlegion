@@ -58,6 +58,7 @@ class RuntimeBackend(abc.ABC):
         model: str = "",
         mcp_servers: list[dict] | None = None,
         browser_backend: str = "",
+        thinking: str = "",
     ) -> str:
         """Start an agent. Returns a URL or identifier for reaching it."""
 
@@ -86,6 +87,7 @@ class RuntimeBackend(abc.ABC):
         ttl: int = 3600,
         mcp_servers: list[dict] | None = None,
         browser_backend: str = "",
+        thinking: str = "",
     ) -> str:
         """Spawn an ephemeral agent with a TTL for auto-cleanup."""
         url = self.start_agent(
@@ -93,6 +95,7 @@ class RuntimeBackend(abc.ABC):
             system_prompt=system_prompt, model=model,
             mcp_servers=mcp_servers,
             browser_backend=browser_backend,
+            thinking=thinking,
         )
         self.agents[agent_id]["ephemeral"] = True
         self.agents[agent_id]["ttl"] = ttl
@@ -172,6 +175,7 @@ class DockerBackend(RuntimeBackend):
         model: str = "",
         mcp_servers: list[dict] | None = None,
         browser_backend: str = "",
+        thinking: str = "",
     ) -> str:
         import docker as _docker
 
@@ -197,6 +201,8 @@ class DockerBackend(RuntimeBackend):
             environment["MCP_SERVERS"] = json.dumps(mcp_servers)
         if browser_backend:
             environment["BROWSER_BACKEND"] = browser_backend
+        if thinking:
+            environment["THINKING"] = thinking
         environment.update(self.extra_env)
         if self.use_host_network:
             environment["AGENT_PORT"] = str(port)
@@ -269,6 +275,8 @@ class DockerBackend(RuntimeBackend):
             "system_prompt": system_prompt,
             "model": model,
             "mcp_servers": mcp_servers,
+            "browser_backend": browser_backend,
+            "thinking": thinking,
         }
         logger.info(f"Started agent '{agent_id}' (role={role}) at {url}")
         return url
@@ -398,6 +406,7 @@ class SandboxBackend(RuntimeBackend):
         model: str,
         mcp_servers: list[dict] | None = None,
         browser_backend: str = "",
+        thinking: str = "",
     ) -> Path:
         """Create the per-agent host directory that will sync into the sandbox."""
         ws = self._workspace_root / agent_id
@@ -453,6 +462,8 @@ class SandboxBackend(RuntimeBackend):
             env_cfg["MCP_SERVERS"] = json.dumps(mcp_servers)
         if browser_backend:
             env_cfg["BROWSER_BACKEND"] = browser_backend
+        if thinking:
+            env_cfg["THINKING"] = thinking
         env_cfg.update(self.extra_env)
 
         env_file = ws / ".agent.env"
@@ -470,9 +481,10 @@ class SandboxBackend(RuntimeBackend):
         model: str = "",
         mcp_servers: list[dict] | None = None,
         browser_backend: str = "",
+        thinking: str = "",
     ) -> str:
         sandbox_name = f"openlegion_{_docker_safe_name(agent_id)}"
-        ws = self._prepare_workspace(agent_id, role, skills_dir, system_prompt, model, mcp_servers=mcp_servers, browser_backend=browser_backend)
+        ws = self._prepare_workspace(agent_id, role, skills_dir, system_prompt, model, mcp_servers=mcp_servers, browser_backend=browser_backend, thinking=thinking)
 
         # Create sandbox with the shell agent type and workspace
         # First creation can be slow (microVM init), allow up to 120s
@@ -518,6 +530,8 @@ class SandboxBackend(RuntimeBackend):
             "system_prompt": system_prompt,
             "model": model,
             "mcp_servers": mcp_servers,
+            "browser_backend": browser_backend,
+            "thinking": thinking,
         }
         logger.info(f"Started agent '{agent_id}' in sandbox '{sandbox_name}'")
         return url

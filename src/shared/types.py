@@ -234,6 +234,7 @@ class LLMResponse(BaseModel):
     """Standardized response from any LLM provider via mesh proxy."""
 
     content: str = ""
+    thinking_content: Optional[str] = None
     tool_calls: Optional[list[ToolCallInfo]] = None
     tokens_used: int = 0
     model: str = ""

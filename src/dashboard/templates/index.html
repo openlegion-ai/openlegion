@@ -578,6 +578,130 @@
                 </div>
               </div>
             </div>
+            <!-- Agent Identity Panel -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-5">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Identity</div>
+              <!-- Tab bar -->
+              <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-3 flex-wrap">
+                <template x-for="tab in identityTabs" :key="tab.id">
+                  <button
+                    @click="switchIdentityTab(selectedAgent, tab.id)"
+                    class="px-2.5 py-1.5 rounded-md text-xs font-medium transition-all flex items-center gap-1.5"
+                    :class="identityTab === tab.id
+                      ? 'bg-gray-700 text-white shadow-sm'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  >
+                    <span x-text="tab.label"></span>
+                    <span
+                      x-show="tab.file && identityFiles.find(f => f.name === tab.file)?.is_default"
+                      class="text-[9px] px-1 py-0 rounded-full bg-gray-600/50 text-gray-400 font-normal"
+                    >default</span>
+                  </button>
+                </template>
+              </div>
+              <!-- Tab description -->
+              <div class="text-xs text-gray-500 mb-3" x-text="identityCurrentTab.desc"></div>
+              <!-- Character budget bar (file tabs with a cap) -->
+              <div x-show="identityCurrentTab.cap" class="mb-3">
+                <div class="flex justify-between items-center text-[11px] text-gray-500 mb-1">
+                  <span x-text="identityCharCount.toLocaleString() + ' / ' + (identityCurrentTab.cap || 0).toLocaleString() + ' chars'"></span>
+                  <span x-text="Math.round(identityBudgetPct) + '%'"></span>
+                </div>
+                <div class="w-full bg-gray-800 rounded-full h-1">
+                  <div class="h-1 rounded-full transition-all duration-300"
+                    :class="identityBudgetColor"
+                    :style="'width:' + identityBudgetPct + '%'"
+                  ></div>
+                </div>
+              </div>
+              <!-- Char count only (file tabs without a cap, e.g. Heartbeat) -->
+              <div x-show="identityCurrentTab.file && !identityCurrentTab.cap" class="mb-3">
+                <div class="text-[11px] text-gray-500" x-text="identityCharCount.toLocaleString() + ' chars'"></div>
+              </div>
+              <!-- Loading -->
+              <div x-show="identityContentLoading || identityLoading" class="py-6 text-center text-gray-600 text-sm">
+                <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                Loading...
+              </div>
+              <!-- Empty state when workspace unavailable -->
+              <div x-show="identityFiles.length === 0 && !identityLoading && identityCurrentTab.file" class="text-gray-600 text-sm py-6 text-center">
+                No workspace available for this agent
+              </div>
+              <!-- Editable file tabs (Soul, Instructions, Preferences, Heartbeat, Memory) -->
+              <div x-show="identityCurrentTab.file && identityFiles.length > 0 && !identityContentLoading && !identityLoading">
+                <!-- Read-only view -->
+                <div x-show="!identityEditing">
+                  <div class="flex items-center justify-between mb-2">
+                    <span class="font-mono text-xs text-gray-500" x-text="identityCurrentTab.file"></span>
+                    <button @click="startIdentityEdit()"
+                      class="text-[11px] px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
+                  </div>
+                  <pre class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-72 overflow-y-auto custom-scrollbar"
+                    x-text="identityContent[identityCurrentTab.file] || '(empty)'"></pre>
+                </div>
+                <!-- Edit mode -->
+                <div x-show="identityEditing">
+                  <div class="flex items-center justify-between mb-2">
+                    <span class="font-mono text-xs text-blue-400" x-text="identityCurrentTab.file"></span>
+                    <div class="flex gap-2">
+                      <button @click="saveIdentityFile(selectedAgent)"
+                        :disabled="identitySaving"
+                        class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-50 transition-colors">
+                        <span x-text="identitySaving ? 'Saving...' : 'Save'"></span>
+                      </button>
+                      <button @click="cancelIdentityEdit()"
+                        class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors">Cancel</button>
+                    </div>
+                  </div>
+                  <textarea x-model="identityEditBuffer"
+                    @keydown.ctrl.s.prevent="saveIdentityFile(selectedAgent)"
+                    @keydown.meta.s.prevent="saveIdentityFile(selectedAgent)"
+                    class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
+                    rows="15" spellcheck="false"></textarea>
+                </div>
+              </div>
+              <!-- Activity tab (read-only logs) -->
+              <div x-show="identityTab === 'activity' && !identityLogsLoading && !identityLoading">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-xs text-gray-500">Daily logs (last 3 days)</span>
+                  <button @click="fetchIdentityLogs(selectedAgent)"
+                    class="text-[11px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
+                </div>
+                <div x-show="!identityLogs" class="text-gray-600 text-sm py-4 text-center">No daily logs found</div>
+                <pre x-show="identityLogs"
+                  class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-80 overflow-y-auto custom-scrollbar"
+                  x-text="identityLogs"></pre>
+              </div>
+              <!-- Learnings tab (read-only errors + corrections) -->
+              <div x-show="identityTab === 'learnings' && !identityLearningsLoading && !identityLoading">
+                <div class="flex items-center justify-between mb-3">
+                  <span class="text-xs text-gray-500">Errors and user corrections</span>
+                  <button @click="fetchIdentityLearnings(selectedAgent)"
+                    class="text-[11px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
+                </div>
+                <!-- Errors section -->
+                <div class="mb-4">
+                  <div class="text-xs font-medium text-red-400/80 mb-1.5">Errors</div>
+                  <div x-show="!identityLearnings?.errors" class="text-gray-600 text-sm py-2 text-center">No errors recorded</div>
+                  <pre x-show="identityLearnings?.errors"
+                    class="bg-red-950/20 border border-red-900/30 rounded p-3 text-xs text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar"
+                    x-text="identityLearnings?.errors"></pre>
+                </div>
+                <!-- Corrections section -->
+                <div>
+                  <div class="text-xs font-medium text-amber-400/80 mb-1.5">Corrections</div>
+                  <div x-show="!identityLearnings?.corrections" class="text-gray-600 text-sm py-2 text-center">No corrections recorded</div>
+                  <pre x-show="identityLearnings?.corrections"
+                    class="bg-amber-950/20 border border-amber-900/30 rounded p-3 text-xs text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar"
+                    x-text="identityLearnings?.corrections"></pre>
+                </div>
+              </div>
+              <!-- Loading states for activity/learnings -->
+              <div x-show="(identityTab === 'activity' && identityLogsLoading) || (identityTab === 'learnings' && identityLearningsLoading)" class="py-6 text-center text-gray-600 text-sm">
+                <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                Loading...
+              </div>
+            </div>
             <!-- Budget bar -->
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-5">
               <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Budget</div>
@@ -622,44 +746,6 @@
                   </div>
                 </template>
               </div>
-            </div>
-            <!-- Workspace Files -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-5">
-              <div class="flex items-center justify-between mb-3">
-                <div class="text-xs text-gray-500 uppercase tracking-wider">Workspace Files</div>
-                <span class="text-xs text-gray-700" x-show="workspaceLoading">Loading...</span>
-              </div>
-              <template x-if="!editingFile">
-                <div class="space-y-1">
-                  <template x-for="f in workspaceFiles" :key="f.name">
-                    <div @click="openWorkspaceFile(selectedAgent, f.name)"
-                      class="flex items-center justify-between py-1.5 px-2 rounded cursor-pointer hover:bg-gray-800/50 transition-colors">
-                      <span class="font-mono text-sm text-blue-400" x-text="f.name"></span>
-                      <span class="text-xs text-gray-600" x-text="f.size > 0 ? (f.size > 1024 ? (f.size / 1024).toFixed(1) + ' KB' : f.size + ' B') : 'empty'"></span>
-                    </div>
-                  </template>
-                  <div x-show="workspaceFiles.length === 0 && !workspaceLoading" class="text-gray-600 text-sm py-2 text-center">No workspace available</div>
-                </div>
-              </template>
-              <template x-if="editingFile">
-                <div>
-                  <div class="flex items-center justify-between mb-2">
-                    <span class="font-mono text-sm text-blue-400" x-text="editingFile"></span>
-                    <div class="flex gap-2">
-                      <button @click="saveWorkspaceFile(selectedAgent, editingFile)"
-                        :disabled="editFileSaving"
-                        class="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded disabled:opacity-50">
-                        <span x-text="editFileSaving ? 'Saving...' : 'Save'"></span>
-                      </button>
-                      <button @click="cancelFileEdit()"
-                        class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded">Cancel</button>
-                    </div>
-                  </div>
-                  <textarea x-model="editFileContent"
-                    class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-blue-500 focus:outline-none"
-                    rows="15" spellcheck="false"></textarea>
-                </div>
-              </template>
             </div>
             <!-- Recent events for this agent -->
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
