@@ -6,6 +6,10 @@ Exposes endpoints for the mesh/orchestrator to interact with:
   GET  /status   - agent health check
   GET  /result   - last task result
   GET  /capabilities - list available skills
+  GET  /workspace - list workspace files
+  GET  /workspace/{filename} - read workspace file
+  PUT  /workspace/{filename} - write workspace file
+  GET  /heartbeat-context - single-call heartbeat bootstrap data
 """
 
 from __future__ import annotations
@@ -154,6 +158,77 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         loop.workspace.append_daily_log(content)
         logger.info(f"Received message from {msg.from_agent}: {msg.type}")
         return {"received": True, "from": msg.from_agent, "type": msg.type}
+
+    # ── Workspace API ────────────────────────────────────────
+
+    _WORKSPACE_ALLOWLIST = frozenset({"SOUL.md", "HEARTBEAT.md", "USER.md", "AGENTS.md", "MEMORY.md"})
+    _DEFAULT_HEARTBEAT_PREFIX = "# Heartbeat Rules\n\nYou are woken periodically"
+
+    @app.get("/workspace")
+    async def list_workspace() -> dict:
+        """List editable workspace files with sizes."""
+        if not loop.workspace:
+            return {"files": []}
+        files = []
+        for filename in sorted(_WORKSPACE_ALLOWLIST):
+            path = loop.workspace.root / filename
+            if path.exists():
+                files.append({"name": filename, "size": path.stat().st_size})
+            else:
+                files.append({"name": filename, "size": 0})
+        return {"files": files}
+
+    @app.get("/workspace/{filename}")
+    async def read_workspace_file(filename: str) -> dict:
+        """Read a workspace file by name."""
+        if filename not in _WORKSPACE_ALLOWLIST:
+            raise HTTPException(400, f"File not allowed: {filename}")
+        if not loop.workspace:
+            raise HTTPException(503, "Workspace not available")
+        content = loop.workspace._read_file(filename) or ""
+        return {"filename": filename, "content": content}
+
+    @app.put("/workspace/{filename}")
+    async def write_workspace_file(filename: str, request: Request) -> dict:
+        """Write content to a workspace file."""
+        if filename not in _WORKSPACE_ALLOWLIST:
+            raise HTTPException(400, f"File not allowed: {filename}")
+        if not loop.workspace:
+            raise HTTPException(503, "Workspace not available")
+        body = await request.json()
+        content = body.get("content", "")
+        if not isinstance(content, str):
+            raise HTTPException(400, "content must be a string")
+        content = sanitize_for_prompt(content)
+        path = loop.workspace.root / filename
+        path.write_text(content)
+        return {"filename": filename, "size": path.stat().st_size}
+
+    @app.get("/heartbeat-context")
+    async def heartbeat_context() -> dict:
+        """Return everything a heartbeat needs in a single call."""
+        if not loop.workspace:
+            return {
+                "heartbeat_rules": "",
+                "daily_logs": "",
+                "is_default_heartbeat": True,
+                "has_recent_activity": False,
+            }
+        rules = loop.workspace.load_heartbeat_rules()
+        daily = loop.workspace.load_daily_logs(days=2)
+        is_default = (
+            not rules.strip()
+            or rules.strip().startswith(_DEFAULT_HEARTBEAT_PREFIX)
+        )
+        # Cap daily logs at 8000 chars for transport
+        if len(daily) > 8000:
+            daily = daily[:8000] + "\n\n... (truncated)"
+        return {
+            "heartbeat_rules": rules,
+            "daily_logs": daily,
+            "is_default_heartbeat": is_default,
+            "has_recent_activity": bool(daily.strip()),
+        }
 
     return app
 

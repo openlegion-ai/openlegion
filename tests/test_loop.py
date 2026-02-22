@@ -999,3 +999,167 @@ async def test_task_terminate_mid_batch_blocks_tool():
     # The terminate path in per-tool is handled as block, so the loop continues.
     # Eventually the pre-scan catches it.
     assert execute_count == 4  # Only first 4 calls execute (block kicks in at 5th)
+
+
+# === Richer Daily Logs ===
+
+
+@pytest.fixture
+def workspace_loop():
+    """Yield (loop_factory, workspace) with a real workspace; clean up after."""
+    import shutil
+    import tempfile
+
+    from src.agent.workspace import WorkspaceManager
+
+    tmpdir = tempfile.mkdtemp()
+    workspace = WorkspaceManager(workspace_dir=tmpdir)
+
+    def factory(llm_responses=None):
+        loop = _make_loop(llm_responses)
+        loop.workspace = workspace
+        return loop
+
+    yield factory, workspace
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestLogChatTurn:
+    @pytest.mark.asyncio
+    async def test_log_chat_turn_captures_tools(self, workspace_loop):
+        """_log_chat_turn includes tool names used during the turn."""
+        factory, workspace = workspace_loop
+        tool_response = LLMResponse(
+            content="",
+            tool_calls=[ToolCallInfo(name="web_search", arguments={"q": "test"})],
+            tokens_used=20,
+        )
+        final = LLMResponse(content="Found it!", tokens_used=20)
+        loop = factory([tool_response, final])
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"type": "function", "function": {"name": "web_search"}}]
+        )
+        loop.skills.execute = AsyncMock(return_value={"results": ["r1"]})
+
+        await loop.chat("find something")
+
+        daily = workspace.load_daily_logs(days=1)
+        assert "Tools: web_search" in daily
+        assert "Chat:" in daily
+        assert "Response:" in daily
+
+    @pytest.mark.asyncio
+    async def test_log_chat_turn_strips_memory_context(self, workspace_loop):
+        """_log_chat_turn strips auto-loaded memory context from user summary."""
+        factory, workspace = workspace_loop
+        loop = factory([LLMResponse(content="Understood", tokens_used=20)])
+        loop.skills.get_tool_definitions = MagicMock(return_value=[])
+
+        msg = "Do the task\n[Relevant memory auto-loaded]\nSome old context here"
+        await loop.chat(msg)
+
+        daily = workspace.load_daily_logs(days=1)
+        assert "Do the task" in daily
+        assert "auto-loaded" not in daily
+
+    @pytest.mark.asyncio
+    async def test_silent_response_not_logged(self, workspace_loop):
+        """__SILENT__ responses (empty string) should not be logged."""
+        factory, workspace = workspace_loop
+        loop = factory([LLMResponse(content="__SILENT__", tokens_used=10)])
+        loop.skills.get_tool_definitions = MagicMock(return_value=[])
+
+        await loop.chat("heartbeat ping")
+
+        daily = workspace.load_daily_logs(days=1)
+        assert "heartbeat ping" not in daily
+
+
+class TestTaskCompletionLogging:
+    @pytest.mark.asyncio
+    async def test_task_completion_writes_daily_log(self, workspace_loop):
+        """Successful task writes a completion entry to daily log."""
+        factory, workspace = workspace_loop
+        tool_response = LLMResponse(
+            content="",
+            tool_calls=[ToolCallInfo(name="exec", arguments={"cmd": "ls"})],
+            tokens_used=50,
+        )
+        final = LLMResponse(content='{"result": {"done": true}}', tokens_used=30)
+        loop = factory([tool_response, final])
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"type": "function", "function": {"name": "exec"}}]
+        )
+        loop.skills.execute = AsyncMock(return_value={"exit_code": 0})
+
+        assignment = TaskAssignment(
+            workflow_id="wf1", step_id="s1", task_type="research",
+            input_data={"query": "test"},
+        )
+        result = await loop.execute_task(assignment)
+        assert result.status == "complete"
+
+        daily = workspace.load_daily_logs(days=1)
+        assert "Task complete: research" in daily
+        assert "Tools: exec" in daily
+        assert "iterations" in daily
+        assert "tokens" in daily
+
+    @pytest.mark.asyncio
+    async def test_task_failure_writes_daily_log(self, workspace_loop):
+        """Max-iterations failure writes a FAILED entry to daily log."""
+        factory, workspace = workspace_loop
+        responses = [
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallInfo(name="search", arguments={"q": f"q_{i}"})],
+                tokens_used=10,
+            )
+            for i in range(25)
+        ]
+        loop = factory(responses)
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"type": "function", "function": {"name": "search"}}]
+        )
+        loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+
+        assignment = TaskAssignment(
+            workflow_id="wf1", step_id="s1", task_type="analysis",
+            input_data={"topic": "test"},
+        )
+        result = await loop.execute_task(assignment)
+        assert result.status == "failed"
+
+        daily = workspace.load_daily_logs(days=1)
+        assert "Task FAILED (max iterations): analysis" in daily
+        assert "tokens" in daily
+
+
+class TestCollectToolNames:
+    def test_extracts_unique_names_in_order(self):
+        """_collect_tool_names returns unique tool names in first-appearance order."""
+        messages = [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "tool_calls": [
+                {"function": {"name": "search"}},
+                {"function": {"name": "exec"}},
+            ]},
+            {"role": "tool", "content": "ok"},
+            {"role": "tool", "content": "ok"},
+            {"role": "assistant", "tool_calls": [
+                {"function": {"name": "search"}},  # duplicate
+                {"function": {"name": "write_file"}},
+            ]},
+        ]
+        names = AgentLoop._collect_tool_names(messages)
+        assert names == ["search", "exec", "write_file"]
+
+    def test_empty_messages(self):
+        assert AgentLoop._collect_tool_names([]) == []
+
+    def test_no_tool_calls(self):
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        assert AgentLoop._collect_tool_names(messages) == []

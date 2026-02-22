@@ -369,11 +369,23 @@ class AgentLoop:
                     self.state = "idle"
                     self.current_task = None
                     self.tasks_completed += 1
+                    duration_s = round(time.time() - start, 1)
 
                     logger.info(
                         f"Task {assignment.task_id} complete",
                         extra={"extra_data": {"iterations": iteration + 1, "tokens": total_tokens}},
                     )
+
+                    # Log task completion to daily log
+                    if self.workspace:
+                        task_tools = self._collect_tool_names(messages)
+                        input_summary = truncate(str(assignment.input_data).replace("\n", " "), 120)
+                        tools_str = ", ".join(task_tools) if task_tools else "none"
+                        self.workspace.append_daily_log(
+                            f"Task complete: {assignment.task_type} | "
+                            f"{iteration + 1} iterations, {total_tokens} tokens, {duration_s}s | "
+                            f"Tools: {tools_str} | Input: {input_summary}"
+                        )
 
                     result = TaskResult(
                         task_id=assignment.task_id,
@@ -381,7 +393,7 @@ class AgentLoop:
                         result=result_data,
                         promote_to_blackboard=promotions,
                         tokens_used=total_tokens,
-                        duration_ms=int((time.time() - start) * 1000),
+                        duration_ms=int(duration_s * 1000),
                     )
                     self._last_result = result
                     return result
@@ -390,6 +402,12 @@ class AgentLoop:
             self.state = "idle"
             self.current_task = None
             self.tasks_failed += 1
+            if self.workspace:
+                input_summary = truncate(str(assignment.input_data).replace("\n", " "), 120)
+                self.workspace.append_daily_log(
+                    f"Task FAILED (max iterations): {assignment.task_type} | "
+                    f"{total_tokens} tokens | Input: {input_summary}"
+                )
             result = TaskResult(
                 task_id=assignment.task_id,
                 status="failed",
@@ -415,6 +433,11 @@ class AgentLoop:
             self.state = "idle"
             self.tasks_failed += 1
             logger.error(f"Task {assignment.task_id} failed: {e}", exc_info=True)
+            if self.workspace:
+                error_summary = truncate(str(e).replace("\n", " "), 200)
+                self.workspace.append_daily_log(
+                    f"Task FAILED (error): {assignment.task_type} | {error_summary}"
+                )
             result = TaskResult(
                 task_id=assignment.task_id,
                 status="failed",
@@ -556,6 +579,20 @@ class AgentLoop:
         if isinstance(result, dict) and result.get("reload_requested"):
             count = self.skills.reload()
             logger.info(f"Hot-reloaded skills: {count} available")
+
+    @staticmethod
+    def _collect_tool_names(messages: list[dict]) -> list[str]:
+        """Extract unique tool names from a message list, in order of first appearance."""
+        seen: set[str] = set()
+        names: list[str] = []
+        for msg in messages:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    name = tc.get("function", {}).get("name", "")
+                    if name and name not in seen:
+                        seen.add(name)
+                        names.append(name)
+        return names
 
     def _build_tool_history_context(self, limit: int = 10) -> str:
         """Build a system prompt section with recent tool outcomes."""
@@ -841,12 +878,44 @@ class AgentLoop:
             return {"response": f"Error: {e}", "tool_outputs": tool_outputs, "tokens_used": total_tokens}
 
     def _log_chat_turn(self, user_msg: str, assistant_msg: str) -> None:
-        """Append a summary of the chat turn to the daily log."""
+        """Append a rich summary of the chat turn to the daily log."""
         if not self.workspace:
             return
-        user_summary = truncate(user_msg.split("\n")[0], 80)
-        assistant_summary = truncate(assistant_msg.split("\n")[0], 80)
-        self.workspace.append_daily_log(f"User: {user_summary} → Agent: {assistant_summary}")
+        # Skip logging for suppressed responses (__SILENT__ → empty string)
+        if not assistant_msg.strip():
+            return
+        # Strip auto-loaded memory context from user message before summarizing
+        clean_user = user_msg.split("\n[Relevant memory auto-loaded]")[0]
+        user_summary = truncate(clean_user.replace("\n", " ").strip(), 120)
+
+        # Collect tool names used in the current turn (chronological order).
+        # Find the last user message index, then collect from there forward.
+        last_user_idx = -1
+        for i in range(len(self._chat_messages) - 1, -1, -1):
+            if self._chat_messages[i].get("role") == "user":
+                last_user_idx = i
+                break
+        tool_names: list[str] = []
+        for msg in self._chat_messages[last_user_idx + 1:]:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    name = tc.get("function", {}).get("name", "")
+                    if name and name not in tool_names:
+                        tool_names.append(name)
+
+        # Multi-line aware response summary
+        response_lines = [l.strip() for l in assistant_msg.splitlines() if l.strip()]
+        if len(response_lines) <= 2:
+            response_summary = " ".join(response_lines)
+        else:
+            response_summary = f"{response_lines[0]} (+{len(response_lines)-1} lines)"
+        response_summary = truncate(response_summary, 200)
+
+        parts = [f"Chat: {user_summary}"]
+        if tool_names:
+            parts.append(f"Tools: {', '.join(tool_names)}")
+        parts.append(f"Response: {response_summary}")
+        self.workspace.append_daily_log(" | ".join(parts))
 
     async def reset_chat(self) -> None:
         """Clear conversation history. Acquires the chat lock to avoid

@@ -82,11 +82,28 @@ Persistent markdown files stored on the agent's `/data/workspace` volume.
 | `USER.md` | User preferences and working style | System prompt |
 | `MEMORY.md` | Curated long-term facts | System prompt |
 | `PROJECT.md` | Project-wide context (optional, mounted read-only from host) | System prompt |
-| `HEARTBEAT.md` | Autonomous monitoring rules | Heartbeat probes |
+| `HEARTBEAT.md` | Autonomous monitoring rules | Heartbeat dispatch (auto-loaded) |
 
 ### Daily Logs
 
-Session activity is logged to `memory/YYYY-MM-DD.md`. Each entry is timestamped and includes facts saved by the agent during the session.
+Session activity is logged to `memory/YYYY-MM-DD.md`. Each entry is timestamped. Three types of entries are recorded:
+
+**Chat turns** — include user intent summary, tool names used, and a multi-line-aware response summary:
+```
+[14:30:22] Chat: Research Acme Corp competitors | Tools: web_search, memory_save | Response: Found 3 main competitors (+5 lines)
+```
+
+**Task completions** — include task type, iteration count, token usage, duration, and tools used:
+```
+[14:45:10] Task complete: research_prospect | 8 iterations, 12340 tokens, 45s | Tools: web_search, http_request | Input: {"company": "Acme Corp"}
+```
+
+**Task failures** — include failure reason (max iterations or error) and context:
+```
+[15:00:05] Task FAILED (max iterations): qualify_lead | 8500 tokens | Input: {"lead_id": "abc123"}
+```
+
+Daily logs are auto-loaded into heartbeat messages (last 2 days, capped at 4000 chars) so agents have continuity across heartbeat wake-ups.
 
 ### BM25 Search
 

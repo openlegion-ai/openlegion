@@ -12,7 +12,7 @@ No additional setup is required -- the dashboard starts automatically with `open
 
 ### Agents
 
-Overview of all registered agents showing health status, activity state (idle/thinking/tool), daily cost, token usage, and restart count. Click any agent card to drill down into its detail view with cost breakdowns, budget bars, and recent events. Also includes agent configuration management — view and edit each agent's model, browser backend, role, system prompt, and daily budget. Changes that require a restart (model, browser) are flagged.
+Overview of all registered agents showing health status, activity state (idle/thinking/tool), daily cost, token usage, and restart count. Click any agent card to drill down into its detail view with cost breakdowns, budget bars, workspace file editor, and recent events. Also includes agent configuration management — view and edit each agent's model, browser backend, role, system prompt, and daily budget. Changes that require a restart (model, browser) are flagged.
 
 ### Activity
 
@@ -55,6 +55,33 @@ Click the **Restart** button on any agent card. A confirmation dialog prevents a
 ### Update Budget
 
 From the agent detail view (click an agent in Agents), budget bars show current daily and monthly usage. Budget can also be updated via the Agents tab edit form.
+
+## Workspace Editing
+
+The agent detail view includes a workspace file editor for viewing and editing an agent's core workspace files directly from the dashboard.
+
+### Editable Files
+
+| File | Purpose |
+|------|---------|
+| `SOUL.md` | Agent personality and behavioral guidelines |
+| `HEARTBEAT.md` | Autonomous monitoring rules |
+| `USER.md` | User preferences and working style |
+| `AGENTS.md` | Fleet context (other agents, their roles) |
+| `MEMORY.md` | Curated long-term facts |
+
+### Usage
+
+1. Click an agent card to open the detail view
+2. The **Workspace Files** panel shows all editable files with their sizes
+3. Click a filename to open the inline editor
+4. Edit the content in the monospace textarea
+5. Click **Save** to write changes (content is sanitized for invisible Unicode before saving)
+6. Click **Cancel** to discard changes
+
+Files with size 0 are shown with an "empty" indicator. The editor uses the same `sanitize_for_prompt()` sanitization applied at all other trust boundaries.
+
+The dashboard proxies workspace operations through the mesh transport layer to the agent's container — files are read from and written to the agent's `/data/workspace` volume.
 
 ## Chat
 
@@ -120,6 +147,9 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `POST` | `/dashboard/api/agents/{id}/steer` | Update agent system prompt live |
 | `POST` | `/dashboard/api/agents/{id}/restart` | Restart an agent |
 | `PUT` | `/dashboard/api/agents/{id}/budget` | Update agent budget |
+| `GET` | `/dashboard/api/agents/{id}/workspace` | List agent workspace files |
+| `GET` | `/dashboard/api/agents/{id}/workspace/{file}` | Read workspace file content |
+| `PUT` | `/dashboard/api/agents/{id}/workspace/{file}` | Write workspace file content |
 | `GET` | `/dashboard/api/blackboard` | List blackboard entries |
 | `PUT` | `/dashboard/api/blackboard/{key}` | Write blackboard entry |
 | `DELETE` | `/dashboard/api/blackboard/{key}` | Delete blackboard entry |

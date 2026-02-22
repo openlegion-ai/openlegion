@@ -6,9 +6,10 @@ container restarts. Dispatches messages to agents via POST /chat.
 Supports:
   - Standard 5-field cron expressions: "0 9 * * 1-5"
   - Interval shorthand: "every 30m", "every 2h", "every 1d"
-  - Heartbeat pattern: runs deterministic probes first, only
-    dispatches to agent (costing LLM tokens) when probes find
-    actionable items.
+  - Heartbeat pattern: runs deterministic probes, fetches agent
+    workspace context (HEARTBEAT.md, daily logs), and skips
+    LLM dispatch when there is nothing actionable (no custom
+    rules, no recent activity, no triggered probes).
 
 State persisted to config/cron.json, hot-reloadable.
 """
@@ -75,6 +76,7 @@ class CronScheduler:
         workflow_trigger_fn: Optional[Callable] = None,
         blackboard: Any = None,
         trace_store: Any = None,
+        context_fn: Optional[Callable] = None,
     ):
         self.config_path = Path(config_path)
         self.jobs: dict[str, CronJob] = {}
@@ -82,6 +84,7 @@ class CronScheduler:
         self.workflow_trigger_fn = workflow_trigger_fn
         self.blackboard = blackboard
         self._trace_store = trace_store
+        self.context_fn = context_fn
         self._running = False
         self._load()
 
@@ -216,21 +219,73 @@ class CronScheduler:
                 response = await self.workflow_trigger_fn(job.workflow, payload)
                 logger.info(f"Cron {job.id} triggered workflow '{job.workflow}'")
             elif self.dispatch_fn:
-                # Heartbeat: always wake agent, probes provide context
                 if job.heartbeat:
                     probes = self._run_heartbeat_probes(job.agent)
                     triggered = [p for p in probes if p.triggered]
+
+                    # Fetch agent workspace context (HEARTBEAT.md, daily logs)
+                    ctx = {}
+                    if self.context_fn:
+                        try:
+                            ctx = await self.context_fn(job.agent)
+                        except Exception as e:
+                            logger.warning(
+                                "context_fn failed for '%s': %s", job.agent, e,
+                            )
+
+                    is_default = ctx.get("is_default_heartbeat", True)
+                    has_activity = ctx.get("has_recent_activity", False)
+
+                    # Skip-LLM optimization: no custom rules, no activity, no probes
+                    if is_default and not has_activity and not triggered:
+                        logger.debug(
+                            "Heartbeat %s: skipped (default rules, no activity, "
+                            "no probes) for '%s'", job.id, job.agent,
+                        )
+                        return None
+
+                    # Build rich heartbeat message
+                    sections: list[str] = [f"Heartbeat for {job.agent}."]
+
+                    rules = ctx.get("heartbeat_rules", "")
+                    if rules and not is_default:
+                        sections.append(
+                            f"## Your Heartbeat Rules\n\n{rules.strip()}"
+                        )
+
+                    daily = ctx.get("daily_logs", "")
+                    if daily and daily.strip():
+                        capped = daily[:4000]
+                        if len(daily) > 4000:
+                            capped += "\n\n... (truncated)"
+                        sections.append(
+                            f"## Your Recent Activity\n\n{capped}"
+                        )
+
                     if triggered:
-                        context = "Probes detected:\n" + "\n".join(
+                        probe_lines = "\n".join(
                             f"- [{p.name}] {p.detail}" for p in triggered
                         )
+                        sections.append(
+                            f"## Probe Alerts\n\n{probe_lines}"
+                        )
+
+                    pending = self._get_pending_details(job.agent, probes)
+                    if pending:
+                        sections.append(pending)
+
+                    if is_default:
+                        sections.append(
+                            "Work toward your goals. If nothing needs attention, "
+                            "respond HEARTBEAT_OK."
+                        )
                     else:
-                        context = "No probe alerts — routine check-in."
-                    message = (
-                        f"Heartbeat for {job.agent}.\n{context}\n\n"
-                        "Review your HEARTBEAT.md rules, work toward your current goals, "
-                        "and send a brief status update."
-                    )
+                        sections.append(
+                            "Follow your HEARTBEAT.md rules. If nothing needs "
+                            "attention, respond HEARTBEAT_OK."
+                        )
+
+                    message = "\n\n".join(sections)
                     response = await self.dispatch_fn(job.agent, message)
                     logger.info(
                         f"Heartbeat {job.id}: dispatched for '{job.agent}' "
@@ -294,6 +349,52 @@ class CronScheduler:
                 logger.debug("Pending tasks probe failed for '%s': %s", agent, e)
 
         return results
+
+    def _get_pending_details(
+        self,
+        agent: str,
+        probes: list[HeartbeatProbeResult],
+        max_items: int = 5,
+    ) -> str:
+        """Format actual blackboard entry content for pending signals/tasks.
+
+        Reuses probe results to determine which prefixes have entries,
+        avoiding duplicate blackboard queries.
+        """
+        if not self.blackboard:
+            return ""
+        # Only fetch details for prefixes that probes already found entries for
+        probe_map = {p.name: p for p in probes}
+        parts: list[str] = []
+
+        if probe_map.get("pending_signals", HeartbeatProbeResult("", False)).triggered:
+            try:
+                signals = self.blackboard.list_by_prefix(f"signals/{agent}")
+                if signals:
+                    lines = []
+                    for entry in signals[:max_items]:
+                        val = json.dumps(entry.value, default=str)
+                        if len(val) > 200:
+                            val = val[:200] + "..."
+                        lines.append(f"- `{entry.key}`: {val}")
+                    parts.append("## Pending Signals\n\n" + "\n".join(lines))
+            except Exception as e:
+                logger.debug("Failed to get signal details for '%s': %s", agent, e)
+
+        if probe_map.get("pending_tasks", HeartbeatProbeResult("", False)).triggered:
+            try:
+                tasks = self.blackboard.list_by_prefix(f"tasks/{agent}")
+                if tasks:
+                    lines = []
+                    for entry in tasks[:max_items]:
+                        val = json.dumps(entry.value, default=str)
+                        if len(val) > 200:
+                            val = val[:200] + "..."
+                        lines.append(f"- `{entry.key}`: {val}")
+                    parts.append("## Pending Tasks\n\n" + "\n".join(lines))
+            except Exception as e:
+                logger.debug("Failed to get task details for '%s': %s", agent, e)
+        return "\n\n".join(parts)
 
     def _is_due(self, job: CronJob, now: datetime) -> bool:
         schedule = job.schedule.strip()

@@ -233,8 +233,8 @@ class TestHeartbeat:
         assert signal_probes[0].triggered is False
 
     @pytest.mark.asyncio
-    async def test_heartbeat_always_dispatches_when_clean(self):
-        """Heartbeat always wakes the agent, even when probes are clean."""
+    async def test_heartbeat_skips_when_clean_no_context(self):
+        """Heartbeat skips dispatch when no context_fn, no probes, default rules."""
         dispatch = AsyncMock(return_value="Checked in")
         mock_bb = MagicMock()
         mock_bb.list_by_prefix.return_value = []
@@ -243,11 +243,9 @@ class TestHeartbeat:
         )
         job = sched.add_job(agent="test", schedule="every 15m", message="heartbeat", heartbeat=True)
         result = await sched._execute_job(job)
-        dispatch.assert_called_once()
-        assert result == "Checked in"
-        # Message should mention routine check-in
-        call_msg = dispatch.call_args[0][1]
-        assert "routine check-in" in call_msg.lower()
+        # Skip-LLM optimization: no custom rules, no activity, no probes → skip
+        dispatch.assert_not_called()
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_heartbeat_dispatches_with_probe_context(self):
@@ -264,7 +262,7 @@ class TestHeartbeat:
         assert result == "Taking action"
         # Message should mention probes
         call_msg = dispatch.call_args[0][1]
-        assert "probes detected" in call_msg.lower()
+        assert "Probe Alerts" in call_msg
 
     def test_find_heartbeat_job(self):
         sched = CronScheduler(config_path=self.config_path)
@@ -307,3 +305,206 @@ class TestHeartbeat:
         updated = sched.update_job(job.id, id="hacked_id")
         assert updated is not None
         assert updated.id == original_id  # id should not change
+
+
+class TestEnrichedHeartbeat:
+    """Tests for the enriched heartbeat message with context_fn and skip-LLM."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_skip_no_rules_no_activity_no_probes(self):
+        """Skip dispatch when default rules, no activity, and no probes triggered."""
+        dispatch = AsyncMock(return_value="response")
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "",
+            "daily_logs": "",
+            "is_default_heartbeat": True,
+            "has_recent_activity": False,
+        })
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        result = await sched._execute_job(job)
+        assert result is None
+        dispatch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_dispatches_custom_rules(self):
+        """Message includes HEARTBEAT.md content when custom rules exist."""
+        dispatch = AsyncMock(return_value="Done")
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "# My Rules\n\nCheck email every hour.",
+            "daily_logs": "",
+            "is_default_heartbeat": False,
+            "has_recent_activity": False,
+        })
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        result = await sched._execute_job(job)
+        dispatch.assert_called_once()
+        call_msg = dispatch.call_args[0][1]
+        assert "Check email every hour" in call_msg
+        assert "Your Heartbeat Rules" in call_msg
+        assert "Follow your HEARTBEAT.md rules" in call_msg
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_dispatches_on_probes(self):
+        """Skip optimization bypassed when probes trigger, even with default rules."""
+        dispatch = AsyncMock(return_value="Acting")
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "",
+            "daily_logs": "",
+            "is_default_heartbeat": True,
+            "has_recent_activity": False,
+        })
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.side_effect = (
+            lambda prefix: [MagicMock()] if "signals" in prefix else []
+        )
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        result = await sched._execute_job(job)
+        dispatch.assert_called_once()
+        call_msg = dispatch.call_args[0][1]
+        assert "Probe Alerts" in call_msg
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_dispatches_on_activity(self):
+        """Skip optimization bypassed when has_recent_activity=True."""
+        dispatch = AsyncMock(return_value="Continued")
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "",
+            "daily_logs": "Did some work",
+            "is_default_heartbeat": True,
+            "has_recent_activity": True,
+        })
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        result = await sched._execute_job(job)
+        dispatch.assert_called_once()
+        call_msg = dispatch.call_args[0][1]
+        assert "Your Recent Activity" in call_msg
+        assert "Did some work" in call_msg
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_message_order(self):
+        """Agent context sections appear before blackboard sections."""
+        dispatch = AsyncMock(return_value="Ok")
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "# My Rules\n\nDo stuff.",
+            "daily_logs": "Some activity",
+            "is_default_heartbeat": False,
+            "has_recent_activity": True,
+        })
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.side_effect = lambda prefix: (
+            [MagicMock(key=f"signals/test/s1", value={"msg": "hi"})]
+            if "signals" in prefix else []
+        )
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        await sched._execute_job(job)
+        call_msg = dispatch.call_args[0][1]
+
+        rules_pos = call_msg.index("Your Heartbeat Rules")
+        activity_pos = call_msg.index("Your Recent Activity")
+        signals_pos = call_msg.index("Pending Signals")
+        # Agent context (rules, activity) should come before blackboard (signals)
+        assert rules_pos < signals_pos
+        assert activity_pos < signals_pos
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_pending_details(self):
+        """Heartbeat message includes actual pending signal/task values."""
+        dispatch = AsyncMock(return_value="Ok")
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "# Rules\n\nCheck tasks.",
+            "daily_logs": "",
+            "is_default_heartbeat": False,
+            "has_recent_activity": False,
+        })
+        mock_signal = MagicMock()
+        mock_signal.key = "signals/test/alert1"
+        mock_signal.value = {"message": "urgent update needed"}
+        mock_task = MagicMock()
+        mock_task.key = "tasks/test/todo1"
+        mock_task.value = {"action": "review PR #42"}
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.side_effect = lambda prefix: (
+            [mock_signal] if "signals" in prefix else
+            [mock_task] if "tasks" in prefix else []
+        )
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        await sched._execute_job(job)
+        call_msg = dispatch.call_args[0][1]
+        assert "urgent update needed" in call_msg
+        assert "review PR #42" in call_msg
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_context_fn_failure_graceful(self):
+        """Dispatch still happens when context_fn raises."""
+        dispatch = AsyncMock(return_value="Ok")
+        context_fn = AsyncMock(side_effect=RuntimeError("transport down"))
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        # context_fn fails → ctx={} → is_default=True, has_activity=False
+        # but no probes triggered either → would skip…
+        # Actually, since ctx is empty, is_default=True, has_activity=False,
+        # and with empty blackboard → no probes triggered → SKIP.
+        # That's the correct behavior when we have no context and no probes.
+        # To test graceful fallback, we need at least one probe to trigger.
+        mock_bb.list_by_prefix.side_effect = (
+            lambda prefix: [MagicMock()] if "signals" in prefix else []
+        )
+        result = await sched._execute_job(job)
+        dispatch.assert_called_once()
+        # Should still dispatch despite context_fn failure

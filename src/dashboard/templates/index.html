@@ -623,6 +623,44 @@
                 </template>
               </div>
             </div>
+            <!-- Workspace Files -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-5">
+              <div class="flex items-center justify-between mb-3">
+                <div class="text-xs text-gray-500 uppercase tracking-wider">Workspace Files</div>
+                <span class="text-xs text-gray-700" x-show="workspaceLoading">Loading...</span>
+              </div>
+              <template x-if="!editingFile">
+                <div class="space-y-1">
+                  <template x-for="f in workspaceFiles" :key="f.name">
+                    <div @click="openWorkspaceFile(selectedAgent, f.name)"
+                      class="flex items-center justify-between py-1.5 px-2 rounded cursor-pointer hover:bg-gray-800/50 transition-colors">
+                      <span class="font-mono text-sm text-blue-400" x-text="f.name"></span>
+                      <span class="text-xs text-gray-600" x-text="f.size > 0 ? (f.size > 1024 ? (f.size / 1024).toFixed(1) + ' KB' : f.size + ' B') : 'empty'"></span>
+                    </div>
+                  </template>
+                  <div x-show="workspaceFiles.length === 0 && !workspaceLoading" class="text-gray-600 text-sm py-2 text-center">No workspace available</div>
+                </div>
+              </template>
+              <template x-if="editingFile">
+                <div>
+                  <div class="flex items-center justify-between mb-2">
+                    <span class="font-mono text-sm text-blue-400" x-text="editingFile"></span>
+                    <div class="flex gap-2">
+                      <button @click="saveWorkspaceFile(selectedAgent, editingFile)"
+                        :disabled="editFileSaving"
+                        class="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 text-white rounded disabled:opacity-50">
+                        <span x-text="editFileSaving ? 'Saving...' : 'Save'"></span>
+                      </button>
+                      <button @click="cancelFileEdit()"
+                        class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded">Cancel</button>
+                    </div>
+                  </div>
+                  <textarea x-model="editFileContent"
+                    class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-blue-500 focus:outline-none"
+                    rows="15" spellcheck="false"></textarea>
+                </div>
+              </template>
+            </div>
             <!-- Recent events for this agent -->
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
               <div class="flex items-center justify-between mb-3">

@@ -6,7 +6,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
-[![Tests: 911](https://img.shields.io/badge/tests-911%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 954](https://img.shields.io/badge/tests-954%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -116,7 +116,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 911 tests including full Docker E2E |
+| **Test coverage** | Minimal | 954 tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~14,000 lines — auditable in a day |
 
 ---
@@ -131,7 +131,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, or CLI. Agents act aut
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**911 tests passing** across **~14,000 lines** of application code.
+**954 tests passing** across **~14,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
@@ -156,7 +156,7 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
 
 7. **Multi-channel** — connect agents to Telegram, Discord, Slack, and WhatsApp. Also accessible via CLI and API.
 
-8. **Real-time dashboard** — web-based fleet observability at `/dashboard` with grouped request traces, live event streaming, token-level streaming chat, LLM prompt/response previews, agent management, cost charts, and cron management.
+8. **Real-time dashboard** — web-based fleet observability at `/dashboard` with grouped request traces, live event streaming, token-level streaming chat, LLM prompt/response previews, agent management, workspace file editing, cost charts, and cron management.
 
 9. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly budget enforcement.
 
@@ -324,6 +324,8 @@ chat, status, capabilities, and results.
 │  FastAPI Server (:8400)                                      │
 │    POST /task    POST /chat    POST /chat/reset               │
 │    GET /status   GET /result   GET /capabilities              │
+│    GET /workspace  GET|PUT /workspace/{file}                  │
+│    GET /heartbeat-context                                     │
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐    │
 │  │                     AgentLoop                         │    │
@@ -501,7 +503,13 @@ Cost-efficient autonomous monitoring. Heartbeat jobs run cheap deterministic
 probes first — disk usage, pending signals, pending tasks — and only dispatch
 to the agent (costing LLM tokens) when probes detect something actionable.
 
-This 5-stage architecture (scheduler → probes → policy → escalation → action)
+When a heartbeat fires, the agent receives enriched context: its HEARTBEAT.md
+rules, recent daily logs, probe alerts, and actual pending signal/task content
+— all in a single message. If HEARTBEAT.md is the default scaffold, no recent
+activity exists, and no probes triggered, the dispatch is skipped entirely
+(zero LLM cost).
+
+This 5-stage architecture (scheduler → probes → context → policy → action)
 makes always-on agents economically viable.
 
 ### Webhook Endpoints
@@ -811,38 +819,40 @@ pytest tests/
 |----------|-------|---------------|
 | Built-in Tools | 77 | exec, file, browser (incl. backend tiers + screenshots), memory, mesh tools, notifications, discovery |
 | Dashboard | 66 | Index, agents, blackboard, costs, traces, queues, cron, settings, config |
-| Agent Loop | 46 | Task execution, tool calling, cancellation, tool memory, chat helpers |
+| Agent Loop | 55 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
 | Workspace | 45 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat |
+| Cron | 39 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM optimization |
 | Sanitization | 38 | Invisible Unicode stripping, bidi overrides, tag chars, zero-width |
 | Channels (base) | 37 | Abstract channel, commands, per-user routing, chunking, steer, debug |
 | Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
 | Mesh | 33 | Blackboard, PubSub, MessageRouter, permissions |
-| Cron | 32 | Cron expressions, intervals, dispatch, persistence |
+| Runtime Backend | 31 | DockerBackend, SandboxBackend, browser_backend, extra_env, name sanitization, detection, selection |
 | Context Manager | 31 | Token estimation (tiktoken + model-aware), compaction, flushing |
+| Traces | 30 | Trace recording, grouping, summaries, prompt preview extraction |
 | Events | 30 | Event streaming, filtering, WebSocket |
 | Integration | 28 | Multi-component mesh operations, notifications |
 | Orchestrator | 25 | Workflows, conditions, retries, failures |
+| Credentials | 24 | Vault, API proxy, provider detection |
 | Transcript | 24 | Transcript formatting, safety, round-trip fidelity |
 | Slack Channel | 21 | Socket Mode, thread routing, pairing, command translation |
 | WhatsApp Channel | 21 | Cloud API, webhook verification, message chunking |
-| Traces | 31 | Trace recording, grouping, summaries, prompt preview extraction |
-| Runtime Backend | 26 | DockerBackend, SandboxBackend, browser_backend, extra_env, name sanitization, detection, selection |
+| Setup Wizard | 20 | Quickstart, full setup, API key validation, templates |
 | Marketplace | 20 | Install, manifest parsing, validation, path traversal, remove |
 | Skills | 19 | Discovery, execution, injection, MCP integration |
 | Transport | 18 | HttpTransport, SandboxTransport, resolve_url |
-| Credentials | 18 | Vault, API proxy, provider detection |
 | Vault | 16 | Credential storage, budget enforcement, failover |
 | CLI | 16 | Agent add/list/remove, chat, setup |
 | Failover | 15 | Health tracking, chain cascade, cooldown |
-| Setup Wizard | 14 | Quickstart, full setup, API key validation, templates |
+| Loop Detector | 14 | Agent loop detection and intervention |
 | Lanes | 13 | Per-agent FIFO task queues |
 | Subagent | 11 | Spawn, depth/concurrent limits, TTL timeout, skill cloning, memory isolation |
-| Loop Detector | 11 | Agent loop detection and intervention |
 | Chat | 11 | Chat mode, streaming, workspace integration |
 | MCP Client | 10 | Tool discovery, routing, conflicts, lifecycle |
 | Costs | 10 | Usage recording, budgets, vault integration |
 | Chat Workspace | 10 | Cross-session memory, corrections, learnings |
+| Agent Server | 9 | Workspace API, heartbeat-context endpoint, content sanitization, file allowlist |
 | Types | 8 | Pydantic validation, serialization |
+| Dashboard Workspace | 7 | Workspace proxy endpoints, filename validation, transport forwarding, sanitization |
 | MCP E2E | 7 | Real MCP protocol with live server subprocess |
 | Webhooks | 7 | Add/remove, persistence, dispatch |
 | File Watchers | 7 | Polling, dispatch, pattern matching |
@@ -850,7 +860,7 @@ pytest tests/
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | Health Monitor | 5 | Ephemeral cleanup, TTL expiry, event emission |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **911** | |
+| **Total** | **971** | |
 
 ---
 

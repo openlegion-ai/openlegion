@@ -502,11 +502,20 @@ class RuntimeContext:
             exec_id = await self.orchestrator.trigger_workflow(workflow_name, payload)
             return f"workflow:{exec_id}"
 
+        async def fetch_heartbeat_context(agent_name: str) -> dict:
+            try:
+                return await self.transport.request(
+                    agent_name, "GET", "/heartbeat-context", timeout=10,
+                )
+            except Exception:
+                return {}
+
         self.cron_scheduler = CronScheduler(
             dispatch_fn=cron_dispatch,
             workflow_trigger_fn=trigger_workflow,
             blackboard=self.blackboard,
             trace_store=self.trace_store,
+            context_fn=fetch_heartbeat_context,
         )
         if self.cron_scheduler.jobs:
             echo_ok(f"Cron scheduler: {len(self.cron_scheduler.jobs)} jobs loaded")

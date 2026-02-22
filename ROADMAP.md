@@ -175,6 +175,17 @@ DuckDuckGo is rate-limited and returns low-quality snippets. No content extracti
 - **Search result caching**: simple `dict[str, (float, list)]` with 15-minute TTL, cleared on agent restart. Key = query string, value = (timestamp, results). Check before hitting search API.
 - Add `trafilatura` to agent container dependencies
 
+### ~~4.8 Heartbeat Context Enrichment~~ ✅ Done
+
+Agents waking from heartbeat lacked crucial context: HEARTBEAT.md wasn't loaded, daily logs weren't available, and pending signals/tasks showed only counts. Task completion wrote nothing to daily logs, and chat turn logs were too terse.
+
+**Changes:**
+- Agent workspace API: `/workspace`, `/workspace/{filename}` (read/write), `/heartbeat-context` endpoints in agent server
+- Richer daily logs: chat turns now include tool names and multi-line-aware response summaries; task completion/failure logged with iterations, tokens, duration, tools
+- Enriched heartbeat message: `context_fn` fetches HEARTBEAT.md + daily logs from agent, heartbeat includes sections for rules, recent activity, probe alerts, and pending signal/task details
+- Skip-LLM optimization: when HEARTBEAT.md is default, no recent activity, and no probes triggered, heartbeat dispatch is skipped entirely (saves LLM tokens)
+- Dashboard workspace editing: proxy endpoints + Alpine.js UI for viewing/editing SOUL.md, HEARTBEAT.md, USER.md, AGENTS.md, MEMORY.md
+
 ---
 
 ## Tier 5: Observability Dashboard
@@ -283,6 +294,10 @@ Cron jobs spawn subagents instead of blocking main agent:
 - Main agent stays available for chat
 - Results announced when done
 - Dashboard shows subagent activity in parent's detail view
+
+### ~~5.6 Dashboard Workspace Editing~~ ✅ Done
+
+Dashboard can now view and edit agent workspace files (SOUL.md, HEARTBEAT.md, USER.md, AGENTS.md, MEMORY.md) directly from the agent detail panel. Three proxy endpoints in `src/dashboard/server.py` forward requests to agent containers via transport. Alpine.js UI shows file list with sizes, inline editor with syntax-friendly monospace textarea, and Save/Cancel controls. Content sanitized at both dashboard and agent levels.
 
 ---
 
