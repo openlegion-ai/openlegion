@@ -1,10 +1,11 @@
 /**
  * OpenLegion Dashboard — Alpine.js application.
  *
- * Six panels: Agents, Activity, Blackboard, Costs, Automation, System.
+ * Five panels: Agents, Activity, Blackboard, Automation, System (with Costs sub-tab).
  * Real-time updates via WebSocket + periodic REST polling.
  */
 const _IDENTITY_TABS = [
+  { id: 'config', label: 'Config', file: null, desc: 'Model, role, browser backend, and budget settings.' },
   { id: 'soul', label: 'Soul', file: 'SOUL.md', cap: 4000, desc: 'Personality, tone, and behavioral guidelines.' },
   { id: 'instructions', label: 'Instructions', file: 'AGENTS.md', cap: 8000, desc: 'Operating instructions loaded into the system prompt.' },
   { id: 'preferences', label: 'Preferences', file: 'USER.md', cap: 4000, desc: 'User preferences, background, and working style.' },
@@ -22,7 +23,6 @@ function dashboard() {
       { id: 'fleet', label: 'Agents' },
       { id: 'activity', label: 'Activity' },
       { id: 'blackboard', label: 'Blackboard' },
-      { id: 'costs', label: 'Costs' },
       { id: 'automation', label: 'Automation' },
       { id: 'system', label: 'System' },
     ],
@@ -55,7 +55,6 @@ function dashboard() {
 
     // Agent config (V2)
     agentConfigs: {},
-    editingAgent: null,
     editForm: {},
     availableModels: [],
     availableBrowsers: [],
@@ -109,6 +108,7 @@ function dashboard() {
 
     // Settings (V2)
     settingsData: null,
+    systemView: 'costs',
 
     // Chat (persistent per agent until cleared)
     chatAgent: null,
@@ -120,7 +120,7 @@ function dashboard() {
 
     // Identity panel
     identityTabs: _IDENTITY_TABS,
-    identityTab: 'soul',
+    identityTab: 'config',
     identityFiles: [],
     identityLoading: false,
     identityContent: {},
@@ -128,6 +128,8 @@ function dashboard() {
     identityEditing: false,
     identityEditBuffer: '',
     identitySaving: false,
+    configEditing: false,
+    configSaving: false,
     identityLogs: null,
     identityLogsLoading: false,
     identityLearnings: null,
@@ -258,7 +260,6 @@ function dashboard() {
         }
       }
       if (tab === 'blackboard') { this.fetchBlackboard(); this.fetchProject(); }
-      if (tab === 'costs') this.fetchCosts();
       if (tab === 'fleet') {
         this.fetchAgents();
         this.fetchQueues();
@@ -272,6 +273,7 @@ function dashboard() {
       }
       if (tab === 'system') {
         this.fetchSettings();
+        this.fetchCosts();
       }
     },
 
@@ -330,7 +332,7 @@ function dashboard() {
       }
 
       // Debounced cost panel refresh on llm_call events
-      if (evt.type === 'llm_call' && this.activeTab === 'costs') {
+      if (evt.type === 'llm_call' && this.activeTab === 'system' && this.systemView === 'costs') {
         if (this._costDebounce) clearTimeout(this._costDebounce);
         this._costDebounce = setTimeout(() => this.fetchCosts(), 2000);
       }
@@ -462,6 +464,11 @@ function dashboard() {
 
     async loadIdentityTabContent(agentId) {
       const tab = this.identityCurrentTab;
+      if (tab.id === 'config') {
+        // Config tab fetches agent config, not a workspace file
+        if (!this.agentConfigs[agentId]) await this.fetchAgentConfig(agentId);
+        return;
+      }
       if (tab.file) {
         if (this.identityContent[tab.file] !== undefined) return;
         this.identityContentLoading = true;
@@ -646,10 +653,9 @@ function dashboard() {
       return null;
     },
 
-    startEditAgent(agentId) {
-      const cfg = this.agentConfigs[agentId];
+    startConfigEdit() {
+      const cfg = this.agentConfigs[this.selectedAgent];
       if (!cfg) return;
-      this.editingAgent = agentId;
       this.editForm = {
         model: cfg.model || '',
         browser_backend: cfg.browser_backend || 'basic',
@@ -657,11 +663,21 @@ function dashboard() {
         system_prompt: cfg.system_prompt || '',
         budget_daily: cfg.budget?.daily_usd || '',
       };
+      this.configEditing = true;
     },
 
-    cancelEdit() {
-      this.editingAgent = null;
+    cancelConfigEdit() {
+      this.configEditing = false;
       this.editForm = {};
+    },
+
+    async saveConfigFromDetail(agentId) {
+      this.configSaving = true;
+      await this.saveAgentConfig(agentId);
+      this.configEditing = false;
+      this.configSaving = false;
+      await this.fetchAgentConfig(agentId);
+      await this.fetchAgentDetail(agentId);
     },
 
     async saveAgentConfig(agentId) {
@@ -675,7 +691,7 @@ function dashboard() {
         body.budget = { daily_usd: parseFloat(this.editForm.budget_daily) };
       }
       if (Object.keys(body).length === 0) {
-        this.cancelEdit();
+        this.cancelConfigEdit();
         return;
       }
       try {
@@ -691,7 +707,7 @@ function dashboard() {
           this.showToast(`Error: ${err.detail || 'Update failed'}`);
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
-      this.cancelEdit();
+      this.cancelConfigEdit();
     },
 
     async restartAgent(agentId) {
@@ -1082,24 +1098,18 @@ function dashboard() {
     drillDown(agentId) {
       this.selectedAgent = agentId;
       this.agentEvents = this.events.filter(e => e.agent === agentId).slice(0, 100);
-      this.identityTab = 'soul';
+      this.identityTab = 'config';
       this.identityFiles = [];
       this.identityContent = {};
       this.identityEditing = false;
       this.identityEditBuffer = '';
+      this.configEditing = false;
       this.identityLogs = null;
       this.identityLearnings = null;
       this.fetchAgentDetail(agentId);
       this.fetchIdentityFiles(agentId);
+      this.fetchAgentConfig(agentId);
       this.activeTab = 'agent-detail';
-    },
-
-    // ── V2: Agents panel drill-down ───────────────────────
-
-    async openAgentConfig(agentId) {
-      await this.fetchAgentConfig(agentId);
-      this.selectedAgent = agentId;
-      this.startEditAgent(agentId);
     },
 
     // ── Chart.js rendering ────────────────────────────────
