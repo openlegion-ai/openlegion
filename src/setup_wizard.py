@@ -144,9 +144,12 @@ class SetupWizard:
 
         When a ``type`` kwarg with validation (e.g. ``click.IntRange``) is
         provided, we strip it and validate manually *after* checking for
-        'back'.  This avoids Click rejecting 'back' as invalid input.
+        'back'.  The default is also stringified to prevent Click from
+        inferring an integer type from it.
         """
         click_type = kwargs.pop("type", None)
+        if click_type is not None and "default" in kwargs:
+            kwargs["default"] = str(kwargs["default"])
         value = click.prompt(prompt_text, **kwargs)
         if isinstance(value, str) and value.strip().lower() == "back":
             return None
@@ -155,7 +158,7 @@ class SetupWizard:
             try:
                 value = click_type.convert(value, None, None)
             except (click.BadParameter, Exception):
-                click.echo(f"  Error: invalid input. Try again or type 'back'.")
+                click.echo("  Error: invalid input. Try again or type 'back'.")
                 return SetupWizard._prompt_with_back(prompt_text, type=click_type, **kwargs)
         return value
 
