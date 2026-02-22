@@ -14,6 +14,7 @@ import abc
 import asyncio
 import json
 import platform
+import re
 import secrets
 import shutil
 import subprocess
@@ -24,6 +25,14 @@ from typing import Any
 from src.shared.utils import setup_logging
 
 logger = setup_logging("host.runtime")
+
+# Docker container/volume names only allow [a-zA-Z0-9][a-zA-Z0-9_.-]
+_DOCKER_NAME_RE = re.compile(r"[^a-zA-Z0-9_.-]")
+
+
+def _docker_safe_name(agent_id: str) -> str:
+    """Sanitize an agent ID for use in Docker container/volume names."""
+    return _DOCKER_NAME_RE.sub("_", agent_id)
 
 
 class RuntimeBackend(abc.ABC):
@@ -192,8 +201,9 @@ class DockerBackend(RuntimeBackend):
         if self.use_host_network:
             environment["AGENT_PORT"] = str(port)
 
+        safe_name = _docker_safe_name(agent_id)
         volumes: dict[str, Any] = {
-            f"openlegion_data_{agent_id}": {"bind": "/data", "mode": "rw"},
+            f"openlegion_data_{safe_name}": {"bind": "/data", "mode": "rw"},
         }
         if skills_dir:
             # docker-py on Windows needs forward-slash or POSIX paths for bind mounts
@@ -223,7 +233,7 @@ class DockerBackend(RuntimeBackend):
 
         run_kwargs: dict[str, Any] = {
             "detach": True,
-            "name": f"openlegion_{agent_id}",
+            "name": f"openlegion_{safe_name}",
             "environment": environment,
             "volumes": volumes,
             "mem_limit": "512m",
@@ -241,7 +251,7 @@ class DockerBackend(RuntimeBackend):
                     "host.docker.internal": "host-gateway",
                 }
 
-        container_name = f"openlegion_{agent_id}"
+        container_name = f"openlegion_{safe_name}"
         try:
             stale = self.client.containers.get(container_name)
             stale.remove(force=True)
@@ -461,7 +471,7 @@ class SandboxBackend(RuntimeBackend):
         mcp_servers: list[dict] | None = None,
         browser_backend: str = "",
     ) -> str:
-        sandbox_name = f"openlegion_{agent_id}"
+        sandbox_name = f"openlegion_{_docker_safe_name(agent_id)}"
         ws = self._prepare_workspace(agent_id, role, skills_dir, system_prompt, model, mcp_servers=mcp_servers, browser_backend=browser_backend)
 
         # Create sandbox with the shell agent type and workspace

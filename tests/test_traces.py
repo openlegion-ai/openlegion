@@ -122,6 +122,79 @@ class TestTraceStore:
         summaries = self.store.list_trace_summaries(limit=3)
         assert len(summaries) == 3
 
+    def test_list_trace_summaries_trigger_fields(self):
+        """Summaries include trigger_detail, first_event_type, and trigger_preview."""
+        import json
+        self.store.record(
+            "tr_rich", "dispatch", "alpha", "chat", detail="hello world",
+            meta={"prompt_preview": "What is the capital of France?"},
+        )
+        self.store.record("tr_rich", "mesh", "alpha", "llm_call", duration_ms=100)
+
+        summaries = self.store.list_trace_summaries(limit=10)
+        assert len(summaries) == 1
+        s = summaries[0]
+        assert s["trigger_detail"] == "hello world"
+        assert s["first_event_type"] == "chat"
+        # trigger_preview prefers prompt_preview from meta over detail
+        assert s["trigger_preview"] == "What is the capital of France?"
+
+    def test_list_trace_summaries_trigger_fallback_to_detail(self):
+        """trigger_preview falls back to detail when no prompt_preview in meta."""
+        self.store.record("tr_fall", "dispatch", "alpha", "chat", detail="simple detail")
+        summaries = self.store.list_trace_summaries(limit=10)
+        assert summaries[0]["trigger_preview"] == "simple detail"
+
+    def test_list_trace_summaries_trigger_preview_truncation(self):
+        """trigger_preview is truncated to 120 chars."""
+        long_detail = "x" * 200
+        self.store.record("tr_long", "dispatch", "a", "chat", detail=long_detail)
+        summaries = self.store.list_trace_summaries(limit=10)
+        assert len(summaries[0]["trigger_preview"]) == 120
+
+
+# ── _extract_prompt_preview ──────────────────────────────────
+
+class TestExtractPromptPreview:
+    def test_basic_string_content(self):
+        from src.host.server import _extract_prompt_preview
+        params = {"messages": [{"role": "user", "content": "Hello world"}]}
+        assert _extract_prompt_preview(params) == "Hello world"
+
+    def test_list_content_blocks(self):
+        from src.host.server import _extract_prompt_preview
+        params = {"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "Describe this image"},
+            {"type": "image", "source": {"data": "..."}},
+        ]}]}
+        assert _extract_prompt_preview(params) == "Describe this image"
+
+    def test_last_user_message(self):
+        from src.host.server import _extract_prompt_preview
+        params = {"messages": [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "second"},
+        ]}
+        assert _extract_prompt_preview(params) == "second"
+
+    def test_no_messages(self):
+        from src.host.server import _extract_prompt_preview
+        assert _extract_prompt_preview({}) == ""
+        assert _extract_prompt_preview({"messages": []}) == ""
+
+    def test_no_user_messages(self):
+        from src.host.server import _extract_prompt_preview
+        params = {"messages": [{"role": "assistant", "content": "hi"}]}
+        assert _extract_prompt_preview(params) == ""
+
+    def test_truncation(self):
+        from src.host.server import _extract_prompt_preview
+        long_msg = "x" * 1000
+        params = {"messages": [{"role": "user", "content": long_msg}]}
+        assert len(_extract_prompt_preview(params)) == 500
+        assert len(_extract_prompt_preview(params, max_len=50)) == 50
+
 
 # ── Contextvar + helpers ─────────────────────────────────────
 

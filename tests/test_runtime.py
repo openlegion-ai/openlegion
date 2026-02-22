@@ -10,6 +10,7 @@ from src.host.runtime import (
     DockerBackend,
     RuntimeBackend,
     SandboxBackend,
+    _docker_safe_name,
     sandbox_available,
     select_backend,
 )
@@ -321,3 +322,23 @@ class TestDefaultEmbeddingModel:
 
     def test_unknown_provider_no_embeddings(self):
         assert _default_embedding_model("deepseek/deepseek-chat") == "none"
+
+
+# ── _docker_safe_name ────────────────────────────────────────
+
+class TestDockerSafeName:
+    def test_spaces_replaced(self):
+        assert _docker_safe_name("Signal Watcher") == "Signal_Watcher"
+
+    def test_already_valid(self):
+        assert _docker_safe_name("alpha") == "alpha"
+
+    def test_dots_and_dashes_preserved(self):
+        assert _docker_safe_name("my-agent.v2") == "my-agent.v2"
+
+    def test_special_chars(self):
+        assert _docker_safe_name("agent@home!") == "agent_home_"
+
+    def test_unicode(self):
+        result = _docker_safe_name("agente_espanol")
+        assert result == "agente_espanol"

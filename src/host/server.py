@@ -24,6 +24,22 @@ from src.shared.utils import setup_logging
 
 _server_logger = setup_logging("host.server")
 
+
+def _extract_prompt_preview(params: dict, max_len: int = 500) -> str:
+    """Extract the last user message content as a short preview string."""
+    for msg in reversed(params.get("messages", [])):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                return content[:max_len]
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        return (part.get("text") or "")[:max_len]
+            break
+    return ""
+
+
 if TYPE_CHECKING:
     from src.dashboard.events import EventBus
     from src.host.credentials import CredentialVault
@@ -183,14 +199,29 @@ def create_mesh_app(
             return APIProxyResponse(success=False, error="No credential vault configured")
 
         req_trace_id = request.headers.get("x-trace-id")
+        prompt_preview = _extract_prompt_preview(api_request.params)
         t0 = time.time()
         result = await credential_vault.execute_api_call(api_request, agent_id=agent_id)
         duration_ms = int((time.time() - t0) * 1000)
+        response_preview = ""
+        if result.success and result.data:
+            resp_content = result.data.get("content", "")
+            if isinstance(resp_content, str):
+                response_preview = resp_content[:500]
+            elif isinstance(resp_content, list):
+                for block in resp_content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        response_preview = (block.get("text") or "")[:500]
+                        break
         if req_trace_id and trace_store:
             trace_meta = {
                 "service": api_request.service,
                 "action": api_request.action,
             }
+            if prompt_preview:
+                trace_meta["prompt_preview"] = prompt_preview
+            if response_preview:
+                trace_meta["response_preview"] = response_preview
             trace_status = "ok"
             trace_error = ""
             if result.success and result.data:
@@ -218,7 +249,7 @@ def create_mesh_app(
             input_tok = result.data.get("input_tokens", 0)
             output_tok = result.data.get("output_tokens", 0)
             from src.host.costs import estimate_cost
-            event_bus.emit("llm_call", agent=agent_id, data={
+            event_data = {
                 "service": api_request.service, "action": api_request.action,
                 "duration_ms": duration_ms,
                 "model": model,
@@ -228,7 +259,12 @@ def create_mesh_app(
                 "cost_usd": estimate_cost(
                     model, input_tokens=input_tok, output_tokens=output_tok, total_tokens=tokens,
                 ),
-            })
+            }
+            if prompt_preview:
+                event_data["prompt_preview"] = prompt_preview
+            if response_preview:
+                event_data["response_preview"] = response_preview
+            event_bus.emit("llm_call", agent=agent_id, data=event_data)
         return result
 
     @app.post("/mesh/api/stream")
@@ -242,12 +278,20 @@ def create_mesh_app(
 
         req_trace_id = request.headers.get("x-trace-id")
         if req_trace_id and trace_store:
+            stream_meta: dict = {
+                "service": api_request.service,
+                "action": api_request.action,
+            }
+            stream_prompt_preview = _extract_prompt_preview(api_request.params)
+            if stream_prompt_preview:
+                stream_meta["prompt_preview"] = stream_prompt_preview
             trace_store.record(
                 trace_id=req_trace_id,
                 source="mesh.api_proxy",
                 agent=agent_id,
                 event_type="llm_stream",
                 detail=f"{api_request.service}/{api_request.action}",
+                meta=stream_meta,
             )
         return StreamingResponse(
             credential_vault.stream_llm(api_request, agent_id=agent_id),
