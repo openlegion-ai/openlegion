@@ -815,6 +815,83 @@ class TestDashboardSettings:
         assert "anthropic" in data["provider_models"]
         assert len(data["model_costs"]) > 0
 
+    def test_has_llm_credentials_true(self):
+        """has_llm_credentials is True when a known LLM key exists."""
+        self.components["credential_vault"].list_credential_names.return_value = [
+            "anthropic_api_key", "brave_search_api_key",
+        ]
+        self.client = _make_client(self.components)
+        resp = self.client.get("/dashboard/api/settings")
+        data = resp.json()
+        assert data["has_llm_credentials"] is True
+
+    def test_has_llm_credentials_false(self):
+        """has_llm_credentials is False when no known LLM keys exist."""
+        self.components["credential_vault"].list_credential_names.return_value = [
+            "brave_search_api_key",
+        ]
+        self.client = _make_client(self.components)
+        resp = self.client.get("/dashboard/api/settings")
+        data = resp.json()
+        assert data["has_llm_credentials"] is False
+
+    def test_has_llm_credentials_empty(self):
+        """has_llm_credentials is False when no credentials at all."""
+        self.components["credential_vault"].list_credential_names.return_value = []
+        self.client = _make_client(self.components)
+        resp = self.client.get("/dashboard/api/settings")
+        data = resp.json()
+        assert data["has_llm_credentials"] is False
+
+
+# ── V2 Tests: Credential Base URL ────────────────────────────
+
+
+class TestDashboardCredentialBaseUrl:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_post_credential_with_base_url(self):
+        """POST /api/credentials with base_url stores both key and base."""
+        resp = self.client.post(
+            "/dashboard/api/credentials",
+            json={"service": "openai", "key": "sk-test", "base_url": "https://gateway.example.com/v1"},
+        )
+        assert resp.status_code == 200
+        vault = self.components["credential_vault"]
+        calls = vault.add_credential.call_args_list
+        # First call: the API key itself
+        assert calls[0][0] == ("openai_api_key", "sk-test")
+        # Second call: the base URL
+        assert calls[1][0] == ("openai_api_base", "https://gateway.example.com/v1")
+
+    def test_post_credential_without_base_url(self):
+        """POST /api/credentials without base_url stores only the key."""
+        resp = self.client.post(
+            "/dashboard/api/credentials",
+            json={"service": "openai", "key": "sk-test"},
+        )
+        assert resp.status_code == 200
+        vault = self.components["credential_vault"]
+        assert vault.add_credential.call_count == 1
+        assert vault.add_credential.call_args[0] == ("openai_api_key", "sk-test")
+
+    def test_post_credential_empty_base_url_ignored(self):
+        """Empty base_url string is ignored."""
+        resp = self.client.post(
+            "/dashboard/api/credentials",
+            json={"service": "openai", "key": "sk-test", "base_url": "  "},
+        )
+        assert resp.status_code == 200
+        vault = self.components["credential_vault"]
+        assert vault.add_credential.call_count == 1
+
 
 # ── V2 Tests: Messages ──────────────────────────────────────
 

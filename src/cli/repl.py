@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import click
 
 from src.cli.config import (
+    _PROVIDERS,
     _create_agent,
     _default_description,
     _edit_agent_interactive,
@@ -89,8 +90,89 @@ class REPLSession:
             "/help":       (self._cmd_help,       "Show this help"),
         }
 
+    def _first_run_guide(self) -> None:
+        """Show onboarding prompts for first-time users (no credentials, no agents)."""
+        has_creds = bool(self.ctx.credential_vault.credentials)
+        has_agents = bool(self.ctx.agents)
+
+        if has_creds and not has_agents:
+            click.echo("\n  Tip: Type /add to create your first agent, or visit the dashboard.\n")
+            return
+        if has_creds:
+            return
+
+        click.echo("\n  Welcome to OpenLegion!\n")
+        click.echo("  No API credentials configured yet. Pick a path:\n")
+        click.echo("  1. Quick setup here (1 minute)")
+        click.echo("  2. Open the dashboard instead")
+        click.echo("  3. Skip — I'll use /addkey later\n")
+        try:
+            choice = click.prompt("  Choice", default="1").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+
+        if choice == "2":
+            mesh_port = self.ctx.cfg.get("mesh", {}).get("port", 8420)
+            url = f"http://localhost:{mesh_port}/dashboard/"
+            click.echo(f"\n  Dashboard: {url}")
+            try:
+                click.launch(url)
+            except Exception:
+                pass
+            click.echo("  Add your API key there, then come back here.\n")
+            return
+
+        if choice != "1":
+            click.echo("\n  No problem. Use /addkey to add credentials and /add to create an agent.\n")
+            return
+
+        # Option 1: interactive terminal setup
+        click.echo()
+        for i, p in enumerate(_PROVIDERS, 1):
+            click.echo(f"  {i}. {p['label']}")
+        click.echo()
+        try:
+            idx = click.prompt("  Provider", type=click.IntRange(1, len(_PROVIDERS)), default=1)
+        except (EOFError, KeyboardInterrupt):
+            return
+        provider = _PROVIDERS[idx - 1]["name"]
+
+        try:
+            api_key = click.prompt(f"  {provider} API key", hide_input=True)
+        except (EOFError, KeyboardInterrupt):
+            return
+        if not api_key.strip():
+            click.echo("  No key provided.")
+            return
+
+        service = f"{provider}_api_key"
+        self.ctx.credential_vault.add_credential(service, api_key.strip())
+        click.echo(f"  Credential '{service}' stored.")
+
+        # Optional base URL
+        try:
+            base_url = click.prompt(
+                "  Custom API base URL (leave blank for default)", default="", show_default=False,
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            base_url = ""
+        if base_url:
+            self.ctx.credential_vault.add_credential(f"{provider}_api_base", base_url)
+            click.echo(f"  Custom base URL stored for {provider}.")
+
+        click.echo()
+        try:
+            create_agent = click.confirm("  Create your first agent?", default=True)
+        except (EOFError, KeyboardInterrupt):
+            create_agent = False
+        if create_agent:
+            self._cmd_add("")
+        else:
+            click.echo("\n  Use /add when you're ready to create an agent.\n")
+
     def run(self) -> None:
         """Main REPL loop."""
+        self._first_run_guide()
         while True:
             try:
                 if self.current:
@@ -600,6 +682,16 @@ class REPLSession:
             return
         self.ctx.credential_vault.add_credential(service, key_value)
         click.echo(f"Credential '{service}' stored.")
+        # Prompt for optional base URL when the key is for a known LLM provider
+        if service.lower().endswith("_api_key"):
+            provider = service.lower().replace("_api_key", "")
+            if provider in known_providers:
+                base_url = click.prompt(
+                    "  Custom API base URL (leave blank for default)", default="", show_default=False,
+                ).strip()
+                if base_url:
+                    self.ctx.credential_vault.add_credential(f"{provider}_api_base", base_url)
+                    click.echo(f"  Custom base URL stored for {provider}.")
 
     def _cmd_reset(self, arg: str) -> None:
         if self.current is None:

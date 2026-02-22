@@ -313,8 +313,65 @@
             Loading agents...
           </div>
         </div>
+        <!-- Onboarding banner (first-run) -->
+        <div x-show="showOnboarding && !loading" x-cloak class="mb-6 bg-gray-900 border border-indigo-800/40 rounded-xl p-6">
+          <h3 class="text-base font-semibold text-white mb-4">Get started</h3>
+          <div class="space-y-4">
+            <!-- Step 1: API key -->
+            <div class="flex items-start gap-3">
+              <div class="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold"
+                :class="settingsData?.has_llm_credentials ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-400'">
+                <span x-show="settingsData?.has_llm_credentials">&#10003;</span>
+                <span x-show="!settingsData?.has_llm_credentials">1</span>
+              </div>
+              <div class="flex-1">
+                <div class="text-sm font-medium text-gray-200 mb-2">Add an API key</div>
+                <div x-show="!settingsData?.has_llm_credentials" class="space-y-2">
+                  <div class="flex flex-wrap gap-2">
+                    <select x-model="onboardProvider" class="dash-select text-xs w-40">
+                      <option value="">Provider...</option>
+                      <option value="anthropic">Anthropic</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="gemini">Google Gemini</option>
+                      <option value="deepseek">DeepSeek</option>
+                      <option value="moonshot">Moonshot / Kimi</option>
+                      <option value="xai">xAI (Grok)</option>
+                      <option value="groq">Groq</option>
+                    </select>
+                    <input type="password" x-model="onboardKey" class="dash-input flex-1 min-w-[200px]" placeholder="API key">
+                  </div>
+                  <div class="flex flex-wrap gap-2 items-center">
+                    <input type="text" x-model="onboardBaseUrl" class="dash-input flex-1 min-w-[200px]" placeholder="Custom API base URL (optional)">
+                    <button @click="submitOnboardCredential()" :disabled="!onboardProvider || !onboardKey"
+                      class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">Save</button>
+                  </div>
+                </div>
+                <div x-show="settingsData?.has_llm_credentials" class="text-xs text-emerald-400">API key configured</div>
+              </div>
+            </div>
+            <!-- Step 2: Create agent -->
+            <div class="flex items-start gap-3">
+              <div class="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold"
+                :class="agents.length > 0 ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-400'">
+                <span x-show="agents.length > 0">&#10003;</span>
+                <span x-show="agents.length === 0">2</span>
+              </div>
+              <div class="flex-1">
+                <div class="text-sm font-medium text-gray-200 mb-2">Create your first agent</div>
+                <button @click="addAgentMode = true; fetchSettings()"
+                  :disabled="!settingsData?.has_llm_credentials"
+                  class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors inline-flex items-center gap-1.5"
+                  x-show="agents.length === 0">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  Add Agent
+                </button>
+                <div x-show="agents.length > 0" class="text-xs text-emerald-400">Agent running</div>
+              </div>
+            </div>
+          </div>
+        </div>
         <!-- Empty state -->
-        <div x-show="agents.length === 0 && !loading" class="text-center py-16" x-cloak>
+        <div x-show="agents.length === 0 && !loading && !showOnboarding" class="text-center py-16" x-cloak>
           <svg class="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
           </svg>
@@ -1267,6 +1324,7 @@
                     <input type="password" x-model="credKey" class="dash-input flex-1" placeholder="API key">
                     <button @click="addCredential()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Add</button>
                   </div>
+                  <input type="text" x-model="credBaseUrl" class="dash-input w-full mt-2" placeholder="Custom API base URL (optional)">
                 </div>
               </div>
               <!-- PubSub subscriptions -->

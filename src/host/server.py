@@ -124,11 +124,14 @@ def create_mesh_app(
         """Remove all rate-limit buckets for a deregistered agent.
 
         Only clears timestamp lists (not locks) to avoid racing with
-        concurrent lock acquisitions on the defaultdict.
+        concurrent lock acquisitions on the defaultdict.  Also cleans up
+        per-agent budget locks in the credential vault.
         """
         stale = [k for k in _rate_ts if k.endswith(f":{agent_id}")]
         for k in stale:
             del _rate_ts[k]
+        if credential_vault is not None:
+            credential_vault.cleanup_agent(agent_id)
 
     app.cleanup_rate_limits = _cleanup_rate_limits  # type: ignore[attr-defined]
 
