@@ -78,8 +78,8 @@
         </div>
       </div>
       <div class="flex items-center gap-4">
-        <!-- Fleet total cost -->
-        <div class="text-xs text-gray-400 hidden sm:block" x-show="fleetTotalCost > 0">
+        <!-- Fleet total cost (click to System > Costs) -->
+        <div class="text-xs text-gray-400 hidden sm:block cursor-pointer hover:text-gray-200 transition-colors" x-show="fleetTotalCost > 0" @click="systemView = 'costs'; switchTab('system')">
           Today: <span class="text-gray-200 font-medium" x-text="formatCost(fleetTotalCost)"></span>
         </div>
         <!-- Connection indicator -->
@@ -220,7 +220,7 @@
                   <span class="text-yellow-400 font-mono text-[11px]" x-text="agent.restarts"></span>
                 </div>
               </div>
-              <!-- Agent actions: Chat, Identity, Config, Restart, Remove -->
+              <!-- Agent actions: Chat, Manage, Restart, Remove -->
               <div class="mt-3 pt-3 border-t border-gray-800/50 flex flex-wrap gap-1.5">
                 <button
                   @click="openChat(agent.id)"
@@ -229,52 +229,15 @@
                 <button
                   @click="drillDown(agent.id)"
                   class="text-[11px] px-2 py-1 rounded bg-purple-900/30 hover:bg-purple-800/40 text-purple-300 hover:text-purple-200 border border-purple-800/30 transition-colors"
-                >Identity</button>
-                <button
-                  @click="openAgentConfig(agent.id)"
-                  x-show="editingAgent !== agent.id"
-                  class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
-                >Config</button>
+                >Manage</button>
                 <button
                   @click="restartAgent(agent.id)"
-                  class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
+                  class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-amber-900/30 text-gray-400 hover:text-amber-400 transition-colors"
                 >Restart</button>
                 <button
                   @click="removeAgent(agent.id)"
                   class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-red-900/50 text-gray-400 hover:text-red-400 transition-colors"
                 >Remove</button>
-              </div>
-              <!-- Inline edit mode -->
-              <div x-show="editingAgent === agent.id" class="mt-3 pt-3 border-t border-gray-800/50 space-y-2">
-                <div>
-                  <label class="text-[11px] text-gray-500">Model</label>
-                  <select x-model="editForm.model" class="dash-select w-full mt-0.5">
-                    <template x-for="m in availableModels" :key="m">
-                      <option :value="m" x-text="m"></option>
-                    </template>
-                  </select>
-                </div>
-                <div>
-                  <label class="text-[11px] text-gray-500">Browser</label>
-                  <select x-model="editForm.browser_backend" class="dash-select w-full mt-0.5">
-                    <template x-for="b in availableBrowsers" :key="b">
-                      <option :value="b" x-text="b"></option>
-                    </template>
-                  </select>
-                </div>
-                <div>
-                  <label class="text-[11px] text-gray-500">Role</label>
-                  <input type="text" x-model="editForm.role" class="dash-input w-full mt-0.5">
-                </div>
-                <div>
-                  <label class="text-[11px] text-gray-500">Budget ($/day)</label>
-                  <input type="number" step="0.5" min="0.1" x-model="editForm.budget_daily" class="dash-input w-full mt-0.5" placeholder="10.0">
-                </div>
-                <div class="flex gap-2 mt-2">
-                  <button @click="saveAgentConfig(agent.id)" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save</button>
-                  <button @click="cancelEdit()" class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Cancel</button>
-                  <button @click="resetAgent(agent.id)" class="text-xs px-3 py-1.5 rounded text-gray-600 hover:text-red-400 transition-colors ml-auto">Reset Conversation</button>
-                </div>
               </div>
             </div>
           </template>
@@ -527,7 +490,7 @@
       </div>
 
       <!-- Agent Detail -->
-      <div x-show="activeTab === 'agent-detail'" x-cloak>
+      <div x-show="activeTab === 'agent-detail'" x-cloak @keydown.escape.window="if (activeTab === 'agent-detail' && !identityEditing && !configEditing && !chatAgent) switchTab('fleet')">
         <button @click="switchTab('fleet')" class="text-sm text-gray-500 hover:text-gray-300 mb-4 flex items-center gap-1 transition-colors">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
           Back to agents
@@ -541,25 +504,35 @@
         </div>
         <template x-if="agentDetail">
           <div>
-            <div class="flex items-center gap-3 mb-5">
-              <h2 class="text-xl font-bold" x-text="agentDetail.id"></h2>
-              <span
-                class="text-[11px] px-2 py-0.5 rounded-full font-medium"
-                :class="{
-                  'bg-green-900/40 text-green-400 border border-green-800/50': agentDetail.health?.status === 'healthy',
-                  'bg-yellow-900/40 text-yellow-400 border border-yellow-800/50': agentDetail.health?.status === 'unhealthy',
-                  'bg-red-900/40 text-red-400 border border-red-800/50': agentDetail.health?.status === 'failed',
-                  'bg-gray-800/60 text-gray-500 border border-gray-700/50': !agentDetail.health?.status || agentDetail.health?.status === 'unknown',
-                }"
-                x-text="agentDetail.health?.status || 'unknown'"
-              ></span>
-              <span class="text-xs text-gray-600 font-mono" x-text="agentDetail.url"></span>
+            <div class="flex items-center justify-between mb-5">
+              <div class="flex items-center gap-3">
+                <h2 class="text-xl font-bold" x-text="agentDetail.id"></h2>
+                <span
+                  class="text-[11px] px-2 py-0.5 rounded-full font-medium"
+                  :class="{
+                    'bg-green-900/40 text-green-400 border border-green-800/50': agentDetail.health?.status === 'healthy',
+                    'bg-yellow-900/40 text-yellow-400 border border-yellow-800/50': agentDetail.health?.status === 'unhealthy',
+                    'bg-red-900/40 text-red-400 border border-red-800/50': agentDetail.health?.status === 'failed',
+                    'bg-gray-800/60 text-gray-500 border border-gray-700/50': !agentDetail.health?.status || agentDetail.health?.status === 'unknown',
+                  }"
+                  x-text="agentDetail.health?.status || 'unknown'"
+                ></span>
+                <span class="text-xs text-gray-600 font-mono" x-text="agentDetail.url"></span>
+              </div>
+              <div class="flex items-center gap-2">
+                <button @click="openChat(selectedAgent)"
+                  class="text-[11px] px-3 py-1.5 rounded bg-indigo-900/30 hover:bg-indigo-800/40 text-indigo-300 hover:text-indigo-200 border border-indigo-800/30 transition-colors"
+                >Chat</button>
+                <button @click="restartAgent(selectedAgent)"
+                  class="text-[11px] px-3 py-1.5 rounded bg-gray-800 hover:bg-amber-900/30 text-gray-400 hover:text-amber-400 transition-colors"
+                >Restart</button>
+              </div>
             </div>
             <!-- Agent Identity Panel -->
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-5">
               <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Identity</div>
               <!-- Tab bar -->
-              <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-3 flex-wrap">
+              <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-3 overflow-x-auto">
                 <template x-for="tab in identityTabs" :key="tab.id">
                   <button
                     @click="switchIdentityTab(selectedAgent, tab.id)"
@@ -677,6 +650,91 @@
               <div x-show="(identityTab === 'activity' && identityLogsLoading) || (identityTab === 'learnings' && identityLearningsLoading)" class="py-6 text-center text-gray-600 text-sm">
                 <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
                 Loading...
+              </div>
+              <!-- Config tab -->
+              <div x-show="identityTab === 'config' && !identityLoading">
+                <!-- Loading state -->
+                <div x-show="!agentConfigs[selectedAgent]" class="py-6 text-center text-gray-600 text-sm">
+                  <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                  Loading config...
+                </div>
+                <!-- Read-only view -->
+                <div x-show="agentConfigs[selectedAgent] && !configEditing">
+                  <div class="flex items-center justify-between mb-3">
+                    <span class="text-xs text-gray-500">Agent configuration</span>
+                    <button @click="startConfigEdit()"
+                      class="text-[11px] px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
+                  </div>
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div class="bg-gray-800/50 rounded p-3">
+                      <div class="text-[11px] text-gray-500 mb-1">Model</div>
+                      <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.model || '-'"></div>
+                    </div>
+                    <div class="bg-gray-800/50 rounded p-3">
+                      <div class="text-[11px] text-gray-500 mb-1">Browser Backend</div>
+                      <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.browser_backend || '-'"></div>
+                    </div>
+                    <div class="bg-gray-800/50 rounded p-3">
+                      <div class="text-[11px] text-gray-500 mb-1">Role</div>
+                      <div class="text-sm text-gray-200" x-text="agentConfigs[selectedAgent]?.role || '-'"></div>
+                    </div>
+                    <div class="bg-gray-800/50 rounded p-3">
+                      <div class="text-[11px] text-gray-500 mb-1">Budget ($/day)</div>
+                      <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.budget?.daily_usd ? formatCost(agentConfigs[selectedAgent].budget.daily_usd) : '-'"></div>
+                    </div>
+                  </div>
+                  <div x-show="agentConfigs[selectedAgent]?.system_prompt" class="mt-3 bg-gray-800/50 rounded p-3">
+                    <div class="text-[11px] text-gray-500 mb-1">System Prompt</div>
+                    <pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar" x-text="agentConfigs[selectedAgent]?.system_prompt"></pre>
+                  </div>
+                </div>
+                <!-- Edit mode -->
+                <div x-show="agentConfigs[selectedAgent] && configEditing">
+                  <div class="space-y-3">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div>
+                        <label class="text-[11px] text-gray-500 mb-1 block">Model</label>
+                        <select x-model="editForm.model" class="dash-select w-full">
+                          <template x-for="m in availableModels" :key="m">
+                            <option :value="m" x-text="m"></option>
+                          </template>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="text-[11px] text-gray-500 mb-1 block">Browser Backend</label>
+                        <select x-model="editForm.browser_backend" class="dash-select w-full">
+                          <template x-for="b in availableBrowsers" :key="b">
+                            <option :value="b" x-text="b"></option>
+                          </template>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="text-[11px] text-gray-500 mb-1 block">Role</label>
+                        <input type="text" x-model="editForm.role" class="dash-input w-full">
+                      </div>
+                      <div>
+                        <label class="text-[11px] text-gray-500 mb-1 block">Budget ($/day)</label>
+                        <input type="number" step="0.5" min="0.1" x-model="editForm.budget_daily" class="dash-input w-full" placeholder="10.0">
+                      </div>
+                    </div>
+                    <div>
+                      <label class="text-[11px] text-gray-500 mb-1 block">System Prompt</label>
+                      <textarea x-model="editForm.system_prompt"
+                        class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
+                        rows="6" spellcheck="false"></textarea>
+                    </div>
+                    <div class="flex gap-2">
+                      <button @click="saveConfigFromDetail(selectedAgent)" :disabled="configSaving"
+                        class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
+                        <span x-text="configSaving ? 'Saving...' : 'Save'"></span>
+                      </button>
+                      <button @click="cancelConfigEdit()"
+                        class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Cancel</button>
+                      <button @click="resetAgent(selectedAgent)"
+                        class="text-xs px-3 py-1.5 rounded text-gray-600 hover:text-red-400 transition-colors ml-auto">Reset Conversation</button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
             <!-- Spend / Health summary -->
@@ -938,61 +996,6 @@
         </div>
       </div>
 
-      <!-- Costs -->
-      <div x-show="activeTab === 'costs'" x-cloak>
-        <div class="flex items-center justify-between mb-4">
-          <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
-            <template x-for="p in ['today', 'week', 'month']" :key="p">
-              <button
-                @click="costPeriod = p; fetchCosts()"
-                class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
-                :class="costPeriod === p ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-500 hover:text-gray-300'"
-                x-text="p.charAt(0).toUpperCase() + p.slice(1)"
-              ></button>
-            </template>
-          </div>
-          <div class="text-sm text-gray-400" x-show="costData.agents && costData.agents.length > 0">
-            Total: <span class="text-white font-mono font-medium" x-text="formatCost(costTotal)"></span>
-          </div>
-        </div>
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-            <div class="h-72" x-show="costData.agents && costData.agents.length > 0">
-              <canvas id="costChart"></canvas>
-            </div>
-            <div x-show="!costData.agents || costData.agents.length === 0" class="flex items-center justify-center h-72 text-gray-600">
-              No cost data for this period
-            </div>
-          </div>
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-            <div class="text-xs text-gray-500 uppercase tracking-wider mb-4">Budget Status</div>
-            <div class="space-y-4">
-              <template x-for="item in costData.agents || []" :key="item.agent">
-                <div>
-                  <div class="flex justify-between text-sm mb-1">
-                    <span class="text-white font-medium" x-text="item.agent"></span>
-                    <div class="flex items-center gap-3">
-                      <span class="text-gray-500 text-xs font-mono" x-text="item.tokens.toLocaleString() + ' tok'"></span>
-                      <span class="text-gray-300 font-mono text-xs" x-text="formatCost(item.cost)"></span>
-                    </div>
-                  </div>
-                  <div x-show="costData.budgets && costData.budgets[item.agent]">
-                    <div class="w-full bg-gray-800 rounded-full h-1.5">
-                      <div class="h-1.5 rounded-full transition-all duration-500"
-                        :class="item.cost / (costData.budgets?.[item.agent]?.daily_limit || 1) > 0.8 ? 'bg-red-500' : 'bg-indigo-500'"
-                        :style="'width:' + Math.min(100, (item.cost / (costData.budgets?.[item.agent]?.daily_limit || 1)) * 100) + '%'"
-                      ></div>
-                    </div>
-                    <div class="text-[10px] text-gray-700 mt-1 font-mono" x-text="formatCost(item.cost) + ' / ' + formatCost(costData.budgets?.[item.agent]?.daily_limit || 0) + ' daily'"></div>
-                  </div>
-                </div>
-              </template>
-              <div x-show="!costData.agents || costData.agents.length === 0" class="text-gray-600 text-sm py-4 text-center">Budgets appear once agents incur costs</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
       <!-- Automation (Cron with inline schedule editing) -->
       <div x-show="activeTab === 'automation'" x-cloak>
         <div class="flex items-center justify-between mb-4">
@@ -1070,79 +1073,149 @@
         </div>
       </div>
 
-      <!-- System (Settings) -->
+      <!-- System (Costs + Infrastructure) -->
       <div x-show="activeTab === 'system'" x-cloak>
-        <!-- Settings section -->
-        <h3 class="text-sm font-medium text-gray-400 mb-3">Settings</h3>
-        <div x-show="!settingsData" class="text-center py-12 text-gray-600">Loading...</div>
-        <template x-if="settingsData">
+        <!-- Sub-tab toggle -->
+        <div class="flex items-center justify-between mb-4">
+          <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
+            <button @click="systemView = 'costs'; fetchCosts()"
+              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
+              :class="systemView === 'costs' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+            >Costs</button>
+            <button @click="systemView = 'infrastructure'; fetchSettings()"
+              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
+              :class="systemView === 'infrastructure' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+            >Infrastructure</button>
+          </div>
+        </div>
+
+        <!-- Costs sub-view -->
+        <div x-show="systemView === 'costs'">
+          <div class="flex items-center justify-between mb-4">
+            <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
+              <template x-for="p in ['today', 'week', 'month']" :key="p">
+                <button
+                  @click="costPeriod = p; fetchCosts()"
+                  class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
+                  :class="costPeriod === p ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-500 hover:text-gray-300'"
+                  x-text="p.charAt(0).toUpperCase() + p.slice(1)"
+                ></button>
+              </template>
+            </div>
+            <div class="text-sm text-gray-400" x-show="costData.agents && costData.agents.length > 0">
+              Total: <span class="text-white font-mono font-medium" x-text="formatCost(costTotal)"></span>
+            </div>
+          </div>
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <!-- Credentials -->
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Credentials</div>
-              <div class="text-sm text-gray-400 mb-2">
-                <span x-text="settingsData.credentials.count"></span> credential(s) configured
+              <div class="h-72" x-show="costData.agents && costData.agents.length > 0">
+                <canvas id="costChart"></canvas>
               </div>
-              <div class="space-y-1 mb-3">
-                <template x-for="name in settingsData.credentials.names" :key="name">
-                  <div class="flex items-center gap-2 text-xs">
-                    <span class="w-2 h-2 rounded-full bg-green-500/50"></span>
-                    <span class="text-gray-300 font-mono" x-text="name"></span>
-                  </div>
-                </template>
-              </div>
-              <div class="border-t border-gray-800 pt-3">
-                <div class="text-xs text-gray-500 mb-2">Add credential</div>
-                <div class="flex gap-2">
-                  <input type="text" x-model="credService" class="dash-input flex-1" placeholder="Service (e.g. openai)">
-                  <input type="password" x-model="credKey" class="dash-input flex-1" placeholder="API key">
-                  <button @click="addCredential()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Add</button>
-                </div>
+              <div x-show="!costData.agents || costData.agents.length === 0" class="flex items-center justify-center h-72 text-gray-600">
+                No cost data for this period
               </div>
             </div>
-            <!-- PubSub subscriptions -->
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">PubSub Subscriptions</div>
-              <div x-show="Object.keys(settingsData.pubsub_subscriptions || {}).length === 0" class="text-gray-600 text-sm">No subscriptions</div>
-              <div class="space-y-2">
-                <template x-for="[topic, agents] in Object.entries(settingsData.pubsub_subscriptions || {})" :key="topic">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-4">Budget Status</div>
+              <div class="space-y-4">
+                <template x-for="item in costData.agents || []" :key="item.agent">
                   <div>
-                    <span class="text-xs text-cyan-400 font-mono" x-text="topic"></span>
-                    <span class="text-gray-600 text-xs mx-1">&rarr;</span>
-                    <span class="text-xs text-gray-400" x-text="agents.join(', ')"></span>
-                  </div>
-                </template>
-              </div>
-            </div>
-            <!-- Model pricing -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Model Pricing (per 1K tokens)</div>
-              <div class="space-y-1 max-h-60 overflow-y-auto custom-scrollbar">
-                <template x-for="[model, costs] in Object.entries(settingsData.model_costs || {})" :key="model">
-                  <div class="flex justify-between text-xs">
-                    <span class="text-gray-400 font-mono" x-text="model"></span>
-                    <div class="flex gap-3">
-                      <span class="text-gray-500">in: <span class="text-gray-300" x-text="'$' + costs.input_per_1k.toFixed(5)"></span></span>
-                      <span class="text-gray-500">out: <span class="text-gray-300" x-text="'$' + costs.output_per_1k.toFixed(5)"></span></span>
+                    <div class="flex justify-between text-sm mb-1">
+                      <span class="text-white font-medium" x-text="item.agent"></span>
+                      <div class="flex items-center gap-3">
+                        <span class="text-gray-500 text-xs font-mono" x-text="item.tokens.toLocaleString() + ' tok'"></span>
+                        <span class="text-gray-300 font-mono text-xs" x-text="formatCost(item.cost)"></span>
+                      </div>
+                    </div>
+                    <div x-show="costData.budgets && costData.budgets[item.agent]">
+                      <div class="w-full bg-gray-800 rounded-full h-1.5">
+                        <div class="h-1.5 rounded-full transition-all duration-500"
+                          :class="item.cost / (costData.budgets?.[item.agent]?.daily_limit || 1) > 0.8 ? 'bg-red-500' : 'bg-indigo-500'"
+                          :style="'width:' + Math.min(100, (item.cost / (costData.budgets?.[item.agent]?.daily_limit || 1)) * 100) + '%'"
+                        ></div>
+                      </div>
+                      <div class="text-[10px] text-gray-700 mt-1 font-mono" x-text="formatCost(item.cost) + ' / ' + formatCost(costData.budgets?.[item.agent]?.daily_limit || 0) + ' daily'"></div>
                     </div>
                   </div>
                 </template>
-              </div>
-            </div>
-            <!-- Browser backends -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Browser Backends</div>
-              <div class="space-y-2">
-                <template x-for="b in settingsData.browser_backends || []" :key="b.name">
-                  <div>
-                    <span class="text-sm text-white font-medium" x-text="b.label || b.name"></span>
-                    <div class="text-xs text-gray-500 mt-0.5" x-text="b.description || ''"></div>
-                  </div>
-                </template>
+                <div x-show="!costData.agents || costData.agents.length === 0" class="text-gray-600 text-sm py-4 text-center">Budgets appear once agents incur costs</div>
               </div>
             </div>
           </div>
-        </template>
+        </div>
+
+        <!-- Infrastructure sub-view -->
+        <div x-show="systemView === 'infrastructure'">
+          <div x-show="!settingsData" class="text-center py-12 text-gray-600">Loading...</div>
+          <template x-if="settingsData">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <!-- Credentials -->
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Credentials</div>
+                <div class="text-sm text-gray-400 mb-2">
+                  <span x-text="settingsData.credentials.count"></span> credential(s) configured
+                </div>
+                <div class="space-y-1 mb-3">
+                  <template x-for="name in settingsData.credentials.names" :key="name">
+                    <div class="flex items-center gap-2 text-xs">
+                      <span class="w-2 h-2 rounded-full bg-green-500/50"></span>
+                      <span class="text-gray-300 font-mono" x-text="name"></span>
+                    </div>
+                  </template>
+                </div>
+                <div class="border-t border-gray-800 pt-3">
+                  <div class="text-xs text-gray-500 mb-2">Add credential</div>
+                  <div class="flex gap-2">
+                    <input type="text" x-model="credService" class="dash-input flex-1" placeholder="Service (e.g. openai)">
+                    <input type="password" x-model="credKey" class="dash-input flex-1" placeholder="API key">
+                    <button @click="addCredential()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Add</button>
+                  </div>
+                </div>
+              </div>
+              <!-- PubSub subscriptions -->
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">PubSub Subscriptions</div>
+                <div x-show="Object.keys(settingsData.pubsub_subscriptions || {}).length === 0" class="text-gray-600 text-sm">No subscriptions</div>
+                <div class="space-y-2">
+                  <template x-for="[topic, agents] in Object.entries(settingsData.pubsub_subscriptions || {})" :key="topic">
+                    <div>
+                      <span class="text-xs text-cyan-400 font-mono" x-text="topic"></span>
+                      <span class="text-gray-600 text-xs mx-1">&rarr;</span>
+                      <span class="text-xs text-gray-400" x-text="agents.join(', ')"></span>
+                    </div>
+                  </template>
+                </div>
+              </div>
+              <!-- Model pricing -->
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Model Pricing (per 1K tokens)</div>
+                <div class="space-y-1 max-h-60 overflow-y-auto custom-scrollbar">
+                  <template x-for="[model, costs] in Object.entries(settingsData.model_costs || {})" :key="model">
+                    <div class="flex justify-between text-xs">
+                      <span class="text-gray-400 font-mono" x-text="model"></span>
+                      <div class="flex gap-3">
+                        <span class="text-gray-500">in: <span class="text-gray-300" x-text="'$' + costs.input_per_1k.toFixed(5)"></span></span>
+                        <span class="text-gray-500">out: <span class="text-gray-300" x-text="'$' + costs.output_per_1k.toFixed(5)"></span></span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+              <!-- Browser backends -->
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Browser Backends</div>
+                <div class="space-y-2">
+                  <template x-for="b in settingsData.browser_backends || []" :key="b.name">
+                    <div>
+                      <span class="text-sm text-white font-medium" x-text="b.label || b.name"></span>
+                      <div class="text-xs text-gray-500 mt-0.5" x-text="b.description || ''"></div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
 
     </main>
