@@ -25,6 +25,7 @@ _page = None
 _launch_lock = asyncio.Lock()
 _page_refs: dict[str, object] = {}
 _credential_filled_refs: set[str] = set()  # refs that had $CRED{} typed into them
+_page_op_lock = asyncio.Lock()  # serializes all page operations (Playwright pages aren't concurrent-safe)
 
 _ACTIONABLE_ROLES = frozenset({
     "button", "link", "textbox", "checkbox", "radio", "combobox",
@@ -246,22 +247,23 @@ def _flatten_tree(node: dict) -> list[dict]:
 )
 async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -> dict:
     """Navigate to a URL and extract text content."""
-    try:
-        _page_refs.clear()
-        _credential_filled_refs.clear()
-        page = await _get_page(mesh_client=mesh_client)
-        response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        if wait_ms:
-            await page.wait_for_timeout(wait_ms)
-        text = await page.inner_text("body")
-        return {
-            "url": page.url,
-            "title": await page.title(),
-            "status": response.status if response else 0,
-            "content": _redact_credentials(text[:50000]),
-        }
-    except Exception as e:
-        return {"error": str(e), "url": url}
+    async with _page_op_lock:
+        try:
+            _page_refs.clear()
+            _credential_filled_refs.clear()
+            page = await _get_page(mesh_client=mesh_client)
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if wait_ms:
+                await page.wait_for_timeout(wait_ms)
+            text = await page.inner_text("body")
+            return {
+                "url": page.url,
+                "title": await page.title(),
+                "status": response.status if response else 0,
+                "content": _redact_credentials(text[:50000]),
+            }
+        except Exception as e:
+            return {"error": str(e), "url": url}
 
 
 def _parse_aria_snapshot(yaml_text: str) -> list[dict]:
@@ -304,6 +306,12 @@ def _parse_aria_snapshot(yaml_text: str) -> list[dict]:
 )
 async def browser_snapshot(*, mesh_client=None) -> dict:
     """Return an accessibility tree snapshot with element refs."""
+    async with _page_op_lock:
+        return await _browser_snapshot_inner(mesh_client=mesh_client)
+
+
+async def _browser_snapshot_inner(*, mesh_client=None) -> dict:
+    """Inner snapshot logic. Caller must hold _page_op_lock."""
     try:
         page = await _get_page(mesh_client=mesh_client)
 
@@ -368,9 +376,6 @@ async def browser_snapshot(*, mesh_client=None) -> dict:
         return result
     except Exception as e:
         return {"error": str(e)}
-
-# Alias for internal use (browser_screenshot needs to auto-call snapshot)
-browser_snapshot_func = browser_snapshot
 
 
 async def _draw_labels(image_path: str) -> dict[str, str]:
@@ -467,30 +472,31 @@ async def browser_screenshot(
     mesh_client=None,
 ) -> dict:
     """Take a screenshot and save it to the data volume."""
-    try:
-        page = await _get_page(mesh_client=mesh_client)
+    async with _page_op_lock:
+        try:
+            page = await _get_page(mesh_client=mesh_client)
 
-        # Auto-snapshot if labeled requested but no refs available
-        if labeled and not _page_refs:
-            await browser_snapshot_func(mesh_client=mesh_client)
+            # Auto-snapshot if labeled requested but no refs available
+            if labeled and not _page_refs:
+                await _browser_snapshot_inner(mesh_client=mesh_client)
 
-        save_path = Path("/data") / filename
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        await page.screenshot(path=str(save_path), full_page=full_page)
+            save_path = Path("/data") / filename
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=str(save_path), full_page=full_page)
 
-        result: dict = {"path": str(save_path), "size": save_path.stat().st_size}
+            result: dict = {"path": str(save_path), "size": save_path.stat().st_size}
 
-        if labeled:
-            labels = await _draw_labels(str(save_path))
-            result["labeled"] = True
-            result["label_count"] = len(labels)
-            result["labels"] = labels
-            # Update file size after drawing labels
-            result["size"] = save_path.stat().st_size
+            if labeled:
+                labels = await _draw_labels(str(save_path))
+                result["labeled"] = True
+                result["label_count"] = len(labels)
+                result["labels"] = labels
+                # Update file size after drawing labels
+                result["size"] = save_path.stat().st_size
 
-        return result
-    except Exception as e:
-        return {"error": str(e)}
+            return result
+        except Exception as e:
+            return {"error": str(e)}
 
 
 @skill(
@@ -516,21 +522,22 @@ async def browser_click(selector: str = "", ref: str = "", *, mesh_client=None) 
     """Click an element by ref or CSS selector."""
     if not selector and not ref:
         return {"error": "Provide either 'ref' (from browser_snapshot) or 'selector' (CSS)"}
-    try:
-        page = await _get_page(mesh_client=mesh_client)
-        if ref:
-            locator = _page_refs.get(ref)
-            if not locator:
-                return {"error": f"Unknown ref '{ref}'. Call browser_snapshot first to get current refs."}
-            await locator.click(timeout=10000)
-            await page.wait_for_timeout(500)
-            return {"clicked": ref, "url": page.url}
-        else:
-            await page.click(selector, timeout=10000)
-            await page.wait_for_timeout(500)
-            return {"clicked": selector, "url": page.url}
-    except Exception as e:
-        return {"error": str(e), "selector": selector, "ref": ref}
+    async with _page_op_lock:
+        try:
+            page = await _get_page(mesh_client=mesh_client)
+            if ref:
+                locator = _page_refs.get(ref)
+                if not locator:
+                    return {"error": f"Unknown ref '{ref}'. Call browser_snapshot first to get current refs."}
+                await locator.click(timeout=10000)
+                await page.wait_for_timeout(500)
+                return {"clicked": ref, "url": page.url}
+            else:
+                await page.click(selector, timeout=10000)
+                await page.wait_for_timeout(500)
+                return {"clicked": selector, "url": page.url}
+        except Exception as e:
+            return {"error": str(e), "selector": selector, "ref": ref}
 
 
 @skill(
@@ -577,30 +584,31 @@ async def browser_type(
             actual_text = actual_text.replace(f"$CRED{{{cred_name}}}", resolved)
         is_credential = True
 
-    try:
-        page = await _get_page(mesh_client=mesh_client)
-        if ref:
-            locator = _page_refs.get(ref)
-            if not locator:
-                return {"error": f"Unknown ref '{ref}'. Call browser_snapshot first to get current refs."}
-            await locator.fill(actual_text, timeout=10000)
-        else:
-            await page.fill(selector, actual_text, timeout=10000)
+    async with _page_op_lock:
+        try:
+            page = await _get_page(mesh_client=mesh_client)
+            if ref:
+                locator = _page_refs.get(ref)
+                if not locator:
+                    return {"error": f"Unknown ref '{ref}'. Call browser_snapshot first to get current refs."}
+                await locator.fill(actual_text, timeout=10000)
+            else:
+                await page.fill(selector, actual_text, timeout=10000)
 
-        # Track which refs have been filled with credentials
-        if is_credential and ref:
-            _credential_filled_refs.add(ref)
+            # Track which refs have been filled with credentials
+            if is_credential and ref:
+                _credential_filled_refs.add(ref)
 
-        # Never return credential values to the LLM
-        display_text = "[credential]" if is_credential else text
-        result: dict = {"typed": display_text}
-        if ref:
-            result["ref"] = ref
-        else:
-            result["selector"] = selector
-        return result
-    except Exception as e:
-        return {"error": str(e), "selector": selector, "ref": ref}
+            # Never return credential values to the LLM
+            display_text = "[credential]" if is_credential else text
+            result: dict = {"typed": display_text}
+            if ref:
+                result["ref"] = ref
+            else:
+                result["selector"] = selector
+            return result
+        except Exception as e:
+            return {"error": str(e), "selector": selector, "ref": ref}
 
 
 @skill(
@@ -616,22 +624,23 @@ async def browser_type(
 )
 async def browser_evaluate(script: str, *, mesh_client=None) -> dict:
     """Evaluate JavaScript in the page context."""
-    try:
-        page = await _get_page(mesh_client=mesh_client)
-        result = await page.evaluate(script)
-        # Redact any credential values that might appear in evaluate results
-        if isinstance(result, str):
-            result = _redact_credentials(result)
-        elif isinstance(result, dict):
-            result = {
-                k: _redact_credentials(v) if isinstance(v, str) else v
-                for k, v in result.items()
-            }
-        elif isinstance(result, list):
-            result = [
-                _redact_credentials(item) if isinstance(item, str) else item
-                for item in result
-            ]
-        return {"result": result}
-    except Exception as e:
-        return {"error": str(e)}
+    async with _page_op_lock:
+        try:
+            page = await _get_page(mesh_client=mesh_client)
+            result = await page.evaluate(script)
+            # Redact any credential values that might appear in evaluate results
+            if isinstance(result, str):
+                result = _redact_credentials(result)
+            elif isinstance(result, dict):
+                result = {
+                    k: _redact_credentials(v) if isinstance(v, str) else v
+                    for k, v in result.items()
+                }
+            elif isinstance(result, list):
+                result = [
+                    _redact_credentials(item) if isinstance(item, str) else item
+                    for item in result
+                ]
+            return {"result": result}
+        except Exception as e:
+            return {"error": str(e)}

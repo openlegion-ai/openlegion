@@ -112,7 +112,12 @@ def test_workflow_execution_step_ready():
     assert ex.is_step_ready(s2)
 
 
-def test_workflow_execution_step_not_ready_if_dep_failed():
+def test_workflow_execution_step_ready_when_dep_failed():
+    """Failed deps count as resolved so downstream steps aren't deadlocked.
+
+    The workflow loop itself decides whether to skip or abort — is_step_ready
+    only checks that every dependency has a result (complete, failed, or skipped).
+    """
     wf = WorkflowDefinition(
         name="test",
         trigger="test",
@@ -123,7 +128,23 @@ def test_workflow_execution_step_not_ready_if_dep_failed():
     )
     ex = WorkflowExecution(wf, {})
     ex.step_results["s1"] = TaskResult(task_id="t1", status="failed", error="boom")
-    assert not ex.is_step_ready(wf.steps[1])
+    # Failed deps are resolved — step is ready (the loop decides to skip it)
+    assert ex.is_step_ready(wf.steps[1])
+
+
+def test_workflow_execution_step_ready_when_dep_skipped():
+    """Skipped deps also count as resolved."""
+    wf = WorkflowDefinition(
+        name="test",
+        trigger="test",
+        steps=[
+            WorkflowStep(id="s1", task_type="t1"),
+            WorkflowStep(id="s2", task_type="t2", depends_on=["s1"]),
+        ],
+    )
+    ex = WorkflowExecution(wf, {})
+    ex.step_results["s1"] = TaskResult(task_id="skipped_s1", status="skipped", error="Dependency failed")
+    assert ex.is_step_ready(wf.steps[1])
 
 
 def test_workflow_execution_condition_evaluation():
@@ -267,6 +288,7 @@ async def test_execute_step_uses_future():
     result = await step_task
     assert result.status == "complete"
     assert result.result == {"found": True}
+    assert len(orch._pending_results) == 0, "pending future should be cleaned up after resolution"
 
 
 @pytest.mark.asyncio
