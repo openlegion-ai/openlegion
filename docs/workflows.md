@@ -124,7 +124,7 @@ input_from: blackboard://context/market_data
 
 ## Failure Handling
 
-Four strategies are available via `on_failure`:
+Five strategies are available via `on_failure`:
 
 ### Retry (default: 3 attempts with exponential backoff)
 
@@ -138,7 +138,7 @@ steps:
     # Retries with exponential backoff: 1s, 2s, 4s, 8s, 16s
 ```
 
-### Skip (continue workflow, mark step as skipped)
+### Skip (continue workflow, mark step as complete with skipped flag)
 
 ```yaml
 steps:
@@ -171,6 +171,26 @@ steps:
     fallback_agent: backup_researcher
     # If primary fails, the task is re-assigned to backup_researcher
 ```
+
+### Dependency Failure (automatic)
+
+When a step's dependency has failed, the step is automatically skipped without execution. The orchestrator sets `status="skipped"` with an error noting the dependency failure. This prevents wasted work on steps whose inputs are unavailable.
+
+```yaml
+steps:
+  - id: research
+    agent: researcher
+    task_type: fetch_data
+    # If this fails and on_failure is "abort"...
+
+  - id: report
+    agent: writer
+    task_type: write_report
+    depends_on: [research]
+    # ...this step is auto-skipped with status="skipped"
+```
+
+This behavior is not configurable — it applies automatically to any step whose dependency has a failed result. It differs from `on_failure: skip` (which marks the *failed* step itself as complete with a skipped flag).
 
 ## Triggering Workflows
 

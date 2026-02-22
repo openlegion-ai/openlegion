@@ -8,7 +8,7 @@ Agents interact with their environment through **skills** -- Python functions re
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `exec_command` | `command`, `workdir`, `timeout` | Execute shell commands with full Linux environment |
+| `exec` | `command`, `workdir`, `timeout` | Execute shell commands with full Linux environment |
 
 ### File Operations
 
@@ -71,7 +71,7 @@ The backend is selected per-agent via the `BROWSER_BACKEND` environment variable
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `update_workspace` | `filename`, `content` | Update a writable workspace file (HEARTBEAT.md, USER.md, MEMORY.md) to persist learnings across sessions |
+| `update_workspace` | `filename`, `content` | Update a writable workspace file (HEARTBEAT.md, USER.md) to persist learnings across sessions |
 
 ### Scheduling & Automation
 

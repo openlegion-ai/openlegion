@@ -75,6 +75,8 @@ pytest tests/ -x
 | `src/host/failover.py` | `tests/test_failover.py` |
 | `src/host/webhooks.py` | `tests/test_webhooks.py` |
 | `src/host/watchers.py` | `tests/test_watchers.py` |
+| `src/agent/loop_detector.py` | `tests/test_loop_detector.py` |
+| `src/marketplace.py` | `tests/test_marketplace.py` |
 | `src/channels/base.py` | `tests/test_channels.py` |
 | `src/channels/slack.py` | `tests/test_slack.py` |
 | `src/channels/whatsapp.py` | `tests/test_whatsapp.py` |
@@ -260,6 +262,7 @@ openlegion/
 │   │   ├── __main__.py          # Agent entry point
 │   │   ├── server.py            # Agent FastAPI server
 │   │   ├── loop.py              # Execution loop (task + chat)
+│   │   ├── loop_detector.py     # Tool loop detection (warn/block/terminate)
 │   │   ├── skills.py            # Skill registry
 │   │   ├── memory.py            # SQLite + sqlite-vec memory
 │   │   ├── workspace.py         # Persistent markdown workspace
@@ -307,6 +310,13 @@ openlegion/
 │   │   ├── types.py             # Pydantic contracts
 │   │   ├── utils.py             # Logging, ID generation
 │   │   └── trace.py             # Distributed trace context
+│   ├── dashboard/               # Web dashboard
+│   │   ├── server.py            # FastAPI router + API endpoints
+│   │   ├── events.py            # EventBus for real-time streaming
+│   │   ├── templates/           # Dashboard HTML (Alpine.js + Tailwind)
+│   │   └── static/              # CSS + JS assets
+│   ├── setup_wizard.py          # Guided setup wizard
+│   ├── marketplace.py           # Skill marketplace
 │   ├── templates/               # Agent setup templates
 │   └── cli/                     # CLI package
 │       ├── main.py              # Click commands and entry point
@@ -321,7 +331,7 @@ openlegion/
 │   ├── permissions.json
 │   ├── cron.json
 │   └── workflows/
-├── tests/                       # Test suite (1102 tests)
+├── tests/                       # Test suite (1103 tests)
 │   └── fixtures/                # Test fixtures (echo MCP server, etc.)
 ├── Dockerfile.agent             # Agent container image
 └── pyproject.toml               # Project metadata

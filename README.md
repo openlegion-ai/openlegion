@@ -6,7 +6,7 @@
 
 [![AGPLv3 License](https://img.shields.io/badge/license-AGPLv3-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 1102](https://img.shields.io/badge/tests-1102%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 1103](https://img.shields.io/badge/tests-1103%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -112,7 +112,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 1102 tests including full Docker E2E |
+| **Test coverage** | Minimal | 1103 tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~19,000 lines — auditable in a day |
 
 ---
@@ -127,14 +127,14 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**1102 tests passing** across **~19,000 lines** of application code.
+**1103 tests passing** across **~19,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. AGPLv3 License.
 
 1. **Security by architecture** — every agent runs in an isolated Docker container
    (microVM when available). API keys live in the credential vault — agents call
    through a proxy and never handle credentials directly. Defense-in-depth with
-   5 security layers.
+   6 security layers.
 
 2. **Production-grade cost control** — per-agent LLM token tracking with enforced
    daily and monthly budget caps at the vault layer. Agents physically cannot spend
@@ -556,7 +556,7 @@ instead of forwarding them to the provider.
 
 ## Security Model
 
-Defense-in-depth with five layers:
+Defense-in-depth with six layers:
 
 | Layer | Mechanism | What It Prevents |
 |-------|-----------|-----------------|
@@ -565,6 +565,7 @@ Defense-in-depth with five layers:
 | Credential separation | Vault holds keys, agents call via proxy | Key leakage, unauthorized API use |
 | Permission enforcement | Per-agent ACLs for messaging, blackboard, pub/sub, APIs | Unauthorized data access |
 | Input validation | Path traversal prevention, safe condition eval (no `eval()`), token budgets, iteration limits | Injection, runaway loops |
+| Unicode sanitization | Invisible character stripping at three choke points | Prompt injection via hidden Unicode |
 
 ### Dual Runtime Backend
 
@@ -839,7 +840,7 @@ pytest tests/
 | Traces | 30 | Trace recording, grouping, summaries, prompt preview extraction |
 | Events | 30 | Event streaming, filtering, WebSocket |
 | Integration | 28 | Multi-component mesh operations, notifications |
-| Orchestrator | 25 | Workflows, conditions, retries, failures |
+| Orchestrator | 26 | Workflows, conditions, retries, failures |
 | Transcript | 24 | Transcript formatting, safety, round-trip fidelity |
 | Agent Server | 21 | Workspace API, heartbeat-context endpoint, content sanitization, file allowlist |
 | Slack Channel | 21 | Socket Mode, thread routing, pairing, command translation |
@@ -866,7 +867,7 @@ pytest tests/
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **1102** | |
+| **Total** | **1103** | |
 
 ---
 
