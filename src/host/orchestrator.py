@@ -242,6 +242,16 @@ class Orchestrator:
 
         wf = self.workflows[workflow_name]
 
+        # Validate all dependency references exist
+        step_ids = {s.id for s in wf.steps}
+        for step in wf.steps:
+            dangling = [d for d in step.depends_on if d not in step_ids]
+            if dangling:
+                raise ValueError(
+                    f"Workflow '{workflow_name}': step '{step.id}' depends on "
+                    f"non-existent step(s): {', '.join(dangling)}"
+                )
+
         # Validate DAG is acyclic before executing
         cycle = self._detect_cycle(wf.steps)
         if cycle:

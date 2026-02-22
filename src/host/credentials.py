@@ -143,7 +143,10 @@ class CredentialVault:
     def add_credential(self, name: str, value: str) -> str:
         """Store a credential in memory and persist to .env. Returns a $CRED{name} handle."""
         cred_key = name.lower()
-        self.credentials[cred_key] = value
+        if cred_key.endswith("_api_base"):
+            self.api_bases[cred_key] = value
+        else:
+            self.credentials[cred_key] = value
         env_key = f"OPENLEGION_CRED_{name.upper()}"
         _persist_to_env(env_key, value)
         logger.info(f"Credential stored: {cred_key}")
@@ -229,7 +232,12 @@ class CredentialVault:
                 return APIProxyResponse(success=False, error=str(e))
 
         if lock is not None:
-            async with lock:
+            try:
+                async with asyncio.timeout(120):
+                    async with lock:
+                        return await _execute()
+            except TimeoutError:
+                logger.warning("Budget lock timed out for agent '%s'", agent_id)
                 return await _execute()
         return await _execute()
 
