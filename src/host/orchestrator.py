@@ -363,13 +363,13 @@ class Orchestrator:
                 self.active_executions.pop(execution.id, None)
             asyncio.create_task(_cleanup())
             # Evict oldest finished executions if cache exceeds limit
-            if len(self.active_executions) > self._MAX_CACHED_EXECUTIONS:
-                finished = [
-                    (eid, ex) for eid, ex in self.active_executions.items()
-                    if ex.status in ("complete", "failed")
-                ]
+            finished = [
+                (eid, ex) for eid, ex in self.active_executions.items()
+                if ex.status in ("complete", "failed", "cancelled")
+            ]
+            if len(finished) > self._MAX_CACHED_EXECUTIONS:
                 finished.sort(key=lambda x: x[1].started_at)
-                excess = len(self.active_executions) - self._MAX_CACHED_EXECUTIONS
+                excess = len(finished) - self._MAX_CACHED_EXECUTIONS
                 for eid, _ in finished[:excess]:
                     self.active_executions.pop(eid, None)
 

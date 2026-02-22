@@ -98,7 +98,7 @@ class HealthMonitor:
                 continue
             ttl = info.get("ttl", 3600)
             spawned_at = info.get("spawned_at", 0)
-            if now - spawned_at <= ttl:
+            if now - spawned_at < ttl:
                 continue
             logger.info("Ephemeral agent '%s' exceeded TTL (%ss), removing", agent_id, ttl)
             try:

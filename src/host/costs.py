@@ -47,8 +47,8 @@ def estimate_cost(
     If input/output split is unavailable, falls back to 70/30 split of total_tokens.
     """
     ir, or_ = MODEL_COSTS.get(model, _DEFAULT_COST)
-    pt = input_tokens or int(total_tokens * 0.7)
-    ct = output_tokens or (total_tokens - pt)
+    pt = input_tokens if input_tokens is not None and input_tokens > 0 else int(total_tokens * 0.7)
+    ct = output_tokens if output_tokens is not None and output_tokens > 0 else (total_tokens - pt)
     return round((pt / 1000 * ir) + (ct / 1000 * or_), 6)
 
 
