@@ -65,6 +65,8 @@ pytest tests/ -x
 | `src/host/transport.py` | `tests/test_transport.py` |
 | `src/host/costs.py` | `tests/test_costs.py` |
 | `src/host/cron.py` | `tests/test_cron.py` |
+| `src/agent/server.py` | `tests/test_agent_server.py` |
+| `src/dashboard/server.py` (workspace) | `tests/test_dashboard_workspace.py` |
 | `src/host/failover.py` | `tests/test_failover.py` |
 | `src/host/webhooks.py` | `tests/test_webhooks.py` |
 | `src/host/watchers.py` | `tests/test_watchers.py` |
@@ -301,7 +303,7 @@ openlegion/
 │   ├── permissions.json
 │   ├── cron.json
 │   └── workflows/
-├── tests/                       # Test suite (~698 tests)
+├── tests/                       # Test suite (954 tests)
 │   └── fixtures/                # Test fixtures (echo MCP server, etc.)
 ├── Dockerfile.agent             # Agent container image
 └── pyproject.toml               # Project metadata

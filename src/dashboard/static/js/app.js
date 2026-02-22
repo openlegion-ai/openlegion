@@ -100,6 +100,13 @@ function dashboard() {
     chatStreaming: false,
     _chatAbort: null,
 
+    // Workspace
+    workspaceFiles: [],
+    workspaceLoading: false,
+    editingFile: null,
+    editFileContent: '',
+    editFileSaving: false,
+
     // Broadcast
     broadcastMessage: '',
     broadcastLoading: false,
@@ -376,6 +383,50 @@ function dashboard() {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}`);
         if (resp.ok) this.agentDetail = await resp.json();
       } catch (e) { console.warn('fetchAgentDetail failed:', e); }
+    },
+
+    async fetchWorkspaceFiles(agentId) {
+      this.workspaceLoading = true;
+      this.workspaceFiles = [];
+      this.editingFile = null;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace`);
+        if (resp.ok) this.workspaceFiles = (await resp.json()).files || [];
+      } catch (e) { console.warn('fetchWorkspaceFiles failed:', e); }
+      this.workspaceLoading = false;
+    },
+
+    async openWorkspaceFile(agentId, filename) {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${filename}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.editingFile = filename;
+          this.editFileContent = data.content || '';
+        }
+      } catch (e) { console.warn('openWorkspaceFile failed:', e); }
+    },
+
+    async saveWorkspaceFile(agentId, filename) {
+      this.editFileSaving = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${filename}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: this.editFileContent }),
+        });
+        if (resp.ok) {
+          this.editingFile = null;
+          this.showToast(`Saved ${filename}`);
+          await this.fetchWorkspaceFiles(agentId);
+        }
+      } catch (e) { console.warn('saveWorkspaceFile failed:', e); }
+      this.editFileSaving = false;
+    },
+
+    cancelFileEdit() {
+      this.editingFile = null;
+      this.editFileContent = '';
     },
 
     async fetchBlackboard() {
@@ -857,6 +908,7 @@ function dashboard() {
       this.selectedAgent = agentId;
       this.agentEvents = this.events.filter(e => e.agent === agentId).slice(0, 100);
       this.fetchAgentDetail(agentId);
+      this.fetchWorkspaceFiles(agentId);
       this.activeTab = 'agent-detail';
     },
 

@@ -165,6 +165,8 @@ pytest tests/test_loop.py -x -v
 | `src/host/transport.py` | `tests/test_transport.py` |
 | `src/host/costs.py` | `tests/test_costs.py` |
 | `src/host/cron.py` | `tests/test_cron.py` |
+| `src/agent/server.py` | `tests/test_agent_server.py` |
+| `src/dashboard/server.py` (workspace) | `tests/test_dashboard_workspace.py` |
 | `src/channels/base.py` | `tests/test_channels.py` |
 | `src/cli/` | `tests/test_cli_commands.py` |
 | `src/shared/utils.py` (sanitization) | `tests/test_sanitize.py` |

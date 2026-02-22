@@ -91,10 +91,13 @@ Heartbeats are a cost-efficient form of autonomous monitoring. They run **cheap 
 ```
 Cron tick
   → Run deterministic probes (no LLM, zero cost)
-    → All clean? → Skip, do nothing
-    → Probe triggered? → Dispatch to agent with probe results
-      → Agent reads HEARTBEAT.md for rules
-      → Agent takes action using tools
+  → Fetch agent context (HEARTBEAT.md + daily logs via /heartbeat-context)
+  → All clean + default HEARTBEAT.md + no activity? → Skip entirely (zero cost)
+  → Otherwise → Build enriched message with:
+      Rules (HEARTBEAT.md) + Recent activity (daily logs)
+      + Probe alerts + Pending signal/task details
+    → Dispatch to agent
+    → Agent takes action using tools
 ```
 
 ### Built-in Probes
@@ -131,7 +134,7 @@ curl -X POST http://localhost:8420/mesh/cron \
 
 ### HEARTBEAT.md
 
-Each agent can have a `HEARTBEAT.md` file in its workspace that defines autonomous monitoring rules. When a heartbeat probe triggers, the agent receives the probe results and is instructed to check `HEARTBEAT.md` for its response rules.
+Each agent can have a `HEARTBEAT.md` file in its workspace that defines autonomous monitoring rules. The heartbeat system auto-loads HEARTBEAT.md content and includes it directly in the heartbeat message — the agent doesn't need to spend a tool call reading it.
 
 ```markdown
 # Autonomous Rules
@@ -148,6 +151,30 @@ Each agent can have a `HEARTBEAT.md` file in its workspace that defines autonomo
 - Execute tasks in priority order
 - Report completion to the blackboard
 ```
+
+### Enriched Heartbeat Messages
+
+When a heartbeat fires, the agent receives a single message with all the context it needs to act:
+
+| Section | Content | Source |
+|---------|---------|--------|
+| **Your Heartbeat Rules** | Custom HEARTBEAT.md content | Agent's `/heartbeat-context` endpoint |
+| **Your Recent Activity** | Last 2 days of daily logs (capped at 4000 chars) | Agent's `/heartbeat-context` endpoint |
+| **Probe Alerts** | Triggered probe results with details | Deterministic probes |
+| **Pending Signals** | Actual blackboard signal content (up to 5 items) | Blackboard `signals/{agent}` |
+| **Pending Tasks** | Actual blackboard task content (up to 5 items) | Blackboard `tasks/{agent}` |
+
+This replaces the previous pattern where agents had to waste tool calls reading HEARTBEAT.md and querying the blackboard themselves.
+
+### Skip-LLM Optimization
+
+Heartbeats skip the LLM dispatch entirely (zero cost) when all three conditions are met:
+
+1. **HEARTBEAT.md is default** — empty or starts with the scaffold prefix
+2. **No recent activity** — daily logs are empty
+3. **No probes triggered** — disk usage normal, no pending signals or tasks
+
+This makes always-on heartbeats economically viable even at high frequencies.
 
 ## Webhooks
 

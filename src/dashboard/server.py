@@ -706,6 +706,57 @@ def create_dashboard_router(
         ]
         return {"workflows": wf_list, "active": [a for a in active if a]}
 
+    # ── Agent Workspace (proxy to agent) ─────────────────────
+
+    _WORKSPACE_ALLOWLIST = frozenset({"SOUL.md", "HEARTBEAT.md", "USER.md", "AGENTS.md", "MEMORY.md"})
+
+    @api_router.get("/api/agents/{agent_id}/workspace")
+    async def api_agent_workspace(agent_id: str) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            return await transport.request(agent_id, "GET", "/workspace", timeout=10)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @api_router.get("/api/agents/{agent_id}/workspace/{filename}")
+    async def api_agent_workspace_read(agent_id: str, filename: str) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if filename not in _WORKSPACE_ALLOWLIST:
+            raise HTTPException(status_code=400, detail=f"File not allowed: {filename}")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            return await transport.request(
+                agent_id, "GET", f"/workspace/{filename}", timeout=10,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @api_router.put("/api/agents/{agent_id}/workspace/{filename}")
+    async def api_agent_workspace_write(agent_id: str, filename: str, request: Request) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if filename not in _WORKSPACE_ALLOWLIST:
+            raise HTTPException(status_code=400, detail=f"File not allowed: {filename}")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        body = await request.json()
+        content = body.get("content", "")
+        if not isinstance(content, str):
+            raise HTTPException(status_code=400, detail="content must be a string")
+        content = sanitize_for_prompt(content)
+        try:
+            return await transport.request(
+                agent_id, "PUT", f"/workspace/{filename}",
+                json={"content": content}, timeout=10,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
     # ── Static files ─────────────────────────────────────────
 
     _MEDIA_TYPES = {
