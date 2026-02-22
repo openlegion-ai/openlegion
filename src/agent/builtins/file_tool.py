@@ -25,7 +25,7 @@ def _safe_path(path: str) -> Path:
     """Resolve a path and ensure it stays within the allowed root."""
     resolved = Path(_ALLOWED_ROOT, path).resolve()
     root = Path(_ALLOWED_ROOT).resolve()
-    if not str(resolved).startswith(str(root)):
+    if not resolved.is_relative_to(root):
         raise ValueError(f"Path escapes allowed root: {path}")
     return resolved
 
@@ -33,7 +33,7 @@ def _safe_path(path: str) -> Path:
 def _is_protected_workspace_file(resolved: Path) -> bool:
     """Check if a resolved path points to a protected workspace file."""
     workspace_root = Path(_ALLOWED_ROOT, "workspace").resolve()
-    if not str(resolved).startswith(str(workspace_root)):
+    if not resolved.is_relative_to(workspace_root):
         return False
     relative = resolved.relative_to(workspace_root)
     return relative.name in _PROTECTED_WORKSPACE_FILES and len(relative.parts) == 1

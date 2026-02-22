@@ -1386,3 +1386,59 @@ class TestLLMClientEmbeddingModel:
 
         llm = LLMClient(mesh_url="http://localhost:8420", agent_id="test")
         assert llm.embedding_model == ""
+
+
+# ── artifact path traversal ──────────────────────────────────
+
+
+class TestArtifactPathTraversal:
+    @pytest.mark.asyncio
+    async def test_path_traversal_blocked(self):
+        """save_artifact rejects names that escape the artifacts dir."""
+        from src.agent.builtins.mesh_tool import save_artifact
+
+        ws = MagicMock()
+        ws.root = tempfile.mkdtemp()
+        try:
+            result = await save_artifact(
+                name="../../escape.txt", content="pwned",
+                workspace_manager=ws, mesh_client=None,
+            )
+            assert "error" in result
+            assert "Invalid artifact name" in result["error"]
+        finally:
+            shutil.rmtree(ws.root, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_normal_artifact_allowed(self):
+        """save_artifact accepts valid names."""
+        from src.agent.builtins.mesh_tool import save_artifact
+
+        ws = MagicMock()
+        ws.root = tempfile.mkdtemp()
+        try:
+            result = await save_artifact(
+                name="report.txt", content="hello",
+                workspace_manager=ws, mesh_client=None,
+            )
+            assert "error" not in result
+            assert result["saved"] is True
+            assert result["name"] == "report.txt"
+        finally:
+            shutil.rmtree(ws.root, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_absolute_path_blocked(self):
+        """save_artifact rejects absolute paths."""
+        from src.agent.builtins.mesh_tool import save_artifact
+
+        ws = MagicMock()
+        ws.root = tempfile.mkdtemp()
+        try:
+            result = await save_artifact(
+                name="/etc/passwd", content="pwned",
+                workspace_manager=ws, mesh_client=None,
+            )
+            assert "error" in result
+        finally:
+            shutil.rmtree(ws.root, ignore_errors=True)

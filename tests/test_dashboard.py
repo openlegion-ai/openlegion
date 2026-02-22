@@ -694,12 +694,12 @@ class TestDashboardCron:
         assert resp.json()["executed"] is True
 
     def test_cron_pause_resume(self):
-        self.components["cron_scheduler"].pause_job.return_value = True
+        self.components["cron_scheduler"].pause_job = AsyncMock(return_value=True)
         resp = self.client.post("/dashboard/api/cron/cron_abc/pause")
         assert resp.status_code == 200
         assert resp.json()["paused"] is True
 
-        self.components["cron_scheduler"].resume_job.return_value = True
+        self.components["cron_scheduler"].resume_job = AsyncMock(return_value=True)
         resp = self.client.post("/dashboard/api/cron/cron_abc/resume")
         assert resp.status_code == 200
         assert resp.json()["resumed"] is True

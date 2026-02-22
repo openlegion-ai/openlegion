@@ -385,7 +385,11 @@ class REPLSession:
                 click.echo("Usage: /cron pause <job_id>")
                 return
             job_id = parts[1].strip()
-            if self.ctx.cron_scheduler.pause_job(job_id):
+            future = asyncio.run_coroutine_threadsafe(
+                self.ctx.cron_scheduler.pause_job(job_id),
+                self.ctx.dispatch_loop,
+            )
+            if future.result(timeout=10):
                 click.echo(f"  Paused cron job: {job_id}")
             else:
                 click.echo(f"  Job not found: {job_id}")
@@ -395,7 +399,11 @@ class REPLSession:
                 click.echo("Usage: /cron resume <job_id>")
                 return
             job_id = parts[1].strip()
-            if self.ctx.cron_scheduler.resume_job(job_id):
+            future = asyncio.run_coroutine_threadsafe(
+                self.ctx.cron_scheduler.resume_job(job_id),
+                self.ctx.dispatch_loop,
+            )
+            if future.result(timeout=10):
                 click.echo(f"  Resumed cron job: {job_id}")
             else:
                 click.echo(f"  Job not found: {job_id}")

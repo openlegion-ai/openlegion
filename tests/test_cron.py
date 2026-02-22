@@ -71,12 +71,13 @@ class TestCronScheduler:
         sched = CronScheduler(config_path=self.config_path)
         assert not sched.remove_job("nonexistent")
 
-    def test_pause_resume(self):
+    @pytest.mark.asyncio
+    async def test_pause_resume(self):
         sched = CronScheduler(config_path=self.config_path)
         job = sched.add_job(agent="test", schedule="every 1h", message="ping")
-        assert sched.pause_job(job.id)
+        assert await sched.pause_job(job.id)
         assert sched.jobs[job.id].enabled is False
-        assert sched.resume_job(job.id)
+        assert await sched.resume_job(job.id)
         assert sched.jobs[job.id].enabled is True
 
     def test_list_jobs(self):
@@ -277,12 +278,13 @@ class TestHeartbeat:
 
         assert sched.find_heartbeat_job("nonexistent") is None
 
-    def test_update_job(self):
+    @pytest.mark.asyncio
+    async def test_update_job(self):
         sched = CronScheduler(config_path=self.config_path)
         job = sched.add_job(agent="test", schedule="every 15m", message="ping")
         original_id = job.id
 
-        updated = sched.update_job(job.id, schedule="every 30m", message="pong")
+        updated = await sched.update_job(job.id, schedule="every 30m", message="pong")
         assert updated is not None
         assert updated.schedule == "every 30m"
         assert updated.message == "pong"
@@ -293,18 +295,81 @@ class TestHeartbeat:
         reloaded = sched2.jobs[original_id]
         assert reloaded.schedule == "every 30m"
 
-    def test_update_job_nonexistent(self):
+    @pytest.mark.asyncio
+    async def test_update_job_nonexistent(self):
         sched = CronScheduler(config_path=self.config_path)
-        assert sched.update_job("nonexistent", schedule="every 1h") is None
+        assert await sched.update_job("nonexistent", schedule="every 1h") is None
 
-    def test_update_job_cannot_change_id(self):
+    @pytest.mark.asyncio
+    async def test_update_job_cannot_change_id(self):
         sched = CronScheduler(config_path=self.config_path)
         job = sched.add_job(agent="test", schedule="every 15m", message="ping")
         original_id = job.id
 
-        updated = sched.update_job(job.id, id="hacked_id")
+        updated = await sched.update_job(job.id, id="hacked_id")
         assert updated is not None
         assert updated.id == original_id  # id should not change
+
+
+class TestCronConcurrentUpdate:
+    """Tests for per-job locking under concurrent mutation."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_update_during_execution(self):
+        """update_job during _execute_job: both mutations persist."""
+        import asyncio
+
+        async def slow_dispatch(agent, msg):
+            await asyncio.sleep(0.1)
+
+        dispatch = AsyncMock(side_effect=slow_dispatch)
+        sched = CronScheduler(config_path=self.config_path, dispatch_fn=dispatch)
+        job = sched.add_job(agent="test", schedule="every 1h", message="original")
+
+        async def run_execute():
+            await sched._execute_job(job)
+
+        async def run_update():
+            # Small delay so _execute_job starts first
+            await asyncio.sleep(0.05)
+            await sched.update_job(job.id, message="updated")
+
+        await asyncio.gather(run_execute(), run_update())
+
+        # Both mutations should have persisted
+        assert sched.jobs[job.id].run_count == 1  # from _execute_job
+        assert sched.jobs[job.id].message == "updated"  # from update_job
+
+    @pytest.mark.asyncio
+    async def test_concurrent_pause_during_execution(self):
+        """pause_job during _execute_job: both mutations persist."""
+        import asyncio
+
+        async def slow_dispatch(agent, msg):
+            await asyncio.sleep(0.1)
+
+        dispatch = AsyncMock(side_effect=slow_dispatch)
+        sched = CronScheduler(config_path=self.config_path, dispatch_fn=dispatch)
+        job = sched.add_job(agent="test", schedule="every 1h", message="ping")
+
+        async def run_execute():
+            await sched._execute_job(job)
+
+        async def run_pause():
+            await asyncio.sleep(0.05)
+            await sched.pause_job(job.id)
+
+        await asyncio.gather(run_execute(), run_pause())
+
+        assert sched.jobs[job.id].run_count == 1
+        assert sched.jobs[job.id].enabled is False
 
 
 class TestEnrichedHeartbeat:

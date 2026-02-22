@@ -427,6 +427,44 @@ class TestContextWarning:
         assert "tokens" in warning
 
 
+class TestFlushResetOnChatReset:
+    @pytest.mark.asyncio
+    async def test_reset_clears_flush_flag(self):
+        """After reset(), proactive flush fires again at 60%+ usage."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            llm = MagicMock()
+            llm.chat = AsyncMock(
+                return_value=LLMResponse(
+                    content='[{"key": "pref", "value": "dark mode", "category": "preference"}]',
+                    tokens_used=30,
+                )
+            )
+
+            cm = ContextManager(max_tokens=470, llm=llm, workspace=workspace)
+            msgs = _make_messages(5, chars_each=200)
+
+            # First pass: proactive flush triggers
+            await cm.maybe_compact("system", msgs)
+            assert cm._flush_triggered is True
+            assert llm.chat.call_count == 1
+
+            # Second pass: no re-trigger (flag is set)
+            await cm.maybe_compact("system", msgs)
+            assert llm.chat.call_count == 1
+
+            # Reset (simulates chat reset)
+            cm.reset()
+            assert cm._flush_triggered is False
+
+            # Third pass: proactive flush fires AGAIN
+            await cm.maybe_compact("system", msgs)
+            assert llm.chat.call_count == 2
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 class TestTokenCount:
     def test_returns_positive_int(self):
         cm = ContextManager(max_tokens=10_000)

@@ -225,7 +225,7 @@ async def save_artifact(
         artifacts_dir = Path(workspace_manager.root) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         filepath = (artifacts_dir / name).resolve()
-        if not str(filepath).startswith(str(artifacts_dir.resolve())):
+        if not filepath.is_relative_to(artifacts_dir.resolve()):
             return {"error": f"Invalid artifact name: {name}"}
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(content)
