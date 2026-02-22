@@ -1377,6 +1377,21 @@ function dashboard() {
       return '$' + usd.toFixed(2);
     },
 
+    agentColorIndex(agentId) {
+      let hash = 0;
+      for (let i = 0; i < agentId.length; i++) {
+        hash = ((hash << 5) - hash) + agentId.charCodeAt(i);
+        hash |= 0;
+      }
+      return Math.abs(hash) % 8;
+    },
+
+    agentInitials(agentId) {
+      const parts = agentId.replace(/[_-]/g, ' ').trim().split(/\s+/);
+      if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+      return agentId.substring(0, 2).toUpperCase();
+    },
+
     truncateJson(value) {
       const s = JSON.stringify(value);
       if (s.length <= 120) return s;
