@@ -56,30 +56,33 @@ Click the **Restart** button on any agent card. A confirmation dialog prevents a
 
 From the agent detail view (click an agent in Agents), budget bars show current daily and monthly usage. Budget can also be updated via the Agents tab edit form.
 
-## Workspace Editing
+## Agent Identity Panel
 
-The agent detail view includes a workspace file editor for viewing and editing an agent's core workspace files directly from the dashboard.
+The agent detail view features a tabbed **Agent Identity** panel for viewing and editing an agent's identity, instructions, and behavioral context. The panel appears above budget and cost sections since identity is the primary concern when drilling into an agent.
 
-### Editable Files
+### Tabs
 
-| File | Purpose |
-|------|---------|
-| `SOUL.md` | Agent personality and behavioral guidelines |
-| `HEARTBEAT.md` | Autonomous monitoring rules |
-| `USER.md` | User preferences and working style |
-| `AGENTS.md` | Fleet context (other agents, their roles) |
-| `MEMORY.md` | Curated long-term facts |
+| Tab | File | Cap | Description |
+|-----|------|-----|-------------|
+| **Soul** | `SOUL.md` | 4,000 chars | Personality, tone, and behavioral guidelines |
+| **Instructions** | `AGENTS.md` | 8,000 chars | Operating instructions loaded into the system prompt |
+| **Preferences** | `USER.md` | 4,000 chars | User preferences, background, and working style |
+| **Heartbeat** | `HEARTBEAT.md` | No cap | Autonomous monitoring and heartbeat rules |
+| **Memory** | `MEMORY.md` | 16,000 chars | Curated long-term facts and important information |
+| **Activity** | (read-only) | — | Daily session logs from the last 3 days |
+| **Learnings** | (read-only) | — | Recorded errors and user corrections |
 
 ### Usage
 
 1. Click an agent card to open the detail view
-2. The **Workspace Files** panel shows all editable files with their sizes
-3. Click a filename to open the inline editor
-4. Edit the content in the monospace textarea
-5. Click **Save** to write changes (content is sanitized for invisible Unicode before saving)
-6. Click **Cancel** to discard changes
-
-Files with size 0 are shown with an "empty" indicator. The editor uses the same `sanitize_for_prompt()` sanitization applied at all other trust boundaries.
+2. The **Agent Identity** panel shows 7 tabs at the top
+3. Tabs with default/scaffold content show a "default" pill — customize them to shape the agent
+4. A character budget bar shows usage against the cap (color transitions: indigo → amber at 80% → red at 95%)
+5. Click **Edit** on any file tab to open the inline editor
+6. Edit the content in the monospace textarea — the budget bar updates live
+7. Click **Save** to write changes (content is sanitized for invisible Unicode)
+8. The **Activity** tab shows daily logs (read-only) with a Refresh button
+9. The **Learnings** tab shows errors (red) and corrections (amber), both read-only
 
 The dashboard proxies workspace operations through the mesh transport layer to the agent's container — files are read from and written to the agent's `/data/workspace` volume.
 
@@ -147,9 +150,11 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `POST` | `/dashboard/api/agents/{id}/steer` | Update agent system prompt live |
 | `POST` | `/dashboard/api/agents/{id}/restart` | Restart an agent |
 | `PUT` | `/dashboard/api/agents/{id}/budget` | Update agent budget |
-| `GET` | `/dashboard/api/agents/{id}/workspace` | List agent workspace files |
+| `GET` | `/dashboard/api/agents/{id}/workspace` | List agent workspace files (with cap, is_default) |
 | `GET` | `/dashboard/api/agents/{id}/workspace/{file}` | Read workspace file content |
 | `PUT` | `/dashboard/api/agents/{id}/workspace/{file}` | Write workspace file content |
+| `GET` | `/dashboard/api/agents/{id}/workspace-logs?days=N` | Read daily logs (read-only, default 3 days) |
+| `GET` | `/dashboard/api/agents/{id}/workspace-learnings` | Read errors and corrections (read-only) |
 | `GET` | `/dashboard/api/blackboard` | List blackboard entries |
 | `PUT` | `/dashboard/api/blackboard/{key}` | Write blackboard entry |
 | `DELETE` | `/dashboard/api/blackboard/{key}` | Delete blackboard entry |

@@ -4,6 +4,16 @@
  * Six panels: Agents, Activity, Blackboard, Costs, Automation, System.
  * Real-time updates via WebSocket + periodic REST polling.
  */
+const _IDENTITY_TABS = [
+  { id: 'soul', label: 'Soul', file: 'SOUL.md', cap: 4000, desc: 'Personality, tone, and behavioral guidelines.' },
+  { id: 'instructions', label: 'Instructions', file: 'AGENTS.md', cap: 8000, desc: 'Operating instructions loaded into the system prompt.' },
+  { id: 'preferences', label: 'Preferences', file: 'USER.md', cap: 4000, desc: 'User preferences, background, and working style.' },
+  { id: 'heartbeat', label: 'Heartbeat', file: 'HEARTBEAT.md', cap: null, desc: 'Autonomous monitoring and heartbeat rules.' },
+  { id: 'memory', label: 'Memory', file: 'MEMORY.md', cap: 16000, desc: 'Curated long-term facts and important information.' },
+  { id: 'activity', label: 'Activity', file: null, desc: 'Daily session logs (read-only).' },
+  { id: 'learnings', label: 'Learnings', file: null, desc: 'Errors and user corrections (read-only).' },
+];
+
 function dashboard() {
   return {
     // Navigation
@@ -100,12 +110,20 @@ function dashboard() {
     chatStreaming: false,
     _chatAbort: null,
 
-    // Workspace
-    workspaceFiles: [],
-    workspaceLoading: false,
-    editingFile: null,
-    editFileContent: '',
-    editFileSaving: false,
+    // Identity panel
+    identityTabs: _IDENTITY_TABS,
+    identityTab: 'soul',
+    identityFiles: [],
+    identityLoading: false,
+    identityContent: {},
+    identityContentLoading: false,
+    identityEditing: false,
+    identityEditBuffer: '',
+    identitySaving: false,
+    identityLogs: '',
+    identityLogsLoading: false,
+    identityLearnings: null,
+    identityLearningsLoading: false,
 
     // Broadcast
     broadcastMessage: '',
@@ -144,6 +162,37 @@ function dashboard() {
 
     get costTotal() {
       return (this.costData.agents || []).reduce((sum, a) => sum + (a.cost || 0), 0);
+    },
+
+    get identityCurrentTab() {
+      return _IDENTITY_TABS.find(t => t.id === this.identityTab) || _IDENTITY_TABS[0];
+    },
+
+    get identityCurrentFile() {
+      const tab = this.identityCurrentTab;
+      if (!tab.file) return null;
+      return this.identityFiles.find(f => f.name === tab.file) || null;
+    },
+
+    get identityBudgetPct() {
+      const tab = this.identityCurrentTab;
+      if (!tab.cap) return 0;
+      const text = this.identityEditing ? this.identityEditBuffer : (this.identityContent[tab.file] || '');
+      return Math.min(100, (text.length / tab.cap) * 100);
+    },
+
+    get identityBudgetColor() {
+      const pct = this.identityBudgetPct;
+      if (pct >= 95) return 'bg-red-500';
+      if (pct >= 80) return 'bg-amber-500';
+      return 'bg-indigo-500';
+    },
+
+    get identityCharCount() {
+      const tab = this.identityCurrentTab;
+      if (!tab.file) return 0;
+      const text = this.identityEditing ? this.identityEditBuffer : (this.identityContent[tab.file] || '');
+      return text.length;
     },
 
     get filteredBbEntries() {
@@ -385,48 +434,116 @@ function dashboard() {
       } catch (e) { console.warn('fetchAgentDetail failed:', e); }
     },
 
-    async fetchWorkspaceFiles(agentId) {
-      this.workspaceLoading = true;
-      this.workspaceFiles = [];
-      this.editingFile = null;
+    // ── Identity panel methods ─────────────────────────────
+
+    async fetchIdentityFiles(agentId) {
+      this.identityLoading = true;
+      this.identityFiles = [];
+      this.identityContent = {};
+      this.identityEditing = false;
+      this.identityEditBuffer = '';
+      this.identityLogs = '';
+      this.identityLearnings = null;
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace`);
-        if (resp.ok) this.workspaceFiles = (await resp.json()).files || [];
-      } catch (e) { console.warn('fetchWorkspaceFiles failed:', e); }
-      this.workspaceLoading = false;
+        if (resp.ok) this.identityFiles = (await resp.json()).files || [];
+      } catch (e) { console.warn('fetchIdentityFiles failed:', e); }
+      this.identityLoading = false;
+      await this.loadIdentityTabContent(agentId);
     },
 
-    async openWorkspaceFile(agentId, filename) {
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${filename}`);
-        if (resp.ok) {
-          const data = await resp.json();
-          this.editingFile = filename;
-          this.editFileContent = data.content || '';
-        }
-      } catch (e) { console.warn('openWorkspaceFile failed:', e); }
+    async loadIdentityTabContent(agentId) {
+      const tab = this.identityCurrentTab;
+      if (tab.file) {
+        if (this.identityContent[tab.file] !== undefined) return;
+        this.identityContentLoading = true;
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${tab.file}`);
+          if (resp.ok) {
+            const data = await resp.json();
+            this.identityContent = { ...this.identityContent, [tab.file]: data.content || '' };
+          }
+        } catch (e) { console.warn('loadIdentityTabContent failed:', e); }
+        this.identityContentLoading = false;
+      } else if (tab.id === 'activity') {
+        if (this.identityLogs) return; // cached
+        await this.fetchIdentityLogs(agentId);
+      } else if (tab.id === 'learnings') {
+        if (this.identityLearnings) return; // cached
+        await this.fetchIdentityLearnings(agentId);
+      }
     },
 
-    async saveWorkspaceFile(agentId, filename) {
-      this.editFileSaving = true;
+    async switchIdentityTab(agentId, tabId) {
+      if (this.identityEditing) {
+        if (!confirm('Discard unsaved changes?')) return;
+        this.identityEditing = false;
+        this.identityEditBuffer = '';
+      }
+      this.identityTab = tabId;
+      // Reset file-loading flag to prevent stale spinner on non-file tabs
+      this.identityContentLoading = false;
+      await this.loadIdentityTabContent(agentId);
+    },
+
+    startIdentityEdit() {
+      const tab = this.identityCurrentTab;
+      if (!tab.file) return;
+      this.identityEditBuffer = this.identityContent[tab.file] || '';
+      this.identityEditing = true;
+    },
+
+    cancelIdentityEdit() {
+      this.identityEditing = false;
+      this.identityEditBuffer = '';
+    },
+
+    async saveIdentityFile(agentId) {
+      const tab = this.identityCurrentTab;
+      if (!tab.file) return;
+      this.identitySaving = true;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${filename}`, {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${tab.file}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: this.editFileContent }),
+          body: JSON.stringify({ content: this.identityEditBuffer }),
         });
         if (resp.ok) {
-          this.editingFile = null;
-          this.showToast(`Saved ${filename}`);
-          await this.fetchWorkspaceFiles(agentId);
+          this.identityContent = { ...this.identityContent, [tab.file]: this.identityEditBuffer };
+          this.identityEditing = false;
+          this.identityEditBuffer = '';
+          this.showToast(`Saved ${tab.file}`);
+          // Refresh file list to update sizes/defaults
+          try {
+            const listResp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace`);
+            if (listResp.ok) this.identityFiles = (await listResp.json()).files || [];
+          } catch (_) {}
+        } else {
+          try {
+            const err = await resp.json();
+            this.showToast(`Save failed: ${err.detail || 'Unknown error'}`);
+          } catch (_) { this.showToast('Save failed'); }
         }
-      } catch (e) { console.warn('saveWorkspaceFile failed:', e); }
-      this.editFileSaving = false;
+      } catch (e) { this.showToast(`Save failed: ${e.message}`); }
+      this.identitySaving = false;
     },
 
-    cancelFileEdit() {
-      this.editingFile = null;
-      this.editFileContent = '';
+    async fetchIdentityLogs(agentId) {
+      this.identityLogsLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace-logs?days=3`);
+        if (resp.ok) this.identityLogs = (await resp.json()).logs || '';
+      } catch (e) { console.warn('fetchIdentityLogs failed:', e); }
+      this.identityLogsLoading = false;
+    },
+
+    async fetchIdentityLearnings(agentId) {
+      this.identityLearningsLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace-learnings`);
+        if (resp.ok) this.identityLearnings = await resp.json();
+      } catch (e) { console.warn('fetchIdentityLearnings failed:', e); }
+      this.identityLearningsLoading = false;
     },
 
     async fetchBlackboard() {
@@ -907,8 +1024,15 @@ function dashboard() {
     drillDown(agentId) {
       this.selectedAgent = agentId;
       this.agentEvents = this.events.filter(e => e.agent === agentId).slice(0, 100);
+      this.identityTab = 'soul';
+      this.identityFiles = [];
+      this.identityContent = {};
+      this.identityEditing = false;
+      this.identityEditBuffer = '';
+      this.identityLogs = '';
+      this.identityLearnings = null;
       this.fetchAgentDetail(agentId);
-      this.fetchWorkspaceFiles(agentId);
+      this.fetchIdentityFiles(agentId);
       this.activeTab = 'agent-detail';
     },
 

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.host.credentials import CredentialVault
+from src.host.credentials import CredentialVault, _extract_content
 from src.shared.types import APIProxyRequest
 
 
@@ -461,3 +461,130 @@ async def test_cost_tracking_uses_actual_model(monkeypatch):
     call_args = cost_tracker.track.call_args
     assert call_args[0][0] == "test-agent"
     assert call_args[0][1] == "openai/gpt-4o-mini"
+
+
+# ── Extended thinking / _extract_content tests ──────────────────
+
+
+def test_extract_content_string():
+    """String content passes through unchanged."""
+    text, thinking = _extract_content("hello world")
+    assert text == "hello world"
+    assert thinking is None
+
+
+def test_extract_content_list_with_thinking():
+    """List with thinking and text blocks splits correctly."""
+    blocks = [
+        {"type": "thinking", "thinking": "Let me reason about this..."},
+        {"type": "text", "text": "The answer is 42."},
+    ]
+    text, thinking = _extract_content(blocks)
+    assert text == "The answer is 42."
+    assert thinking == "Let me reason about this..."
+
+
+def test_extract_content_list_no_thinking():
+    """List without thinking blocks returns None for thinking."""
+    blocks = [
+        {"type": "text", "text": "Part 1. "},
+        {"type": "text", "text": "Part 2."},
+    ]
+    text, thinking = _extract_content(blocks)
+    assert text == "Part 1. Part 2."
+    assert thinking is None
+
+
+def test_extract_content_none():
+    """None/empty content returns empty string."""
+    text, thinking = _extract_content(None)
+    assert text == ""
+    assert thinking is None
+
+    text2, thinking2 = _extract_content("")
+    assert text2 == ""
+    assert thinking2 is None
+
+
+def test_extract_content_multiple_thinking_blocks():
+    """Multiple thinking blocks are concatenated."""
+    blocks = [
+        {"type": "thinking", "thinking": "Step 1. "},
+        {"type": "thinking", "thinking": "Step 2."},
+        {"type": "text", "text": "Done."},
+    ]
+    text, thinking = _extract_content(blocks)
+    assert text == "Done."
+    assert thinking == "Step 1. Step 2."
+
+
+async def test_llm_chat_handles_list_content(monkeypatch):
+    """Full path: list content from LiteLLM → extracted text + thinking_content."""
+    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    v = CredentialVault()
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        # Simulate extended thinking response — content is a list of blocks
+        resp.choices[0].message.content = [
+            {"type": "thinking", "thinking": "I need to think deeply."},
+            {"type": "text", "text": "The final answer."},
+        ]
+        resp.choices[0].message.tool_calls = None
+        resp.usage = MagicMock()
+        resp.usage.total_tokens = 100
+        resp.usage.prompt_tokens = 50
+        resp.usage.completion_tokens = 50
+        return resp
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "anthropic/claude-sonnet-4-5-20250929",
+                "messages": [{"role": "user", "content": "think hard"}],
+            },
+        )
+        result = await v.execute_api_call(req)
+
+    assert result.success
+    assert result.data["content"] == "The final answer."
+    assert result.data["thinking_content"] == "I need to think deeply."
+
+
+def test_thinking_params_anthropic():
+    """LLMClient generates correct Anthropic thinking params."""
+    from src.agent.llm import LLMClient
+
+    client = LLMClient(mesh_url="http://test", thinking="high")
+    params = client._get_thinking_params("anthropic/claude-sonnet-4-5-20250929")
+    assert params["thinking"] == {"type": "enabled", "budget_tokens": 25_000}
+    assert params["temperature"] == 1.0
+
+
+def test_thinking_params_openai_o_series():
+    """LLMClient generates correct OpenAI reasoning params."""
+    from src.agent.llm import LLMClient
+
+    client = LLMClient(mesh_url="http://test", thinking="medium")
+    params = client._get_thinking_params("openai/o3")
+    assert params == {"reasoning_effort": "medium"}
+
+
+def test_thinking_params_off():
+    """thinking='off' returns empty params."""
+    from src.agent.llm import LLMClient
+
+    client = LLMClient(mesh_url="http://test", thinking="off")
+    params = client._get_thinking_params("anthropic/claude-sonnet-4-5-20250929")
+    assert params == {}
+
+
+def test_thinking_params_unsupported_model():
+    """Unsupported model returns empty params even with thinking enabled."""
+    from src.agent.llm import LLMClient
+
+    client = LLMClient(mesh_url="http://test", thinking="high")
+    params = client._get_thinking_params("groq/llama-3.1-70b")
+    assert params == {}

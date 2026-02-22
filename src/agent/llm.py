@@ -21,17 +21,21 @@ logger = setup_logging("agent.llm")
 class LLMClient:
     """LLM interface that routes all calls through the mesh API proxy."""
 
+    _THINKING_BUDGETS = {"low": 5_000, "medium": 10_000, "high": 25_000}
+
     def __init__(
         self,
         mesh_url: str,
         agent_id: str = "agent",
         default_model: str = "openai/gpt-4o-mini",
         embedding_model: str = "",
+        thinking: str = "off",
     ):
         self.mesh_url = mesh_url
         self.agent_id = agent_id
         self.default_model = default_model
         self.embedding_model = embedding_model
+        self.thinking = thinking
         self._client: httpx.AsyncClient | None = None
         self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
 
@@ -47,6 +51,18 @@ class LLMClient:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
+    def _get_thinking_params(self, model: str | None = None) -> dict:
+        """Build provider-specific thinking/reasoning parameters."""
+        if self.thinking == "off":
+            return {}
+        m = model or self.default_model
+        if m.startswith("anthropic/"):
+            budget = self._THINKING_BUDGETS.get(self.thinking, 10_000)
+            return {"thinking": {"type": "enabled", "budget_tokens": budget}, "temperature": 1.0}
+        if "/o" in m:  # OpenAI o-series (o1, o3, o4-mini, etc.)
+            return {"reasoning_effort": self.thinking}
+        return {}
+
     async def chat(
         self,
         system: str,
@@ -55,6 +71,7 @@ class LLMClient:
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        **kwargs,
     ) -> LLMResponse:
         """Send a chat completion request through the mesh proxy."""
         params: dict = {
@@ -65,6 +82,11 @@ class LLMClient:
         }
         if tools:
             params["tools"] = tools
+        params.update(kwargs)
+        thinking_params = self._get_thinking_params(model)
+        for k, v in thinking_params.items():
+            if k not in kwargs:
+                params[k] = v
 
         request = APIProxyRequest(service="llm", action="chat", params=params, timeout=120)
 
@@ -97,6 +119,7 @@ class LLMClient:
 
         return LLMResponse(
             content=result.get("content", ""),
+            thinking_content=result.get("thinking_content"),
             tool_calls=tool_calls if tool_calls else None,
             tokens_used=result.get("tokens_used", 0),
             model=result.get("model", ""),
@@ -110,6 +133,7 @@ class LLMClient:
         model: str | None = None,
         max_tokens: int = 4096,
         temperature: float = 0.7,
+        **kwargs,
     ) -> AsyncIterator[dict]:
         """Stream a chat completion via the mesh proxy SSE endpoint.
 
@@ -126,6 +150,11 @@ class LLMClient:
         }
         if tools:
             params["tools"] = tools
+        params.update(kwargs)
+        thinking_params = self._get_thinking_params(model)
+        for k, v in thinking_params.items():
+            if k not in kwargs:
+                params[k] = v
 
         request = APIProxyRequest(service="llm", action="chat", params=params, timeout=120)
 
@@ -170,6 +199,7 @@ class LLMClient:
 
                     llm_resp = LLMResponse(
                         content=data.get("content", ""),
+                        thinking_content=data.get("thinking_content"),
                         tool_calls=tool_calls if tool_calls else None,
                         tokens_used=data.get("tokens_used", 0),
                         model=data.get("model", ""),

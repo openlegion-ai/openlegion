@@ -23,6 +23,33 @@ from src.shared.utils import setup_logging
 logger = setup_logging("host.credentials")
 
 
+def _extract_content(raw_content) -> tuple[str, str | None]:
+    """Extract text and thinking from LLM response content.
+
+    LiteLLM returns content as a list of blocks when extended thinking is enabled:
+      [{"type": "thinking", "thinking": "..."}, {"type": "text", "text": "..."}]
+    """
+    if isinstance(raw_content, str):
+        return raw_content, None
+    if not isinstance(raw_content, list):
+        return str(raw_content) if raw_content else "", None
+
+    text_parts, thinking_parts = [], []
+    for block in raw_content:
+        if not isinstance(block, dict):
+            text_parts.append(str(block))
+            continue
+        btype = block.get("type", "")
+        if btype == "thinking":
+            thinking_parts.append(block.get("thinking", ""))
+        elif btype == "text":
+            text_parts.append(block.get("text", ""))
+        else:
+            text_parts.append(block.get("text", str(block)))
+
+    return "".join(text_parts), "".join(thinking_parts) if thinking_parts else None
+
+
 def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     """Persist an environment variable to .env and os.environ.
 
@@ -295,20 +322,21 @@ class CredentialVault:
             )
             msg = response.choices[0].message
             usage = response.usage
-            return APIProxyResponse(
-                success=True,
-                data={
-                    "content": msg.content or "",
-                    "tokens_used": usage.total_tokens if usage else 0,
-                    "input_tokens": usage.prompt_tokens if usage else 0,
-                    "output_tokens": usage.completion_tokens if usage else 0,
-                    "model": used_model,
-                    "tool_calls": [
-                        {"name": tc.function.name, "arguments": tc.function.arguments}
-                        for tc in (msg.tool_calls or [])
-                    ],
-                },
-            )
+            content, thinking_content = _extract_content(msg.content)
+            data = {
+                "content": content,
+                "tokens_used": usage.total_tokens if usage else 0,
+                "input_tokens": usage.prompt_tokens if usage else 0,
+                "output_tokens": usage.completion_tokens if usage else 0,
+                "model": used_model,
+                "tool_calls": [
+                    {"name": tc.function.name, "arguments": tc.function.arguments}
+                    for tc in (msg.tool_calls or [])
+                ],
+            }
+            if thinking_content is not None:
+                data["thinking_content"] = thinking_content
+            return APIProxyResponse(success=True, data=data)
 
         elif request.action == "embed":
             # Embedding models produce incompatible vector spaces — no failover
@@ -404,6 +432,10 @@ class CredentialVault:
                     collected_content += delta.content
                     yield f"data: {json.dumps({'type': 'text_delta', 'content': delta.content})}\n\n"
 
+                # Suppress thinking/reasoning tokens from streaming output
+                if getattr(delta, "reasoning_content", None):
+                    pass
+
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
                         idx = tc.index if hasattr(tc, 'index') else 0
@@ -462,19 +494,20 @@ class CredentialVault:
             )
             msg = response.choices[0].message
             usage = response.usage
-            return APIProxyResponse(
-                success=True,
-                data={
-                    "content": msg.content or "",
-                    "tokens_used": usage.total_tokens if usage else 0,
-                    "input_tokens": usage.prompt_tokens if usage else 0,
-                    "output_tokens": usage.completion_tokens if usage else 0,
-                    "tool_calls": [
-                        {"name": tc.function.name, "arguments": tc.function.arguments}
-                        for tc in (msg.tool_calls or [])
-                    ],
-                },
-            )
+            content, thinking_content = _extract_content(msg.content)
+            data = {
+                "content": content,
+                "tokens_used": usage.total_tokens if usage else 0,
+                "input_tokens": usage.prompt_tokens if usage else 0,
+                "output_tokens": usage.completion_tokens if usage else 0,
+                "tool_calls": [
+                    {"name": tc.function.name, "arguments": tc.function.arguments}
+                    for tc in (msg.tool_calls or [])
+                ],
+            }
+            if thinking_content is not None:
+                data["thinking_content"] = thinking_content
+            return APIProxyResponse(success=True, data=data)
 
         elif request.action == "embed":
             embed_kwargs: dict = {}

@@ -35,7 +35,7 @@ _MAX_RETRIES = 3
 _BACKOFF_BASE = 1  # seconds: 1, 2, 4
 
 
-async def _llm_call_with_retry(llm_chat_fn, *, system, messages, tools):
+async def _llm_call_with_retry(llm_chat_fn, *, system, messages, tools, **kwargs):
     """Call the LLM with exponential backoff on transient errors.
 
     Retries on: connection errors, timeouts, 429/502/503 status codes.
@@ -44,7 +44,7 @@ async def _llm_call_with_retry(llm_chat_fn, *, system, messages, tools):
     last_exc = None
     for attempt in range(_MAX_RETRIES + 1):
         try:
-            return await llm_chat_fn(system=system, messages=messages, tools=tools)
+            return await llm_chat_fn(system=system, messages=messages, tools=tools, **kwargs)
         except RuntimeError:
             # Budget exceeded or permanent LLM errors — don't retry
             raise
