@@ -127,25 +127,56 @@ class TraceStore:
 
     def list_trace_summaries(self, limit: int = 50) -> list[dict]:
         """Return one summary row per trace_id, newest first."""
+        import json as _json
         cur = self._conn.execute(
             """
-            SELECT trace_id,
-                   MIN(timestamp) AS started,
-                   MAX(timestamp) AS ended,
-                   COUNT(*) AS event_count,
-                   GROUP_CONCAT(DISTINCT agent) AS agents,
-                   MAX(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS has_error,
-                   SUM(duration_ms) AS total_duration_ms
-            FROM traces
-            GROUP BY trace_id
-            ORDER BY MAX(id) DESC
-            LIMIT ?
+            SELECT s.trace_id,
+                   s.started,
+                   s.ended,
+                   s.event_count,
+                   s.agents,
+                   s.has_error,
+                   s.total_duration_ms,
+                   f.detail AS trigger_detail,
+                   f.event_type AS first_event_type,
+                   f.meta_json AS first_meta_json
+            FROM (
+                SELECT trace_id,
+                       MIN(timestamp) AS started,
+                       MAX(timestamp) AS ended,
+                       COUNT(*) AS event_count,
+                       GROUP_CONCAT(DISTINCT agent) AS agents,
+                       MAX(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS has_error,
+                       SUM(duration_ms) AS total_duration_ms,
+                       MIN(id) AS first_id
+                FROM traces
+                GROUP BY trace_id
+                ORDER BY MAX(id) DESC
+                LIMIT ?
+            ) s
+            LEFT JOIN traces f ON f.id = s.first_id
             """,
             (limit,),
         )
         results = []
         for row in cur.fetchall():
             agents = [a for a in (row[4] or "").split(",") if a]
+            trigger_detail = row[7] or ""
+            first_event_type = row[8] or ""
+            first_meta_json = row[9] or ""
+
+            # Build trigger_preview: prefer prompt_preview from meta, fall back to detail
+            trigger_preview = ""
+            if first_meta_json:
+                try:
+                    meta = _json.loads(first_meta_json)
+                    trigger_preview = meta.get("prompt_preview", "")
+                except (ValueError, TypeError):
+                    pass
+            if not trigger_preview:
+                trigger_preview = trigger_detail
+            trigger_preview = trigger_preview[:120]
+
             results.append({
                 "trace_id": row[0],
                 "started": row[1],
@@ -154,6 +185,9 @@ class TraceStore:
                 "agents": agents,
                 "has_error": bool(row[5]),
                 "total_duration_ms": row[6] or 0,
+                "trigger_detail": trigger_detail,
+                "first_event_type": first_event_type,
+                "trigger_preview": trigger_preview,
             })
         return results
 

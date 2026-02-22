@@ -73,9 +73,13 @@ function dashboard() {
 
     // Traces
     traces: [],
-    selectedTraceId: null,
-    traceDetail: null,
     tracesLoading: false,
+
+    // Activity view
+    activityView: 'traces',
+    expandedTraces: {},
+    _activityRefresh: null,
+    _tracesDebounce: null,
 
     // Queues (V2)
     queueStatus: {},
@@ -167,6 +171,8 @@ function dashboard() {
       if (this._costDebounce) clearTimeout(this._costDebounce);
       if (this._fleetDebounce) clearTimeout(this._fleetDebounce);
       if (this._toastTimer) clearTimeout(this._toastTimer);
+      if (this._activityRefresh) clearInterval(this._activityRefresh);
+      if (this._tracesDebounce) clearTimeout(this._tracesDebounce);
       if (this.costChart) this.costChart.destroy();
       Object.values(this._stateTimers).forEach(clearTimeout);
     },
@@ -178,9 +184,14 @@ function dashboard() {
       // Clear tab-specific auto-refresh intervals
       if (this._queueInterval) { clearInterval(this._queueInterval); this._queueInterval = null; }
       if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
+      this._stopActivityRefresh();
       if (tab === 'activity') {
         this.unreadEvents = 0;
         this._lastSeenEventCount = this.events.length;
+        if (this.activityView === 'traces') {
+          this.fetchTraces();
+          this._startActivityRefresh();
+        }
       }
       if (tab === 'blackboard') this.fetchBlackboard();
       if (tab === 'costs') this.fetchCosts();
@@ -196,7 +207,6 @@ function dashboard() {
         this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
       }
       if (tab === 'system') {
-        this.fetchTraces();
         this.fetchSettings();
       }
     },
@@ -260,6 +270,14 @@ function dashboard() {
         if (this._costDebounce) clearTimeout(this._costDebounce);
         this._costDebounce = setTimeout(() => this.fetchCosts(), 2000);
       }
+
+      // Debounced trace refresh when on traces view
+      if (this.activeTab === 'activity' && this.activityView === 'traces') {
+        if (['llm_call', 'message_sent', 'tool_result'].includes(evt.type)) {
+          if (this._tracesDebounce) clearTimeout(this._tracesDebounce);
+          this._tracesDebounce = setTimeout(() => this.fetchTraces(), 3000);
+        }
+      }
     },
 
     _updateAgentState(agent, eventType) {
@@ -287,6 +305,48 @@ function dashboard() {
     _debouncedFleetRefresh() {
       if (this._fleetDebounce) clearTimeout(this._fleetDebounce);
       this._fleetDebounce = setTimeout(() => this.fetchAgents(), 3000);
+    },
+
+    setActivityView(view) {
+      this.activityView = view;
+      this._stopActivityRefresh();
+      if (view === 'traces') {
+        this.fetchTraces();
+        this._startActivityRefresh();
+      }
+    },
+
+    async toggleTraceExpand(traceId) {
+      if (this.expandedTraces[traceId]) {
+        // Reassign to trigger Alpine reactivity (delete doesn't reliably trigger proxy updates)
+        const copy = { ...this.expandedTraces };
+        delete copy[traceId];
+        this.expandedTraces = copy;
+        return;
+      }
+      this.expandedTraces = { ...this.expandedTraces, [traceId]: { events: [], loading: true } };
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/traces/${traceId}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.expandedTraces = { ...this.expandedTraces, [traceId]: { events: data.events || [], loading: false } };
+        } else {
+          this.expandedTraces = { ...this.expandedTraces, [traceId]: { events: [], loading: false } };
+        }
+      } catch (e) {
+        console.warn('fetchTraceDetail failed:', e);
+        this.expandedTraces = { ...this.expandedTraces, [traceId]: { events: [], loading: false } };
+      }
+    },
+
+    _startActivityRefresh() {
+      this._stopActivityRefresh();
+      this._activityRefresh = setInterval(() => this.fetchTraces(), 10000);
+    },
+
+    _stopActivityRefresh() {
+      if (this._activityRefresh) { clearInterval(this._activityRefresh); this._activityRefresh = null; }
+      if (this._tracesDebounce) { clearTimeout(this._tracesDebounce); this._tracesDebounce = null; }
     },
 
     toggleEventFilter(type) {
@@ -344,15 +404,6 @@ function dashboard() {
         if (resp.ok) this.traces = (await resp.json()).traces;
       } catch (e) { console.warn('fetchTraces failed:', e); }
       this.tracesLoading = false;
-    },
-
-    async fetchTraceDetail(traceId) {
-      this.selectedTraceId = traceId;
-      this.traceDetail = null;
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/traces/${traceId}`);
-        if (resp.ok) this.traceDetail = await resp.json();
-      } catch (e) { console.warn('fetchTraceDetail failed:', e); }
     },
 
     // ── V2: Agent config fetchers ─────────────────────────
@@ -969,6 +1020,8 @@ function dashboard() {
           add('Service', d.service);
           add('Action', d.action);
           if (d.streaming) add('Streaming', 'yes');
+          if (d.prompt_preview) add('Prompt', d.prompt_preview);
+          if (d.response_preview) add('Response', d.response_preview);
           break;
         case 'tool_start':
           add('Tool', d.tool || d.name);
@@ -1031,7 +1084,8 @@ function dashboard() {
           const tokens = (d.total_tokens || d.tokens_used || 0).toLocaleString();
           const cost = d.cost_usd != null ? ` \u00b7 $${d.cost_usd.toFixed(4)}` : '';
           const dur = d.duration_ms ? ` \u00b7 ${d.duration_ms}ms` : '';
-          return `${model} \u00b7 ${tokens} tok${cost}${dur}`;
+          const prompt = d.prompt_preview ? ` \u00b7 "${d.prompt_preview.substring(0, 40)}${d.prompt_preview.length > 40 ? '\u2026' : ''}"` : '';
+          return `${model} \u00b7 ${tokens} tok${cost}${dur}${prompt}`;
         }
         case 'tool_start':
           return `${d.tool || d.name || '?'}(${(d.preview || '').substring(0, 60)})`;
