@@ -490,10 +490,12 @@ function dashboard() {
     },
 
     async switchIdentityTab(agentId, tabId) {
-      if (this.identityEditing) {
+      if (this.identityEditing || this.configEditing) {
         if (!confirm('Discard unsaved changes?')) return;
         this.identityEditing = false;
         this.identityEditBuffer = '';
+        this.configEditing = false;
+        this.editForm = {};
       }
       this.identityTab = tabId;
       // Reset file-loading flag to prevent stale spinner on non-file tabs
@@ -674,9 +676,8 @@ function dashboard() {
     async saveConfigFromDetail(agentId) {
       this.configSaving = true;
       await this.saveAgentConfig(agentId);
-      this.configEditing = false;
+      // saveAgentConfig already calls cancelConfigEdit + fetchAgentConfig
       this.configSaving = false;
-      await this.fetchAgentConfig(agentId);
       await this.fetchAgentDetail(agentId);
     },
 
