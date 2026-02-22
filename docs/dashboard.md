@@ -146,8 +146,12 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `DELETE` | `/dashboard/api/agents/{id}` | Remove an agent |
 | `GET` | `/dashboard/api/agents/{id}/config` | Agent configuration |
 | `PUT` | `/dashboard/api/agents/{id}/config` | Update agent configuration |
+| `GET` | `/dashboard/api/agents/{id}/status` | Agent status from container |
+| `GET` | `/dashboard/api/agents/{id}/capabilities` | Agent capabilities and tools |
+| `POST` | `/dashboard/api/agents/{id}/chat` | Non-streaming chat (request/response) |
 | `POST` | `/dashboard/api/agents/{id}/chat/stream` | SSE streaming chat (token-level) |
 | `POST` | `/dashboard/api/agents/{id}/steer` | Update agent system prompt live |
+| `POST` | `/dashboard/api/agents/{id}/reset` | Reset agent conversation history |
 | `POST` | `/dashboard/api/agents/{id}/restart` | Restart an agent |
 | `PUT` | `/dashboard/api/agents/{id}/budget` | Update agent budget |
 | `GET` | `/dashboard/api/agents/{id}/workspace` | List agent workspace files (with cap, is_default) |
@@ -158,14 +162,20 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `GET` | `/dashboard/api/blackboard` | List blackboard entries |
 | `PUT` | `/dashboard/api/blackboard/{key}` | Write blackboard entry |
 | `DELETE` | `/dashboard/api/blackboard/{key}` | Delete blackboard entry |
+| `POST` | `/dashboard/api/credentials` | Add a credential to the vault |
+| `GET` | `/dashboard/api/costs/{agent_id}` | Cost data for a specific agent |
 | `GET` | `/dashboard/api/costs` | Cost data with optional period |
+| `GET` | `/dashboard/api/project` | Read PROJECT.md content |
+| `PUT` | `/dashboard/api/project` | Update PROJECT.md content |
 | `GET` | `/dashboard/api/traces` | Recent trace events |
 | `GET` | `/dashboard/api/traces/{id}` | Trace detail |
 | `GET` | `/dashboard/api/queues` | Queue status per agent |
 | `GET` | `/dashboard/api/cron` | List cron jobs |
 | `POST` | `/dashboard/api/cron/{id}/run` | Trigger cron job |
+| `PUT` | `/dashboard/api/cron/{id}` | Update cron job schedule |
 | `POST` | `/dashboard/api/cron/{id}/pause` | Pause cron job |
 | `POST` | `/dashboard/api/cron/{id}/resume` | Resume cron job |
+| `DELETE` | `/dashboard/api/cron/{id}` | Delete cron job |
 | `GET` | `/dashboard/api/settings` | Environment settings |
 | `POST` | `/dashboard/api/broadcast` | Send message to all agents |
 | `GET` | `/dashboard/api/messages` | Recent message log |

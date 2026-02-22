@@ -269,6 +269,33 @@ This sends the notification to:
 
 Agents can use `notify_user` at any time -- during cron jobs, heartbeats, workflows, or regular tasks. Messages are capped at 2000 characters.
 
+## File Watchers
+
+Poll directories for new or modified files matching glob patterns. Uses polling (not inotify) for Docker volume compatibility — works reliably across macOS, Linux, and Windows host mounts.
+
+### Configuration
+
+Define watchers in `config/watchers.yaml`:
+
+```yaml
+watchers:
+  - path: "/data/inbox"
+    pattern: "*.csv"
+    agent: "researcher"
+    message: "New prospect list uploaded: {filename}. Begin research."
+```
+
+Each watcher entry specifies:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | string | Directory to watch |
+| `pattern` | string | Glob pattern to match files (e.g., `*.csv`, `*.json`) |
+| `agent` | string | Agent to notify when a match is found |
+| `message` | string | Message template (`{filename}` is replaced with the matched file) |
+
+The watcher polls at a configurable interval, tracks file modification times, and dispatches to the target agent when new or changed files are detected.
+
 ## Source Files
 
 | File | Role |
@@ -278,4 +305,5 @@ Agents can use `notify_user` at any time -- during cron jobs, heartbeats, workfl
 | `src/host/orchestrator.py` | Workflow executor (triggered by pub/sub and webhooks) |
 | `src/host/mesh.py` | PubSub system for event-driven triggering |
 | `src/agent/builtins/mesh_tool.py` | Agent-side `set_cron`, `set_heartbeat`, `list_cron`, `remove_cron` tools |
+| `src/host/watchers.py` | Polling-based file watchers for Docker volume compatibility |
 | `config/cron.json` | Persisted job state |
