@@ -53,7 +53,16 @@ async def _llm_call_with_retry(llm_chat_fn, *, system, messages, tools, **kwargs
             if e.response.status_code in _RETRYABLE_STATUS_CODES:
                 last_exc = e
                 if attempt < _MAX_RETRIES:
-                    wait = _BACKOFF_BASE * (2 ** attempt)
+                    backoff = _BACKOFF_BASE * (2 ** attempt)
+                    # Honour Retry-After header when present (429 responses)
+                    retry_after = e.response.headers.get("retry-after")
+                    if retry_after:
+                        try:
+                            wait = max(float(retry_after), backoff)
+                        except (ValueError, TypeError):
+                            wait = backoff
+                    else:
+                        wait = backoff
                     logger.warning(
                         f"LLM call returned {e.response.status_code}, retrying in {wait}s "
                         f"(attempt {attempt + 1}/{_MAX_RETRIES})"
@@ -120,6 +129,7 @@ class AgentLoop:
         self._last_result: Optional[TaskResult] = None
         self._chat_messages: list[dict] = []
         self._chat_lock = asyncio.Lock()
+        self._chat_total_rounds: int = 0
         self._steer_queue: asyncio.Queue[str] = asyncio.Queue()
         self._fleet_roster: list[dict] | None = None  # cached fleet info
         self._fleet_roster_ts: float = 0  # timestamp of last fetch
@@ -685,6 +695,7 @@ class AgentLoop:
     # ── Chat mode ──────────────────────────────────────────────
 
     CHAT_MAX_TOOL_ROUNDS = 30
+    CHAT_MAX_TOTAL_ROUNDS = 200
 
     async def chat(self, user_message: str, *, trace_id: str | None = None) -> dict:
         """Handle a single chat turn with persistent conversation history.
@@ -874,6 +885,18 @@ class AgentLoop:
         try:
             user_message, system = await self._prepare_chat_turn(user_message)
 
+            if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
+                self.state = "idle"
+                return {
+                    "response": (
+                        "Chat session has reached its maximum tool round limit "
+                        f"({self.CHAT_MAX_TOTAL_ROUNDS}). Please reset the chat "
+                        "to continue."
+                    ),
+                    "tool_outputs": [],
+                    "tokens_used": 0,
+                }
+
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat,
@@ -907,6 +930,11 @@ class AgentLoop:
                 entries = self._build_tool_call_entries(llm_response)
                 for i, tool_call in enumerate(llm_response.tool_calls):
                     await self._execute_chat_tool_call(tool_call, entries[i]["id"], tool_outputs)
+                self._chat_total_rounds += 1
+
+                if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
+                    logger.warning("Chat session hit total round limit (%d)", self.CHAT_MAX_TOTAL_ROUNDS)
+                    break
 
                 await self._compact_chat_context(system)
 
@@ -989,6 +1017,7 @@ class AgentLoop:
                 except Exception as e:
                     logger.warning("Failed to flush memory on chat reset: %s", e)
             self._chat_messages = []
+            self._chat_total_rounds = 0
             self._loop_detector.reset()
             if self.context_manager:
                 self.context_manager.reset()
@@ -1169,6 +1198,17 @@ class AgentLoop:
         try:
             user_message, system = await self._prepare_chat_turn(user_message)
 
+            if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
+                self.state = "idle"
+                msg = (
+                    "Chat session has reached its maximum tool round limit "
+                    f"({self.CHAT_MAX_TOTAL_ROUNDS}). Please reset the chat "
+                    "to continue."
+                )
+                yield {"type": "text_delta", "content": msg}
+                yield {"type": "done", "response": msg, "tool_outputs": [], "tokens_used": 0}
+                return
+
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
                 # Try token-level streaming, fall back to non-streaming on error
                 llm_response = None
@@ -1233,6 +1273,11 @@ class AgentLoop:
                     yield {"type": "tool_start", "name": tool_call.name, "input": tool_call.arguments}
                     output = await self._execute_chat_tool_call(tool_call, entries[i]["id"], tool_outputs)
                     yield {"type": "tool_result", "name": tool_call.name, "output": output["output"]}
+                self._chat_total_rounds += 1
+
+                if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
+                    logger.warning("Chat session hit total round limit (%d)", self.CHAT_MAX_TOTAL_ROUNDS)
+                    break
 
                 await self._compact_chat_context(system)
 

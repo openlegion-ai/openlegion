@@ -189,13 +189,15 @@ class CredentialVault:
 
         async def _execute() -> APIProxyResponse:
             if self.cost_tracker and agent_id and is_llm:
-                budget = self.cost_tracker.check_budget(agent_id)
-                if not budget["allowed"]:
+                model = request.params.get("model", "unknown")
+                preflight = self.cost_tracker.preflight_check(agent_id, model)
+                if not preflight["allowed"]:
                     return APIProxyResponse(
                         success=False,
                         error=(
-                            f"Budget exceeded: ${budget['daily_used']:.2f}/${budget['daily_limit']:.2f} daily, "
-                            f"${budget['monthly_used']:.2f}/${budget['monthly_limit']:.2f} monthly"
+                            f"Budget exceeded: ${preflight['daily_used']:.2f}/${preflight['daily_limit']:.2f} daily, "
+                            f"${preflight['monthly_used']:.2f}/${preflight['monthly_limit']:.2f} monthly "
+                            f"(estimated next call: ${preflight['estimated_cost']:.4f})"
                         ),
                     )
 
@@ -399,8 +401,9 @@ class CredentialVault:
         import litellm
 
         if self.cost_tracker and agent_id and request.service in ("llm", "anthropic", "openai"):
-            budget = self.cost_tracker.check_budget(agent_id)
-            if not budget["allowed"]:
+            model = request.params.get("model", "unknown")
+            preflight = self.cost_tracker.preflight_check(agent_id, model)
+            if not preflight["allowed"]:
                 yield f"data: {json.dumps({'error': 'Budget exceeded'})}\n\n"
                 return
 

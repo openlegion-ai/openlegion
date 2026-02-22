@@ -262,6 +262,9 @@ class ContextManager:
                 f"Context compacted — {count} facts flushed to memory"
             )
 
+    _SUMMARIZE_RETRIES = 2
+    _SUMMARIZE_BACKOFF = 2  # seconds
+
     async def _summarize_compact(
         self, system_prompt: str, messages: list[dict],
     ) -> list[dict]:
@@ -275,17 +278,32 @@ class ContextManager:
             f"Conversation:\n{conversation_text[:20000]}"
         )
 
-        try:
-            response = await self.llm.chat(
-                system="You produce concise conversation summaries.",
-                messages=[{"role": "user", "content": summary_prompt}],
-                max_tokens=1024,
-                temperature=0.3,
-            )
-            summary = response.content.strip()
-        except Exception as e:
-            logger.warning(f"Summarization failed, falling back to hard prune: {e}")
-            return self._hard_prune(messages)
+        import asyncio as _asyncio
+
+        last_err = None
+        for attempt in range(self._SUMMARIZE_RETRIES + 1):
+            try:
+                response = await self.llm.chat(
+                    system="You produce concise conversation summaries.",
+                    messages=[{"role": "user", "content": summary_prompt}],
+                    max_tokens=1024,
+                    temperature=0.3,
+                )
+                summary = response.content.strip()
+                break
+            except Exception as e:
+                last_err = e
+                if attempt < self._SUMMARIZE_RETRIES:
+                    wait = self._SUMMARIZE_BACKOFF * (2 ** attempt)
+                    logger.warning(
+                        f"Summarization failed (attempt {attempt + 1}/{self._SUMMARIZE_RETRIES + 1}), "
+                        f"retrying in {wait}s: {e}"
+                    )
+                    await _asyncio.sleep(wait)
+                else:
+                    logger.warning(f"Summarization failed after {self._SUMMARIZE_RETRIES + 1} attempts, "
+                                   f"falling back to hard prune: {last_err}")
+                    return self._hard_prune(messages)
 
         summary_msg = {
             "role": "user",
