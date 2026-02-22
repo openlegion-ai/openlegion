@@ -121,11 +121,14 @@ def create_mesh_app(
             ts_list.append(now)
 
     def _cleanup_rate_limits(agent_id: str) -> None:
-        """Remove all rate-limit buckets for a deregistered agent."""
+        """Remove all rate-limit buckets for a deregistered agent.
+
+        Only clears timestamp lists (not locks) to avoid racing with
+        concurrent lock acquisitions on the defaultdict.
+        """
         stale = [k for k in _rate_ts if k.endswith(f":{agent_id}")]
         for k in stale:
             del _rate_ts[k]
-            _rate_locks.pop(k, None)
 
     app.cleanup_rate_limits = _cleanup_rate_limits  # type: ignore[attr-defined]
 

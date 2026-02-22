@@ -112,6 +112,10 @@ class CredentialVault:
         if self._http_client and not self._http_client.is_closed:
             await self._http_client.aclose()
 
+    def cleanup_agent(self, agent_id: str) -> None:
+        """Remove per-agent state (budget locks) for a deregistered agent."""
+        self._budget_locks.pop(agent_id, None)
+
     def _load_credentials(self) -> None:
         """Load credentials from environment variables.
 
@@ -213,8 +217,10 @@ class CredentialVault:
                         model = response.data.get(
                             "model", request.params.get("model", "unknown"),
                         )
-                        prompt_tokens = response.data.get("input_tokens") or int(tokens_used * 0.7)
-                        completion_tokens = response.data.get("output_tokens") or (tokens_used - prompt_tokens)
+                        raw_pt = response.data.get("input_tokens")
+                        prompt_tokens = raw_pt if raw_pt else int(tokens_used * 0.7)
+                        raw_ct = response.data.get("output_tokens")
+                        completion_tokens = raw_ct if raw_ct else (tokens_used - prompt_tokens)
                         self.cost_tracker.track(agent_id, model, prompt_tokens, completion_tokens)
 
                 return response

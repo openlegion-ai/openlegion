@@ -45,7 +45,7 @@ async def exec_command(command: str, timeout: int = 30, workdir: str = "/data") 
     # Outside containers (dev/test), /data won't exist — skip the check.
     if os.path.isdir("/data"):
         resolved = os.path.realpath(workdir)
-        if not resolved.startswith("/data"):
+        if resolved != "/data" and not resolved.startswith("/data/"):
             return {"exit_code": -1, "stdout": "", "stderr": f"workdir must be under /data, got: {workdir}"}
         workdir = resolved
     try:
