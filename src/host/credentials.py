@@ -93,7 +93,6 @@ class CredentialVault:
         API key lookup path clean.
         """
         prefix = "OPENLEGION_CRED_"
-        self.api_bases: dict[str, str] = {}
         for key, value in os.environ.items():
             if key.startswith(prefix):
                 cred_name = key[len(prefix) :].lower()
@@ -233,7 +232,7 @@ class CredentialVault:
     async def _call_llm_with_failover(
         self, requested_model: str, call_fn,
     ) -> tuple:
-        """Try *call_fn(model, api_key)* across the failover chain.
+        """Try *call_fn(model, api_key, api_base)* across the failover chain.
 
         Returns ``(result, used_model)`` on success.
         Raises the last exception if all models are exhausted.

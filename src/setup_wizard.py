@@ -139,11 +139,24 @@ class SetupWizard:
         self._print_summary(state["provider"], state["selected_model"], state.get("created_agents", []))
 
     @staticmethod
-    def _prompt_with_back(prompt_text: str, **kwargs) -> str | None:
-        """Wrapper around click.prompt that returns None when user types 'back'."""
+    def _prompt_with_back(prompt_text: str, **kwargs):
+        """Wrapper around click.prompt that returns None when user types 'back'.
+
+        When a ``type`` kwarg with validation (e.g. ``click.IntRange``) is
+        provided, we strip it and validate manually *after* checking for
+        'back'.  This avoids Click rejecting 'back' as invalid input.
+        """
+        click_type = kwargs.pop("type", None)
         value = click.prompt(prompt_text, **kwargs)
         if isinstance(value, str) and value.strip().lower() == "back":
             return None
+        # Re-apply type validation if one was provided
+        if click_type is not None and value is not None:
+            try:
+                value = click_type.convert(value, None, None)
+            except (click.BadParameter, Exception):
+                click.echo(f"  Error: invalid input. Try again or type 'back'.")
+                return SetupWizard._prompt_with_back(prompt_text, type=click_type, **kwargs)
         return value
 
     def _step_provider(self, total_steps, _PROVIDERS, _PROVIDER_MODELS, _set_env_key) -> dict | None:
@@ -293,7 +306,7 @@ class SetupWizard:
         return {"created_agents": created_agents}
 
     def _step_collaboration(self, total_steps, _set_collaborative_permissions) -> dict | None:
-        """Step 4: Collaboration. Returns None for 'back'."""
+        """Step 4: Collaboration (auto-completes, no user prompt)."""
         self._print_step_header(4, total_steps, "Collaboration")
 
         mesh_cfg = {}
