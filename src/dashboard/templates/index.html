@@ -50,10 +50,14 @@
     <div x-show="toastMessage" x-cloak class="fixed bottom-4 right-4 z-50 toast text-gray-200" x-text="toastMessage" x-transition></div>
 
     <!-- Navigation bar -->
-    <nav class="bg-gray-900 border-b border-gray-800 px-4 py-2.5 flex items-center justify-between shrink-0">
+    <nav class="nav-bar px-4 py-2.5 flex items-center justify-between shrink-0">
       <div class="flex items-center gap-5">
-        <div class="flex items-center gap-2">
-          <div class="w-2 h-2 rounded-full bg-indigo-500"></div>
+        <div class="flex items-center gap-2.5">
+          <div class="logo-mark">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+            </svg>
+          </div>
           <span class="text-base font-bold text-white tracking-tight">OpenLegion</span>
         </div>
         <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
@@ -61,10 +65,26 @@
             <button
               @click="switchTab(tab.id)"
               :class="activeTab === tab.id
-                ? 'bg-gray-700 text-white shadow-sm'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative"
+                ? 'nav-tab nav-tab-active'
+                : 'nav-tab nav-tab-inactive'"
+              class="relative"
             >
+              <!-- Tab icons -->
+              <template x-if="tab.id === 'fleet'">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+              </template>
+              <template x-if="tab.id === 'activity'">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+              </template>
+              <template x-if="tab.id === 'blackboard'">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+              </template>
+              <template x-if="tab.id === 'automation'">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              </template>
+              <template x-if="tab.id === 'system'">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              </template>
               <span x-text="tab.label"></span>
               <!-- Unread event count badge -->
               <span
@@ -100,18 +120,22 @@
       <div x-show="activeTab === 'fleet'" x-cloak>
         <!-- Fleet summary bar -->
         <div class="flex items-center justify-between mb-4" x-show="agents.length > 0">
-          <h2 class="text-sm font-medium text-gray-400">
+          <h2 class="text-sm font-medium text-gray-400 flex items-center gap-1.5">
+            <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
             <span x-text="agents.length"></span> agent<span x-show="agents.length !== 1">s</span>
-            <span class="text-gray-600 mx-1">&middot;</span>
+            <span class="text-gray-600 mx-0.5">&middot;</span>
             <span x-text="formatCost(fleetTotalCost)"></span> today
-            <span class="text-gray-600 mx-1">&middot;</span>
+            <span class="text-gray-600 mx-0.5">&middot;</span>
             <span x-text="fleetTotalTokens.toLocaleString()"></span> tokens
           </h2>
           <div class="flex items-center gap-3">
             <button @click="addAgentMode = !addAgentMode; fetchSettings()"
-              class="text-[11px] px-3 py-1.5 rounded-md transition-colors"
+              class="text-[11px] px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5"
               :class="addAgentMode ? 'bg-indigo-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white'"
-            >+ Add Agent</button>
+            >
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add Agent
+            </button>
             <div class="text-xs text-gray-600" x-text="'Updated ' + timeAgo(lastRefresh)"></div>
           </div>
         </div>
@@ -157,87 +181,127 @@
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           <template x-for="agent in agents" :key="agent.id">
             <div
-              class="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-600 transition-all hover:shadow-lg hover:shadow-black/20 group"
+              class="agent-card p-4 group relative overflow-hidden"
               :class="agentStates[agent.id] === 'thinking' || agentStates[agent.id] === 'tool' ? 'pulse-border' : ''"
             >
-              <div class="flex items-center justify-between mb-1">
-                <div class="flex items-center gap-2 cursor-pointer" @click="drillDown(agent.id)" title="View agent details">
-                  <span class="font-semibold text-white group-hover:text-indigo-300 transition-colors" x-text="agent.id"></span>
-                  <svg class="w-3.5 h-3.5 text-gray-600 group-hover:text-indigo-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+              <!-- Top accent stripe -->
+              <div class="agent-card-accent" :class="'agent-color-' + agentColorIndex(agent.id)"></div>
+
+              <!-- Header: Avatar + Name + Health -->
+              <div class="flex items-start gap-3 mb-3">
+                <div class="agent-avatar cursor-pointer" :class="'agent-color-' + agentColorIndex(agent.id)" @click="drillDown(agent.id)" title="View agent details">
+                  <span x-text="agentInitials(agent.id)"></span>
+                  <!-- Activity indicator dot -->
+                  <span class="activity-dot"
+                    :class="{
+                      'bg-purple-400': agentStates[agent.id] === 'thinking',
+                      'bg-amber-400': agentStates[agent.id] === 'tool',
+                      'bg-green-400': agentStates[agent.id] === 'streaming',
+                      'bg-gray-600': !agentStates[agent.id] || agentStates[agent.id] === 'idle',
+                    }"
+                  ></span>
                 </div>
-                <div class="flex items-center gap-2">
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="font-semibold text-white group-hover:text-indigo-300 transition-colors truncate cursor-pointer" @click="drillDown(agent.id)" x-text="agent.id"></span>
+                    <svg class="w-3 h-3 text-gray-600 group-hover:text-indigo-400 transition-colors shrink-0 cursor-pointer" @click="drillDown(agent.id)" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                  </div>
+                  <div class="text-[11px] text-gray-500 truncate mt-0.5" x-show="agent.role" x-text="agent.role"></div>
+                </div>
+                <div class="flex items-center gap-1.5 shrink-0">
                   <!-- Queue depth badge -->
                   <span x-show="queueStatus[agent.id] && queueStatus[agent.id].queued > 0"
                     class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-900/30 text-amber-400 border border-amber-800/40 font-mono"
                     x-text="queueStatus[agent.id]?.queued + ' queued'"
                   ></span>
-                  <span
-                    class="text-[11px] px-2 py-0.5 rounded-full font-medium"
+                  <!-- Health badge -->
+                  <span class="health-badge"
                     :class="{
-                      'bg-green-900/40 text-green-400 border border-green-800/50': agent.health_status === 'healthy',
-                      'bg-yellow-900/40 text-yellow-400 border border-yellow-800/50': agent.health_status === 'unhealthy' || agent.health_status === 'restarting',
-                      'bg-red-900/40 text-red-400 border border-red-800/50': agent.health_status === 'failed',
-                      'bg-gray-800/60 text-gray-500 border border-gray-700/50': agent.health_status === 'unknown',
+                      'health-healthy': agent.health_status === 'healthy',
+                      'health-unhealthy': agent.health_status === 'unhealthy' || agent.health_status === 'restarting',
+                      'health-failed': agent.health_status === 'failed',
+                      'health-unknown': agent.health_status === 'unknown' || !agent.health_status,
                     }"
-                    x-text="agent.health_status"
+                    x-text="agent.health_status || 'unknown'"
                   ></span>
                 </div>
               </div>
-              <div class="text-xs text-gray-500 truncate mb-2" x-show="agent.role" x-text="agent.role"></div>
-              <div class="space-y-2 text-xs">
-                <div class="flex justify-between items-center">
-                  <span class="text-gray-500">Activity</span>
+
+              <!-- Stats grid -->
+              <div class="space-y-0">
+                <div class="stat-row">
+                  <span class="stat-label">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                    Activity
+                  </span>
                   <span class="event-badge font-medium"
                     :class="{
                       'text-purple-400': agentStates[agent.id] === 'thinking',
                       'text-amber-400': agentStates[agent.id] === 'tool',
+                      'text-green-400': agentStates[agent.id] === 'streaming',
                       'text-gray-600': agentStates[agent.id] === 'idle' || !agentStates[agent.id],
                     }"
                     x-text="agentStates[agent.id] || 'idle'"
                   ></span>
                 </div>
-                <div class="flex justify-between items-center">
-                  <span class="text-gray-500">Cost today</span>
-                  <span class="text-gray-200 font-mono text-[11px]" x-text="formatCost(agent.daily_cost)"></span>
+                <div class="stat-row">
+                  <span class="stat-label">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                    Cost today
+                  </span>
+                  <span class="stat-value" x-text="formatCost(agent.daily_cost)"></span>
                 </div>
-                <div class="flex justify-between items-center">
-                  <span class="text-gray-500">Tokens</span>
-                  <span class="text-gray-200 font-mono text-[11px]" x-text="agent.daily_tokens.toLocaleString()"></span>
+                <div class="stat-row">
+                  <span class="stat-label">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    Tokens
+                  </span>
+                  <span class="stat-value" x-text="agent.daily_tokens.toLocaleString()"></span>
                 </div>
-                <div class="flex justify-between items-center" x-show="agentConfigs[agent.id]">
-                  <span class="text-gray-500">Model</span>
-                  <span class="text-gray-300 font-mono text-[11px]" x-text="agentConfigs[agent.id]?.model || '-'"></span>
+                <div class="stat-row" x-show="agentConfigs[agent.id]">
+                  <span class="stat-label">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M12 2a4 4 0 0 0-4 4v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2h-2V6a4 4 0 0 0-4-4z"/></svg>
+                    Model
+                  </span>
+                  <span class="stat-value text-gray-400" x-text="agentConfigs[agent.id]?.model || '-'"></span>
                 </div>
-                <div class="flex justify-between items-center" x-show="queueStatus[agent.id]">
-                  <span class="text-gray-500">Queue</span>
-                  <span class="font-mono text-[11px]"
+                <div class="stat-row" x-show="queueStatus[agent.id]">
+                  <span class="stat-label">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                    Queue
+                  </span>
+                  <span class="stat-value"
                     :class="queueStatus[agent.id]?.busy ? 'text-amber-400' : 'text-gray-600'"
                     x-text="queueStatus[agent.id]?.busy ? 'busy (' + queueStatus[agent.id]?.queued + ' queued)' : 'idle'"
                   ></span>
                 </div>
-                <div class="flex justify-between items-center" x-show="agent.restarts > 0">
-                  <span class="text-gray-500">Restarts</span>
-                  <span class="text-yellow-400 font-mono text-[11px]" x-text="agent.restarts"></span>
+                <div class="stat-row" x-show="agent.restarts > 0">
+                  <span class="stat-label">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                    Restarts
+                  </span>
+                  <span class="stat-value text-yellow-400" x-text="agent.restarts"></span>
                 </div>
               </div>
+
               <!-- Agent actions: Chat, Manage, Restart, Remove -->
-              <div class="mt-3 pt-3 border-t border-gray-800/50 flex flex-wrap gap-1.5">
-                <button
-                  @click="openChat(agent.id)"
-                  class="text-[11px] px-2 py-1 rounded bg-indigo-900/30 hover:bg-indigo-800/40 text-indigo-300 hover:text-indigo-200 border border-indigo-800/30 transition-colors"
-                >Chat</button>
-                <button
-                  @click="drillDown(agent.id)"
-                  class="text-[11px] px-2 py-1 rounded bg-purple-900/30 hover:bg-purple-800/40 text-purple-300 hover:text-purple-200 border border-purple-800/30 transition-colors"
-                >Manage</button>
-                <button
-                  @click="restartAgent(agent.id)"
-                  class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-amber-900/30 text-gray-400 hover:text-amber-400 transition-colors"
-                >Restart</button>
-                <button
-                  @click="removeAgent(agent.id)"
-                  class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-red-900/50 text-gray-400 hover:text-red-400 transition-colors"
-                >Remove</button>
+              <div class="mt-3 pt-3 border-t border-gray-800/30 flex flex-wrap gap-1.5">
+                <button @click="openChat(agent.id)" class="action-btn action-btn-primary">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                  Chat
+                </button>
+                <button @click="drillDown(agent.id)" class="action-btn action-btn-secondary">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9"/></svg>
+                  Manage
+                </button>
+                <button @click="restartAgent(agent.id)" class="action-btn action-btn-warn">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                  Restart
+                </button>
+                <button @click="removeAgent(agent.id)" class="action-btn action-btn-danger">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                  Remove
+                </button>
               </div>
             </div>
           </template>
@@ -251,14 +315,23 @@
         </div>
         <!-- Empty state -->
         <div x-show="agents.length === 0 && !loading" class="text-center py-16" x-cloak>
-          <div class="text-gray-600 text-lg mb-2">No agents yet</div>
-          <div class="text-gray-700 text-sm mb-4">Start agents with <code class="bg-gray-800 px-1.5 py-0.5 rounded text-gray-400">openlegion start</code> or add one here</div>
+          <svg class="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+          </svg>
+          <div class="text-gray-500 text-lg mb-2 font-medium">No agents yet</div>
+          <div class="text-gray-600 text-sm mb-5">Start agents with <code class="bg-gray-800 px-1.5 py-0.5 rounded text-gray-400 text-xs">openlegion start</code> or add one below</div>
           <button @click="addAgentMode = true; fetchSettings()"
-            class="text-sm px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">+ Add Agent</button>
+            class="text-sm px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-2 shadow-lg shadow-indigo-900/30">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add Agent
+          </button>
         </div>
         <!-- Broadcast bar -->
         <div x-show="agents.length > 1" class="mt-6 bg-gray-900 border border-gray-800 rounded-lg p-4" x-cloak>
-          <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Broadcast to all agents</div>
+          <div class="text-xs text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
+            <svg class="w-3.5 h-3.5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+            Broadcast to all agents
+          </div>
           <div class="flex gap-2">
             <input type="text" x-model="broadcastMessage" @keydown.enter="sendBroadcast()"
               class="dash-input flex-1" placeholder="Message all agents...">
@@ -289,6 +362,9 @@
         <div class="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col">
           <div class="flex items-center justify-between px-5 py-3 border-b border-gray-800">
             <div class="flex items-center gap-3">
+              <div class="agent-avatar" :class="'agent-color-' + agentColorIndex(chatAgent || '')" style="width:1.75rem;height:1.75rem;font-size:0.6rem;border-radius:0.375rem;">
+                <span x-text="agentInitials(chatAgent || '')"></span>
+              </div>
               <h3 class="text-sm font-medium text-white">Chat with <span class="text-indigo-400" x-text="chatAgent"></span></h3>
               <button x-show="(chatHistories[chatAgent] || []).length > 0" @click="clearChat()"
                 class="text-[10px] text-gray-600 hover:text-gray-400 transition-colors" title="Clear chat history">Clear</button>
@@ -429,8 +505,11 @@
             </div>
             <!-- Empty state -->
             <div x-show="traces.length === 0 && !tracesLoading" class="text-center py-16">
-              <div class="text-gray-600 text-lg mb-1">No traces yet</div>
-              <div class="text-gray-700 text-sm">Traces appear as agents process requests</div>
+              <svg class="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+              </svg>
+              <div class="text-gray-500 text-lg mb-1 font-medium">No traces yet</div>
+              <div class="text-gray-600 text-sm">Traces appear as agents process requests</div>
             </div>
           </div>
         </div>
@@ -482,8 +561,11 @@
             </template>
             <!-- Empty state -->
             <div x-show="filteredEvents.length === 0" class="text-center py-16">
-              <div class="text-gray-600 text-lg mb-1">No events yet</div>
-              <div class="text-gray-700 text-sm">Events appear in real-time as agents work</div>
+              <svg class="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+              </svg>
+              <div class="text-gray-500 text-lg mb-1 font-medium">No events yet</div>
+              <div class="text-gray-600 text-sm">Events appear in real-time as agents work</div>
             </div>
           </div>
         </div>
@@ -506,26 +588,34 @@
           <div>
             <div class="flex items-center justify-between mb-5">
               <div class="flex items-center gap-3">
-                <h2 class="text-xl font-bold" x-text="agentDetail.id"></h2>
-                <span
-                  class="text-[11px] px-2 py-0.5 rounded-full font-medium"
-                  :class="{
-                    'bg-green-900/40 text-green-400 border border-green-800/50': agentDetail.health?.status === 'healthy',
-                    'bg-yellow-900/40 text-yellow-400 border border-yellow-800/50': agentDetail.health?.status === 'unhealthy',
-                    'bg-red-900/40 text-red-400 border border-red-800/50': agentDetail.health?.status === 'failed',
-                    'bg-gray-800/60 text-gray-500 border border-gray-700/50': !agentDetail.health?.status || agentDetail.health?.status === 'unknown',
-                  }"
-                  x-text="agentDetail.health?.status || 'unknown'"
-                ></span>
-                <span class="text-xs text-gray-600 font-mono" x-text="agentDetail.url"></span>
+                <div class="agent-avatar" :class="'agent-color-' + agentColorIndex(agentDetail.id)" style="width:2.5rem;height:2.5rem;font-size:0.9rem;">
+                  <span x-text="agentInitials(agentDetail.id)"></span>
+                </div>
+                <div>
+                  <div class="flex items-center gap-2.5">
+                    <h2 class="text-xl font-bold" x-text="agentDetail.id"></h2>
+                    <span class="health-badge"
+                      :class="{
+                        'health-healthy': agentDetail.health?.status === 'healthy',
+                        'health-unhealthy': agentDetail.health?.status === 'unhealthy',
+                        'health-failed': agentDetail.health?.status === 'failed',
+                        'health-unknown': !agentDetail.health?.status || agentDetail.health?.status === 'unknown',
+                      }"
+                      x-text="agentDetail.health?.status || 'unknown'"
+                    ></span>
+                  </div>
+                  <span class="text-xs text-gray-600 font-mono" x-text="agentDetail.url"></span>
+                </div>
               </div>
               <div class="flex items-center gap-2">
-                <button @click="openChat(selectedAgent)"
-                  class="text-[11px] px-3 py-1.5 rounded bg-indigo-900/30 hover:bg-indigo-800/40 text-indigo-300 hover:text-indigo-200 border border-indigo-800/30 transition-colors"
-                >Chat</button>
-                <button @click="restartAgent(selectedAgent)"
-                  class="text-[11px] px-3 py-1.5 rounded bg-gray-800 hover:bg-amber-900/30 text-gray-400 hover:text-amber-400 transition-colors"
-                >Restart</button>
+                <button @click="openChat(selectedAgent)" class="action-btn action-btn-primary" style="padding:0.375rem 0.75rem;">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                  Chat
+                </button>
+                <button @click="restartAgent(selectedAgent)" class="action-btn action-btn-warn" style="padding:0.375rem 0.75rem;">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                  Restart
+                </button>
               </div>
             </div>
             <!-- Agent Identity Panel -->
@@ -1082,8 +1172,12 @@
               </tbody>
             </table>
           </div>
-          <div x-show="cronJobs.length === 0" class="text-center py-12 text-gray-600">
-            No automation jobs configured
+          <div x-show="cronJobs.length === 0" class="text-center py-12">
+            <svg class="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+            </svg>
+            <div class="text-gray-500 font-medium mb-1">No automation jobs configured</div>
+            <div class="text-gray-600 text-sm">Add cron jobs in your agent config</div>
           </div>
         </div>
       </div>

@@ -130,6 +130,38 @@ class CostTracker:
             "monthly_limit": budget["monthly_usd"],
         }
 
+    def preflight_check(self, agent: str, model: str, estimated_tokens: int = 4096) -> dict:
+        """Pre-flight budget check before an LLM call.
+
+        Estimates the cost of the upcoming call and checks if the agent can
+        afford it. Returns {"allowed": bool, "estimated_cost": float, ...}.
+        """
+        estimated_cost = estimate_cost(model, total_tokens=estimated_tokens)
+        budget = self.budgets.get(agent, {"daily_usd": 10.0, "monthly_usd": 200.0})
+        daily_used = self.get_spend(agent, "today").get("total_cost", 0)
+        monthly_used = self.get_spend(agent, "month").get("total_cost", 0)
+
+        daily_ok = (daily_used + estimated_cost) <= budget["daily_usd"]
+        monthly_ok = (monthly_used + estimated_cost) <= budget["monthly_usd"]
+        allowed = daily_ok and monthly_ok
+
+        if not allowed:
+            logger.warning(
+                "Pre-flight budget check failed for agent '%s': "
+                "estimated $%.4f would exceed limits (daily: $%.4f/$%.2f, monthly: $%.4f/$%.2f)",
+                agent, estimated_cost, daily_used, budget["daily_usd"],
+                monthly_used, budget["monthly_usd"],
+            )
+
+        return {
+            "allowed": allowed,
+            "estimated_cost": round(estimated_cost, 6),
+            "daily_used": round(daily_used, 4),
+            "daily_limit": budget["daily_usd"],
+            "monthly_used": round(monthly_used, 4),
+            "monthly_limit": budget["monthly_usd"],
+        }
+
     def get_spend(self, agent: str | None = None, period: str = "today") -> dict:
         """Get spend breakdown for an agent or all agents."""
         since = _period_to_since(period)

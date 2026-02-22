@@ -51,11 +51,15 @@ class HealthMonitor:
         transport: Transport,
         router: MessageRouter,
         event_bus=None,
+        cleanup_rate_limits_fn=None,
+        blackboard=None,
     ):
         self.runtime = runtime
         self.transport = transport
         self.router = router
         self._event_bus = event_bus
+        self._cleanup_rate_limits = cleanup_rate_limits_fn
+        self._blackboard = blackboard
         self.agents: dict[str, AgentHealth] = {}
         self._running = False
 
@@ -77,6 +81,11 @@ class HealthMonitor:
 
     async def _check_all(self) -> None:
         await self._cleanup_ephemeral_agents()
+        if self._blackboard:
+            try:
+                self._blackboard.gc_expired()
+            except Exception as e:
+                logger.debug("Blackboard TTL cleanup failed: %s", e)
         for agent_id in list(self.agents.keys()):
             await self._check_agent(agent_id)
 
@@ -97,6 +106,8 @@ class HealthMonitor:
             except Exception as e:
                 logger.warning("Error stopping ephemeral agent '%s': %s", agent_id, e)
             self.router.unregister_agent(agent_id)
+            if self._cleanup_rate_limits:
+                self._cleanup_rate_limits(agent_id)
             del self.agents[agent_id]
             if self._event_bus:
                 self._event_bus.emit("agent_state", agent=agent_id, data={

@@ -132,6 +132,8 @@ class WorkflowExecution:
 class Orchestrator:
     """Workflow engine that executes multi-step DAGs across agents."""
 
+    _MAX_CACHED_EXECUTIONS = 100
+
     def __init__(
         self,
         mesh_url: str,
@@ -150,6 +152,7 @@ class Orchestrator:
         self._trace_store = trace_store
         self._client: httpx.AsyncClient | None = None
         self._pending_results: dict[str, asyncio.Future] = {}
+        self._cancelled: set[str] = set()
         self._load_workflows(workflows_dir)
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -167,6 +170,14 @@ class Orchestrator:
         if future is None or future.done():
             return False
         future.set_result(result)
+        return True
+
+    def cancel_execution(self, execution_id: str) -> bool:
+        """Request cancellation of a running workflow. Checked between steps."""
+        ex = self.active_executions.get(execution_id)
+        if not ex or ex.status != "running":
+            return False
+        self._cancelled.add(execution_id)
         return True
 
     def _load_workflows(self, workflows_dir: str) -> None:
@@ -254,6 +265,11 @@ class Orchestrator:
 
         try:
             while pending_steps and execution.status == "running":
+                if execution.id in self._cancelled:
+                    execution.status = "cancelled"
+                    logger.info(f"Workflow {execution.id} cancelled by user")
+                    break
+
                 elapsed = time.time() - execution.started_at
                 if elapsed > wf.timeout:
                     execution.status = "failed"
@@ -339,12 +355,23 @@ class Orchestrator:
             execution.status = "failed"
             logger.error(f"Workflow {execution.id} failed: {e}", exc_info=True)
         finally:
+            self._cancelled.discard(execution.id)
             # Clean up completed/failed executions after a delay to allow
             # status queries, but prevent unbounded memory growth.
             async def _cleanup():
                 await asyncio.sleep(300)  # keep for 5 minutes for status queries
                 self.active_executions.pop(execution.id, None)
             asyncio.create_task(_cleanup())
+            # Evict oldest finished executions if cache exceeds limit
+            if len(self.active_executions) > self._MAX_CACHED_EXECUTIONS:
+                finished = [
+                    (eid, ex) for eid, ex in self.active_executions.items()
+                    if ex.status in ("complete", "failed")
+                ]
+                finished.sort(key=lambda x: x[1].started_at)
+                excess = len(self.active_executions) - self._MAX_CACHED_EXECUTIONS
+                for eid, _ in finished[:excess]:
+                    self.active_executions.pop(eid, None)
 
     async def _execute_step(self, execution: WorkflowExecution, step: WorkflowStep) -> TaskResult:
         """Execute a single workflow step by sending task to agent."""

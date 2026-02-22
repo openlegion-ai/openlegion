@@ -5,17 +5,307 @@
   display: none !important;
 }
 
+/* ── Agent card polish ────────────────────────────── */
+
 /* Pulse animation for active agent cards */
 @keyframes pulse-border {
-  0%, 100% { border-color: rgba(99, 102, 241, 0.2); }
-  50% { border-color: rgba(99, 102, 241, 0.6); }
+  0%, 100% { border-color: rgba(99, 102, 241, 0.2); box-shadow: 0 0 0 0 rgba(99, 102, 241, 0); }
+  50% { border-color: rgba(99, 102, 241, 0.6); box-shadow: 0 0 20px -4px rgba(99, 102, 241, 0.15); }
 }
 
 .pulse-border {
   animation: pulse-border 2s ease-in-out infinite;
 }
 
-/* Event type badge — monospace pill */
+/* Agent card — glass surface */
+.agent-card {
+  background: linear-gradient(145deg, rgba(17, 17, 24, 0.9), rgba(22, 22, 31, 0.7));
+  border: 1px solid rgba(42, 42, 58, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-radius: 0.75rem;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.agent-card:hover {
+  border-color: rgba(99, 102, 241, 0.3);
+  box-shadow:
+    0 8px 32px -4px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgba(99, 102, 241, 0.08);
+  transform: translateY(-1px);
+}
+
+/* Agent avatar circle */
+.agent-avatar {
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: -0.02em;
+  flex-shrink: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.agent-avatar::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255,255,255,0.12) 0%, transparent 60%);
+  border-radius: inherit;
+}
+
+/* Deterministic agent colors */
+.agent-color-0 { background: linear-gradient(135deg, #4f46e5, #6366f1); color: #e0e7ff; }
+.agent-color-1 { background: linear-gradient(135deg, #7c3aed, #8b5cf6); color: #ede9fe; }
+.agent-color-2 { background: linear-gradient(135deg, #0891b2, #06b6d4); color: #cffafe; }
+.agent-color-3 { background: linear-gradient(135deg, #059669, #10b981); color: #d1fae5; }
+.agent-color-4 { background: linear-gradient(135deg, #d97706, #f59e0b); color: #fef3c7; }
+.agent-color-5 { background: linear-gradient(135deg, #dc2626, #ef4444); color: #fee2e2; }
+.agent-color-6 { background: linear-gradient(135deg, #db2777, #ec4899); color: #fce7f3; }
+.agent-color-7 { background: linear-gradient(135deg, #2563eb, #3b82f6); color: #dbeafe; }
+
+/* Activity dot on avatar */
+.agent-avatar .activity-dot {
+  position: absolute;
+  bottom: -1px;
+  right: -1px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid #111118;
+}
+
+/* Card accent stripe */
+.agent-card-accent {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 0.75rem 0.75rem 0 0;
+  opacity: 0.7;
+  transition: opacity 0.25s;
+}
+
+.agent-card:hover .agent-card-accent {
+  opacity: 1;
+}
+
+/* Action button with icon */
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.6875rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 0.375rem;
+  transition: all 0.15s;
+  border: 1px solid transparent;
+}
+
+.action-btn svg {
+  width: 0.8rem;
+  height: 0.8rem;
+  flex-shrink: 0;
+}
+
+.action-btn-primary {
+  background: rgba(79, 70, 229, 0.15);
+  color: #a5b4fc;
+  border-color: rgba(99, 102, 241, 0.2);
+}
+.action-btn-primary:hover {
+  background: rgba(79, 70, 229, 0.3);
+  color: #c7d2fe;
+  border-color: rgba(99, 102, 241, 0.4);
+}
+
+.action-btn-secondary {
+  background: rgba(139, 92, 246, 0.12);
+  color: #c4b5fd;
+  border-color: rgba(139, 92, 246, 0.2);
+}
+.action-btn-secondary:hover {
+  background: rgba(139, 92, 246, 0.25);
+  color: #ddd6fe;
+  border-color: rgba(139, 92, 246, 0.4);
+}
+
+.action-btn-warn {
+  background: transparent;
+  color: #6b7280;
+}
+.action-btn-warn:hover {
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.2);
+}
+
+.action-btn-danger {
+  background: transparent;
+  color: #6b7280;
+}
+.action-btn-danger:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.2);
+}
+
+/* ── Navbar polish ────────────────────────────────── */
+
+.nav-bar {
+  background: linear-gradient(180deg, rgba(17, 17, 24, 0.98) 0%, rgba(17, 17, 24, 0.95) 100%);
+  border-bottom: 1px solid rgba(42, 42, 58, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.nav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.75rem;
+  border-radius: 0.375rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+
+.nav-tab svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  opacity: 0.7;
+}
+
+.nav-tab-active {
+  background: rgba(42, 42, 58, 0.8);
+  color: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.nav-tab-active svg {
+  opacity: 1;
+}
+
+.nav-tab-inactive {
+  color: #9ca3af;
+}
+.nav-tab-inactive:hover {
+  color: #e5e7eb;
+  background: rgba(42, 42, 58, 0.4);
+}
+
+/* Logo mark */
+.logo-mark {
+  width: 1.5rem;
+  height: 1.5rem;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  border-radius: 0.375rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.3);
+}
+
+/* ── Stat card polish ─────────────────────────────── */
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.375rem 0;
+  border-bottom: 1px solid rgba(42, 42, 58, 0.2);
+}
+
+.stat-row:last-child {
+  border-bottom: none;
+}
+
+.stat-label {
+  font-size: 0.75rem;
+  color: #6b7280;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.stat-label svg {
+  width: 0.75rem;
+  height: 0.75rem;
+  opacity: 0.5;
+}
+
+.stat-value {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.6875rem;
+  color: #e5e7eb;
+}
+
+/* ── Health badge polish ──────────────────────────── */
+
+.health-badge {
+  font-size: 0.6875rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.health-badge::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.health-healthy {
+  background: rgba(16, 185, 129, 0.12);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+.health-healthy::before { background: #34d399; }
+
+.health-unhealthy {
+  background: rgba(245, 158, 11, 0.12);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+.health-unhealthy::before { background: #fbbf24; }
+
+.health-failed {
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+.health-failed::before { background: #f87171; }
+
+.health-unknown {
+  background: rgba(107, 114, 128, 0.12);
+  color: #9ca3af;
+  border: 1px solid rgba(107, 114, 128, 0.2);
+}
+.health-unknown::before { background: #6b7280; }
+
+/* ── Empty states ─────────────────────────────────── */
+
+.empty-state-icon {
+  width: 3rem;
+  height: 3rem;
+  margin: 0 auto 0.75rem;
+  color: #374151;
+}
+
+/* ── Event type badge — monospace pill ─────────────── */
+
 .event-badge {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.65rem;
@@ -23,7 +313,8 @@
   white-space: nowrap;
 }
 
-/* Flash highlight for recent blackboard writes */
+/* ── Flash highlight for recent blackboard writes ──── */
+
 @keyframes flash-yellow {
   0% { background-color: rgba(234, 179, 8, 0.15); }
   100% { background-color: transparent; }
@@ -33,7 +324,8 @@
   animation: flash-yellow 5s ease-out forwards;
 }
 
-/* Waterfall bar for trace inspector */
+/* ── Waterfall bar for trace inspector ─────────────── */
+
 .waterfall-bar {
   position: relative;
   height: 5px;
@@ -43,7 +335,8 @@
   transition: width 0.3s ease;
 }
 
-/* Dark scrollbar — WebKit */
+/* ── Dark scrollbar — WebKit ──────────────────────── */
+
 .custom-scrollbar::-webkit-scrollbar {
   width: 5px;
 }
@@ -67,7 +360,8 @@
   scrollbar-color: rgba(55, 55, 75, 0.6) transparent;
 }
 
-/* Smooth transitions for panel switching */
+/* ── Smooth transitions for panel switching ────────── */
+
 main > div {
   animation: fade-in 0.15s ease-out;
 }
@@ -77,7 +371,8 @@ main > div {
   to { opacity: 1; transform: translateY(0); }
 }
 
-/* Keyboard focus — visible ring on tab-navigation only */
+/* ── Keyboard focus ───────────────────────────────── */
+
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
@@ -88,7 +383,8 @@ select:focus-visible,
   border-radius: 4px;
 }
 
-/* Form inputs for inline editing */
+/* ── Form inputs for inline editing ───────────────── */
+
 .dash-input {
   background: rgba(17, 17, 24, 0.8);
   border: 1px solid rgba(42, 42, 58, 0.8);
@@ -126,11 +422,13 @@ select:focus-visible,
   min-height: 3rem;
 }
 
-/* Queue status colors */
+/* ── Queue status colors ──────────────────────────── */
+
 .queue-busy { color: #f59e0b; }
 .queue-idle { color: #6b7280; }
 
-/* Toast notifications */
+/* ── Toast notifications ──────────────────────────── */
+
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
@@ -146,7 +444,8 @@ select:focus-visible,
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 }
 
-/* Expandable JSON cell */
+/* ── Expandable JSON cell ─────────────────────────── */
+
 .json-expand {
   cursor: pointer;
   transition: max-height 0.3s ease;
@@ -163,7 +462,8 @@ select:focus-visible,
   word-break: break-all;
 }
 
-/* Heartbeat indicator */
+/* ── Heartbeat indicator ──────────────────────────── */
+
 @keyframes heartbeat-pulse {
   0%, 100% { opacity: 0.5; }
   50% { opacity: 1; }
@@ -173,13 +473,15 @@ select:focus-visible,
   animation: heartbeat-pulse 2s ease-in-out infinite;
 }
 
-/* Inline cron schedule editing */
+/* ── Inline cron schedule editing ─────────────────── */
+
 .cron-edit-input {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.75rem;
 }
 
-/* Queue depth badge on agent cards */
+/* ── Queue depth badge on agent cards ─────────────── */
+
 .queue-badge {
   font-size: 0.625rem;
   letter-spacing: -0.01em;

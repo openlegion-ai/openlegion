@@ -72,6 +72,9 @@ def create_mesh_app(
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
+    # Exposed for external callers (dashboard, health monitor) to clean up
+    # rate-limit state when agents are removed.
+    app.cleanup_rate_limits = lambda agent_id: None  # replaced below
 
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
 
@@ -117,6 +120,15 @@ def create_mesh_app(
                 raise HTTPException(429, f"Rate limit exceeded for {endpoint}")
             ts_list.append(now)
 
+    def _cleanup_rate_limits(agent_id: str) -> None:
+        """Remove all rate-limit buckets for a deregistered agent."""
+        stale = [k for k in _rate_ts if k.endswith(f":{agent_id}")]
+        for k in stale:
+            del _rate_ts[k]
+            _rate_locks.pop(k, None)
+
+    app.cleanup_rate_limits = _cleanup_rate_limits  # type: ignore[attr-defined]
+
     def _verify_auth(agent_id: str, request: Request) -> None:
         """Verify agent identity via auth token. No-op when auth is not configured."""
         if not _auth_tokens or not agent_id or agent_id in ("mesh", "orchestrator"):
@@ -149,6 +161,17 @@ def create_mesh_app(
             except Exception as e:
                 return {"error": f"Failed to resolve task result: {e}"}
         return await router.route(msg)
+
+    # === Workflow Cancellation ===
+
+    @app.post("/mesh/cancel/{execution_id}")
+    async def cancel_workflow(execution_id: str) -> dict:
+        """Cancel a running workflow execution."""
+        if orchestrator is None:
+            raise HTTPException(503, "Orchestrator not available")
+        if orchestrator.cancel_execution(execution_id):
+            return {"cancelled": True, "execution_id": execution_id}
+        raise HTTPException(404, f"No running execution found: {execution_id}")
 
     # === Blackboard ===
     # NOTE: list route must be defined BEFORE the {key:path} route to avoid shadowing
