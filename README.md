@@ -18,17 +18,13 @@
 
 ---
 
-> 📹 **[Watch the 90-second demo →](#demo)**
-> *Setup to autonomous agent fleet running in Telegram in under 3 minutes.*
-
----
-
 ## Demo
 
 https://github.com/user-attachments/assets/643f7e71-b8e7-4960-bc01-afa31b45b107
 
-> `openlegion setup` → `openlegion start` → agents running in Telegram with
+> `openlegion setup` → `openlegion start` → multiple agents running.
 > live cost tracking. No configuration files edited by hand.
+> connect Telegram, Whatsapp, Slack, and Discord
 
 ## Table of Contents
 
