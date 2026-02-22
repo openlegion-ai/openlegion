@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import click
 import yaml
 from click.testing import CliRunner
 
@@ -334,11 +335,21 @@ class TestPromptWithBack:
             result = SetupWizard._prompt_with_back("prompt")
             assert result == "hello"
 
-    def test_numeric_input_passes_through(self):
-        """Non-string return values pass through (e.g. IntRange)."""
-        with patch("click.prompt", return_value=2):
-            result = SetupWizard._prompt_with_back("prompt", type=int)
-            assert result == 2
+    def test_back_with_int_range_type(self):
+        """'back' works even when type=IntRange is provided."""
+        with patch("click.prompt", return_value="back"):
+            result = SetupWizard._prompt_with_back(
+                "prompt", type=click.IntRange(1, 5), default=1,
+            )
+            assert result is None
+
+    def test_valid_int_with_int_range_type(self):
+        """Valid integer input is converted when type=IntRange is provided."""
+        with patch("click.prompt", return_value="3"):
+            result = SetupWizard._prompt_with_back(
+                "prompt", type=click.IntRange(1, 5), default=1,
+            )
+            assert result == 3
 
 
 class TestKeyboardInterrupt:

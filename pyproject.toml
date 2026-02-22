@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "openlegion"
 version = "0.1.0"
 description = "A lean, container-isolated, memory-aware multi-agent runtime"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 
 dependencies = [
     "fastapi>=0.115.0",
