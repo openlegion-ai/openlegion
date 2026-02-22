@@ -75,6 +75,14 @@ function dashboard() {
     bbNewValue: '{}',
     bbWriterFilter: '',
 
+    // PROJECT.md (fleet-wide)
+    projectContent: '',
+    projectExists: false,
+    projectLoading: false,
+    projectEditing: false,
+    projectEditBuffer: '',
+    projectSaving: false,
+
     // Costs
     costData: {},
     costPeriod: 'today',
@@ -120,7 +128,7 @@ function dashboard() {
     identityEditing: false,
     identityEditBuffer: '',
     identitySaving: false,
-    identityLogs: '',
+    identityLogs: null,
     identityLogsLoading: false,
     identityLearnings: null,
     identityLearningsLoading: false,
@@ -249,7 +257,7 @@ function dashboard() {
           this._startActivityRefresh();
         }
       }
-      if (tab === 'blackboard') this.fetchBlackboard();
+      if (tab === 'blackboard') { this.fetchBlackboard(); this.fetchProject(); }
       if (tab === 'costs') this.fetchCosts();
       if (tab === 'fleet') {
         this.fetchAgents();
@@ -442,7 +450,7 @@ function dashboard() {
       this.identityContent = {};
       this.identityEditing = false;
       this.identityEditBuffer = '';
-      this.identityLogs = '';
+      this.identityLogs = null;
       this.identityLearnings = null;
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace`);
@@ -466,10 +474,10 @@ function dashboard() {
         } catch (e) { console.warn('loadIdentityTabContent failed:', e); }
         this.identityContentLoading = false;
       } else if (tab.id === 'activity') {
-        if (this.identityLogs) return; // cached
+        if (this.identityLogs !== null) return; // cached
         await this.fetchIdentityLogs(agentId);
       } else if (tab.id === 'learnings') {
-        if (this.identityLearnings) return; // cached
+        if (this.identityLearnings !== null) return; // cached
         await this.fetchIdentityLearnings(agentId);
       }
     },
@@ -544,6 +552,56 @@ function dashboard() {
         if (resp.ok) this.identityLearnings = await resp.json();
       } catch (e) { console.warn('fetchIdentityLearnings failed:', e); }
       this.identityLearningsLoading = false;
+    },
+
+    async fetchProject() {
+      this.projectLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/project`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.projectContent = data.content || '';
+          this.projectExists = data.exists;
+        }
+      } catch (e) { console.warn('fetchProject failed:', e); }
+      this.projectLoading = false;
+    },
+
+    async saveProject() {
+      this.projectSaving = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/project`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: this.projectEditBuffer }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          this.projectContent = this.projectEditBuffer;
+          this.projectExists = true;
+          this.projectEditing = false;
+          this.projectEditBuffer = '';
+          const pushed = Object.values(data.pushed || {}).filter(Boolean).length;
+          const total = Object.keys(data.pushed || {}).length;
+          this.showToast(`PROJECT.md saved${total > 0 ? ` (pushed to ${pushed}/${total} agents)` : ''}`);
+        } else {
+          try {
+            const err = await resp.json();
+            this.showToast(`Save failed: ${err.detail || 'Unknown error'}`);
+          } catch (_) { this.showToast('Save failed'); }
+        }
+      } catch (e) { this.showToast(`Save failed: ${e.message}`); }
+      this.projectSaving = false;
+    },
+
+    startProjectEdit() {
+      this.projectEditBuffer = this.projectContent;
+      this.projectEditing = true;
+    },
+
+    cancelProjectEdit() {
+      this.projectEditing = false;
+      this.projectEditBuffer = '';
     },
 
     async fetchBlackboard() {
@@ -1029,7 +1087,7 @@ function dashboard() {
       this.identityContent = {};
       this.identityEditing = false;
       this.identityEditBuffer = '';
-      this.identityLogs = '';
+      this.identityLogs = null;
       this.identityLearnings = null;
       this.fetchAgentDetail(agentId);
       this.fetchIdentityFiles(agentId);

@@ -607,8 +607,15 @@ class AgentLoop:
 
     def _build_system_prompt(self, assignment: TaskAssignment) -> str:
         tools_desc = self.skills.get_descriptions()
-        parts = [
-            self.system_prompt,
+        parts = [self.system_prompt]
+
+        # Load workspace identity + project files into system prompt
+        if self.workspace:
+            bootstrap = self.workspace.get_bootstrap_content()
+            if bootstrap:
+                parts.append(sanitize_for_prompt(bootstrap))
+
+        parts.append(
             f"You are the '{self.role}' agent in the OpenLegion multi-agent system.\n"
             f"Your current task: {assignment.task_type}\n\n"
             f"Available tools:\n{tools_desc}\n\n"
@@ -622,7 +629,7 @@ class AgentLoop:
             f"- 'promote' contains data to share with other agents via blackboard.\n"
             f"- You have max {self.MAX_ITERATIONS} iterations.\n"
             f"- Learn from past errors — avoid repeating known failures.\n",
-        ]
+        )
         if self.workspace:
             learnings = self.workspace.get_learnings_context()
             if learnings:

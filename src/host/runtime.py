@@ -223,13 +223,6 @@ class DockerBackend(RuntimeBackend):
                 host_path = project_md.as_posix()
             volumes[host_path] = {"bind": "/app/PROJECT.md", "mode": "ro"}
 
-        soul_md = self.project_root / "SOUL.md"
-        if soul_md.exists():
-            host_path = str(soul_md)
-            if platform.system() == "Windows":
-                host_path = soul_md.as_posix()
-            volumes[host_path] = {"bind": "/app/SOUL.md", "mode": "ro"}
-
         marketplace_dir = self.project_root / "skills" / "_marketplace"
         if marketplace_dir.is_dir():
             mp_path = str(marketplace_dir)
@@ -417,11 +410,6 @@ class SandboxBackend(RuntimeBackend):
         project_md = self.project_root / "PROJECT.md"
         if project_md.exists():
             shutil.copy2(project_md, ws / "PROJECT.md")
-
-        # Copy SOUL.md (project-level persona)
-        soul_md = self.project_root / "SOUL.md"
-        if soul_md.exists():
-            shutil.copy2(soul_md, ws / "SOUL.md")
 
         # Copy skills
         skills_dest = ws / "skills"

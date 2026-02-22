@@ -693,6 +693,7 @@ agents:
     skills_dir: "./skills/research"
     system_prompt: "You are a research specialist..."
     browser_backend: "stealth"          # basic (default), stealth, or advanced
+    thinking: "medium"                   # off (default), low, medium, or high
     resources:
       memory_limit: "512m"
       cpu_limit: 0.5

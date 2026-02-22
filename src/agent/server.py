@@ -9,6 +9,7 @@ Exposes endpoints for the mesh/orchestrator to interact with:
   GET  /workspace - list workspace files
   GET  /workspace/{filename} - read workspace file
   PUT  /workspace/{filename} - write workspace file
+  PUT  /project - update fleet-wide PROJECT.md (pushed by mesh)
   GET  /workspace-logs - read daily logs (read-only)
   GET  /workspace-learnings - read errors and corrections (read-only)
   GET  /heartbeat-context - single-call heartbeat bootstrap data
@@ -232,6 +233,25 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         path = loop.workspace.root / filename
         path.write_text(content)
         return {"filename": filename, "size": path.stat().st_size}
+
+    @app.put("/project")
+    async def update_project(request: Request) -> dict:
+        """Accept an updated PROJECT.md from the mesh host.
+
+        PROJECT.md is fleet-wide (not per-agent), so it's separate from
+        the identity file allowlist. The mesh pushes updates here after
+        the user edits it on the dashboard.
+        """
+        if not loop.workspace:
+            raise HTTPException(503, "Workspace not available")
+        body = await request.json()
+        content = body.get("content", "")
+        if not isinstance(content, str):
+            raise HTTPException(400, "content must be a string")
+        content = sanitize_for_prompt(content)
+        path = loop.workspace.root / "PROJECT.md"
+        path.write_text(content)
+        return {"updated": True, "size": path.stat().st_size}
 
     @app.get("/workspace-logs")
     async def workspace_logs(days: int = 3) -> dict:

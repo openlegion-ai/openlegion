@@ -161,8 +161,9 @@
               :class="agentStates[agent.id] === 'thinking' || agentStates[agent.id] === 'tool' ? 'pulse-border' : ''"
             >
               <div class="flex items-center justify-between mb-1">
-                <div class="flex items-center gap-2 cursor-pointer" @click="drillDown(agent.id)">
+                <div class="flex items-center gap-2 cursor-pointer" @click="drillDown(agent.id)" title="View agent details">
                   <span class="font-semibold text-white group-hover:text-indigo-300 transition-colors" x-text="agent.id"></span>
+                  <svg class="w-3.5 h-3.5 text-gray-600 group-hover:text-indigo-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                 </div>
                 <div class="flex items-center gap-2">
                   <!-- Queue depth badge -->
@@ -219,17 +220,21 @@
                   <span class="text-yellow-400 font-mono text-[11px]" x-text="agent.restarts"></span>
                 </div>
               </div>
-              <!-- Agent actions: Chat, Edit, Restart, Remove -->
+              <!-- Agent actions: Chat, Identity, Config, Restart, Remove -->
               <div class="mt-3 pt-3 border-t border-gray-800/50 flex flex-wrap gap-1.5">
                 <button
                   @click="openChat(agent.id)"
                   class="text-[11px] px-2 py-1 rounded bg-indigo-900/30 hover:bg-indigo-800/40 text-indigo-300 hover:text-indigo-200 border border-indigo-800/30 transition-colors"
                 >Chat</button>
                 <button
+                  @click="drillDown(agent.id)"
+                  class="text-[11px] px-2 py-1 rounded bg-purple-900/30 hover:bg-purple-800/40 text-purple-300 hover:text-purple-200 border border-purple-800/30 transition-colors"
+                >Identity</button>
+                <button
                   @click="openAgentConfig(agent.id)"
                   x-show="editingAgent !== agent.id"
                   class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
-                >Edit</button>
+                >Config</button>
                 <button
                   @click="restartAgent(agent.id)"
                   class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
@@ -550,34 +555,6 @@
               ></span>
               <span class="text-xs text-gray-600 font-mono" x-text="agentDetail.url"></span>
             </div>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
-              <!-- Spend today card -->
-              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Spend Today</div>
-                <div class="text-2xl font-bold font-mono" x-text="formatCost(agentDetail.spend_today?.total_cost || 0)"></div>
-                <div class="text-xs text-gray-500 mt-1" x-text="(agentDetail.spend_today?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
-              </div>
-              <!-- Spend this week card -->
-              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Spend This Week</div>
-                <div class="text-2xl font-bold font-mono" x-text="formatCost(agentDetail.spend_week?.total_cost || 0)"></div>
-                <div class="text-xs text-gray-500 mt-1" x-text="(agentDetail.spend_week?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
-              </div>
-              <!-- Health card -->
-              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Health</div>
-                <div class="space-y-1.5 text-sm">
-                  <div class="flex justify-between">
-                    <span class="text-gray-500">Failures</span>
-                    <span class="font-mono" x-text="agentDetail.health?.failures || 0"></span>
-                  </div>
-                  <div class="flex justify-between">
-                    <span class="text-gray-500">Restarts</span>
-                    <span class="font-mono" x-text="agentDetail.health?.restarts || 0"></span>
-                  </div>
-                </div>
-              </div>
-            </div>
             <!-- Agent Identity Panel -->
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-5">
               <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Identity</div>
@@ -619,7 +596,7 @@
                 <div class="text-[11px] text-gray-500" x-text="identityCharCount.toLocaleString() + ' chars'"></div>
               </div>
               <!-- Loading -->
-              <div x-show="identityContentLoading || identityLoading" class="py-6 text-center text-gray-600 text-sm">
+              <div x-show="identityContentLoading || identityLoading || identityLogsLoading || identityLearningsLoading" class="py-6 text-center text-gray-600 text-sm">
                 <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
                 Loading...
               </div>
@@ -700,6 +677,32 @@
               <div x-show="(identityTab === 'activity' && identityLogsLoading) || (identityTab === 'learnings' && identityLearningsLoading)" class="py-6 text-center text-gray-600 text-sm">
                 <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
                 Loading...
+              </div>
+            </div>
+            <!-- Spend / Health summary -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Spend Today</div>
+                <div class="text-2xl font-bold font-mono" x-text="formatCost(agentDetail.spend_today?.total_cost || 0)"></div>
+                <div class="text-xs text-gray-500 mt-1" x-text="(agentDetail.spend_today?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
+              </div>
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Spend This Week</div>
+                <div class="text-2xl font-bold font-mono" x-text="formatCost(agentDetail.spend_week?.total_cost || 0)"></div>
+                <div class="text-xs text-gray-500 mt-1" x-text="(agentDetail.spend_week?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
+              </div>
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Health</div>
+                <div class="space-y-1.5 text-sm">
+                  <div class="flex justify-between">
+                    <span class="text-gray-500">Failures</span>
+                    <span class="font-mono" x-text="agentDetail.health?.failures || 0"></span>
+                  </div>
+                  <div class="flex justify-between">
+                    <span class="text-gray-500">Restarts</span>
+                    <span class="font-mono" x-text="agentDetail.health?.restarts || 0"></span>
+                  </div>
+                </div>
               </div>
             </div>
             <!-- Budget bar -->
@@ -785,6 +788,55 @@
 
       <!-- Blackboard -->
       <div x-show="activeTab === 'blackboard'" x-cloak>
+        <!-- PROJECT.md editor -->
+        <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-2">
+              <div class="text-xs text-gray-500 uppercase tracking-wider">PROJECT.md</div>
+              <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/30">fleet-wide</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span x-show="projectLoading" class="text-gray-600 text-xs">
+                <svg class="animate-spin h-3 w-3 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+              </span>
+              <button x-show="!projectEditing && !projectLoading" @click="fetchProject()"
+                class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-white transition-colors" title="Refresh">
+                <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0114.32-3.2M20 15a8 8 0 01-14.32 3.2"/></svg>
+              </button>
+              <button x-show="!projectEditing && !projectLoading" @click="startProjectEdit()"
+                class="text-[11px] px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
+            </div>
+          </div>
+          <div class="text-xs text-gray-600 mb-3">Shared project context loaded into every agent's system prompt. Changes push to all running agents.</div>
+          <!-- Read-only view -->
+          <div x-show="!projectEditing && !projectLoading">
+            <div x-show="!projectContent && !projectExists" class="text-gray-600 text-sm py-4 text-center">No PROJECT.md found. Click Edit to create one.</div>
+            <div x-show="!projectContent && projectExists" class="text-gray-600 text-sm py-4 text-center">PROJECT.md is empty. Click Edit to add content.</div>
+            <pre x-show="projectContent"
+              class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar"
+              x-text="projectContent"></pre>
+            <div x-show="projectContent" class="text-[11px] text-gray-600 mt-1" x-text="projectContent.length.toLocaleString() + ' chars'"></div>
+          </div>
+          <!-- Edit mode -->
+          <div x-show="projectEditing">
+            <textarea x-model="projectEditBuffer"
+              @keydown.ctrl.s.prevent="saveProject()"
+              @keydown.meta.s.prevent="saveProject()"
+              class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
+              rows="10" spellcheck="false" placeholder="# Project Context&#10;&#10;Describe your project goals, architecture, team conventions..."></textarea>
+            <div class="flex items-center justify-between mt-2">
+              <span class="text-[11px] text-gray-600" x-text="projectEditBuffer.length.toLocaleString() + ' chars'"></span>
+              <div class="flex gap-2">
+                <button @click="saveProject()" :disabled="projectSaving"
+                  class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-50 transition-colors">
+                  <span x-text="projectSaving ? 'Saving...' : 'Save'"></span>
+                </button>
+                <button @click="cancelProjectEdit()"
+                  class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
         <div class="mb-3 flex gap-2">
           <input
             type="text"

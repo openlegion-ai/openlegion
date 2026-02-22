@@ -22,6 +22,7 @@ class LLMClient:
     """LLM interface that routes all calls through the mesh API proxy."""
 
     _THINKING_BUDGETS = {"low": 5_000, "medium": 10_000, "high": 25_000}
+    _VALID_THINKING_LEVELS = {"off", "low", "medium", "high"}
 
     def __init__(
         self,
@@ -31,6 +32,12 @@ class LLMClient:
         embedding_model: str = "",
         thinking: str = "off",
     ):
+        if thinking and thinking not in self._VALID_THINKING_LEVELS:
+            logger.warning(
+                "Invalid thinking level '%s', falling back to 'off'. "
+                "Valid: %s", thinking, ", ".join(sorted(self._VALID_THINKING_LEVELS)),
+            )
+            thinking = "off"
         self.mesh_url = mesh_url
         self.agent_id = agent_id
         self.default_model = default_model
@@ -58,8 +65,14 @@ class LLMClient:
         m = model or self.default_model
         if m.startswith("anthropic/"):
             budget = self._THINKING_BUDGETS.get(self.thinking, 10_000)
-            return {"thinking": {"type": "enabled", "budget_tokens": budget}, "temperature": 1.0}
-        if "/o" in m:  # OpenAI o-series (o1, o3, o4-mini, etc.)
+            # Anthropic requires max_tokens > budget_tokens; ensure enough room
+            # for both thinking and output text.
+            return {
+                "thinking": {"type": "enabled", "budget_tokens": budget},
+                "temperature": 1.0,
+                "max_tokens": budget + 4096,
+            }
+        if m.startswith("openai/o") or m.startswith("o1") or m.startswith("o3") or m.startswith("o4"):
             return {"reasoning_effort": self.thinking}
         return {}
 

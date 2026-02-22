@@ -154,6 +154,7 @@ def create_dashboard_router(
                 system_prompt=acfg.get("system_prompt", ""),
                 model=acfg.get("model", model),
                 browser_backend=acfg.get("browser_backend", ""),
+                thinking=acfg.get("thinking", ""),
             )
             agent_registry[name] = url
             if router is not None:
@@ -354,6 +355,7 @@ def create_dashboard_router(
                 system_prompt=agent_cfg.get("system_prompt", ""),
                 model=agent_cfg.get("model", default_model),
                 browser_backend=agent_cfg.get("browser_backend", ""),
+                thinking=agent_cfg.get("thinking", ""),
             )
             agent_registry[agent_id] = url
             ready = await runtime.wait_for_agent(agent_id, timeout=60)
@@ -548,6 +550,60 @@ def create_dashboard_router(
         for item in agents_spend:
             budgets[item["agent"]] = cost_tracker.check_budget(item["agent"])
         return {"period": period, "agents": agents_spend, "budgets": budgets}
+
+    # ── Fleet-wide PROJECT.md ───────────────────────────────
+
+    @api_router.get("/api/project")
+    async def api_project_read() -> dict:
+        """Read the fleet-wide PROJECT.md from the project root."""
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Runtime not available")
+        project_path = runtime.project_root / "PROJECT.md"
+        exists = project_path.exists()
+        content = project_path.read_text(errors="replace")[:200_000] if exists else ""
+        return {"content": content, "exists": exists}
+
+    @api_router.put("/api/project")
+    async def api_project_write(request: Request) -> dict:
+        """Write PROJECT.md to host and push to all running agents."""
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Runtime not available")
+        body = await request.json()
+        content = body.get("content", "")
+        if not isinstance(content, str):
+            raise HTTPException(status_code=400, detail="content must be a string")
+        content = sanitize_for_prompt(content)
+
+        # Write to host project root
+        project_path = runtime.project_root / "PROJECT.md"
+        project_path.write_text(content)
+
+        # Push to all running agents
+        push_results = {}
+        if transport is not None:
+            import asyncio as _asyncio
+
+            async def _push(aid: str) -> tuple[str, bool]:
+                try:
+                    await transport.request(
+                        aid, "PUT", "/project",
+                        json={"content": content}, timeout=10,
+                    )
+                    return aid, True
+                except Exception as e:
+                    logger.warning(f"Failed to push PROJECT.md to {aid}: {e}")
+                    return aid, False
+
+            tasks = [_push(aid) for aid in agent_registry]
+            for coro in _asyncio.as_completed(tasks):
+                aid, ok = await coro
+                push_results[aid] = ok
+
+        return {
+            "saved": True,
+            "size": project_path.stat().st_size,
+            "pushed": push_results,
+        }
 
     # ── Blackboard viewer + write/delete ─────────────────────
 
@@ -765,6 +821,7 @@ def create_dashboard_router(
             raise HTTPException(status_code=404, detail="Agent not found")
         if transport is None:
             raise HTTPException(status_code=503, detail="Transport not available")
+        days = max(1, min(days, 14))
         try:
             return await transport.request(
                 agent_id, "GET", f"/workspace-logs?days={days}", timeout=10,

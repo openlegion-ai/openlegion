@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -10,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from src.dashboard.server import create_dashboard_router
 
 
-def _make_dashboard_app(transport=None, agent_registry=None):
+def _make_dashboard_app(transport=None, agent_registry=None, runtime=None):
     """Create a FastAPI app with dashboard router for testing."""
     from fastapi import FastAPI
 
@@ -34,6 +37,7 @@ def _make_dashboard_app(transport=None, agent_registry=None):
         event_bus=None,
         agent_registry=agent_registry,
         transport=transport,
+        runtime=runtime,
     )
     app = FastAPI()
     app.include_router(router)
@@ -235,3 +239,119 @@ class TestLearningsProxy:
                 "/dashboard/api/agents/nonexistent/workspace-learnings",
             )
             assert resp.status_code == 404
+
+
+class TestProjectProxy:
+    @pytest.fixture
+    def tmp_project_dir(self):
+        d = tempfile.mkdtemp()
+        yield Path(d)
+        shutil.rmtree(d, ignore_errors=True)
+
+    def _make_runtime(self, project_root: Path):
+        runtime = MagicMock()
+        runtime.project_root = project_root
+        return runtime
+
+    @pytest.mark.asyncio
+    async def test_read_project_empty(self, tmp_project_dir):
+        """GET /api/project returns empty content when no PROJECT.md exists."""
+        runtime = self._make_runtime(tmp_project_dir)
+        app = _make_dashboard_app(runtime=runtime)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get("/dashboard/api/project")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["content"] == ""
+            assert data["exists"] is False
+
+    @pytest.mark.asyncio
+    async def test_read_project_with_content(self, tmp_project_dir):
+        """GET /api/project returns content from existing PROJECT.md."""
+        (tmp_project_dir / "PROJECT.md").write_text("# My Project")
+        runtime = self._make_runtime(tmp_project_dir)
+        app = _make_dashboard_app(runtime=runtime)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get("/dashboard/api/project")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "My Project" in data["content"]
+            assert data["exists"] is True
+
+    @pytest.mark.asyncio
+    async def test_read_project_no_runtime(self):
+        """GET /api/project returns 503 without runtime."""
+        app = _make_dashboard_app(runtime=None)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get("/dashboard/api/project")
+            assert resp.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_write_project_saves_and_pushes(self, tmp_project_dir):
+        """PUT /api/project saves to host and pushes to agents."""
+        runtime = self._make_runtime(tmp_project_dir)
+        transport = AsyncMock()
+        transport.request = AsyncMock(return_value={"updated": True, "size": 20})
+        app = _make_dashboard_app(
+            transport=transport, runtime=runtime,
+        )
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.put(
+                "/dashboard/api/project",
+                json={"content": "# Updated Project"},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["saved"] is True
+            assert data["size"] > 0
+            assert data["pushed"]["test_agent"] is True
+
+            # Verify file was written to host
+            content = (tmp_project_dir / "PROJECT.md").read_text()
+            assert "Updated Project" in content
+
+            # Verify transport was called to push to agent
+            transport.request.assert_called_once()
+            call_args = transport.request.call_args
+            assert call_args[0][0] == "test_agent"
+            assert call_args[0][1] == "PUT"
+            assert call_args[0][2] == "/project"
+
+    @pytest.mark.asyncio
+    async def test_write_project_no_runtime(self):
+        """PUT /api/project returns 503 without runtime."""
+        app = _make_dashboard_app(runtime=None)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.put(
+                "/dashboard/api/project",
+                json={"content": "anything"},
+            )
+            assert resp.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_write_project_sanitizes_content(self, tmp_project_dir):
+        """PUT /api/project sanitizes invisible characters."""
+        runtime = self._make_runtime(tmp_project_dir)
+        app = _make_dashboard_app(runtime=runtime)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.put(
+                "/dashboard/api/project",
+                json={"content": "clean\u200Btext\u202Ehere"},
+            )
+            assert resp.status_code == 200
+            content = (tmp_project_dir / "PROJECT.md").read_text()
+            assert "\u200B" not in content
+            assert "\u202E" not in content
+            assert "cleantexthere" in content

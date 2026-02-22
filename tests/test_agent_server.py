@@ -194,6 +194,64 @@ class TestHeartbeatContext:
             assert "Did some work" in data["daily_logs"]
 
 
+class TestProjectEndpoint:
+    @pytest.mark.asyncio
+    async def test_update_project(self, tmp_workspace):
+        """PUT /project writes PROJECT.md to workspace."""
+        app, loop = _make_app(tmp_workspace)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.put(
+                "/project",
+                json={"content": "# My Project\n\nBuild a web app."},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["updated"] is True
+            assert data["size"] > 0
+
+            # Verify file was written
+            project_path = Path(tmp_workspace) / "PROJECT.md"
+            assert project_path.exists()
+            assert "My Project" in project_path.read_text()
+
+    @pytest.mark.asyncio
+    async def test_update_project_sanitizes_content(self, tmp_workspace):
+        """PUT /project sanitizes invisible characters."""
+        app, _ = _make_app(tmp_workspace)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.put(
+                "/project",
+                json={"content": "clean\u200Btext\u202Ehere"},
+            )
+            assert resp.status_code == 200
+            content = (Path(tmp_workspace) / "PROJECT.md").read_text()
+            assert "\u200B" not in content
+            assert "\u202E" not in content
+            assert "cleantexthere" in content
+
+    @pytest.mark.asyncio
+    async def test_update_project_no_workspace(self):
+        """PUT /project returns 503 without workspace."""
+        app, _ = _make_app(None)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.put(
+                "/project",
+                json={"content": "anything"},
+            )
+            assert resp.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_update_project_rejects_non_string(self, tmp_workspace):
+        """PUT /project rejects non-string content."""
+        app, _ = _make_app(tmp_workspace)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.put(
+                "/project",
+                json={"content": 12345},
+            )
+            assert resp.status_code == 400
+
+
 class TestWorkspaceLogs:
     @pytest.mark.asyncio
     async def test_workspace_logs_returns_content(self, tmp_workspace):

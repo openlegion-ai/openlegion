@@ -176,6 +176,7 @@ class REPLSession:
         skills_dir = os.path.abspath(agent_cfg_data.get("skills_dir", ""))
         add_mcp_servers = agent_cfg_data.get("mcp_servers") or None
         add_browser_backend = agent_cfg_data.get("browser_backend", "")
+        add_thinking = agent_cfg_data.get("thinking", "")
         url = self.ctx.runtime.start_agent(
             agent_id=new_name,
             role=new_desc,
@@ -184,6 +185,7 @@ class REPLSession:
             model=agent_cfg_data.get("model", model),
             mcp_servers=add_mcp_servers,
             browser_backend=add_browser_backend,
+            thinking=add_thinking,
         )
         self.ctx.router.register_agent(new_name, url)
         self.ctx.agent_urls[new_name] = url
@@ -438,6 +440,7 @@ class REPLSession:
         agent_model = agent_cfg.get("model", default_model)
         agent_mcp_servers = agent_cfg.get("mcp_servers") or None
         agent_browser_backend = agent_cfg.get("browser_backend", "")
+        agent_thinking = agent_cfg.get("thinking", "")
 
         # Start new container
         url = self.ctx.runtime.start_agent(
@@ -448,6 +451,7 @@ class REPLSession:
             model=agent_model,
             mcp_servers=agent_mcp_servers,
             browser_backend=agent_browser_backend,
+            thinking=agent_thinking,
         )
 
         # Update router and transport

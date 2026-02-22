@@ -32,6 +32,7 @@ agents:
       daily_usd: 5.00
       monthly_usd: 100.00
     browser_backend: stealth
+    thinking: medium
     mcp_servers:
       - name: filesystem
         command: mcp-server-filesystem
@@ -51,6 +52,7 @@ agents:
 | `budget.daily_usd` | float | No | Daily spend cap in USD |
 | `budget.monthly_usd` | float | No | Monthly spend cap in USD |
 | `browser_backend` | string | No | Browser tier: `basic` (default), `stealth` (Camoufox), or `advanced` (Bright Data CDP) |
+| `thinking` | string | No | Extended thinking/reasoning mode: `off` (default), `low`, `medium`, or `high`. Anthropic models use thinking budgets (5K/10K/25K tokens). OpenAI o-series models use `reasoning_effort`. Ignored for unsupported models |
 | `mcp_servers` | list | No | External MCP tool servers. See [MCP Integration](mcp.md) |
 
 ### Model Format
@@ -241,6 +243,7 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `MESH_AUTH_TOKEN` | -- | Agent auth token (set automatically in containers) |
 | `MESH_HOST` | -- | Mesh host URL (set automatically in containers) |
 | `AGENT_ID` | -- | Agent identifier (set automatically in containers) |
+| `THINKING` | `off` | Extended thinking/reasoning mode (set automatically from `thinking` in agents.yaml) |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for memory vector search (set automatically from `llm.embedding_model` in mesh.yaml). Set to `"none"` to disable vector search |
 
 The mesh port is configured in `config/mesh.yaml` (`mesh.port`), not via environment variable.

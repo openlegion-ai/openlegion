@@ -561,6 +561,18 @@ def test_thinking_params_anthropic():
     params = client._get_thinking_params("anthropic/claude-sonnet-4-5-20250929")
     assert params["thinking"] == {"type": "enabled", "budget_tokens": 25_000}
     assert params["temperature"] == 1.0
+    # max_tokens must exceed budget_tokens (Anthropic requirement)
+    assert params["max_tokens"] > 25_000
+
+
+def test_thinking_params_anthropic_max_tokens_covers_budget():
+    """max_tokens is auto-set to budget + 4096 for Anthropic thinking."""
+    from src.agent.llm import LLMClient
+
+    for level, expected_budget in [("low", 5_000), ("medium", 10_000), ("high", 25_000)]:
+        client = LLMClient(mesh_url="http://test", thinking=level)
+        params = client._get_thinking_params("anthropic/claude-sonnet-4-5-20250929")
+        assert params["max_tokens"] == expected_budget + 4096
 
 
 def test_thinking_params_openai_o_series():
@@ -570,6 +582,27 @@ def test_thinking_params_openai_o_series():
     client = LLMClient(mesh_url="http://test", thinking="medium")
     params = client._get_thinking_params("openai/o3")
     assert params == {"reasoning_effort": "medium"}
+
+
+def test_thinking_params_openai_o_series_variants():
+    """All o-series model name formats are detected."""
+    from src.agent.llm import LLMClient
+
+    client = LLMClient(mesh_url="http://test", thinking="low")
+    for model in ["openai/o1", "openai/o3", "openai/o4-mini", "o3", "o4-mini"]:
+        params = client._get_thinking_params(model)
+        assert params == {"reasoning_effort": "low"}, f"Failed for model: {model}"
+
+
+def test_thinking_params_no_false_positive_on_slash_o():
+    """Models with '/o' in the name but not o-series are not matched."""
+    from src.agent.llm import LLMClient
+
+    client = LLMClient(mesh_url="http://test", thinking="high")
+    # These models contain '/o' but are NOT OpenAI o-series
+    for model in ["together/opt-350m", "huggingface/opt-1.3b"]:
+        params = client._get_thinking_params(model)
+        assert params == {}, f"False positive match for model: {model}"
 
 
 def test_thinking_params_off():
@@ -587,4 +620,14 @@ def test_thinking_params_unsupported_model():
 
     client = LLMClient(mesh_url="http://test", thinking="high")
     params = client._get_thinking_params("groq/llama-3.1-70b")
+    assert params == {}
+
+
+def test_thinking_invalid_level_falls_back_to_off():
+    """Invalid thinking level falls back to 'off' with a warning."""
+    from src.agent.llm import LLMClient
+
+    client = LLMClient(mesh_url="http://test", thinking="extreme")
+    assert client.thinking == "off"
+    params = client._get_thinking_params("anthropic/claude-sonnet-4-5-20250929")
     assert params == {}
