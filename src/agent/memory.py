@@ -50,6 +50,8 @@ class MemoryStore:
         categorize_fn: Optional[CategorizeFn] = None,
     ):
         self.db = sqlite3.connect(db_path)
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=5000")
         self.db.enable_load_extension(True)
         sqlite_vec.load(self.db)
         self.db.enable_load_extension(False)
@@ -233,11 +235,20 @@ class MemoryStore:
             (blob, top_k),
         ).fetchall()
 
+    @staticmethod
+    def _sanitize_fts_query(query: str) -> str:
+        """Sanitize a query for FTS5 MATCH: strip all special chars."""
+        # FTS5 special characters: *, ^, :, (, ), +, -, ", NEAR, AND, OR, NOT
+        import re
+        # Strip everything except alphanumeric and spaces
+        safe = re.sub(r"[^\w\s]", " ", query)
+        words = safe.split()
+        # Only keep words with 2+ chars, limit to 20 terms
+        return " OR ".join(w for w in words[:20] if len(w) > 1)
+
     def _keyword_search(self, query: str, top_k: int) -> list[tuple[str, float]]:
         try:
-            safe_query = query.replace('"', "").replace("'", "")
-            words = safe_query.split()
-            fts_query = " OR ".join(w for w in words if len(w) > 1)
+            fts_query = self._sanitize_fts_query(query)
             if not fts_query:
                 return []
             rows = self.db.execute(
@@ -512,7 +523,7 @@ class MemoryStore:
             (cat_id,),
         )
         row = self.db.execute("SELECT item_count FROM categories WHERE id = ?", (cat_id,)).fetchone()
-        if row and row[0] % _CATEGORY_RECOMPUTE_INTERVAL == 0:
+        if row and row[0] > 0 and row[0] % _CATEGORY_RECOMPUTE_INTERVAL == 0:
             self._recompute_category_embedding(cat_id)
 
     def _recompute_category_embedding(self, cat_id: int) -> None:
@@ -639,9 +650,7 @@ class MemoryStore:
 
         # Keyword search scoped to category
         try:
-            safe_query = query.replace('"', "").replace("'", "")
-            words = safe_query.split()
-            fts_query = " OR ".join(w for w in words if len(w) > 1)
+            fts_query = self._sanitize_fts_query(query)
             if fts_query:
                 fts_rows = self.db.execute(
                     "SELECT fact_id, bm25(facts_fts) as rank FROM facts_fts "

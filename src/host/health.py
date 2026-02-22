@@ -168,6 +168,17 @@ class HealthMonitor:
             )
             return
 
+        # Exponential backoff: wait 30s * 2^(restart_count) between restarts
+        if health.restart_timestamps:
+            last_restart = max(health.restart_timestamps)
+            backoff = min(30 * (2 ** len(health.restart_timestamps)), 600)
+            if now - last_restart < backoff:
+                logger.debug(
+                    "Restart backoff for '%s': %.0fs remaining",
+                    agent_id, backoff - (now - last_restart),
+                )
+                return
+
         logger.info(f"Restarting agent '{agent_id}'...")
         info = self.runtime.agents.get(agent_id)
         if not info:

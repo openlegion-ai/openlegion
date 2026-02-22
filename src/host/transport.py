@@ -124,13 +124,23 @@ class HttpTransport(Transport):
         url = self._urls.get(agent_id)
         if not url:
             return {"error": f"Agent '{agent_id}' not registered in transport"}
-        client = await self._get_client()
-        resp = await client.request(
-            method, f"{url}{path}", json=json, timeout=timeout,
-            headers=self._resolve_headers(headers),
-        )
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            client = await self._get_client()
+            resp = await client.request(
+                method, f"{url}{path}", json=json, timeout=timeout,
+                headers=self._resolve_headers(headers),
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.warning("HTTP %d from agent '%s' %s: %s", e.response.status_code, agent_id, path, e)
+            return {"error": f"HTTP {e.response.status_code}", "status_code": e.response.status_code}
+        except httpx.TimeoutException:
+            logger.warning("Timeout reaching agent '%s' %s", agent_id, path)
+            return {"error": f"Timeout after {timeout}s"}
+        except httpx.ConnectError as e:
+            logger.debug("Connection failed for agent '%s' %s: %s", agent_id, path, e)
+            return {"error": f"Connection failed: {e}"}
 
     async def is_reachable(self, agent_id: str, timeout: int = 5) -> bool:
         url = self._urls.get(agent_id)
@@ -158,18 +168,25 @@ class HttpTransport(Transport):
         if not url:
             yield {"error": f"Agent '{agent_id}' not registered in transport"}
             return
-        client = await self._get_client()
-        async with client.stream(
-            method, f"{url}{path}", json=json, timeout=timeout,
-            headers=self._resolve_headers(headers),
-        ) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if line.startswith("data: "):
-                    try:
-                        yield json_module.loads(line[6:])
-                    except json_module.JSONDecodeError:
-                        yield {"raw": line[6:]}
+        try:
+            client = await self._get_client()
+            async with client.stream(
+                method, f"{url}{path}", json=json, timeout=timeout,
+                headers=self._resolve_headers(headers),
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if line.startswith("data: "):
+                        try:
+                            yield json_module.loads(line[6:])
+                        except json_module.JSONDecodeError:
+                            yield {"raw": line[6:]}
+        except httpx.HTTPStatusError as e:
+            logger.warning("Stream HTTP %d from agent '%s' %s", e.response.status_code, agent_id, path)
+            yield {"error": f"HTTP {e.response.status_code}"}
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            logger.warning("Stream connection failed for agent '%s' %s: %s", agent_id, path, e)
+            yield {"error": str(e)}
 
     def request_sync(
         self,
@@ -183,12 +200,19 @@ class HttpTransport(Transport):
         url = self._urls.get(agent_id)
         if not url:
             return {"error": f"Agent '{agent_id}' not registered in transport"}
-        resp = httpx.request(
-            method, f"{url}{path}", json=json, timeout=timeout,
-            headers=self._resolve_headers(headers),
-        )
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = httpx.request(
+                method, f"{url}{path}", json=json, timeout=timeout,
+                headers=self._resolve_headers(headers),
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.warning("Sync HTTP %d from agent '%s' %s", e.response.status_code, agent_id, path)
+            return {"error": f"HTTP {e.response.status_code}", "status_code": e.response.status_code}
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            logger.warning("Sync request failed for agent '%s' %s: %s", agent_id, path, e)
+            return {"error": str(e)}
 
 
 class SandboxTransport(Transport):

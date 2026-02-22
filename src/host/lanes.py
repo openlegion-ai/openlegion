@@ -130,6 +130,12 @@ class LaneManager:
             f"Collected message for '{agent}' "
             f"(buffer size: {len(self._collect_buffers[agent])})"
         )
+
+        # Guard against race: if agent finished between the busy check and
+        # the buffer append, flush now so messages aren't stuck forever.
+        if not self._busy.get(agent, False):
+            self._flush_collect_buffer(agent)
+
         return SILENT_REPLY_TOKEN
 
     def _flush_collect_buffer(self, agent: str) -> None:
@@ -153,8 +159,16 @@ class LaneManager:
             message=combined,
             mode="followup",
         )
-        # Suppress "Future exception was never retrieved" — no caller awaits this.
-        task.future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+        # Mark exceptions as retrieved (prevents "Future exception was never
+        # retrieved" warnings) since no caller awaits collected-batch futures.
+        def _handle_orphan_exception(f: asyncio.Future) -> None:
+            if f.cancelled():
+                return
+            exc = f.exception()
+            if exc:
+                logger.warning("Collected-batch task %s failed: %s", task.id, exc)
+
+        task.future.add_done_callback(_handle_orphan_exception)
         self._pending[agent].append(task)
         self._queues[agent].put_nowait(task)
         logger.debug(

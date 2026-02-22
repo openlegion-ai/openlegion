@@ -70,7 +70,7 @@ class TaskResult(BaseModel):
     """Returned by an agent when a task completes or fails."""
 
     task_id: str
-    status: Literal["complete", "failed", "cancelled", "timeout"]
+    status: Literal["complete", "failed", "cancelled", "timeout", "skipped", "pending"]
     result: Optional[dict[str, Any]] = None
     error: Optional[str] = None
     promote_to_blackboard: dict[str, Any] = {}

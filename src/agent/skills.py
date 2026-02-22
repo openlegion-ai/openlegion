@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -19,8 +20,11 @@ if TYPE_CHECKING:
 
 logger = setup_logging("agent.skills")
 
-# Global registry populated by the @skill decorator
+# Global registry populated by the @skill decorator.
+# Protected by _skill_staging_lock during reload to prevent
+# corruption if hot-reload runs concurrently with module import.
 _skill_staging: dict[str, dict] = {}
+_skill_staging_lock = threading.Lock()
 
 
 def skill(name: str, description: str, parameters: dict):
@@ -52,11 +56,12 @@ class SkillRegistry:
         self.skills_dir = skills_dir
         self._mcp_client = mcp_client
         self.skills: dict[str, dict] = {}
-        self._discover_builtins()
-        self._discover(skills_dir)
-        self._discover(self.CUSTOM_SKILLS_DIR)
-        self._discover(self.MARKETPLACE_SKILLS_DIR)
-        self.skills = dict(_skill_staging)
+        with _skill_staging_lock:
+            self._discover_builtins()
+            self._discover(skills_dir)
+            self._discover(self.CUSTOM_SKILLS_DIR)
+            self._discover(self.MARKETPLACE_SKILLS_DIR)
+            self.skills = dict(_skill_staging)
         self._register_mcp_tools()
 
     def _discover_builtins(self) -> None:
@@ -99,12 +104,13 @@ class SkillRegistry:
 
     def reload(self) -> int:
         """Re-discover skills from builtins and skills_dir. Returns new skill count."""
-        _skill_staging.clear()
-        self._discover_builtins()
-        self._discover(self.skills_dir)
-        self._discover(self.CUSTOM_SKILLS_DIR)
-        self._discover(self.MARKETPLACE_SKILLS_DIR)
-        self.skills = dict(_skill_staging)
+        with _skill_staging_lock:
+            _skill_staging.clear()
+            self._discover_builtins()
+            self._discover(self.skills_dir)
+            self._discover(self.CUSTOM_SKILLS_DIR)
+            self._discover(self.MARKETPLACE_SKILLS_DIR)
+            self.skills = dict(_skill_staging)
         self._register_mcp_tools()
         logger.info(f"Reloaded {len(self.skills)} skills")
         return len(self.skills)
