@@ -1,18 +1,18 @@
 /**
  * OpenLegion Dashboard — Alpine.js application.
  *
- * Five panels: Agents, Activity, Blackboard, Automation, System (with Costs sub-tab).
+ * Five panels: Agents, Activity, Blackboard, Automation, System.
  * Real-time updates via WebSocket + periodic REST polling.
  */
 const _IDENTITY_TABS = [
-  { id: 'config', label: 'Config', file: null, desc: 'Model, role, browser backend, and budget settings.' },
-  { id: 'soul', label: 'Soul', file: 'SOUL.md', cap: 4000, desc: 'Personality, tone, and behavioral guidelines.' },
-  { id: 'instructions', label: 'Instructions', file: 'AGENTS.md', cap: 8000, desc: 'Operating instructions loaded into the system prompt.' },
-  { id: 'preferences', label: 'Preferences', file: 'USER.md', cap: 4000, desc: 'User preferences, background, and working style.' },
-  { id: 'heartbeat', label: 'Heartbeat', file: 'HEARTBEAT.md', cap: null, desc: 'Autonomous monitoring and heartbeat rules.' },
-  { id: 'memory', label: 'Memory', file: 'MEMORY.md', cap: 16000, desc: 'Curated long-term facts and important information.' },
-  { id: 'activity', label: 'Activity', file: null, desc: 'Daily session logs (read-only).' },
-  { id: 'learnings', label: 'Learnings', file: null, desc: 'Errors and user corrections (read-only).' },
+  { id: 'config', label: 'Config', file: null, access: 'user', desc: 'Model, role, browser backend, and daily budget. Model changes may require a restart.' },
+  { id: 'soul', label: 'Soul', file: 'SOUL.md', cap: 4000, access: 'user', desc: 'Core personality, tone, and behavioral guidelines. Defines who the agent is. Only you can edit this \u2014 the agent reads it but cannot change it.' },
+  { id: 'instructions', label: 'Instructions', file: 'AGENTS.md', cap: 8000, access: 'user', desc: 'Operating instructions injected into the agent\u2019s system prompt. Tells the agent what to do and how to work. Only you can edit this.' },
+  { id: 'preferences', label: 'Preferences', file: 'USER.md', cap: 4000, access: 'agent', desc: 'Your preferences, background, and working style. The agent can update this as it learns about you.' },
+  { id: 'heartbeat', label: 'Heartbeat', file: 'HEARTBEAT.md', cap: null, access: 'agent', desc: 'Rules the agent follows when running autonomously (heartbeat/cron triggers). The agent can update these.' },
+  { id: 'memory', label: 'Memory', file: 'MEMORY.md', cap: 16000, access: 'agent', desc: 'Long-term facts from conversations. The agent saves important info here automatically during context compaction. You can also edit directly.' },
+  { id: 'activity', label: 'Activity', file: null, access: 'auto', desc: 'Timestamped session logs from the last 3 days. Auto-generated as the agent works.' },
+  { id: 'learnings', label: 'Learnings', file: null, access: 'auto', desc: 'Errors the agent encountered and corrections you\u2019ve made. Helps avoid repeating mistakes.' },
 ];
 
 function dashboard() {
@@ -108,7 +108,6 @@ function dashboard() {
 
     // Settings (V2)
     settingsData: null,
-    systemView: 'costs',
 
     // Chat (persistent per agent until cleared)
     chatAgent: null,
@@ -332,7 +331,7 @@ function dashboard() {
       }
 
       // Debounced cost panel refresh on llm_call events
-      if (evt.type === 'llm_call' && this.activeTab === 'system' && this.systemView === 'costs') {
+      if (evt.type === 'llm_call' && this.activeTab === 'system') {
         if (this._costDebounce) clearTimeout(this._costDebounce);
         this._costDebounce = setTimeout(() => this.fetchCosts(), 2000);
       }
