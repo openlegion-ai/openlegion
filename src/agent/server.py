@@ -220,7 +220,20 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
     @app.put("/workspace/{filename}")
     async def write_workspace_file(filename: str, request: Request) -> dict:
-        """Write content to a workspace file."""
+        """Write content to a workspace file.
+
+        This endpoint is for mesh host / dashboard use only (human-initiated
+        edits). Agent-side writes go through the update_workspace skill which
+        enforces its own allowlist and versioning. We require X-Mesh-Internal
+        header to prevent agents from calling their own endpoint via
+        http_request or exec+curl.
+        """
+        if not request.headers.get("x-mesh-internal"):
+            raise HTTPException(
+                403,
+                "Workspace writes via this endpoint require X-Mesh-Internal header. "
+                "Agents should use the update_workspace tool instead.",
+            )
         if filename not in _WORKSPACE_ALLOWLIST:
             raise HTTPException(400, f"File not allowed: {filename}")
         if not loop.workspace:

@@ -15,10 +15,13 @@ from src.agent.skills import skill
     name="notify_user",
     description=(
         "Send a notification to the user across all connected channels "
-        "(CLI, Telegram, Discord, Slack, etc.). Use this when you have "
-        "important updates — e.g., a long-running task completed, an error "
-        "needs attention, or a scheduled check found something noteworthy. "
-        "Keep messages concise and actionable."
+        "(CLI, Telegram, Discord, Slack, etc.). This is your PRIMARY way "
+        "to report back to the user when working autonomously (heartbeat, "
+        "cron jobs, long-running tasks). Use it for progress updates, "
+        "completed work summaries, errors needing attention, or anything "
+        "the user should know about. Keep messages concise and actionable. "
+        "Do NOT write user-facing updates to the blackboard — the blackboard "
+        "is for agent-to-agent collaboration only."
     ),
     parameters={
         "message": {
@@ -66,10 +69,10 @@ async def list_agents(*, mesh_client=None) -> dict:
 @skill(
     name="read_shared_state",
     description=(
-        "Read a value from the shared blackboard. The blackboard is the team's "
-        "shared memory — any agent can write data that others can read. "
-        "Keys are hierarchical: context/market_analysis, goals/researcher, signals/urgent. "
-        "Returns null if the key does not exist."
+        "Read a value from the shared blackboard. The blackboard is for "
+        "agent-to-agent collaboration — data that other agents have shared "
+        "for you to act on. Keys are hierarchical: context/market_analysis, "
+        "goals/researcher, signals/urgent. Returns null if the key does not exist."
     ),
     parameters={
         "key": {
@@ -93,11 +96,13 @@ async def read_shared_state(key: str, *, mesh_client=None) -> dict:
 @skill(
     name="write_shared_state",
     description=(
-        "Write a value to the shared blackboard for other agents to read. "
-        "Use hierarchical keys: goals/ for objectives, context/ for shared "
-        "knowledge, signals/ for alerts. Values must be JSON-serializable. "
-        "Example: write_shared_state(key='goals/engineer', value='{\"priority\": "
-        "\"fix auth bug\"}')"
+        "Write a value to the shared blackboard for OTHER AGENTS to read. "
+        "The blackboard is for agent-to-agent collaboration only — do NOT "
+        "use it for status updates or reporting to the user (use notify_user "
+        "or chat responses for that). Write here when another agent needs "
+        "specific data to do their work. Use hierarchical keys: goals/ for "
+        "objectives, context/ for shared knowledge, signals/ for alerts, "
+        "tasks/ for work requests. Values must be JSON-serializable."
     ),
     parameters={
         "key": {
@@ -128,8 +133,9 @@ async def write_shared_state(key: str, value: str, *, mesh_client=None) -> dict:
     name="list_shared_state",
     description=(
         "List all entries on the shared blackboard matching a key prefix. "
-        "Use this to browse what's available: list_shared_state(prefix='goals/') "
-        "to see all goals, or list_shared_state(prefix='context/') for shared context."
+        "Use this to see what other agents have shared: list_shared_state(prefix='goals/') "
+        "to see all goals, or list_shared_state(prefix='context/') for shared context. "
+        "The blackboard is for agent-to-agent coordination."
     ),
     parameters={
         "prefix": {
@@ -218,7 +224,10 @@ async def save_artifact(
         from pathlib import Path
         artifacts_dir = Path(workspace_manager.root) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
-        filepath = artifacts_dir / name
+        filepath = (artifacts_dir / name).resolve()
+        if not str(filepath).startswith(str(artifacts_dir.resolve())):
+            return {"error": f"Invalid artifact name: {name}"}
+        filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(content)
 
         if mesh_client:
@@ -268,9 +277,11 @@ async def set_cron(schedule: str, message: str, *, mesh_client=None) -> dict:
     name="set_heartbeat",
     description=(
         "Set or update your heartbeat schedule. You are automatically given a "
-        "heartbeat on startup — use this to change the frequency. The mesh will "
-        "periodically wake you to work toward your goals and check for pending "
-        "tasks. Define your autonomous rules in HEARTBEAT.md in your workspace."
+        "heartbeat on startup — only change it if the USER explicitly asks you "
+        "to. Each heartbeat costs API credits, so NEVER increase frequency on "
+        "your own. The mesh will periodically wake you to work toward your "
+        "goals and check for pending tasks. Define your autonomous rules in "
+        "HEARTBEAT.md in your workspace."
     ),
     parameters={
         "schedule": {
@@ -399,6 +410,66 @@ async def read_agent_history(agent_id: str, *, mesh_client=None) -> dict:
         return result
     except Exception as e:
         return {"error": f"Failed to read history of '{agent_id}': {e}"}
+
+
+@skill(
+    name="update_workspace",
+    description=(
+        "Update one of your writable workspace files to get better over time. "
+        "These files persist across sessions and shape your future behavior.\n\n"
+        "- HEARTBEAT.md: refine your autonomous rules — drop checks that "
+        "are wasteful, add ones that proved useful, adjust priorities based "
+        "on what you've learned about your role.\n"
+        "- USER.md: build up user context — record their preferences, "
+        "communication style, project context, and important facts so you "
+        "serve them better in future sessions.\n\n"
+        "Update these when you discover something lasting, not every turn. "
+        "Read the current content first (via read_file) to avoid losing "
+        "existing information — merge new knowledge in, don't overwrite blindly. "
+        "SOUL.md and AGENTS.md are read-only (human-controlled). "
+        "A backup is saved automatically."
+    ),
+    parameters={
+        "filename": {
+            "type": "string",
+            "enum": ["HEARTBEAT.md", "USER.md"],
+            "description": "File to update: 'HEARTBEAT.md' or 'USER.md'",
+        },
+        "content": {
+            "type": "string",
+            "description": "New content for the file (replaces existing content)",
+        },
+    },
+)
+async def update_workspace(
+    filename: str, content: str, *, workspace_manager=None, mesh_client=None,
+) -> dict:
+    if workspace_manager is None:
+        return {"error": "No workspace_manager available"}
+    from src.shared.utils import sanitize_for_prompt
+    content = sanitize_for_prompt(content)
+
+    # Capture old content for diff summary (single read)
+    old_content = workspace_manager._read_file(filename) or ""
+
+    result = workspace_manager.update_file(filename, content)
+    if result.get("error"):
+        return result
+
+    # Notify the user with a meaningful summary of what changed
+    if mesh_client:
+        try:
+            agent_id = getattr(mesh_client, "agent_id", "agent")
+            if old_content.strip() == content.strip():
+                summary = f"[{agent_id}] Re-saved {filename} (no changes)."
+            elif not old_content.strip() or old_content.strip().startswith(("# Heartbeat Rules\n\nYou are woken", "# User Context\n\nRecord user")):
+                summary = f"[{agent_id}] Initialized {filename} with custom content."
+            else:
+                summary = f"[{agent_id}] Updated {filename} based on what I've learned."
+            await mesh_client.notify_user(summary)
+        except Exception:
+            pass  # Non-fatal — the write still succeeded
+    return result
 
 
 def _preview(value: dict, max_len: int = 200) -> str:

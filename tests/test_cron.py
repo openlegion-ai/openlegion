@@ -508,3 +508,36 @@ class TestEnrichedHeartbeat:
         result = await sched._execute_job(job)
         dispatch.assert_called_once()
         # Should still dispatch despite context_fn failure
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_includes_operating_rules(self):
+        """Heartbeat messages always include non-negotiable operating rules."""
+        dispatch = AsyncMock(return_value="Ok")
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "# My Rules\n\nDo stuff.",
+            "daily_logs": "Some activity",
+            "is_default_heartbeat": False,
+            "has_recent_activity": True,
+        })
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        await sched._execute_job(job)
+        call_msg = dispatch.call_args[0][1]
+        # Non-negotiable rules must be present
+        assert "Operating Rules" in call_msg
+        assert "ECONOMICAL" in call_msg
+        assert "notify_user" in call_msg
+        assert "HEARTBEAT_OK" in call_msg
+        assert "Do NOT change your heartbeat schedule" in call_msg
+        # Operating rules should appear before agent's custom rules
+        rules_pos = call_msg.index("Operating Rules")
+        custom_pos = call_msg.index("Your Heartbeat Rules")
+        assert rules_pos < custom_pos
+

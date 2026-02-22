@@ -108,6 +108,10 @@ class ContextManager:
         self.memory = memory
         self._flush_triggered = False
 
+    def reset(self) -> None:
+        """Reset per-session state for a new conversation."""
+        self._flush_triggered = False
+
     def usage(self, messages: list[dict]) -> float:
         """Return context usage as a fraction (0.0 to 1.0)."""
         return estimate_tokens(messages, model=self.model) / self.max_tokens
@@ -162,7 +166,10 @@ class ContextManager:
         usage_pct = int(usage * 100)
         logger.info(f"Context at {usage_pct}% — compacting")
 
-        # Step 1: Extract important facts and flush to MEMORY.md
+        # Reset so proactive flush can fire again after compaction
+        self._flush_triggered = False
+
+        # Step 1: Extract important facts and flush to MEMORY.md + DB
         if self.workspace and self.llm:
             await self._flush_to_memory(system_prompt, messages)
 
@@ -173,18 +180,17 @@ class ContextManager:
         # Fallback: hard prune if no LLM available
         return self._hard_prune(messages)
 
-    async def _proactive_flush(
-        self, system_prompt: str, messages: list[dict],
-    ) -> None:
-        """Extract structured facts at 60% and save to workspace + memory store.
+    async def _extract_and_store_facts(
+        self, messages: list[dict], *, label: str,
+    ) -> int:
+        """Extract structured facts from messages, store to workspace + memory DB.
 
-        Runs once per conversation (guarded by _flush_triggered). Extracts
-        facts as JSON so they're searchable in the memory DB, not just
-        appended as free text to MEMORY.md.
+        Returns the number of facts extracted (0 on failure or empty).
+        Shared by proactive flush (60%) and compaction flush (70%).
         """
         conversation_text = self._messages_to_text(messages)
         if len(conversation_text) < 100:
-            return
+            return 0
 
         extract_prompt = (
             "Extract the most important facts, decisions, and user preferences "
@@ -212,56 +218,44 @@ class ContextManager:
 
             facts = json.loads(raw)
             if not isinstance(facts, list) or not facts:
-                return
+                return 0
 
             # Write human-readable summary to MEMORY.md
             lines = [f"- **{f['key']}**: {f['value']}" for f in facts if "key" in f and "value" in f]
-            if lines:
+            if lines and self.workspace:
                 self.workspace.append_memory(
-                    f"\n## Proactive Flush ({_now_str()})\n\n" + "\n".join(lines),
+                    f"\n## {label} ({_now_str()})\n\n" + "\n".join(lines),
                 )
 
             # Store structured facts in memory DB for search
             if self.memory:
                 stored = await self.memory.store_facts_batch(facts)
-                logger.info(f"Proactive flush: {stored} facts stored to memory DB")
+                logger.info(f"{label}: {stored} facts stored to memory DB")
 
-            logger.info(f"Proactive flush: {len(facts)} facts extracted at 60% context")
+            logger.info(f"{label}: {len(facts)} facts extracted")
+            return len(facts)
         except (json.JSONDecodeError, KeyError) as e:
-            logger.warning(f"Proactive flush: failed to parse LLM response as JSON: {e}")
+            logger.warning(f"{label}: failed to parse LLM response as JSON: {e}")
+            return 0
         except Exception as e:
-            logger.warning(f"Proactive flush failed: {e}")
+            logger.warning(f"{label} failed: {e}")
+            return 0
+
+    async def _proactive_flush(
+        self, system_prompt: str, messages: list[dict],
+    ) -> None:
+        """Extract structured facts at 60% and save to workspace + memory store."""
+        await self._extract_and_store_facts(messages, label="Proactive Flush")
 
     async def _flush_to_memory(
         self, system_prompt: str, messages: list[dict],
     ) -> None:
-        """Ask the LLM to extract important facts, write them to MEMORY.md."""
-        conversation_text = self._messages_to_text(messages)
-        if len(conversation_text) < 100:
-            return
-
-        extract_prompt = (
-            "Extract the most important facts, decisions, and user preferences "
-            "from this conversation. Output a concise bullet list in Markdown. "
-            "Only include information worth remembering long-term. "
-            "If there's nothing important, respond with 'NONE'.\n\n"
-            f"Conversation:\n{conversation_text[:20000]}"
-        )
-
-        try:
-            response = await self.llm.chat(
-                system="You extract key facts from conversations. Be concise.",
-                messages=[{"role": "user", "content": extract_prompt}],
-                max_tokens=1024,
-                temperature=0.3,
+        """Extract structured facts at 70% and save to workspace + memory store."""
+        count = await self._extract_and_store_facts(messages, label="Extracted")
+        if count and self.workspace:
+            self.workspace.append_daily_log(
+                f"Context compacted — {count} facts flushed to memory"
             )
-            facts = response.content.strip()
-            if facts and facts.upper() != "NONE":
-                self.workspace.append_memory(f"\n## Extracted ({_now_str()})\n\n{facts}")
-                self.workspace.append_daily_log(f"Context compacted — {len(facts)} chars flushed to MEMORY.md")
-                logger.info(f"Flushed {len(facts)} chars to MEMORY.md")
-        except Exception as e:
-            logger.warning(f"Failed to flush facts to MEMORY.md: {e}")
 
     async def _summarize_compact(
         self, system_prompt: str, messages: list[dict],

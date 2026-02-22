@@ -25,11 +25,16 @@ class Transport(abc.ABC):
     """Abstract transport for reaching an agent's HTTP API."""
 
     def _resolve_headers(self, headers: dict[str, str] | None) -> dict[str, str]:
-        """Return *headers* if given, otherwise auto-inject from trace contextvar."""
-        if headers is not None:
-            return headers
-        from src.shared.trace import trace_headers
-        return trace_headers()
+        """Return *headers* with mesh-internal marker and trace context.
+
+        Always injects X-Mesh-Internal so agent endpoints can distinguish
+        mesh/dashboard requests from agent self-calls (http_request tool).
+        """
+        if headers is None:
+            from src.shared.trace import trace_headers
+            headers = trace_headers()
+        headers.setdefault("x-mesh-internal", "1")
+        return headers
 
     @abc.abstractmethod
     async def request(

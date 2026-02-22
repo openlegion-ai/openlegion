@@ -101,6 +101,41 @@ class TestChatMode:
         assert len(loop._chat_messages) == 0
 
     @pytest.mark.asyncio
+    async def test_chat_reset_flushes_memory(self):
+        """reset_chat flushes to memory before clearing when context_manager exists."""
+        import tempfile, shutil
+        from src.agent.context import ContextManager
+        from src.agent.workspace import WorkspaceManager
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            flush_llm = MagicMock()
+            flush_llm.chat = AsyncMock(
+                return_value=LLMResponse(
+                    content='[{"key": "chat_fact", "value": "from chat", "category": "fact"}]',
+                    tokens_used=30,
+                )
+            )
+            cm = ContextManager(max_tokens=200_000, llm=flush_llm, workspace=workspace)
+
+            loop = _make_loop()
+            loop.context_manager = cm
+            # Build enough conversation for flush to consider it worth extracting
+            long_msg = "Please help me set up my ML pipeline. " * 10
+            await loop.chat(long_msg)
+            assert len(loop._chat_messages) > 0
+
+            await loop.reset_chat()
+            assert len(loop._chat_messages) == 0
+            # Flush should have been called
+            assert flush_llm.chat.call_count == 1
+            memory_content = workspace.load_memory()
+            assert "chat_fact" in memory_content
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
     async def test_chat_queues_while_locked(self):
         """Concurrent chat calls queue via lock instead of being rejected."""
         import asyncio

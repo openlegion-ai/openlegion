@@ -169,7 +169,14 @@ class HealthMonitor:
             return
 
         logger.info(f"Restarting agent '{agent_id}'...")
-        info = self.runtime.agents.get(agent_id, {})
+        info = self.runtime.agents.get(agent_id)
+        if not info:
+            logger.error(
+                "Cannot restart agent '%s': no stored config. "
+                "Manual restart required.", agent_id,
+            )
+            health.status = "failed"
+            return
         try:
             self.runtime.stop_agent(agent_id)
         except Exception as e:

@@ -53,9 +53,12 @@ _SCAFFOLD_FILES: dict[str, str] = {
     "HEARTBEAT.md": (
         "# Heartbeat Rules\n\n"
         "You are woken periodically. On each heartbeat:\n"
-        "1. Check for pending tasks on the blackboard\n"
+        "1. Check the blackboard for tasks or signals from other agents\n"
         "2. Continue working toward your current goal\n"
-        "3. Send a brief status update to the user\n"
+        "3. Report what you worked on to the user via notify_user\n"
+        "   (what you did, progress made, any blockers)\n"
+        "\nRemember: the blackboard is for collaborating with other agents.\n"
+        "Use notify_user to keep the user informed of your progress.\n"
     ),
 }
 
@@ -198,6 +201,55 @@ class WorkspaceManager:
         path = self.root / self.MEMORY_FILE
         with path.open("a") as f:
             f.write(f"\n{content}\n")
+
+    # Files agents are allowed to update themselves
+    AGENT_WRITABLE = frozenset({"HEARTBEAT.md", "USER.md"})
+    _MAX_WRITABLE_SIZE = 32_000  # 32KB cap for agent-writable files
+    _MAX_BACKUPS_PER_FILE = 20
+
+    def update_file(self, filename: str, content: str) -> dict:
+        """Write a workspace file with backup versioning.
+
+        Only files in AGENT_WRITABLE can be updated by agents.
+        Creates a timestamped backup before overwriting.
+        Returns metadata about the write.
+        """
+        if filename not in self.AGENT_WRITABLE:
+            return {"error": f"Cannot update {filename}. Agents can only update: {', '.join(sorted(self.AGENT_WRITABLE))}"}
+
+        if len(content) > self._MAX_WRITABLE_SIZE:
+            return {"error": f"Content too large ({len(content)} chars). Max is {self._MAX_WRITABLE_SIZE}."}
+
+        path = self.root / filename
+        backup_dir = self.root / "backups"
+        backup_dir.mkdir(exist_ok=True)
+
+        # Back up existing content
+        if path.exists():
+            old_content = path.read_text(errors="replace")
+            timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+            backup_path = backup_dir / f"{filename}.{timestamp}.bak"
+            backup_path.write_text(old_content)
+            self._rotate_backups(backup_dir, filename)
+
+        path.write_text(content)
+        self.append_daily_log(f"Updated workspace file: {filename}")
+        return {
+            "filename": filename,
+            "size": len(content),
+            "updated": True,
+        }
+
+    def _rotate_backups(self, backup_dir: Path, filename: str) -> None:
+        """Keep only the most recent backups per file."""
+        pattern = f"{filename}.*.bak"
+        backups = sorted(backup_dir.glob(pattern))
+        if len(backups) > self._MAX_BACKUPS_PER_FILE:
+            for old in backups[: len(backups) - self._MAX_BACKUPS_PER_FILE]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
 
     # ── Search ───────────────────────────────────────────────
 

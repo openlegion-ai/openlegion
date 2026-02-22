@@ -594,6 +594,20 @@ class TestToolMemory:
         assert "Recent Tool History" in prompt
 
 
+# === Memory Decay ===
+
+
+@pytest.mark.asyncio
+async def test_decay_all_called_on_task_start():
+    """Salience decay runs at the start of each task execution."""
+    loop = _make_loop()
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research", input_data={"q": "test"}
+    )
+    await loop.execute_task(assignment)
+    loop.memory.decay_all.assert_called_once()
+
+
 # === Prompt Injection Sanitization (choke-point integration) ===
 
 
@@ -731,6 +745,14 @@ async def test_system_prompt_learnings_sanitized():
     assert "\u200B" not in prompt
     assert "\u202E" not in prompt
     assert "lesson one important" in prompt
+
+
+def test_chat_prompt_includes_memory_recall_instruction():
+    """Chat system prompt instructs agent to search memory before answering."""
+    loop = _make_loop()
+    prompt = loop._build_chat_system_prompt()
+    assert "memory_search" in prompt
+    assert "prior work" in prompt or "Before answering" in prompt
 
 
 # === Tool Loop Detection Integration ===

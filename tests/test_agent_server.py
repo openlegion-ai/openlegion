@@ -86,6 +86,7 @@ class TestWorkspaceList:
             await client.put(
                 "/workspace/SOUL.md",
                 json={"content": "# My Custom Soul\n\nI am unique."},
+                headers={"x-mesh-internal": "1"},
             )
             resp = await client.get("/workspace")
             files = resp.json()["files"]
@@ -102,6 +103,7 @@ class TestWorkspaceReadWrite:
             resp = await client.put(
                 "/workspace/SOUL.md",
                 json={"content": "# My Soul\n\nI am a test agent."},
+                headers={"x-mesh-internal": "1"},
             )
             assert resp.status_code == 200
             assert resp.json()["size"] > 0
@@ -121,8 +123,20 @@ class TestWorkspaceReadWrite:
             resp = await client.put(
                 "/workspace/PROJECT.md",
                 json={"content": "hacked"},
+                headers={"x-mesh-internal": "1"},
             )
             assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_write_requires_mesh_internal_header(self, tmp_workspace):
+        """PUT /workspace rejects requests without X-Mesh-Internal header."""
+        app, _ = _make_app(tmp_workspace)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.put(
+                "/workspace/SOUL.md",
+                json={"content": "# Hacked"},
+            )
+            assert resp.status_code == 403
 
     @pytest.mark.asyncio
     async def test_content_sanitized(self, tmp_workspace):
@@ -132,6 +146,7 @@ class TestWorkspaceReadWrite:
             resp = await client.put(
                 "/workspace/USER.md",
                 json={"content": "clean\u200Bvalue\u202Ehere"},
+                headers={"x-mesh-internal": "1"},
             )
             assert resp.status_code == 200
 
@@ -167,6 +182,7 @@ class TestHeartbeatContext:
             await client.put(
                 "/workspace/HEARTBEAT.md",
                 json={"content": "# My Custom Rules\n\nCheck email every hour."},
+                headers={"x-mesh-internal": "1"},
             )
             resp = await client.get("/heartbeat-context")
             assert resp.json()["is_default_heartbeat"] is False

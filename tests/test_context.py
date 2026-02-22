@@ -78,10 +78,15 @@ class TestCompaction:
             workspace = WorkspaceManager(workspace_dir=tmpdir)
             llm = MagicMock()
             llm.chat = AsyncMock(
-                return_value=LLMResponse(
-                    content="- User prefers dark mode\n- User works on ML projects",
-                    tokens_used=50,
-                )
+                side_effect=[
+                    # flush extraction
+                    LLMResponse(
+                        content='[{"key": "user_theme", "value": "prefers dark mode", "category": "preference"}]',
+                        tokens_used=50,
+                    ),
+                    # summarization
+                    LLMResponse(content="Summary of the conversation.", tokens_used=30),
+                ]
             )
 
             cm = ContextManager(max_tokens=100, llm=llm, workspace=workspace)
@@ -89,7 +94,7 @@ class TestCompaction:
             result = await cm.maybe_compact("system", msgs)
 
             memory_content = workspace.load_memory()
-            assert "dark mode" in memory_content or "ML projects" in memory_content
+            assert "dark mode" in memory_content
             assert len(result) < len(msgs)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -102,7 +107,7 @@ class TestCompaction:
             llm = MagicMock()
             llm.chat = AsyncMock(
                 side_effect=[
-                    LLMResponse(content="- Key fact extracted", tokens_used=30),
+                    LLMResponse(content='[{"key": "topic", "value": "discussed Python and ML", "category": "fact"}]', tokens_used=30),
                     LLMResponse(content="Summary: discussed Python and ML.", tokens_used=30),
                 ]
             )
@@ -247,6 +252,82 @@ class TestProactiveFlush:
             fact = memory_store._get_fact_by_key("tool_pref")
             assert fact is not None
             assert fact.value == "uses vim"
+            memory_store.close()
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    @pytest.mark.asyncio
+    async def test_flush_triggered_resets_after_compaction(self):
+        """After compaction, proactive flush can fire again on next growth."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            flush_json = '[{"key": "f1", "value": "v1", "category": "fact"}]'
+            summary_text = "Summary of conversation."
+            llm = MagicMock()
+            llm.chat = AsyncMock(
+                side_effect=[
+                    # 1st: proactive flush at 60%
+                    LLMResponse(content=flush_json, tokens_used=30),
+                    # 2nd: compaction flush at 70%
+                    LLMResponse(content=flush_json, tokens_used=30),
+                    # 3rd: summarization
+                    LLMResponse(content=summary_text, tokens_used=30),
+                    # 4th: second proactive flush (after reset)
+                    LLMResponse(content=flush_json, tokens_used=30),
+                ]
+            )
+
+            # Phase 1: trigger proactive flush at ~63%
+            cm = ContextManager(max_tokens=470, llm=llm, workspace=workspace)
+            msgs_60 = _make_messages(5, chars_each=200)
+            await cm.maybe_compact("system", msgs_60)
+            assert cm._flush_triggered is True
+            assert llm.chat.call_count == 1
+
+            # Phase 2: force compaction at 70%+
+            msgs_70 = _make_messages(10, chars_each=200)
+            result = await cm.maybe_compact("system", msgs_70)
+            assert cm._flush_triggered is False  # reset after compaction
+            assert len(result) < len(msgs_70)
+
+            # Phase 3: proactive flush fires again
+            msgs_60b = _make_messages(5, chars_each=200)
+            await cm.maybe_compact("system", msgs_60b)
+            assert cm._flush_triggered is True
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_compaction_flush_stores_to_memory_db(self):
+        """70% compaction flush stores structured facts in memory DB."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            from src.agent.memory import MemoryStore
+
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            memory_store = MemoryStore(db_path=":memory:")
+            llm = MagicMock()
+            llm.chat = AsyncMock(
+                side_effect=[
+                    # flush
+                    LLMResponse(
+                        content='[{"key": "compact_fact", "value": "from compaction", "category": "fact"}]',
+                        tokens_used=30,
+                    ),
+                    # summarize
+                    LLMResponse(content="Conversation summary.", tokens_used=30),
+                ]
+            )
+
+            cm = ContextManager(max_tokens=100, llm=llm, workspace=workspace, memory=memory_store)
+            msgs = _make_messages(10, chars_each=200)
+            await cm.maybe_compact("system", msgs)
+
+            fact = memory_store._get_fact_by_key("compact_fact")
+            assert fact is not None
+            assert fact.value == "from compaction"
             memory_store.close()
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)

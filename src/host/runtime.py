@@ -18,6 +18,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -149,6 +150,7 @@ class DockerBackend(RuntimeBackend):
         self.client = docker.from_env()
         self.use_host_network = use_host_network
         self._next_port = 8401
+        self._port_lock = threading.Lock()
         self._cleanup_stale()
 
     @staticmethod
@@ -179,8 +181,9 @@ class DockerBackend(RuntimeBackend):
     ) -> str:
         import docker as _docker
 
-        port = self._next_port
-        self._next_port += 1
+        with self._port_lock:
+            port = self._next_port
+            self._next_port += 1
 
         # Generate per-agent auth token for mesh request verification
         auth_token = secrets.token_urlsafe(32)
@@ -416,7 +419,7 @@ class SandboxBackend(RuntimeBackend):
         if skills_dir and Path(skills_dir).is_dir():
             if skills_dest.exists():
                 shutil.rmtree(skills_dest)
-            shutil.copytree(skills_dir, skills_dest)
+            shutil.copytree(skills_dir, skills_dest, symlinks=True)
         else:
             skills_dest.mkdir(exist_ok=True)
 
@@ -426,7 +429,7 @@ class SandboxBackend(RuntimeBackend):
         if marketplace_src.is_dir():
             if marketplace_dest.exists():
                 shutil.rmtree(marketplace_dest)
-            shutil.copytree(marketplace_src, marketplace_dest)
+            shutil.copytree(marketplace_src, marketplace_dest, symlinks=True)
         else:
             marketplace_dest.mkdir(exist_ok=True)
 
