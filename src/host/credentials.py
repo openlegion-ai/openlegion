@@ -61,6 +61,7 @@ class CredentialVault:
         failover_config: dict[str, list[str]] | None = None,
     ) -> None:
         self.credentials: dict[str, str] = {}
+        self.api_bases: dict[str, str] = {}
         self.service_handlers: dict[str, Callable] = {}
         self.cost_tracker = cost_tracker
         self._http_client: httpx.AsyncClient | None = None
@@ -83,15 +84,29 @@ class CredentialVault:
             await self._http_client.aclose()
 
     def _load_credentials(self) -> None:
-        """Load credentials from environment variables."""
+        """Load credentials from environment variables.
+
+        Standard credentials: ``OPENLEGION_CRED_<SERVICE>_<KEY_NAME>``
+        Custom base URLs:     ``OPENLEGION_CRED_<PROVIDER>_API_BASE``
+
+        Base URLs are stored separately from credentials to keep the
+        API key lookup path clean.
+        """
         prefix = "OPENLEGION_CRED_"
+        self.api_bases: dict[str, str] = {}
         for key, value in os.environ.items():
             if key.startswith(prefix):
                 cred_name = key[len(prefix) :].lower()
-                self.credentials[cred_name] = value
+                if cred_name.endswith("_api_base"):
+                    # e.g. OPENLEGION_CRED_OPENAI_API_BASE → openai_api_base
+                    self.api_bases[cred_name] = value
+                else:
+                    self.credentials[cred_name] = value
         loaded = list(self.credentials.keys())
         if loaded:
             logger.info(f"Loaded credentials: {', '.join(loaded)}")
+        if self.api_bases:
+            logger.info(f"Loaded custom API bases: {', '.join(self.api_bases.keys())}")
 
     def add_credential(self, name: str, value: str) -> str:
         """Store a credential in memory and persist to .env. Returns a $CRED{name} handle."""
@@ -161,25 +176,39 @@ class CredentialVault:
             logger.error(f"API call failed for {request.service}/{request.action}: {e}")
             return APIProxyResponse(success=False, error=str(e))
 
+    # Provider prefix → credential key mapping (shared by key + base lookups)
+    _PROVIDER_KEY_MAP = {
+        "anthropic/": "anthropic",
+        "openai/": "openai",
+        "gpt-": "openai",
+        "o1": "openai",
+        "o3": "openai",
+        "o4": "openai",
+        "xai/": "xai",
+        "groq/": "groq",
+        "gemini/": "gemini",
+        "moonshot/": "moonshot",
+        "deepseek/": "deepseek",
+        "text-embedding-": "openai",
+    }
+
     def _get_api_key_for_model(self, model: str) -> str | None:
         """Resolve the API key for a model based on its provider prefix."""
-        provider_key_map = {
-            "anthropic/": "anthropic_api_key",
-            "openai/": "openai_api_key",
-            "gpt-": "openai_api_key",
-            "o1": "openai_api_key",
-            "o3": "openai_api_key",
-            "o4": "openai_api_key",
-            "xai/": "xai_api_key",
-            "groq/": "groq_api_key",
-            "gemini/": "gemini_api_key",
-            "moonshot/": "moonshot_api_key",
-            "deepseek/": "deepseek_api_key",
-            "text-embedding-": "openai_api_key",
-        }
-        for prefix, key_name in provider_key_map.items():
+        for prefix, provider in self._PROVIDER_KEY_MAP.items():
             if model.startswith(prefix):
-                return self.credentials.get(key_name)
+                return self.credentials.get(f"{provider}_api_key")
+        return None
+
+    def _get_api_base_for_model(self, model: str) -> str | None:
+        """Resolve a custom API base URL for a model's provider.
+
+        Looks up ``OPENLEGION_CRED_<PROVIDER>_API_BASE`` (e.g.
+        ``OPENLEGION_CRED_OPENAI_API_BASE``). Returns *None* when no
+        custom base is configured — LiteLLM uses its own defaults.
+        """
+        for prefix, provider in self._PROVIDER_KEY_MAP.items():
+            if model.startswith(prefix):
+                return self.api_bases.get(f"{provider}_api_base")
         return None
 
     @staticmethod
@@ -217,8 +246,9 @@ class CredentialVault:
             if not api_key:
                 logger.debug(f"No API key for failover candidate '{model}', skipping")
                 continue
+            api_base = self._get_api_base_for_model(model)
             try:
-                result = await call_fn(model, api_key)
+                result = await call_fn(model, api_key, api_base)
                 self._health_tracker.record_success(model)
                 if model != requested_model:
                     logger.info(
@@ -249,13 +279,16 @@ class CredentialVault:
         requested_model = request.params.get("model", "")
 
         if request.action == "chat":
-            async def _chat(model: str, api_key: str):
+            async def _chat(model: str, api_key: str, api_base: str | None = None):
                 sanitized = sanitize_for_provider(request.params.get("messages", []), model)
+                extra = {k: v for k, v in request.params.items() if k not in ("model", "messages")}
+                if api_base:
+                    extra["api_base"] = api_base
                 return await litellm.acompletion(
                     model=model,
                     messages=sanitized,
                     api_key=api_key,
-                    **{k: v for k, v in request.params.items() if k not in ("model", "messages")},
+                    **extra,
                 )
 
             response, used_model = await self._call_llm_with_failover(
@@ -286,10 +319,15 @@ class CredentialVault:
                     success=False,
                     error=f"No API key configured for model: {requested_model}",
                 )
+            api_base = self._get_api_base_for_model(requested_model)
+            embed_kwargs: dict = {}
+            if api_base:
+                embed_kwargs["api_base"] = api_base
             response = await litellm.aembedding(
                 model=request.params["model"],
                 input=request.params.get("text", ""),
                 api_key=api_key,
+                **embed_kwargs,
             )
             item = response.data[0]
             embedding = item["embedding"] if isinstance(item, dict) else item.embedding
@@ -324,14 +362,18 @@ class CredentialVault:
             api_key = self._get_api_key_for_model(model)
             if not api_key:
                 continue
+            api_base = self._get_api_base_for_model(model)
             try:
                 sanitized = sanitize_for_provider(request.params.get("messages", []), model)
+                extra = {k: v for k, v in request.params.items() if k not in ("model", "messages")}
+                if api_base:
+                    extra["api_base"] = api_base
                 response = await litellm.acompletion(
                     model=model,
                     messages=sanitized,
                     api_key=api_key,
                     stream=True,
-                    **{k: v for k, v in request.params.items() if k not in ("model", "messages")},
+                    **extra,
                 )
                 used_model = model
                 if model != requested_model:
@@ -405,14 +447,19 @@ class CredentialVault:
 
         import litellm
 
+        api_base = self.api_bases.get("anthropic_api_base")
+
         if request.action == "chat":
             model = request.params.get("model", "anthropic/claude-sonnet-4-5-20250929")
             sanitized = sanitize_for_provider(request.params.get("messages", []), model)
+            extra = {k: v for k, v in request.params.items() if k not in ("model", "messages")}
+            if api_base:
+                extra["api_base"] = api_base
             response = await litellm.acompletion(
                 model=model,
                 messages=sanitized,
                 api_key=api_key,
-                **{k: v for k, v in request.params.items() if k not in ("model", "messages")},
+                **extra,
             )
             msg = response.choices[0].message
             usage = response.usage
@@ -431,10 +478,14 @@ class CredentialVault:
             )
 
         elif request.action == "embed":
+            embed_kwargs: dict = {}
+            if api_base:
+                embed_kwargs["api_base"] = api_base
             response = await litellm.aembedding(
                 model=request.params["model"],
                 input=request.params.get("text", ""),
                 api_key=api_key,
+                **embed_kwargs,
             )
             item = response.data[0]
             embedding = item["embedding"] if isinstance(item, dict) else item.embedding
@@ -450,11 +501,17 @@ class CredentialVault:
 
         import litellm
 
+        api_base = self.api_bases.get("openai_api_base")
+
         if request.action == "embed":
+            embed_kwargs: dict = {}
+            if api_base:
+                embed_kwargs["api_base"] = api_base
             response = await litellm.aembedding(
                 model=request.params["model"],
                 input=request.params.get("text", ""),
                 api_key=api_key,
+                **embed_kwargs,
             )
             item = response.data[0]
             embedding = item["embedding"] if isinstance(item, dict) else item.embedding

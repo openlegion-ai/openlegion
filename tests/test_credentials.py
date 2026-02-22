@@ -295,6 +295,132 @@ def test_has_credential(monkeypatch):
     assert v.has_credential("nope_key") is False
 
 
+# ── Custom API base URL tests ─────────────────────────────────
+
+
+def test_load_api_base_from_env(monkeypatch):
+    """OPENLEGION_CRED_*_API_BASE env vars are loaded into api_bases dict."""
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_BASE", "https://gateway.example.com/v1")
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-test")
+    v = CredentialVault()
+    assert v.api_bases.get("openai_api_base") == "https://gateway.example.com/v1"
+    # API base should NOT appear in regular credentials
+    assert "openai_api_base" not in v.credentials
+    # Regular key should still be loaded
+    assert v.credentials.get("openai_api_key") == "sk-test"
+
+
+def test_get_api_base_for_model(monkeypatch):
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_BASE", "https://custom.example.com/v1")
+    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_BASE", "https://anthropic.proxy.com")
+    v = CredentialVault()
+    assert v._get_api_base_for_model("openai/gpt-4o-mini") == "https://custom.example.com/v1"
+    assert v._get_api_base_for_model("gpt-4o") == "https://custom.example.com/v1"
+    assert v._get_api_base_for_model("anthropic/claude-haiku-4-5-20251001") == "https://anthropic.proxy.com"
+    assert v._get_api_base_for_model("deepseek/deepseek-chat") is None
+    assert v._get_api_base_for_model("unknown/model") is None
+
+
+def test_no_api_base_configured(monkeypatch):
+    """When no API base is set, _get_api_base_for_model returns None."""
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-test")
+    v = CredentialVault()
+    assert v._get_api_base_for_model("openai/gpt-4o") is None
+
+
+async def test_llm_chat_passes_api_base(monkeypatch):
+    """api_base is forwarded to litellm.acompletion when configured."""
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_BASE", "https://gateway.example.com/v1")
+    v = CredentialVault()
+
+    captured_kwargs = {}
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        captured_kwargs.update(kwargs)
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = "ok"
+        resp.choices[0].message.tool_calls = None
+        resp.usage = MagicMock()
+        resp.usage.total_tokens = 10
+        resp.usage.prompt_tokens = 5
+        resp.usage.completion_tokens = 5
+        return resp
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        result = await v.execute_api_call(req)
+
+    assert result.success
+    assert captured_kwargs.get("api_base") == "https://gateway.example.com/v1"
+
+
+async def test_llm_chat_no_api_base_when_not_configured(monkeypatch):
+    """api_base is NOT passed to litellm when not configured."""
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-test")
+    v = CredentialVault()
+
+    captured_kwargs = {}
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        captured_kwargs.update(kwargs)
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = "ok"
+        resp.choices[0].message.tool_calls = None
+        resp.usage = MagicMock()
+        resp.usage.total_tokens = 10
+        resp.usage.prompt_tokens = 5
+        resp.usage.completion_tokens = 5
+        return resp
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        result = await v.execute_api_call(req)
+
+    assert result.success
+    assert "api_base" not in captured_kwargs
+
+
+async def test_stream_passes_api_base(monkeypatch):
+    """api_base is forwarded during streaming LLM calls."""
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_BASE", "https://gateway.example.com/v1")
+    v = CredentialVault()
+
+    captured_kwargs = {}
+
+    async def mock_chunk_generator():
+        chunk = MagicMock()
+        chunk.choices = [MagicMock()]
+        chunk.choices[0].delta.content = "hi"
+        chunk.choices[0].delta.tool_calls = None
+        yield chunk
+
+    async def mock_acompletion(model, messages, api_key, stream=False, **kwargs):
+        captured_kwargs.update(kwargs)
+        return mock_chunk_generator()
+
+    import json
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        events = []
+        async for event in v.stream_llm(req):
+            events.append(event)
+
+    assert captured_kwargs.get("api_base") == "https://gateway.example.com/v1"
+
+
 async def test_cost_tracking_uses_actual_model(monkeypatch):
     """Cost is attributed to the model that actually responded."""
     monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
