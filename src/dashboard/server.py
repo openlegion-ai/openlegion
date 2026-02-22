@@ -527,6 +527,12 @@ def create_dashboard_router(
         if service.lower() in known_providers and not service.lower().endswith("_api_key"):
             service = f"{service}_api_key"
         credential_vault.add_credential(service, key)
+        # Store optional custom API base URL alongside the key
+        base_url = body.get("base_url", "").strip()
+        if base_url:
+            # Derive provider name: "openai_api_key" → "openai"
+            provider = service.replace("_api_key", "")
+            credential_vault.add_credential(f"{provider}_api_base", base_url)
         return {"stored": True, "service": service}
 
     # ── Cost detail per agent ────────────────────────────────
@@ -729,9 +735,13 @@ def create_dashboard_router(
         from src.host.costs import MODEL_COSTS
 
         cred_names = credential_vault.list_credential_names() if credential_vault else []
+        _llm_key_names = {"anthropic_api_key", "openai_api_key", "gemini_api_key",
+                          "deepseek_api_key", "moonshot_api_key", "xai_api_key", "groq_api_key"}
+        has_llm = bool(set(cred_names) & _llm_key_names)
         pubsub_subs = pubsub.subscriptions if pubsub else {}
         return {
             "credentials": {"names": cred_names, "count": len(cred_names)},
+            "has_llm_credentials": has_llm,
             "pubsub_subscriptions": pubsub_subs,
             "model_costs": {k: {"input_per_1k": v[0], "output_per_1k": v[1]} for k, v in MODEL_COSTS.items()},
             "provider_models": _PROVIDER_MODELS,

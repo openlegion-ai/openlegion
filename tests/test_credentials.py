@@ -250,6 +250,34 @@ def test_add_credential_stores_in_memory(monkeypatch):
         cred_mod._persist_to_env = original
 
 
+def test_add_credential_routes_api_base_to_api_bases(monkeypatch):
+    """add_credential() with _api_base suffix stores in api_bases, not credentials."""
+    v = CredentialVault()
+    import src.host.credentials as cred_mod
+    original = cred_mod._persist_to_env
+    cred_mod._persist_to_env = lambda *a, **kw: None
+    try:
+        v.add_credential("openai_api_base", "https://gateway.example.com/v1")
+        assert "openai_api_base" not in v.credentials
+        assert v.api_bases["openai_api_base"] == "https://gateway.example.com/v1"
+    finally:
+        cred_mod._persist_to_env = original
+
+
+def test_add_credential_regular_key_not_in_api_bases(monkeypatch):
+    """add_credential() with a normal key stores in credentials, not api_bases."""
+    v = CredentialVault()
+    import src.host.credentials as cred_mod
+    original = cred_mod._persist_to_env
+    cred_mod._persist_to_env = lambda *a, **kw: None
+    try:
+        v.add_credential("openai_api_key", "sk-test")
+        assert v.credentials["openai_api_key"] == "sk-test"
+        assert "openai_api_key" not in v.api_bases
+    finally:
+        cred_mod._persist_to_env = original
+
+
 def test_add_credential_persists_to_env(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text("EXISTING_VAR=keep\n")

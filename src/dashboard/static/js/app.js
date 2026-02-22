@@ -142,6 +142,12 @@ function dashboard() {
     // Credentials
     credService: '',
     credKey: '',
+    credBaseUrl: '',
+
+    // Onboarding
+    onboardProvider: '',
+    onboardKey: '',
+    onboardBaseUrl: '',
 
     // WebSocket
     _ws: null,
@@ -152,6 +158,11 @@ function dashboard() {
     _seenEventIds: new Set(),
 
     // ── Computed ───────────────────────────────────────────
+
+    get showOnboarding() {
+      if (this.loading || !this.settingsData) return false;
+      return !this.settingsData.has_llm_credentials || this.agents.length === 0;
+    },
 
     get filteredEvents() {
       if (this.eventFilters.size === 0) {
@@ -225,6 +236,7 @@ function dashboard() {
       this._ws.connect();
 
       this.fetchAgents();
+      this.fetchSettings();
       this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
     },
 
@@ -1076,15 +1088,40 @@ function dashboard() {
     async addCredential() {
       if (!this.credService.trim() || !this.credKey.trim()) return;
       try {
+        const body = { service: this.credService.trim(), key: this.credKey.trim() };
+        if (this.credBaseUrl.trim()) body.base_url = this.credBaseUrl.trim();
         const resp = await fetch(`${window.__config.apiBase}/credentials`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ service: this.credService.trim(), key: this.credKey.trim() }),
+          body: JSON.stringify(body),
         });
         if (resp.ok) {
           const data = await resp.json();
           this.showToast(`Credential stored: ${data.service}`);
           this.credService = '';
           this.credKey = '';
+          this.credBaseUrl = '';
+          this.fetchSettings();
+        } else {
+          const err = await resp.json();
+          this.showToast(`Error: ${err.detail}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
+    async submitOnboardCredential() {
+      if (!this.onboardProvider || !this.onboardKey.trim()) return;
+      try {
+        const body = { service: this.onboardProvider, key: this.onboardKey.trim() };
+        if (this.onboardBaseUrl.trim()) body.base_url = this.onboardBaseUrl.trim();
+        const resp = await fetch(`${window.__config.apiBase}/credentials`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+          this.showToast('API key saved');
+          this.onboardProvider = '';
+          this.onboardKey = '';
+          this.onboardBaseUrl = '';
           this.fetchSettings();
         } else {
           const err = await resp.json();
