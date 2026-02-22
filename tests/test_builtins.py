@@ -1442,3 +1442,23 @@ class TestArtifactPathTraversal:
             assert "error" in result
         finally:
             shutil.rmtree(ws.root, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_sibling_directory_blocked(self):
+        """save_artifact rejects names that resolve to a sibling of artifacts dir."""
+        from src.agent.builtins.mesh_tool import save_artifact
+
+        ws = MagicMock()
+        ws.root = tempfile.mkdtemp()
+        try:
+            # Create a sibling directory that starts with "artifacts"
+            sibling = os.path.join(ws.root, "artifacts_evil")
+            os.makedirs(sibling)
+            result = await save_artifact(
+                name="../artifacts_evil/steal.txt", content="pwned",
+                workspace_manager=ws, mesh_client=None,
+            )
+            assert "error" in result
+            assert "Invalid artifact name" in result["error"]
+        finally:
+            shutil.rmtree(ws.root, ignore_errors=True)
