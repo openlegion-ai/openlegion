@@ -16,7 +16,11 @@ Overview of all registered agents showing health status, activity state (idle/th
 
 ### Activity
 
-Real-time event feed streamed via WebSocket. Events include LLM calls, tool executions, text streaming deltas, messages sent/received, blackboard writes, agent state changes, and health changes. Filter by event type using the chip toggles. Events are capped at 500 in the browser; older events are dropped. Click any event row to expand an inline detail panel showing all available data fields with type-specific formatting (e.g. model, token breakdown, and cost for `llm_call`; full untruncated arguments for `tool_start`; complete message text for `message_sent`). The same expandable rows appear in the agent detail view's Recent Events section. Note: per-token `text_delta` events are delivered via the direct streaming chat endpoint (not the WebSocket event bus) to avoid flooding the event buffer.
+Two sub-views toggled via a tab bar at the top of the panel:
+
+**Traces** (default) — Grouped request traces showing the full lifecycle of each request through the system. Each trace row shows the triggering event type, participating agents, a prompt preview (extracted from the first LLM call's user message), event count, total duration, error badge, and relative time. Click a trace to expand an inline event timeline with a vertical waterfall: each event shows its type, source, agent, duration, detail text, error message (if any), and metadata fields (model, tokens, prompt/response previews). Traces auto-refresh every 10 seconds and on relevant WebSocket events (debounced). LLM call events include prompt and response preview fields extracted from the mesh API proxy.
+
+**Live Events** — Real-time event feed streamed via WebSocket. Events include LLM calls, tool executions, text streaming deltas, messages sent/received, blackboard writes, agent state changes, and health changes. Filter by event type using the chip toggles. Events are capped at 500 in the browser; older events are dropped. Click any event row to expand an inline detail panel showing all available data fields with type-specific formatting (e.g. model, token breakdown, cost, and prompt/response previews for `llm_call`; full untruncated arguments for `tool_start`; complete message text for `message_sent`). The same expandable rows appear in the agent detail view's Recent Events section. Note: per-token `text_delta` events are delivered via the direct streaming chat endpoint (not the WebSocket event bus) to avoid flooding the event buffer.
 
 ### Blackboard
 
@@ -28,13 +32,7 @@ Per-agent LLM spend with period selector (today/week/month). Bar chart shows cos
 
 ### Automation
 
-Three sub-panels under a single tab:
-
-**Cron** — Manage scheduled jobs. View schedule, last run time, run count, error count, and heartbeat status. Actions: Run (trigger immediately), Pause, Resume. Auto-refreshes every 10 seconds while the tab is active.
-
-**Queues** — Live view of per-agent task queue depth, pending/collected counts, and busy/idle status. Auto-refreshes every 5 seconds while the tab is active.
-
-**Traces** — Request trace timeline. The left panel lists recent trace events; clicking one shows its full event chain in the right panel with a waterfall timing visualization. Traces cover the full request path: dispatch, LLM calls, tool executions, blackboard writes, and pub/sub events.
+Manage scheduled jobs. View schedule, last run time, run count, error count, and heartbeat status. Actions: Run (trigger immediately), Pause, Resume, Edit schedule, Delete. Auto-refreshes every 10 seconds while the tab is active.
 
 ### System
 
