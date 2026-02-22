@@ -631,3 +631,167 @@ def test_thinking_invalid_level_falls_back_to_off():
     assert client.thinking == "off"
     params = client._get_thinking_params("anthropic/claude-sonnet-4-5-20250929")
     assert params == {}
+
+
+async def test_stream_collects_thinking_content(monkeypatch):
+    """Streaming: reasoning_content tokens are collected and included in done event."""
+    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    v = CredentialVault()
+
+    async def mock_chunk_generator():
+        # First chunk: thinking token
+        chunk1 = MagicMock()
+        chunk1.choices = [MagicMock()]
+        chunk1.choices[0].delta.content = None
+        chunk1.choices[0].delta.reasoning_content = "Let me think..."
+        chunk1.choices[0].delta.tool_calls = None
+        yield chunk1
+
+        # Second chunk: more thinking
+        chunk2 = MagicMock()
+        chunk2.choices = [MagicMock()]
+        chunk2.choices[0].delta.content = None
+        chunk2.choices[0].delta.reasoning_content = " Step 2."
+        chunk2.choices[0].delta.tool_calls = None
+        yield chunk2
+
+        # Third chunk: actual text content
+        chunk3 = MagicMock()
+        chunk3.choices = [MagicMock()]
+        chunk3.choices[0].delta.content = "The answer is 42."
+        chunk3.choices[0].delta.reasoning_content = None
+        chunk3.choices[0].delta.tool_calls = None
+        yield chunk3
+
+    async def mock_acompletion(model, messages, api_key, stream=False, **kwargs):
+        return mock_chunk_generator()
+
+    import json as _json
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "anthropic/claude-sonnet-4-5-20250929",
+                "messages": [{"role": "user", "content": "think"}],
+            },
+        )
+        events = []
+        async for event in v.stream_llm(req):
+            events.append(event)
+
+    # Parse the done event
+    done_events = [e for e in events if "done" in e]
+    assert done_events, "No done event emitted"
+    done_data = _json.loads(done_events[0].split("data: ")[1].strip())
+    assert done_data["content"] == "The answer is 42."
+    assert done_data["thinking_content"] == "Let me think... Step 2."
+
+    # Text deltas should NOT include thinking tokens
+    text_events = [e for e in events if "text_delta" in e]
+    for te in text_events:
+        data = _json.loads(te.split("data: ")[1].strip())
+        assert "think" not in data.get("content", "").lower() or "42" in data.get("content", "")
+
+
+async def test_stream_no_thinking_content_when_absent(monkeypatch):
+    """Streaming: done event omits thinking_content when no reasoning tokens."""
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    v = CredentialVault()
+
+    async def mock_chunk_generator():
+        chunk = MagicMock()
+        chunk.choices = [MagicMock()]
+        chunk.choices[0].delta.content = "hello"
+        chunk.choices[0].delta.tool_calls = None
+        # No reasoning_content attribute at all
+        del chunk.choices[0].delta.reasoning_content
+        yield chunk
+
+    async def mock_acompletion(model, messages, api_key, stream=False, **kwargs):
+        return mock_chunk_generator()
+
+    import json as _json
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        events = []
+        async for event in v.stream_llm(req):
+            events.append(event)
+
+    done_events = [e for e in events if "done" in e]
+    assert done_events
+    done_data = _json.loads(done_events[0].split("data: ")[1].strip())
+    assert "thinking_content" not in done_data
+
+
+async def test_reasoning_content_attribute_fallback(monkeypatch):
+    """Non-streaming: thinking extracted from msg.reasoning_content when content is a string."""
+    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    v = CredentialVault()
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        # litellm normalizes content to string, puts thinking in reasoning_content
+        resp.choices[0].message.content = "The final answer."
+        resp.choices[0].message.reasoning_content = "I thought about this carefully."
+        resp.choices[0].message.tool_calls = None
+        resp.usage = MagicMock()
+        resp.usage.total_tokens = 100
+        resp.usage.prompt_tokens = 50
+        resp.usage.completion_tokens = 50
+        return resp
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "anthropic/claude-sonnet-4-5-20250929",
+                "messages": [{"role": "user", "content": "think hard"}],
+            },
+        )
+        result = await v.execute_api_call(req)
+
+    assert result.success
+    assert result.data["content"] == "The final answer."
+    assert result.data["thinking_content"] == "I thought about this carefully."
+
+
+async def test_reasoning_content_not_duplicated(monkeypatch):
+    """When both content blocks AND reasoning_content exist, don't duplicate."""
+    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    v = CredentialVault()
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        # Content is a list with thinking blocks — _extract_content handles it
+        resp.choices[0].message.content = [
+            {"type": "thinking", "thinking": "Deep thought."},
+            {"type": "text", "text": "42."},
+        ]
+        # Also has reasoning_content (should be ignored since _extract_content found it)
+        resp.choices[0].message.reasoning_content = "Deep thought."
+        resp.choices[0].message.tool_calls = None
+        resp.usage = MagicMock()
+        resp.usage.total_tokens = 50
+        resp.usage.prompt_tokens = 25
+        resp.usage.completion_tokens = 25
+        return resp
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "anthropic/claude-sonnet-4-5-20250929",
+                "messages": [{"role": "user", "content": "think"}],
+            },
+        )
+        result = await v.execute_api_call(req)
+
+    assert result.success
+    assert result.data["content"] == "42."
+    # Should use the one from _extract_content, not duplicate
+    assert result.data["thinking_content"] == "Deep thought."
