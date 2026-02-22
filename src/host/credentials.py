@@ -323,6 +323,9 @@ class CredentialVault:
             msg = response.choices[0].message
             usage = response.usage
             content, thinking_content = _extract_content(msg.content)
+            # Fallback: some litellm versions put thinking in a separate attribute
+            if thinking_content is None:
+                thinking_content = getattr(msg, "reasoning_content", None) or None
             data = {
                 "content": content,
                 "tokens_used": usage.total_tokens if usage else 0,
@@ -421,6 +424,7 @@ class CredentialVault:
 
         try:
             collected_content = ""
+            collected_thinking = ""
             collected_tool_calls: list[dict] = []
 
             async for chunk in response:
@@ -432,9 +436,10 @@ class CredentialVault:
                     collected_content += delta.content
                     yield f"data: {json.dumps({'type': 'text_delta', 'content': delta.content})}\n\n"
 
-                # Suppress thinking/reasoning tokens from streaming output
-                if getattr(delta, "reasoning_content", None):
-                    pass
+                # Collect thinking/reasoning tokens but don't stream them to client
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning and isinstance(reasoning, str):
+                    collected_thinking += reasoning
 
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
@@ -456,7 +461,14 @@ class CredentialVault:
                 completion_tokens = getattr(response.usage, 'completion_tokens', 0) or 0
 
             self._health_tracker.record_success(used_model)
-            yield f"data: {json.dumps({'type': 'done', 'content': collected_content, 'tool_calls': collected_tool_calls, 'tokens_used': tokens_used, 'model': used_model})}\n\n"
+            done_data: dict = {
+                'type': 'done', 'content': collected_content,
+                'tool_calls': collected_tool_calls,
+                'tokens_used': tokens_used, 'model': used_model,
+            }
+            if collected_thinking:
+                done_data['thinking_content'] = collected_thinking
+            yield f"data: {json.dumps(done_data)}\n\n"
 
             if self.cost_tracker and agent_id and tokens_used:
                 pt = prompt_tokens or int(tokens_used * 0.7)
@@ -495,6 +507,9 @@ class CredentialVault:
             msg = response.choices[0].message
             usage = response.usage
             content, thinking_content = _extract_content(msg.content)
+            # Fallback: some litellm versions put thinking in a separate attribute
+            if thinking_content is None:
+                thinking_content = getattr(msg, "reasoning_content", None) or None
             data = {
                 "content": content,
                 "tokens_used": usage.total_tokens if usage else 0,
