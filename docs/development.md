@@ -57,6 +57,7 @@ pytest tests/ -x
 | `src/agent/skills.py` | `tests/test_skills.py` |
 | `src/agent/builtins/*` | `tests/test_builtins.py`, `tests/test_memory_tools.py` |
 | `src/agent/builtins/vault_tool.py` | `tests/test_vault.py` |
+| `src/agent/builtins/subagent_tool.py` | `tests/test_subagent.py` |
 | `src/agent/mcp_client.py` | `tests/test_mcp_client.py`, `tests/test_mcp_e2e.py` |
 | `src/host/mesh.py` | `tests/test_mesh.py` |
 | `src/host/orchestrator.py` | `tests/test_orchestrator.py` |
@@ -65,15 +66,22 @@ pytest tests/ -x
 | `src/host/transport.py` | `tests/test_transport.py` |
 | `src/host/costs.py` | `tests/test_costs.py` |
 | `src/host/cron.py` | `tests/test_cron.py` |
+| `src/host/health.py` | `tests/test_health.py` |
+| `src/host/lanes.py` | `tests/test_lanes.py` |
+| `src/host/traces.py` | `tests/test_traces.py` |
+| `src/host/transcript.py` | `tests/test_transcript.py` |
 | `src/agent/server.py` | `tests/test_agent_server.py` |
-| `src/dashboard/server.py` (workspace) | `tests/test_dashboard_workspace.py` |
+| `src/dashboard/server.py` | `tests/test_dashboard.py`, `tests/test_dashboard_workspace.py` |
 | `src/host/failover.py` | `tests/test_failover.py` |
 | `src/host/webhooks.py` | `tests/test_webhooks.py` |
 | `src/host/watchers.py` | `tests/test_watchers.py` |
 | `src/channels/base.py` | `tests/test_channels.py` |
+| `src/channels/slack.py` | `tests/test_slack.py` |
+| `src/channels/whatsapp.py` | `tests/test_whatsapp.py` |
 | `src/shared/types.py` | `tests/test_types.py` |
-| `src/cli.py` | `tests/test_cli_commands.py` |
-| Cross-component | `tests/test_integration.py` |
+| `src/shared/utils.py` (sanitization) | `tests/test_sanitize.py` |
+| `src/cli/` | `tests/test_cli_commands.py`, `tests/test_setup_wizard.py` |
+| Cross-component | `tests/test_integration.py`, `tests/test_events.py` |
 
 ### Testing Conventions
 
@@ -217,7 +225,7 @@ async def your_endpoint(request: YourRequest):
 1. Subclass `Channel` from `src/channels/base.py`
 2. Implement `start()`, `stop()`, `send_notification()`
 3. The base class `handle_message()` handles all command parsing
-4. Add startup logic in `src/cli.py:_start_channels()`
+4. Add startup logic in `src/cli/channels.py`
 5. Add tests in `tests/test_channels.py`
 
 ### Adding a Workflow
@@ -268,6 +276,7 @@ openlegion/
 │   │       ├── mesh_tool.py     # Blackboard, pub/sub, artifacts, cron
 │   │       ├── vault_tool.py    # Credential vault (blind storage)
 │   │       ├── skill_tool.py    # Custom skill creation + reload
+│   │       ├── subagent_tool.py # In-container subagent spawning
 │   │       └── web_search_tool.py  # DuckDuckGo search
 │   ├── host/                    # Runs on the host machine
 │   │   ├── server.py            # Mesh FastAPI app
@@ -284,7 +293,9 @@ openlegion/
 │   │   ├── failover.py          # LLM model failover logic
 │   │   ├── webhooks.py          # Webhook manager
 │   │   ├── watchers.py          # File watchers
-│   │   └── containers.py        # Container management facade
+│   │   ├── containers.py        # Container management facade
+│   │   ├── traces.py            # Request tracing and diagnostics
+│   │   └── transcript.py        # Conversation transcript storage
 │   ├── channels/                # Messaging adapters
 │   │   ├── base.py              # Abstract channel
 │   │   ├── telegram.py          # Telegram bot
@@ -294,16 +305,23 @@ openlegion/
 │   │   └── webhook.py           # HTTP webhooks
 │   ├── shared/                  # Shared between host and agent
 │   │   ├── types.py             # Pydantic contracts
-│   │   └── utils.py             # Logging, ID generation
+│   │   ├── utils.py             # Logging, ID generation
+│   │   └── trace.py             # Distributed trace context
 │   ├── templates/               # Agent setup templates
-│   └── cli.py                   # CLI entry point
+│   └── cli/                     # CLI package
+│       ├── main.py              # Click commands and entry point
+│       ├── config.py            # Config loading, Docker helpers
+│       ├── runtime.py           # RuntimeContext lifecycle management
+│       ├── repl.py              # REPLSession interactive dispatch
+│       ├── channels.py          # ChannelManager messaging lifecycle
+│       └── formatting.py        # Tool display and styled output
 ├── config/                      # Runtime configuration
 │   ├── agents.yaml
 │   ├── mesh.yaml
 │   ├── permissions.json
 │   ├── cron.json
 │   └── workflows/
-├── tests/                       # Test suite (954 tests)
+├── tests/                       # Test suite (1102 tests)
 │   └── fixtures/                # Test fixtures (echo MCP server, etc.)
 ├── Dockerfile.agent             # Agent container image
 └── pyproject.toml               # Project metadata

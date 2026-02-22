@@ -1,8 +1,8 @@
 # Security Model
 
-OpenLegion is designed assuming agents will be compromised. Defense-in-depth with five layers prevents a compromised agent from accessing credentials, escaping isolation, or affecting other agents.
+OpenLegion is designed assuming agents will be compromised. Defense-in-depth with six layers prevents a compromised agent from accessing credentials, escaping isolation, or affecting other agents.
 
-## Five Security Layers
+## Six Security Layers
 
 | Layer | Mechanism | What It Prevents |
 |-------|-----------|-----------------|

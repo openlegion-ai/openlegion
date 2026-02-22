@@ -1,6 +1,6 @@
 # Channels
 
-Channels bridge external messaging platforms to the OpenLegion mesh, providing the same multi-agent chat experience across CLI, Telegram, and Discord.
+Channels bridge external messaging platforms to the OpenLegion mesh, providing the same multi-agent chat experience across CLI, Telegram, Discord, Slack, and WhatsApp.
 
 ## Overview
 
@@ -314,4 +314,4 @@ The channel receives these callbacks at construction:
 | `src/channels/slack.py` | Slack adapter (Socket Mode via slack-bolt) |
 | `src/channels/whatsapp.py` | WhatsApp Cloud API adapter |
 | `src/channels/webhook.py` | HTTP webhook adapter |
-| `src/cli.py` | CLI REPL (uses same dispatch pattern) |
+| `src/cli/` | CLI package (uses same dispatch pattern) |

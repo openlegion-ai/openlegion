@@ -52,6 +52,9 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 | `failover.py` | Model health tracking and failover chains |
 | `webhooks.py` | Named webhook endpoints |
 | `watchers.py` | File watcher with polling |
+| `containers.py` | Container management facade |
+| `traces.py` | Request tracing and diagnostics |
+| `transcript.py` | Conversation transcript storage |
 
 ### Agent (`src/agent/`)
 
@@ -82,6 +85,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `memory_tool.py` | Memory search, save, recall |
 | `vault_tool.py` | Credential-blind vault operations |
 | `skill_tool.py` | Runtime skill creation and hot-reload |
+| `subagent_tool.py` | In-container subagent spawning and management |
 | `web_search_tool.py` | DuckDuckGo web search (no API key) |
 
 ### Channels (`src/channels/`)
@@ -101,6 +105,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 |--------|---------|
 | `types.py` | **THE contract** -- all Pydantic models shared between host and agents |
 | `utils.py` | ID generation, structured logging, prompt injection sanitization |
+| `trace.py` | Distributed trace context propagation |
 
 ## Data Flow
 
