@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from collections import defaultdict
+
 from src.shared.utils import generate_id, setup_logging
 
 logger = setup_logging("host.cron")
@@ -86,6 +88,7 @@ class CronScheduler:
         self._trace_store = trace_store
         self.context_fn = context_fn
         self._running = False
+        self._job_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._load()
 
     def _load(self) -> None:
@@ -134,16 +137,17 @@ class CronScheduler:
                 return job
         return None
 
-    def update_job(self, job_id: str, **kwargs) -> CronJob | None:
+    async def update_job(self, job_id: str, **kwargs) -> CronJob | None:
         """Update fields on an existing cron job. Returns updated job or None."""
-        job = self.jobs.get(job_id)
-        if not job:
-            return None
-        for k, v in kwargs.items():
-            if hasattr(job, k) and k != "id":
-                setattr(job, k, v)
-        self._save()
-        return job
+        async with self._job_locks[job_id]:
+            job = self.jobs.get(job_id)
+            if not job:
+                return None
+            for k, v in kwargs.items():
+                if hasattr(job, k) and k != "id":
+                    setattr(job, k, v)
+            self._save()
+            return job
 
     def remove_job(self, job_id: str) -> bool:
         if job_id not in self.jobs:
@@ -161,19 +165,21 @@ class CronScheduler:
             self._save()
         return len(to_remove)
 
-    def pause_job(self, job_id: str) -> bool:
-        if job_id not in self.jobs:
-            return False
-        self.jobs[job_id].enabled = False
-        self._save()
-        return True
+    async def pause_job(self, job_id: str) -> bool:
+        async with self._job_locks[job_id]:
+            if job_id not in self.jobs:
+                return False
+            self.jobs[job_id].enabled = False
+            self._save()
+            return True
 
-    def resume_job(self, job_id: str) -> bool:
-        if job_id not in self.jobs:
-            return False
-        self.jobs[job_id].enabled = True
-        self._save()
-        return True
+    async def resume_job(self, job_id: str) -> bool:
+        async with self._job_locks[job_id]:
+            if job_id not in self.jobs:
+                return False
+            self.jobs[job_id].enabled = True
+            self._save()
+            return True
 
     async def run_job(self, job_id: str) -> str | None:
         """Manually trigger a job. Returns the agent response."""
@@ -201,9 +207,10 @@ class CronScheduler:
 
     async def _execute_job(self, job: CronJob) -> str | None:
         try:
-            job.last_run = datetime.now(UTC).isoformat()
-            job.run_count += 1
-            self._save()
+            async with self._job_locks[job.id]:
+                job.last_run = datetime.now(UTC).isoformat()
+                job.run_count += 1
+                self._save()
             if self._trace_store:
                 from src.shared.trace import new_trace_id
                 self._trace_store.record(
@@ -246,6 +253,24 @@ class CronScheduler:
 
                     # Build rich heartbeat message
                     sections: list[str] = [f"Heartbeat for {job.agent}."]
+
+                    # Hardcoded operating rules — always included, cannot be
+                    # overridden by agent-editable HEARTBEAT.md
+                    sections.append(
+                        "## Heartbeat Operating Rules (non-negotiable)\n\n"
+                        "1. Be ECONOMICAL. Each heartbeat costs API credits. "
+                        "Only call tools if there is actual work to do.\n"
+                        "2. If nothing needs attention, respond HEARTBEAT_OK "
+                        "immediately. Do NOT make unnecessary tool calls.\n"
+                        "3. Report what you worked on to the USER via "
+                        "notify_user — not the blackboard.\n"
+                        "4. The blackboard is for sharing data with other "
+                        "agents. Do NOT write status updates or progress "
+                        "reports there.\n"
+                        "5. Do NOT change your heartbeat schedule to run "
+                        "more frequently unless the user asked you to. "
+                        "More frequent heartbeats waste credits."
+                    )
 
                     rules = ctx.get("heartbeat_rules", "")
                     if rules and not is_default:
@@ -301,8 +326,9 @@ class CronScheduler:
 
             return response
         except Exception as e:
-            job.error_count += 1
-            self._save()
+            async with self._job_locks[job.id]:
+                job.error_count += 1
+                self._save()
             logger.error(f"Cron {job.id} failed: {e}")
             return None
 

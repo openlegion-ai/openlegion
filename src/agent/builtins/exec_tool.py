@@ -19,7 +19,10 @@ _MAX_OUTPUT = 100_000
         "Run a shell command and return stdout+stderr. You have a full Linux "
         "environment with Python, Node.js, curl, git, and standard tools. "
         "Use for: installing packages, running scripts, processing data, "
-        "downloading files, or any system operation."
+        "downloading files, or any system operation. "
+        "Do NOT use exec to modify workspace identity files "
+        "(SOUL.md, AGENTS.md, HEARTBEAT.md, USER.md, MEMORY.md) — "
+        "use the update_workspace tool instead."
     ),
     parameters={
         "command": {"type": "string", "description": "Shell command to execute"},

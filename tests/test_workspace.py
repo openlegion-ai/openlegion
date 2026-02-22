@@ -367,7 +367,7 @@ class TestLearnings:
     def test_load_heartbeat_rules(self):
         rules = self.ws.load_heartbeat_rules()
         assert "Heartbeat Rules" in rules
-        assert "pending tasks" in rules
+        assert "notify_user" in rules
 
 
 class TestPerAgentSoul:
@@ -424,3 +424,99 @@ class TestHeartbeatFile:
         ws = WorkspaceManager(workspace_dir=self._tmpdir)
         rules = ws.load_heartbeat_rules()
         assert "Check email" in rules
+
+
+class TestUpdateFile:
+    """Tests for agent-writable workspace file updates."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.ws = WorkspaceManager(workspace_dir=self._tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_update_heartbeat_md(self):
+        result = self.ws.update_file("HEARTBEAT.md", "# Custom Rules\n- Check inbox")
+        assert result["updated"] is True
+        assert result["filename"] == "HEARTBEAT.md"
+        content = (Path(self._tmpdir) / "HEARTBEAT.md").read_text()
+        assert "Check inbox" in content
+
+    def test_update_user_md(self):
+        result = self.ws.update_file("USER.md", "# User\nPrefers short answers")
+        assert result["updated"] is True
+        content = (Path(self._tmpdir) / "USER.md").read_text()
+        assert "Prefers short answers" in content
+
+    def test_update_soul_md_blocked(self):
+        result = self.ws.update_file("SOUL.md", "hacked identity")
+        assert "error" in result
+        # Original scaffold content should be preserved
+        content = (Path(self._tmpdir) / "SOUL.md").read_text()
+        assert "Identity" in content
+
+    def test_update_agents_md_blocked(self):
+        result = self.ws.update_file("AGENTS.md", "hacked instructions")
+        assert "error" in result
+
+    def test_update_memory_md_blocked(self):
+        result = self.ws.update_file("MEMORY.md", "overwrite memory")
+        assert "error" in result
+
+    def test_backup_created(self):
+        # Write initial content
+        (Path(self._tmpdir) / "HEARTBEAT.md").write_text("original content")
+        # Update
+        self.ws.update_file("HEARTBEAT.md", "new content")
+        # Check backup exists
+        backup_dir = Path(self._tmpdir) / "backups"
+        assert backup_dir.exists()
+        backups = list(backup_dir.glob("HEARTBEAT.md.*.bak"))
+        assert len(backups) == 1
+        assert backups[0].read_text() == "original content"
+
+    def test_multiple_backups(self):
+        """Each update creates a separate backup."""
+        (Path(self._tmpdir) / "USER.md").write_text("v1")
+        self.ws.update_file("USER.md", "v2")
+        self.ws.update_file("USER.md", "v3")
+        backups = list((Path(self._tmpdir) / "backups").glob("USER.md.*.bak"))
+        assert len(backups) == 2
+
+    def test_daily_log_entry(self):
+        self.ws.update_file("HEARTBEAT.md", "new rules")
+        today_log = list((Path(self._tmpdir) / "memory").glob("*.md"))
+        assert len(today_log) >= 1
+        content = today_log[0].read_text()
+        assert "Updated workspace file: HEARTBEAT.md" in content
+
+    def test_size_limit_enforced(self):
+        """Content exceeding _MAX_WRITABLE_SIZE is rejected."""
+        huge = "x" * (WorkspaceManager._MAX_WRITABLE_SIZE + 1)
+        result = self.ws.update_file("HEARTBEAT.md", huge)
+        assert "error" in result
+        assert "too large" in result["error"].lower()
+
+    def test_size_at_limit_accepted(self):
+        """Content exactly at _MAX_WRITABLE_SIZE is accepted."""
+        exact = "x" * WorkspaceManager._MAX_WRITABLE_SIZE
+        result = self.ws.update_file("HEARTBEAT.md", exact)
+        assert result["updated"] is True
+        assert result["size"] == WorkspaceManager._MAX_WRITABLE_SIZE
+
+    def test_backup_rotation(self):
+        """Old backups are pruned when exceeding _MAX_BACKUPS_PER_FILE."""
+        path = Path(self._tmpdir) / "HEARTBEAT.md"
+        backup_dir = Path(self._tmpdir) / "backups"
+        backup_dir.mkdir(exist_ok=True)
+        # Create more backups than the limit
+        for i in range(WorkspaceManager._MAX_BACKUPS_PER_FILE + 5):
+            path.write_text(f"v{i}")
+            bak = backup_dir / f"HEARTBEAT.md.fake_{i:04d}.bak"
+            bak.write_text(f"v{i}")
+        # Trigger rotation by doing a real update
+        path.write_text("current")
+        self.ws.update_file("HEARTBEAT.md", "new")
+        backups = list(backup_dir.glob("HEARTBEAT.md.*.bak"))
+        assert len(backups) <= WorkspaceManager._MAX_BACKUPS_PER_FILE

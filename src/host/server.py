@@ -10,6 +10,7 @@ Provides endpoints for:
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import time
 from collections import defaultdict
@@ -78,6 +79,7 @@ def create_mesh_app(
     _VAULT_RESOLVE_LIMIT = 5
     _VAULT_RESOLVE_WINDOW = 60
     _vault_resolve_ts: dict[str, list[float]] = defaultdict(list)
+    _vault_rate_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     def _verify_auth(agent_id: str, request: Request) -> None:
         """Verify agent identity via auth token. No-op when auth is not configured."""
@@ -360,16 +362,17 @@ def create_mesh_app(
             raise HTTPException(400, "name is required")
 
         # Rate limit: max N resolves per agent per window
-        now = time.time()
-        ts_list = _vault_resolve_ts[agent_id]
-        ts_list[:] = [t for t in ts_list if now - t < _VAULT_RESOLVE_WINDOW]
-        if len(ts_list) >= _VAULT_RESOLVE_LIMIT:
-            _server_logger.warning(
-                "Vault resolve rate limit hit",
-                extra={"extra_data": {"agent_id": agent_id, "name": name}},
-            )
-            raise HTTPException(429, "Vault resolve rate limit exceeded")
-        ts_list.append(now)
+        async with _vault_rate_locks[agent_id]:
+            now = time.time()
+            ts_list = _vault_resolve_ts[agent_id]
+            ts_list[:] = [t for t in ts_list if now - t < _VAULT_RESOLVE_WINDOW]
+            if len(ts_list) >= _VAULT_RESOLVE_LIMIT:
+                _server_logger.warning(
+                    "Vault resolve rate limit hit",
+                    extra={"extra_data": {"agent_id": agent_id, "name": name}},
+                )
+                raise HTTPException(429, "Vault resolve rate limit exceeded")
+            ts_list.append(now)
 
         # Audit log every resolve
         _server_logger.info(
@@ -480,7 +483,7 @@ def create_mesh_app(
             error = cron_scheduler._validate_schedule(body["schedule"])
             if error:
                 raise HTTPException(400, error)
-        job = cron_scheduler.update_job(job_id, **body)
+        job = await cron_scheduler.update_job(job_id, **body)
         if not job:
             raise HTTPException(404, f"Job not found: {job_id}")
         from dataclasses import asdict

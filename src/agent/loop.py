@@ -158,13 +158,21 @@ class AgentLoop:
             else:
                 lines.append(f"- **{agent['name']}**")
         lines.append(
-            "\n## Collaboration via Blackboard\n"
-            "The blackboard is your shared workspace. Use it to:\n"
-            "- **Share findings**: `write_shared_state(key='findings/<topic>', ...)`\n"
-            "- **Read others' work**: `list_shared_state(prefix='findings/')` then `read_shared_state(key=...)`\n"
-            "- **Coordinate tasks**: write to `tasks/<agent_name>` to request work from a teammate\n"
-            "- **Publish deliverables**: `save_artifact(name=..., content=...)` for files others can use\n"
-            "\nCheck the blackboard regularly for updates from your teammates."
+            "\n## Blackboard = Agent-to-Agent Collaboration ONLY\n"
+            "The blackboard is for coordinating with other agents — NOT for reporting to the user.\n"
+            "Use it to:\n"
+            "- **Share data other agents need**: `write_shared_state(key='findings/<topic>', ...)`\n"
+            "- **Read teammates' work**: `list_shared_state(prefix='findings/')` then `read_shared_state(key=...)`\n"
+            "- **Request work from a teammate**: write to `tasks/<agent_name>`\n"
+            "- **Publish artifacts for other agents**: `save_artifact(name=..., content=...)`\n"
+            "\nDo NOT write status updates, progress reports, or summaries to the blackboard.\n"
+            "Keep blackboard writes focused and minimal — only what another agent needs to act on.\n"
+            "\n## Reporting to the User\n"
+            "Report progress, results, and updates to the user via:\n"
+            "- **Chat responses**: when the user is talking to you directly\n"
+            "- **notify_user(message)**: push updates when working autonomously "
+            "(heartbeat, cron, long tasks)\n"
+            "\nThe user wants to hear from you — don't just write to the blackboard and go silent."
         )
         return "\n".join(lines)
 
@@ -220,6 +228,10 @@ class AgentLoop:
 
         system_prompt = self._build_system_prompt(assignment)
         messages = await self._build_initial_context(assignment)
+
+        # Decay salience scores so old facts don't dominate forever
+        if self.memory:
+            self.memory.decay_all()
 
         try:
             for iteration in range(self.MAX_ITERATIONS):
@@ -626,9 +638,14 @@ class AgentLoop:
             f"- Shell: exec runs any command. HTTP: http_request calls any API.\n"
             f"- When done, respond with final answer (no tool call).\n"
             f"- Structure final answer as JSON: {{\"result\": {{...}}, \"promote\": {{...}}}}\n"
-            f"- 'promote' contains data to share with other agents via blackboard.\n"
+            f"- 'promote' contains ONLY data that other agents need to act on.\n"
+            f"- Use notify_user to report progress and results to the user.\n"
+            f"- The blackboard is for agent-to-agent coordination — not for "
+            f"status updates or user-facing reports.\n"
             f"- You have max {self.MAX_ITERATIONS} iterations.\n"
-            f"- Learn from past errors — avoid repeating known failures.\n",
+            f"- Learn from past errors — avoid repeating known failures.\n"
+            f"- Use update_workspace to save lasting preferences to USER.md "
+            f"or refine autonomous rules in HEARTBEAT.md.\n",
         )
         if self.workspace:
             learnings = self.workspace.get_learnings_context()
@@ -925,11 +942,21 @@ class AgentLoop:
         self.workspace.append_daily_log(" | ".join(parts))
 
     async def reset_chat(self) -> None:
-        """Clear conversation history. Acquires the chat lock to avoid
-        corrupting state during an active chat turn."""
+        """Clear conversation history. Flushes important facts to memory
+        before clearing. Acquires the chat lock to avoid corrupting state
+        during an active chat turn."""
         async with self._chat_lock:
+            if self._chat_messages and self.context_manager:
+                try:
+                    await self.context_manager._flush_to_memory(
+                        "", self._chat_messages,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to flush memory on chat reset: %s", e)
             self._chat_messages = []
             self._loop_detector.reset()
+            if self.context_manager:
+                self.context_manager.reset()
 
     def _build_chat_system_prompt(self, goals: dict | None = None, fleet_roster: list[dict] | None = None) -> str:
         tools_desc = self.skills.get_descriptions()
@@ -1013,15 +1040,31 @@ class AgentLoop:
             f"Prefer reasonable defaults. Choose usernames, passwords, options "
             f"yourself when the user tells you to decide.\n\n"
             f"## Memory & coordination\n"
+            f"Before answering questions about prior work, decisions, dates, "
+            f"people, preferences, or todos: run memory_search first.\n"
             f"- memory_save: remember important facts for future sessions.\n"
             f"- memory_search: recall information from workspace files and memory DB.\n"
             f"- memory_recall: search structured fact database by semantic similarity "
             f"(better for specific facts, supports category filtering).\n"
-            f"- read/write/list_shared_state: coordinate via the shared blackboard.\n"
+            f"- read/write/list_shared_state: coordinate with OTHER AGENTS via "
+            f"the shared blackboard. Only write data that another agent needs.\n"
             f"- save_artifact: publish deliverables other agents can find.\n"
+            f"- notify_user: report progress and results to the user (use this "
+            f"when working autonomously — heartbeat, cron, background tasks).\n"
             f"- Refer to PROJECT.md for current priorities and constraints.\n"
             f"- Learn from past errors — avoid repeating known failures.\n"
             f"- Respect user corrections — they define preferred behavior.\n"
+            f"\n## Reporting: User vs Blackboard\n"
+            f"- **User-facing updates** (what you worked on, progress, results, "
+            f"blockers): report via chat responses or notify_user.\n"
+            f"- **Blackboard** (data for other agents to act on): only write "
+            f"structured data that a specific teammate needs. Keep it minimal.\n"
+            f"- The user wants to hear from you directly. Don't just write to "
+            f"the blackboard and go silent.\n"
+            f"\n## Self-Improvement\n"
+            f"Use update_workspace to persist lasting knowledge across sessions:\n"
+            f"- **USER.md**: user preferences, corrections, project context.\n"
+            f"- **HEARTBEAT.md**: autonomous rules for your periodic wakeups.\n"
         )
 
         # Fleet collaboration context (only for multi-agent setups)

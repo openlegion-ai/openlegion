@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from unittest.mock import patch
+
+import pytest
 
 from src.host.costs import CostTracker
 
@@ -92,6 +95,42 @@ class TestBudgetEnforcement:
         budget = self.tracker.check_budget("agent1")
         assert budget["allowed"] is True
         assert budget["daily_used"] == 0
+
+
+class TestBudgetOverrunWarning:
+    """Post-hoc budget warning when track() pushes spend over budget."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self._tmpdir, "costs.db")
+        self.tracker = CostTracker(db_path=self.db_path)
+
+    def teardown_method(self):
+        self.tracker.close()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_warning_logged_on_overrun(self):
+        """track() logs a warning when the call pushes spend over daily budget."""
+        self.tracker.set_budget("agent1", daily_usd=0.001, monthly_usd=200.0)
+        with patch("src.host.costs.logger") as mock_logger:
+            self.tracker.track("agent1", "openai/gpt-4o", 10000, 5000)
+            mock_logger.warning.assert_called_once()
+            call_args = mock_logger.warning.call_args
+            assert "exceeded daily budget" in call_args[0][0]
+            assert "agent1" in call_args[0][1]
+
+    def test_no_warning_within_budget(self):
+        """track() does NOT warn when spend stays under budget."""
+        self.tracker.set_budget("agent1", daily_usd=100.0, monthly_usd=2000.0)
+        with patch("src.host.costs.logger") as mock_logger:
+            self.tracker.track("agent1", "openai/gpt-4o-mini", 100, 50)
+            mock_logger.warning.assert_not_called()
+
+    def test_no_warning_without_budget(self):
+        """track() does NOT warn when no explicit budget is set."""
+        with patch("src.host.costs.logger") as mock_logger:
+            self.tracker.track("agent1", "openai/gpt-4o-mini", 100, 50)
+            mock_logger.warning.assert_not_called()
 
 
 class TestCostTrackerWithVault:

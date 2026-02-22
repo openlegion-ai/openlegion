@@ -411,7 +411,12 @@ class _MockCtx:
         self.health_monitor = None
         self.event_bus = None
         self.trace_store = None
-        self._dispatch_loop = None
+        # Set up a real event loop in a background thread for async cron methods
+        import asyncio
+        import threading
+        self._dispatch_loop = asyncio.new_event_loop()
+        t = threading.Thread(target=self._dispatch_loop.run_forever, daemon=True)
+        t.start()
 
     @property
     def agents(self):
@@ -719,11 +724,12 @@ class TestREPLCronExtended:
         assert not sched.jobs[job.id].enabled
 
     def test_resume_job(self, tmp_path, capsys):
+        import asyncio
         from src.cli.repl import REPLSession
         from src.host.cron import CronScheduler
         sched = CronScheduler(config_path=str(tmp_path / "cron.json"))
         job = sched.add_job(agent="bot", schedule="every 5m", message="check")
-        sched.pause_job(job.id)
+        asyncio.run(sched.pause_job(job.id))
         ctx = _MockCtx(cron_scheduler=sched)
         repl = REPLSession(ctx)
 
@@ -927,11 +933,12 @@ class TestREPLCronListFormatting:
         assert "never" in out
 
     def test_cron_list_paused_job(self, tmp_path, capsys):
+        import asyncio
         from src.cli.repl import REPLSession
         from src.host.cron import CronScheduler
         sched = CronScheduler(config_path=str(tmp_path / "cron.json"))
         job = sched.add_job(agent="bot", schedule="every 10m", message="ping")
-        sched.pause_job(job.id)
+        asyncio.run(sched.pause_job(job.id))
         ctx = _MockCtx(cron_scheduler=sched)
         repl = REPLSession(ctx)
 

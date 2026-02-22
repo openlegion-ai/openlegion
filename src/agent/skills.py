@@ -180,10 +180,13 @@ class SkillRegistry:
             properties = {}
             required = []
             for param_name, param_info in params.items():
-                properties[param_name] = {
+                prop: dict = {
                     "type": param_info.get("type", "string"),
                     "description": param_info.get("description", ""),
                 }
+                if "enum" in param_info:
+                    prop["enum"] = param_info["enum"]
+                properties[param_name] = prop
                 if "default" not in param_info:
                     required.append(param_name)
 

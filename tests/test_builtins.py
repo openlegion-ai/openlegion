@@ -114,6 +114,199 @@ class TestFileTool:
         assert "line0" not in result["content"]
 
 
+class TestFileToolWorkspaceGuard:
+    """write_file must block writes to workspace identity files."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        import src.agent.builtins.file_tool as ft
+
+        self._ft = ft
+        self._original_root = ft._ALLOWED_ROOT
+        ft._ALLOWED_ROOT = self._tmpdir
+        # Create workspace directory structure
+        workspace = os.path.join(self._tmpdir, "workspace")
+        os.makedirs(workspace, exist_ok=True)
+
+    def teardown_method(self):
+        self._ft._ALLOWED_ROOT = self._original_root
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_write_soul_md_blocked(self):
+        result = self._ft.write_file(path="workspace/SOUL.md", content="hacked")
+        assert "error" in result
+        assert "update_workspace" in result["error"]
+
+    def test_write_agents_md_blocked(self):
+        result = self._ft.write_file(path="workspace/AGENTS.md", content="hacked")
+        assert "error" in result
+
+    def test_write_heartbeat_md_blocked(self):
+        result = self._ft.write_file(path="workspace/HEARTBEAT.md", content="hacked")
+        assert "error" in result
+
+    def test_write_user_md_blocked(self):
+        result = self._ft.write_file(path="workspace/USER.md", content="hacked")
+        assert "error" in result
+
+    def test_write_memory_md_blocked(self):
+        result = self._ft.write_file(path="workspace/MEMORY.md", content="hacked")
+        assert "error" in result
+
+    def test_write_other_workspace_files_allowed(self):
+        result = self._ft.write_file(path="workspace/notes.md", content="ok")
+        assert "error" not in result
+        assert result["bytes_written"] == 2
+
+    def test_write_non_workspace_files_allowed(self):
+        result = self._ft.write_file(path="other/data.txt", content="fine")
+        assert "error" not in result
+
+    def test_write_nested_workspace_not_blocked(self):
+        """Files inside workspace subdirs with same name are NOT blocked."""
+        result = self._ft.write_file(path="workspace/subdir/SOUL.md", content="ok")
+        assert "error" not in result
+
+
+# ── update_workspace (mesh_tool) ────────────────────────────
+
+
+class TestUpdateWorkspaceTool:
+    """Skill-level tests for the update_workspace tool in mesh_tool.py."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _make_ws(self):
+        from src.agent.workspace import WorkspaceManager
+        return WorkspaceManager(workspace_dir=self._tmpdir)
+
+    @pytest.mark.asyncio
+    async def test_returns_error_when_no_workspace_manager(self):
+        from src.agent.builtins.mesh_tool import update_workspace
+        result = await update_workspace(
+            filename="HEARTBEAT.md", content="rules",
+            workspace_manager=None, mesh_client=None,
+        )
+        assert "error" in result
+        assert "workspace_manager" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_blocks_read_only_files(self):
+        from src.agent.builtins.mesh_tool import update_workspace
+        ws = self._make_ws()
+        for name in ("SOUL.md", "AGENTS.md", "MEMORY.md"):
+            result = await update_workspace(
+                filename=name, content="hacked",
+                workspace_manager=ws, mesh_client=None,
+            )
+            assert "error" in result, f"Expected error for {name}"
+
+    @pytest.mark.asyncio
+    async def test_writes_heartbeat_md(self):
+        from src.agent.builtins.mesh_tool import update_workspace
+        ws = self._make_ws()
+        result = await update_workspace(
+            filename="HEARTBEAT.md", content="# My Rules\nCheck inbox",
+            workspace_manager=ws, mesh_client=None,
+        )
+        assert result.get("updated") is True
+        from pathlib import Path
+        content = (Path(self._tmpdir) / "HEARTBEAT.md").read_text()
+        assert "Check inbox" in content
+
+    @pytest.mark.asyncio
+    async def test_writes_user_md(self):
+        from src.agent.builtins.mesh_tool import update_workspace
+        ws = self._make_ws()
+        result = await update_workspace(
+            filename="USER.md", content="# User\nPrefers short answers",
+            workspace_manager=ws, mesh_client=None,
+        )
+        assert result.get("updated") is True
+
+    @pytest.mark.asyncio
+    async def test_sanitizes_content(self):
+        from src.agent.builtins.mesh_tool import update_workspace
+        ws = self._make_ws()
+        result = await update_workspace(
+            filename="HEARTBEAT.md", content="clean\u200Bvalue\u202Ehere",
+            workspace_manager=ws, mesh_client=None,
+        )
+        assert result.get("updated") is True
+        from pathlib import Path
+        content = (Path(self._tmpdir) / "HEARTBEAT.md").read_text()
+        assert "\u200B" not in content
+        assert "\u202E" not in content
+
+    @pytest.mark.asyncio
+    async def test_notify_no_changes(self):
+        from src.agent.builtins.mesh_tool import update_workspace
+        ws = self._make_ws()
+        from pathlib import Path
+        (Path(self._tmpdir) / "HEARTBEAT.md").write_text("same content")
+        mc = AsyncMock()
+        mc.agent_id = "test_agent"
+        await update_workspace(
+            filename="HEARTBEAT.md", content="same content",
+            workspace_manager=ws, mesh_client=mc,
+        )
+        mc.notify_user.assert_called_once()
+        msg = mc.notify_user.call_args[0][0]
+        assert "no changes" in msg.lower()
+        assert "test_agent" in msg
+
+    @pytest.mark.asyncio
+    async def test_notify_initialized(self):
+        from src.agent.builtins.mesh_tool import update_workspace
+        ws = self._make_ws()
+        # Default scaffold content should trigger "initialized"
+        mc = AsyncMock()
+        mc.agent_id = "test_agent"
+        await update_workspace(
+            filename="HEARTBEAT.md", content="# Custom Rules\nDo things",
+            workspace_manager=ws, mesh_client=mc,
+        )
+        mc.notify_user.assert_called_once()
+        msg = mc.notify_user.call_args[0][0]
+        assert "initialized" in msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_notify_updated(self):
+        from src.agent.builtins.mesh_tool import update_workspace
+        ws = self._make_ws()
+        from pathlib import Path
+        # Write non-default content first
+        (Path(self._tmpdir) / "USER.md").write_text("# User\nLikes Python")
+        mc = AsyncMock()
+        mc.agent_id = "bot"
+        await update_workspace(
+            filename="USER.md", content="# User\nLikes Python and Rust",
+            workspace_manager=ws, mesh_client=mc,
+        )
+        mc.notify_user.assert_called_once()
+        msg = mc.notify_user.call_args[0][0]
+        assert "updated" in msg.lower()
+        assert "bot" in msg
+
+    @pytest.mark.asyncio
+    async def test_write_succeeds_if_notify_fails(self):
+        from src.agent.builtins.mesh_tool import update_workspace
+        ws = self._make_ws()
+        mc = AsyncMock()
+        mc.agent_id = "test"
+        mc.notify_user = AsyncMock(side_effect=RuntimeError("notify down"))
+        result = await update_workspace(
+            filename="HEARTBEAT.md", content="# Rules",
+            workspace_manager=ws, mesh_client=mc,
+        )
+        # Write should still succeed even though notification failed
+        assert result.get("updated") is True
+
+
 # ── http_tool ────────────────────────────────────────────────
 
 
@@ -1193,3 +1386,59 @@ class TestLLMClientEmbeddingModel:
 
         llm = LLMClient(mesh_url="http://localhost:8420", agent_id="test")
         assert llm.embedding_model == ""
+
+
+# ── artifact path traversal ──────────────────────────────────
+
+
+class TestArtifactPathTraversal:
+    @pytest.mark.asyncio
+    async def test_path_traversal_blocked(self):
+        """save_artifact rejects names that escape the artifacts dir."""
+        from src.agent.builtins.mesh_tool import save_artifact
+
+        ws = MagicMock()
+        ws.root = tempfile.mkdtemp()
+        try:
+            result = await save_artifact(
+                name="../../escape.txt", content="pwned",
+                workspace_manager=ws, mesh_client=None,
+            )
+            assert "error" in result
+            assert "Invalid artifact name" in result["error"]
+        finally:
+            shutil.rmtree(ws.root, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_normal_artifact_allowed(self):
+        """save_artifact accepts valid names."""
+        from src.agent.builtins.mesh_tool import save_artifact
+
+        ws = MagicMock()
+        ws.root = tempfile.mkdtemp()
+        try:
+            result = await save_artifact(
+                name="report.txt", content="hello",
+                workspace_manager=ws, mesh_client=None,
+            )
+            assert "error" not in result
+            assert result["saved"] is True
+            assert result["name"] == "report.txt"
+        finally:
+            shutil.rmtree(ws.root, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_absolute_path_blocked(self):
+        """save_artifact rejects absolute paths."""
+        from src.agent.builtins.mesh_tool import save_artifact
+
+        ws = MagicMock()
+        ws.root = tempfile.mkdtemp()
+        try:
+            result = await save_artifact(
+                name="/etc/passwd", content="pwned",
+                workspace_manager=ws, mesh_client=None,
+            )
+            assert "error" in result
+        finally:
+            shutil.rmtree(ws.root, ignore_errors=True)

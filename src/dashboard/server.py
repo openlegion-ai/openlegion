@@ -693,7 +693,7 @@ def create_dashboard_router(
             error = cron_scheduler._validate_schedule(body["schedule"])
             if error:
                 raise HTTPException(status_code=400, detail=error)
-        job = cron_scheduler.update_job(job_id, **body)
+        job = await cron_scheduler.update_job(job_id, **body)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         return {"status": "updated", "job_id": job_id}
@@ -702,7 +702,7 @@ def create_dashboard_router(
     async def api_cron_pause(job_id: str) -> dict:
         if cron_scheduler is None:
             raise HTTPException(status_code=503, detail="Cron scheduler not available")
-        if not cron_scheduler.pause_job(job_id):
+        if not await cron_scheduler.pause_job(job_id):
             raise HTTPException(status_code=404, detail="Job not found")
         return {"paused": True, "job_id": job_id}
 
@@ -710,7 +710,7 @@ def create_dashboard_router(
     async def api_cron_resume(job_id: str) -> dict:
         if cron_scheduler is None:
             raise HTTPException(status_code=503, detail="Cron scheduler not available")
-        if not cron_scheduler.resume_job(job_id):
+        if not await cron_scheduler.resume_job(job_id):
             raise HTTPException(status_code=404, detail="Job not found")
         return {"resumed": True, "job_id": job_id}
 

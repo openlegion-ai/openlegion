@@ -78,6 +78,31 @@ def test_get_tool_definitions():
     assert "n" not in defs[0]["function"]["parameters"]["required"]
 
 
+def test_get_tool_definitions_enum():
+    """Enum values in parameters are passed through to tool definitions."""
+    @skill(
+        name="enum_test",
+        description="test enum",
+        parameters={
+            "choice": {
+                "type": "string",
+                "enum": ["opt_a", "opt_b"],
+                "description": "pick one",
+            },
+        },
+    )
+    def dummy(choice: str):
+        return {}
+
+    registry = SkillRegistry.__new__(SkillRegistry)
+    registry.skills = dict(_skill_staging)
+
+    defs = registry.get_tool_definitions()
+    assert len(defs) == 1
+    props = defs[0]["function"]["parameters"]["properties"]
+    assert props["choice"]["enum"] == ["opt_a", "opt_b"]
+
+
 def test_list_skills():
     @skill(name="a", description="a", parameters={})
     def a():

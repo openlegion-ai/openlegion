@@ -13,14 +13,30 @@ from src.agent.skills import skill
 _ALLOWED_ROOT = "/data"
 _MAX_READ = 500_000
 
+# Workspace identity files that must not be written via write_file.
+# Agents should use the update_workspace tool for writable files
+# (HEARTBEAT.md, USER.md) and cannot modify the rest (SOUL.md, AGENTS.md).
+_PROTECTED_WORKSPACE_FILES = frozenset({
+    "SOUL.md", "AGENTS.md", "HEARTBEAT.md", "USER.md", "MEMORY.md",
+})
+
 
 def _safe_path(path: str) -> Path:
     """Resolve a path and ensure it stays within the allowed root."""
     resolved = Path(_ALLOWED_ROOT, path).resolve()
     root = Path(_ALLOWED_ROOT).resolve()
-    if not str(resolved).startswith(str(root)):
+    if not resolved.is_relative_to(root):
         raise ValueError(f"Path escapes allowed root: {path}")
     return resolved
+
+
+def _is_protected_workspace_file(resolved: Path) -> bool:
+    """Check if a resolved path points to a protected workspace file."""
+    workspace_root = Path(_ALLOWED_ROOT, "workspace").resolve()
+    if not resolved.is_relative_to(workspace_root):
+        return False
+    relative = resolved.relative_to(workspace_root)
+    return relative.name in _PROTECTED_WORKSPACE_FILES and len(relative.parts) == 1
 
 
 @skill(
@@ -73,6 +89,14 @@ def read_file(path: str, offset: int = 0, limit: int = 0) -> dict:
 def write_file(path: str, content: str, append: bool = False) -> dict:
     """Write or append content to a file."""
     safe = _safe_path(path)
+    if _is_protected_workspace_file(safe):
+        return {
+            "error": (
+                f"Cannot write to workspace file '{safe.name}' directly. "
+                "Use the update_workspace tool for HEARTBEAT.md and USER.md. "
+                "SOUL.md and AGENTS.md are read-only (human-controlled)."
+            ),
+        }
     safe.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if append else "w"
     with safe.open(mode) as f:

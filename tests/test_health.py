@@ -72,6 +72,41 @@ class TestEphemeralCleanup:
         )
 
 
+class TestHealthRestartMissingConfig:
+    @pytest.mark.asyncio
+    async def test_restart_skipped_when_no_config(self):
+        """Restart with missing agent metadata sets status to 'failed' and does NOT call start_agent."""
+        monitor = _make_monitor({})  # empty agents dict — no config
+        monitor.register("ghost-agent")
+        health = monitor.agents["ghost-agent"]
+        health.consecutive_failures = 3
+        health.status = "unhealthy"
+
+        await monitor._try_restart("ghost-agent")
+
+        assert health.status == "failed"
+        monitor.runtime.start_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_restart_succeeds_with_config(self):
+        """Restart with valid agent metadata proceeds normally."""
+        monitor = _make_monitor({
+            "good-agent": {"role": "coder", "skills_dir": "/skills", "system_prompt": "You are a coder."},
+        })
+        monitor.register("good-agent")
+        health = monitor.agents["good-agent"]
+        health.consecutive_failures = 3
+        health.status = "unhealthy"
+        monitor.runtime.start_agent.return_value = "http://localhost:8401"
+        monitor.runtime.wait_for_agent = AsyncMock(return_value=True)
+
+        await monitor._try_restart("good-agent")
+
+        monitor.runtime.start_agent.assert_called_once()
+        assert health.status == "healthy"
+        assert health.restart_count == 1
+
+
 class TestHealthRecoveryEvent:
     @pytest.mark.asyncio
     async def test_recovery_emits_health_change(self):

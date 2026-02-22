@@ -99,6 +99,16 @@ class CostTracker:
         )
         self.db.commit()
 
+        # Post-hoc budget enforcement: warn if this call pushed us over
+        budget = self.budgets.get(agent)
+        if budget:
+            daily_spent = self.get_spend(agent, "today").get("total_cost", 0)
+            if daily_spent > budget["daily_usd"]:
+                logger.warning(
+                    "Agent '%s' exceeded daily budget: $%.4f / $%.2f",
+                    agent, daily_spent, budget["daily_usd"],
+                )
+
         return cost
 
     def check_budget(self, agent: str) -> dict:
