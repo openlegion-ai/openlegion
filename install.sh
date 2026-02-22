@@ -40,8 +40,12 @@ if [ "$(id -u)" -eq 0 ]; then
     echo ""
 fi
 
-# ── Check Python ──────────────────────────────────────────────
+# ── Check all prerequisites ──────────────────────────────────
+# Collect ALL failures before exiting so users can fix everything in one pass.
 
+ERRORS=()
+
+# Python
 PYTHON=""
 for cmd in python3 python; do
     if command -v "$cmd" &>/dev/null; then
@@ -56,78 +60,87 @@ for cmd in python3 python; do
 done
 
 if [ -z "$PYTHON" ]; then
-    fail "Python 3.10+ is required but not found.
+    ERRORS+=("Python 3.10+ is required but not found.
     Install it:
       macOS:   brew install python@3
       Ubuntu:  sudo apt install python3
       Windows: https://python.org/downloads
-      Other:   https://github.com/pyenv/pyenv"
-fi
-info "Python $version ($PYTHON)"
+      Other:   https://github.com/pyenv/pyenv")
+else
+    info "Python $version ($PYTHON)"
 
-# ── Check pip ─────────────────────────────────────────────────
-
-if ! "$PYTHON" -m pip --version &>/dev/null; then
-    fail "pip is not installed.
+    # pip (only check if Python was found)
+    if ! "$PYTHON" -m pip --version &>/dev/null; then
+        ERRORS+=("pip is not installed.
     Install it:
       macOS:   python3 -m ensurepip --upgrade
       Ubuntu:  sudo apt install python3-pip
-      Other:   https://pip.pypa.io/en/stable/installation/"
-fi
-info "pip available"
-
-# ── Check venv module (Debian/Ubuntu ship it separately) ──────
-
-if ! "$PYTHON" -m venv --help &>/dev/null 2>&1; then
-    # Detect Debian/Ubuntu for a helpful message
-    if [ -f /etc/debian_version ]; then
-        fail "python3-venv is not installed (required on Debian/Ubuntu).
-    Install it:
-      sudo apt install python3-venv"
+      Other:   https://pip.pypa.io/en/stable/installation/")
     else
-        fail "Python venv module is not available.
-    Install it for your platform and retry."
+        info "pip available"
+    fi
+
+    # venv module (only check if Python was found)
+    if ! "$PYTHON" -m venv --help &>/dev/null 2>&1; then
+        if [ -f /etc/debian_version ]; then
+            ERRORS+=("python3-venv is not installed (required on Debian/Ubuntu).
+    Install it:
+      sudo apt install python3-venv")
+        else
+            ERRORS+=("Python venv module is not available.
+    Install it for your platform and retry.")
+        fi
     fi
 fi
 
-# ── Check Docker ──────────────────────────────────────────────
-
+# Docker
 if ! command -v docker &>/dev/null; then
-    fail "Docker is not installed.
+    ERRORS+=("Docker is not installed.
     Install it:
       macOS/Windows: https://docker.com/products/docker-desktop
-      Linux:         sudo apt install docker.io"
-fi
-
-if ! docker info &>/dev/null 2>&1; then
-    # Distinguish "not running" from "permission denied"
+      Linux:         sudo apt install docker.io")
+elif ! docker info &>/dev/null 2>&1; then
     if docker info 2>&1 | grep -qi "permission denied"; then
         if [ "$(uname)" = "Linux" ]; then
-            fail "Docker permission denied. Add your user to the docker group:
+            ERRORS+=("Docker permission denied. Add your user to the docker group:
       sudo usermod -aG docker \$USER && newgrp docker
-    Then run this installer again (without sudo)."
+    Then run this installer again (without sudo).")
         else
-            fail "Docker permission denied. Make sure Docker Desktop is running."
+            ERRORS+=("Docker permission denied. Make sure Docker Desktop is running.")
         fi
     else
-        fail "Docker is installed but not running.
+        ERRORS+=("Docker is installed but not running.
     Start it:
       macOS/Windows: Open Docker Desktop
-      Linux:         sudo systemctl start docker"
+      Linux:         sudo systemctl start docker")
     fi
+else
+    info "Docker is running"
 fi
-info "Docker is running"
 
-# ── Check Git ─────────────────────────────────────────────────
-
+# Git
 if ! command -v git &>/dev/null; then
-    fail "Git is not installed.
+    ERRORS+=("Git is not installed.
     Install it:
       macOS:   xcode-select --install
       Ubuntu:  sudo apt install git
-      Windows: https://git-scm.com"
+      Windows: https://git-scm.com")
+else
+    info "Git available"
 fi
-info "Git available"
+
+# Report all failures at once
+if [ ${#ERRORS[@]} -gt 0 ]; then
+    echo ""
+    echo -e "  ${RED}Found ${#ERRORS[@]} issue(s):${NC}"
+    echo ""
+    for err in "${ERRORS[@]}"; do
+        echo -e "  ${RED}✗${NC} $err"
+        echo ""
+    done
+    echo -e "  Fix the above and run ${BOLD}./install.sh${NC} again."
+    exit 1
+fi
 
 # ── Detect platform for venv paths ───────────────────────────
 # Windows (Git Bash/MSYS2) uses Scripts/, Unix uses bin/
