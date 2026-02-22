@@ -200,33 +200,21 @@ class SetupWizard:
         selected_model = models[model_choice - 1]
         click.echo(f"  Selected: {selected_model}\n")
 
-        # Optional custom API base URL (for OpenAI-compatible gateways like Vercel AI Gateway)
-        base_url = self._prompt_with_back(
-            "  Custom API base URL (press Enter to skip, e.g. https://gateway.ai.vercel.app/v1)",
-            default="",
-            show_default=False,
-        )
-        if base_url is None:
-            return None
-        base_url = base_url.strip()
-
         # API key with validation
         key_name = f"{provider}_api_key"
         existing_key = os.environ.get(f"OPENLEGION_CRED_{key_name.upper()}", "")
         if existing_key:
             click.echo(f"  API key already set for {provider}.")
             if click.confirm("  Replace it?", default=False):
-                api_key = self._prompt_and_validate_key(provider, _PROVIDERS[choice - 1]["label"], base_url=base_url)
+                api_key = self._prompt_and_validate_key(provider, _PROVIDERS[choice - 1]["label"])
                 if api_key:
                     _set_env_key(key_name, api_key)
         else:
-            api_key = self._prompt_and_validate_key(provider, _PROVIDERS[choice - 1]["label"], base_url=base_url)
+            api_key = self._prompt_and_validate_key(provider, _PROVIDERS[choice - 1]["label"])
             if api_key:
                 _set_env_key(key_name, api_key)
 
-        # Store custom base URL if provided
-        if base_url:
-            _set_env_key(f"{provider}_api_base", base_url)
+        click.echo("  Tip: Use /addkey or the dashboard to set a custom API base URL.\n")
 
         # Update default model in mesh config
         mesh_cfg: dict = {}
@@ -341,7 +329,7 @@ class SetupWizard:
 
     # ── API key validation ───────────────────────────────────
 
-    def _prompt_and_validate_key(self, provider: str, label: str, *, base_url: str = "") -> str:
+    def _prompt_and_validate_key(self, provider: str, label: str) -> str:
         """Prompt for API key with validation and retry loop. Returns the valid key."""
         max_attempts = 3
         for attempt in range(max_attempts):
@@ -351,7 +339,7 @@ class SetupWizard:
                 continue
 
             click.echo("  Validating API key...", nl=False)
-            valid = self._validate_api_key(provider, api_key.strip(), base_url=base_url)
+            valid = self._validate_api_key(provider, api_key.strip())
             if valid:
                 click.echo(" valid.\n")
                 return api_key.strip()
@@ -365,7 +353,7 @@ class SetupWizard:
                     return api_key.strip()
         return ""
 
-    def _validate_api_key(self, provider: str, api_key: str, *, base_url: str = "") -> bool:
+    def _validate_api_key(self, provider: str, api_key: str) -> bool:
         """Lightweight key check using litellm with minimal token usage."""
         validation_model = _VALIDATION_MODELS.get(provider)
         if not validation_model:
@@ -390,14 +378,13 @@ class SetupWizard:
             try:
                 if env_var:
                     os.environ[env_var] = api_key
-                kwargs: dict = {
-                    "model": validation_model,
-                    "messages": [{"role": "user", "content": "hi"}],
-                    "max_tokens": 1,
-                }
-                if base_url:
-                    kwargs["api_base"] = base_url
-                asyncio.run(litellm.acompletion(**kwargs))
+                asyncio.run(
+                    litellm.acompletion(
+                        model=validation_model,
+                        messages=[{"role": "user", "content": "hi"}],
+                        max_tokens=1,
+                    )
+                )
                 return True
             except litellm.AuthenticationError:
                 return False
