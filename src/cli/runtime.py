@@ -165,11 +165,6 @@ class RuntimeContext:
     # ── Private lifecycle steps ─────────────────────────────
 
     def _validate_prereqs(self) -> None:
-        agents_cfg = self.cfg.get("agents", {})
-        if not agents_cfg:
-            click.echo("No agents configured. Run: openlegion setup", err=True)
-            sys.exit(1)
-
         if not _check_docker_running():
             click.echo("Docker is not running. Please start Docker first.", err=True)
             sys.exit(1)
@@ -470,28 +465,29 @@ class RuntimeContext:
         echo_ok(f"Isolation: {self._backend_label}")
         echo_ok(f"Dashboard: http://localhost:{mesh_port}/dashboard")
 
-        # Wait for agents
-        async def _wait_all_agents():
-            async def _wait_one(aid):
-                ready = await self.runtime.wait_for_agent(aid, timeout=60)
-                return aid, ready
-            return await asyncio.gather(*[_wait_one(aid) for aid in agents_cfg])
+        if agents_cfg:
+            # Wait for agents
+            async def _wait_all_agents():
+                async def _wait_one(aid):
+                    ready = await self.runtime.wait_for_agent(aid, timeout=60)
+                    return aid, ready
+                return await asyncio.gather(*[_wait_one(aid) for aid in agents_cfg])
 
-        agent_results = asyncio.run(_wait_all_agents())
+            agent_results = asyncio.run(_wait_all_agents())
 
-        echo_header("Agents")
-        default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-        for agent_id, ready in agent_results:
-            agent_cfg = agents_cfg.get(agent_id, {})
-            model = agent_cfg.get("model", default_model)
-            browser = agent_cfg.get("browser_backend", "basic") or "basic"
-            if ready:
-                echo_ok(f"{agent_id:<20} ready     model: {model:<20} browser: {browser}")
-            else:
-                logs = self.runtime.get_logs(agent_id, tail=15)
-                echo_fail(f"{agent_id:<20} failed to start")
-                if logs:
-                    click.echo(logs, err=True)
+            echo_header("Agents")
+            default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+            for agent_id, ready in agent_results:
+                agent_cfg = agents_cfg.get(agent_id, {})
+                model = agent_cfg.get("model", default_model)
+                browser = agent_cfg.get("browser_backend", "basic") or "basic"
+                if ready:
+                    echo_ok(f"{agent_id:<20} ready     model: {model:<20} browser: {browser}")
+                else:
+                    logs = self.runtime.get_logs(agent_id, tail=15)
+                    echo_fail(f"{agent_id:<20} failed to start")
+                    if logs:
+                        click.echo(logs, err=True)
 
     def _create_cron_scheduler(self) -> None:
         from src.host.cron import CronScheduler
@@ -636,7 +632,6 @@ class RuntimeContext:
     def _print_ready(self) -> None:
         agents_cfg = self.cfg.get("agents", {})
         active_agents = list(agents_cfg.keys())
-        active_agent = active_agents[0]
 
         # Show channel status
         if self.channel_manager and self.channel_manager.active:
@@ -647,9 +642,15 @@ class RuntimeContext:
             for instruction in self.channel_manager.pairing_instructions:
                 click.echo(click.style("  \u26a0 ", fg="yellow") + instruction.strip())
 
-        click.echo(f"\nChatting with '{active_agent}'.", nl=False)
-        if len(active_agents) > 1:
-            click.echo(" Use @agent to direct messages. /help for commands.")
+        if active_agents:
+            active_agent = active_agents[0]
+            click.echo(f"\nChatting with '{active_agent}'.", nl=False)
+            if len(active_agents) > 1:
+                click.echo(" Use @agent to direct messages. /help for commands.")
+            else:
+                click.echo(" /help for commands.")
         else:
-            click.echo(" /help for commands.")
+            mesh_port = self.cfg["mesh"]["port"]
+            click.echo(f"\nNo agents running. Add one with /add or via the dashboard:")
+            click.echo(f"  http://localhost:{mesh_port}/dashboard")
         click.echo("")

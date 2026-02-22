@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import os
 from typing import TYPE_CHECKING
 
@@ -51,9 +52,12 @@ class REPLSession:
             ("/remove [name]",    "Remove an agent"),
         ]),
         ("System", [
+            ("/blackboard [cmd]", "View/edit blackboard entries"),
+            ("/queue",            "Show agent queue status"),
+            ("/workflow [cmd]",   "List or trigger workflows"),
             ("/costs",            "Show spend, context, and model health"),
+            ("/cron [cmd]",       "Manage cron jobs"),
             ("/debug [trace]",    "Show recent request traces"),
-            ("/cron [del id]",    "List or delete cron jobs"),
             ("/addkey [service]", "Store a credential"),
             ("/help",             "Show this help"),
             ("/quit",             "Exit and stop runtime"),
@@ -62,44 +66,54 @@ class REPLSession:
 
     def __init__(self, ctx: RuntimeContext):
         self.ctx = ctx
-        self.current = list(ctx.agents.keys())[0]
+        self.current = list(ctx.agents.keys())[0] if ctx.agents else None
         self._commands = {
-            "/quit":      (self._cmd_quit,      "Exit and stop runtime"),
-            "/exit":      (self._cmd_quit,      "Exit and stop runtime"),
-            "/agents":    (self._cmd_status,    "Show agents, models, and state"),
-            "/use":       (self._cmd_use,       "Switch active agent"),
-            "/add":       (self._cmd_add,       "Add a new agent"),
-            "/edit":      (self._cmd_edit,      "Change agent settings"),
-            "/remove":    (self._cmd_remove,    "Remove an agent"),
-            "/status":    (self._cmd_status,    "Show agents, models, and state"),
-            "/broadcast": (self._cmd_broadcast, "Send to all agents"),
-            "/steer":     (self._cmd_steer,     "Redirect busy agent"),
-            "/costs":     (self._cmd_costs,     "Show spend, context, and model health"),
-            "/debug":     (self._cmd_debug,     "Show recent request traces"),
-            "/cron":      (self._cmd_cron,      "List or delete cron jobs"),
-            "/addkey":    (self._cmd_addkey,     "Store a credential"),
-            "/reset":     (self._cmd_reset,     "Clear conversation history"),
-            "/help":      (self._cmd_help,      "Show this help"),
+            "/quit":       (self._cmd_quit,       "Exit and stop runtime"),
+            "/exit":       (self._cmd_quit,       "Exit and stop runtime"),
+            "/agents":     (self._cmd_status,     "Show agents, models, and state"),
+            "/use":        (self._cmd_use,        "Switch active agent"),
+            "/add":        (self._cmd_add,        "Add a new agent"),
+            "/edit":       (self._cmd_edit,       "Change agent settings"),
+            "/remove":     (self._cmd_remove,     "Remove an agent"),
+            "/status":     (self._cmd_status,     "Show agents, models, and state"),
+            "/broadcast":  (self._cmd_broadcast,  "Send to all agents"),
+            "/steer":      (self._cmd_steer,      "Redirect busy agent"),
+            "/blackboard": (self._cmd_blackboard, "View/edit blackboard entries"),
+            "/queue":      (self._cmd_queue,      "Show agent queue status"),
+            "/workflow":   (self._cmd_workflow,   "List or trigger workflows"),
+            "/costs":      (self._cmd_costs,      "Show spend, context, and model health"),
+            "/debug":      (self._cmd_debug,      "Show recent request traces"),
+            "/cron":       (self._cmd_cron,       "Manage cron jobs"),
+            "/addkey":     (self._cmd_addkey,     "Store a credential"),
+            "/reset":      (self._cmd_reset,      "Clear conversation history"),
+            "/help":       (self._cmd_help,       "Show this help"),
         }
 
     def run(self) -> None:
         """Main REPL loop."""
         while True:
             try:
-                user_input = input(user_prompt(self.current)).strip()
+                if self.current:
+                    user_input = input(user_prompt(self.current)).strip()
+                else:
+                    user_input = input("openlegion> ").strip()
             except EOFError:
                 break
 
             if not user_input:
                 continue
 
-            target, message = self._parse_input(user_input)
-            if target is None:
+            # Commands work regardless of active agent
+            if user_input.startswith("/"):
+                if self._dispatch_command(user_input) == "quit":
+                    break
                 continue
 
-            if message.startswith("/"):
-                if self._dispatch_command(message) == "quit":
-                    break
+            target, message = self._parse_input(user_input)
+            if target is None:
+                if message:
+                    # Bare text with no active agent — _parse_input returned (None, text)
+                    click.echo("No active agent. Use /add to create one, or @agent to direct a message.")
                 continue
 
             from src.shared.trace import new_trace_id
@@ -139,9 +153,13 @@ class REPLSession:
         return "quit"
 
     def _cmd_use(self, arg: str) -> None:
+        if not self.ctx.agents:
+            click.echo("No agents available. Use /add to create one.")
+            return
         available = ", ".join(self.ctx.agents)
         if not arg.strip():
-            click.echo(f"Usage: /use <agent>  (current: {self.current})")
+            current_str = self.current or "none"
+            click.echo(f"Usage: /use <agent>  (current: {current_str})")
             click.echo(f"  Available: {available}")
             return
         new_agent = arg.strip()
@@ -195,6 +213,9 @@ class REPLSession:
         ready = asyncio.run(self.ctx.runtime.wait_for_agent(new_name, timeout=60))
         if ready:
             click.echo(f"Agent '{new_name}' ready.")
+            if self.current is None:
+                self.current = new_name
+                click.echo(f"Now chatting with '{self.current}'.")
             if self.ctx.event_bus:
                 self.ctx.event_bus.emit("agent_state", agent=new_name,
                     data={"state": "added", "role": new_desc, "ready": True})
@@ -205,6 +226,9 @@ class REPLSession:
                     data={"state": "added", "ready": False})
 
     def _cmd_status(self, arg: str) -> None:
+        if not self.ctx.agents:
+            click.echo("  No agents running. Use /add to create one.")
+            return
         agents_cfg = self.ctx.cfg.get("agents", {})
         default_model = self.ctx.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
         for name in self.ctx.agents:
@@ -220,6 +244,9 @@ class REPLSession:
                 click.echo(f"  {name:<20} unreachable")
 
     def _cmd_broadcast(self, arg: str) -> None:
+        if not self.ctx.agents:
+            click.echo("No agents to broadcast to. Use /add to create one.")
+            return
         if not arg.strip():
             click.echo("Usage: /broadcast <message>")
             return
@@ -247,6 +274,9 @@ class REPLSession:
                 click.echo(f"[{aid}] {response}\n")
 
     def _cmd_steer(self, arg: str) -> None:
+        if self.current is None:
+            click.echo("No active agent. Use /add to create one first.")
+            return
         if not arg.strip():
             click.echo("Usage: /steer <message>")
             return
@@ -350,20 +380,196 @@ class REPLSession:
             else:
                 click.echo(f"  Job not found: {job_id}")
             return
+        if parts and parts[0] == "pause":
+            if len(parts) < 2:
+                click.echo("Usage: /cron pause <job_id>")
+                return
+            job_id = parts[1].strip()
+            if self.ctx.cron_scheduler.pause_job(job_id):
+                click.echo(f"  Paused cron job: {job_id}")
+            else:
+                click.echo(f"  Job not found: {job_id}")
+            return
+        if parts and parts[0] == "resume":
+            if len(parts) < 2:
+                click.echo("Usage: /cron resume <job_id>")
+                return
+            job_id = parts[1].strip()
+            if self.ctx.cron_scheduler.resume_job(job_id):
+                click.echo(f"  Resumed cron job: {job_id}")
+            else:
+                click.echo(f"  Job not found: {job_id}")
+            return
+        if parts and parts[0] == "run":
+            if len(parts) < 2:
+                click.echo("Usage: /cron run <job_id>")
+                return
+            job_id = parts[1].strip()
+            if job_id not in self.ctx.cron_scheduler.jobs:
+                click.echo(f"  Job not found: {job_id}")
+                return
+            click.echo(f"  Running job {job_id}...")
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self.ctx.cron_scheduler.run_job(job_id),
+                    self.ctx.dispatch_loop,
+                )
+                result = future.result(timeout=120)
+                if result:
+                    click.echo(f"  {result[:200]}")
+                else:
+                    click.echo("  Job completed (no output).")
+            except Exception as e:
+                click.echo(f"  Error: {e}")
+            return
         jobs = self.ctx.cron_scheduler.list_jobs()
         if not jobs:
             click.echo("  No cron jobs configured.")
             return
         click.echo()
-        click.echo(f"  {'ID':<24} {'Agent':<16} {'Schedule':<16} Status")
-        click.echo(f"  {'-'*24} {'-'*16} {'-'*16} {'-'*12}")
+        click.echo(f"  {'ID':<24} {'Agent':<16} {'Schedule':<16} {'Status':<14} Last run")
+        click.echo(f"  {'-'*24} {'-'*16} {'-'*16} {'-'*14} {'-'*20}")
         for j in jobs:
             status = "active" if j["enabled"] else "paused"
             hb = " [heartbeat]" if j.get("heartbeat") else ""
-            click.echo(f"  {j['id']:<24} {j['agent']:<16} {j['schedule']:<16} {status}{hb}")
+            last_run = j.get("last_run", "")
+            if last_run:
+                # Show just date+time, truncate timezone/microseconds
+                last_run = last_run[:19].replace("T", " ")
+            else:
+                last_run = "never"
+            click.echo(f"  {j['id']:<24} {j['agent']:<16} {j['schedule']:<16} {status + hb:<14} {last_run}")
             if j.get("message"):
                 click.echo(f"  {'':24} {j['message'][:60]}")
         click.echo()
+
+    def _cmd_blackboard(self, arg: str) -> None:
+        if not self.ctx.blackboard:
+            click.echo("Blackboard not available.")
+            return
+        parts = arg.strip().split(None, 1)
+        sub = parts[0] if parts else "list"
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        _BB_SUBCMDS = {"list", "ls", "get", "set", "del", "delete", "rm"}
+
+        if sub not in _BB_SUBCMDS:
+            # Treat entire arg as a prefix filter for list
+            rest = arg.strip()
+            sub = "list"
+
+        if sub in ("list", "ls"):
+            entries = self.ctx.blackboard.list_by_prefix(rest)
+            if not entries:
+                click.echo("  No entries" + (f" matching '{rest}'" if rest else "") + ".")
+                return
+            click.echo()
+            for entry in entries:
+                val = json.dumps(entry.value, default=str)
+                if len(val) > 80:
+                    val = val[:80] + "..."
+                click.echo(f"  {entry.key:<40} {val}")
+            click.echo()
+        elif sub == "get":
+            if not rest:
+                click.echo("Usage: /blackboard get <key>")
+                return
+            entry = self.ctx.blackboard.read(rest)
+            if not entry:
+                click.echo(f"  Key not found: {rest}")
+                return
+            click.echo(f"\n  Key:        {entry.key}")
+            click.echo(f"  Written by: {entry.written_by}")
+            click.echo(f"  Version:    {entry.version}")
+            if entry.updated_at:
+                click.echo(f"  Updated:    {entry.updated_at}")
+            val_str = json.dumps(entry.value, indent=2, default=str)
+            val_lines = val_str.split("\n")
+            click.echo(f"  Value:      {val_lines[0]}")
+            for vl in val_lines[1:]:
+                click.echo(f"              {vl}")
+            click.echo()
+        elif sub == "set":
+            key_and_val = rest.split(None, 1)
+            if len(key_and_val) < 2:
+                click.echo("Usage: /blackboard set <key> <json>")
+                return
+            key, val_str = key_and_val
+            try:
+                value = json.loads(val_str)
+            except json.JSONDecodeError:
+                click.echo("  Invalid JSON value.")
+                return
+            if not isinstance(value, dict):
+                value = {"value": value}
+            self.ctx.blackboard.write(key, value, written_by="cli")
+            click.echo(f"  Written: {key}")
+        elif sub in ("del", "delete", "rm"):
+            if not rest:
+                click.echo("Usage: /blackboard del <key>")
+                return
+            try:
+                self.ctx.blackboard.delete(rest, deleted_by="cli")
+                click.echo(f"  Deleted: {rest}")
+            except ValueError as e:
+                click.echo(f"  Error: {e}")
+
+    def _cmd_queue(self, arg: str) -> None:
+        if not self.ctx.lane_manager:
+            click.echo("Lane manager not available.")
+            return
+        status = self.ctx.lane_manager.get_status()
+        if not status:
+            click.echo("  No agent queues.")
+            return
+        click.echo()
+        for agent, info in sorted(status.items()):
+            state = "busy" if info.get("busy") else "idle"
+            queued = info.get("queued", 0)
+            click.echo(f"  {agent:<20} {state:<10} {queued} queued")
+        click.echo()
+
+    def _cmd_workflow(self, arg: str) -> None:
+        if not self.ctx.orchestrator:
+            click.echo("Orchestrator not available.")
+            return
+        parts = arg.strip().split(None, 1)
+        sub = parts[0] if parts else "list"
+
+        if sub in ("list", "ls", ""):
+            workflows = self.ctx.orchestrator.workflows
+            if not workflows:
+                click.echo("  No workflows loaded.")
+            else:
+                click.echo("\n  Workflows:")
+                for name, wf in workflows.items():
+                    steps = len(wf.steps) if hasattr(wf, "steps") else "?"
+                    click.echo(f"    {name:<24} {steps} steps")
+
+            active = self.ctx.orchestrator.active_executions
+            if active:
+                click.echo("\n  Active executions:")
+                for eid, ex in active.items():
+                    status = ex.status if hasattr(ex, "status") else "running"
+                    wf_name = ex.workflow.name if hasattr(ex, "workflow") else "?"
+                    click.echo(f"    {eid:<24} {wf_name:<20} {status}")
+            click.echo()
+        elif sub == "run":
+            wf_name = parts[1].strip() if len(parts) > 1 else ""
+            if not wf_name:
+                click.echo("Usage: /workflow run <name>")
+                return
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self.ctx.orchestrator.trigger_workflow(wf_name, {}),
+                    self.ctx.dispatch_loop,
+                )
+                exec_id = future.result(timeout=30)
+                click.echo(f"  Started workflow '{wf_name}' (execution: {exec_id})")
+            except Exception as e:
+                click.echo(f"  Error: {e}")
+        else:
+            click.echo("Usage: /workflow [list|run] ...")
 
     def _cmd_addkey(self, arg: str) -> None:
         if not arg.strip():
@@ -388,6 +594,9 @@ class REPLSession:
         click.echo(f"Credential '{service}' stored.")
 
     def _cmd_reset(self, arg: str) -> None:
+        if self.current is None:
+            click.echo("No active agent. Use /add to create one first.")
+            return
         try:
             self.ctx.transport.request_sync(self.current, "POST", "/chat/reset", timeout=5)
             click.echo(f"Conversation with '{self.current}' reset.")
@@ -397,6 +606,9 @@ class REPLSession:
     def _cmd_edit(self, arg: str) -> None:
         """Interactive property editor for an agent. Auto-applies changes."""
         name = arg.strip() if arg.strip() else self.current
+        if name is None:
+            click.echo("No active agent. Use /add to create one first.")
+            return
         if name not in self.ctx.agents:
             click.echo(f"Agent '{name}' not found.")
             return
@@ -545,6 +757,7 @@ class REPLSession:
             self.current = list(self.ctx.agents.keys())[0]
             click.echo(f"Switched to '{self.current}'.")
         elif not self.ctx.agents:
+            self.current = None
             click.echo("No agents remaining. Add one with /add.")
 
     def _cmd_help(self, arg: str) -> None:
