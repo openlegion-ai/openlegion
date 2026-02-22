@@ -83,7 +83,7 @@
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
               </template>
               <template x-if="tab.id === 'system'">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
               </template>
               <span x-text="tab.label"></span>
               <!-- Unread event count badge -->
@@ -182,7 +182,7 @@
           <template x-for="agent in agents" :key="agent.id">
             <div
               class="agent-card p-4 group relative overflow-hidden"
-              :class="agentStates[agent.id] === 'thinking' || agentStates[agent.id] === 'tool' ? 'pulse-border' : ''"
+              :class="['thinking', 'tool', 'streaming'].includes(agentStates[agent.id]) ? 'pulse-border' : ''"
             >
               <!-- Top accent stripe -->
               <div class="agent-card-accent" :class="'agent-color-' + agentColorIndex(agent.id)"></div>
@@ -260,14 +260,14 @@
                 </div>
                 <div class="stat-row" x-show="agentConfigs[agent.id]">
                   <span class="stat-label">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M12 2a4 4 0 0 0-4 4v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2h-2V6a4 4 0 0 0-4-4z"/></svg>
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
                     Model
                   </span>
                   <span class="stat-value text-gray-400" x-text="agentConfigs[agent.id]?.model || '-'"></span>
                 </div>
                 <div class="stat-row" x-show="queueStatus[agent.id]">
                   <span class="stat-label">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
                     Queue
                   </span>
                   <span class="stat-value"
@@ -291,7 +291,7 @@
                   Chat
                 </button>
                 <button @click="drillDown(agent.id)" class="action-btn action-btn-secondary">
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9"/></svg>
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
                   Manage
                 </button>
                 <button @click="restartAgent(agent.id)" class="action-btn action-btn-warn">
@@ -362,7 +362,7 @@
         <div class="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col">
           <div class="flex items-center justify-between px-5 py-3 border-b border-gray-800">
             <div class="flex items-center gap-3">
-              <div class="agent-avatar" :class="'agent-color-' + agentColorIndex(chatAgent || '')" style="width:1.75rem;height:1.75rem;font-size:0.6rem;border-radius:0.375rem;">
+              <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(chatAgent || '')">
                 <span x-text="agentInitials(chatAgent || '')"></span>
               </div>
               <h3 class="text-sm font-medium text-white">Chat with <span class="text-indigo-400" x-text="chatAgent"></span></h3>
@@ -588,7 +588,7 @@
           <div>
             <div class="flex items-center justify-between mb-5">
               <div class="flex items-center gap-3">
-                <div class="agent-avatar" :class="'agent-color-' + agentColorIndex(agentDetail.id)" style="width:2.5rem;height:2.5rem;font-size:0.9rem;">
+                <div class="agent-avatar agent-avatar-lg" :class="'agent-color-' + agentColorIndex(agentDetail.id)">
                   <span x-text="agentInitials(agentDetail.id)"></span>
                 </div>
                 <div>
@@ -608,11 +608,11 @@
                 </div>
               </div>
               <div class="flex items-center gap-2">
-                <button @click="openChat(selectedAgent)" class="action-btn action-btn-primary" style="padding:0.375rem 0.75rem;">
+                <button @click="openChat(selectedAgent)" class="action-btn action-btn-primary px-3 py-1.5">
                   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                   Chat
                 </button>
-                <button @click="restartAgent(selectedAgent)" class="action-btn action-btn-warn" style="padding:0.375rem 0.75rem;">
+                <button @click="restartAgent(selectedAgent)" class="action-btn action-btn-warn px-3 py-1.5">
                   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
                   Restart
                 </button>
