@@ -79,7 +79,7 @@
       </div>
       <div class="flex items-center gap-4">
         <!-- Fleet total cost (click to System > Costs) -->
-        <div class="text-xs text-gray-400 hidden sm:block cursor-pointer hover:text-gray-200 transition-colors" x-show="fleetTotalCost > 0" @click="systemView = 'costs'; switchTab('system')">
+        <div class="text-xs text-gray-400 hidden sm:block cursor-pointer hover:text-gray-200 transition-colors" x-show="fleetTotalCost > 0" @click="switchTab('system')">
           Today: <span class="text-gray-200 font-medium" x-text="formatCost(fleetTotalCost)"></span>
         </div>
         <!-- Connection indicator -->
@@ -542,15 +542,30 @@
                       : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
                   >
                     <span x-text="tab.label"></span>
-                    <span
-                      x-show="tab.file && identityFiles.find(f => f.name === tab.file)?.is_default"
-                      class="text-[9px] px-1 py-0 rounded-full bg-gray-600/50 text-gray-400 font-normal"
-                    >default</span>
+                    <!-- Access badge -->
+                    <span x-show="tab.access === 'user'"
+                      class="text-[9px] px-1 py-0 rounded-full bg-blue-900/40 text-blue-400 border border-blue-800/30 font-normal"
+                      title="Only you can edit this file"
+                    >User</span>
+                    <span x-show="tab.access === 'agent'"
+                      class="text-[9px] px-1 py-0 rounded-full bg-purple-900/40 text-purple-400 border border-purple-800/30 font-normal"
+                      title="The agent can update this file"
+                    >Agent</span>
+                    <span x-show="tab.access === 'auto'"
+                      class="text-[9px] px-1 py-0 rounded-full bg-gray-700/50 text-gray-500 border border-gray-600/30 font-normal"
+                      title="Auto-generated, read-only"
+                    >Auto</span>
                   </button>
                 </template>
               </div>
               <!-- Tab description -->
-              <div class="text-xs text-gray-500 mb-3" x-text="identityCurrentTab.desc"></div>
+              <div class="text-xs text-gray-500 mb-3">
+                <span x-text="identityCurrentTab.desc"></span>
+                <span
+                  x-show="identityCurrentTab.file && identityFiles.find(f => f.name === identityCurrentTab.file)?.is_default"
+                  class="inline-block ml-1.5 text-[9px] px-1 py-0 rounded-full bg-gray-600/50 text-gray-400 font-normal align-middle"
+                >default</span>
+              </div>
               <!-- Character budget bar (file tabs with a cap) -->
               <div x-show="identityCurrentTab.cap" class="mb-3">
                 <div class="flex justify-between items-center text-[11px] text-gray-500 mb-1">
@@ -1075,22 +1090,9 @@
 
       <!-- System (Costs + Infrastructure) -->
       <div x-show="activeTab === 'system'" x-cloak>
-        <!-- Sub-tab toggle -->
-        <div class="flex items-center justify-between mb-4">
-          <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
-            <button @click="systemView = 'costs'; fetchCosts()"
-              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
-              :class="systemView === 'costs' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-            >Costs</button>
-            <button @click="systemView = 'infrastructure'; fetchSettings()"
-              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
-              :class="systemView === 'infrastructure' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-            >Infrastructure</button>
-          </div>
-        </div>
-
-        <!-- Costs sub-view -->
-        <div x-show="systemView === 'costs'">
+        <!-- Costs -->
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Costs</div>
+        <div>
           <div class="flex items-center justify-between mb-4">
             <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
               <template x-for="p in ['today', 'week', 'month']" :key="p">
@@ -1144,8 +1146,9 @@
           </div>
         </div>
 
-        <!-- Infrastructure sub-view -->
-        <div x-show="systemView === 'infrastructure'">
+        <!-- Infrastructure -->
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 mt-6">Infrastructure</div>
+        <div>
           <div x-show="!settingsData" class="text-center py-12 text-gray-600">Loading...</div>
           <template x-if="settingsData">
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
