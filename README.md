@@ -4,7 +4,7 @@
 > Every agent runs in its own Docker container. API keys never leave the vault.
 > Chat via Telegram, Discord, Slack, or WhatsApp. Built-in cost controls. 100+ LLM providers.
 
-[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![AGPLv3 License](https://img.shields.io/badge/license-AGPLv3-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
 [![Tests: 954](https://img.shields.io/badge/tests-954%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
@@ -133,7 +133,7 @@ prompted.
 
 **954 tests passing** across **~14,000 lines** of application code.
 **Fully auditable in a day.**
-No LangChain. No Redis. No Kubernetes. No CEO agent. MIT License.
+No LangChain. No Redis. No Kubernetes. No CEO agent. AGPLv3 License.
 
 1. **Security by architecture** — every agent runs in an isolated Docker container
    (microVM when available). API keys live in the credential vault — agents call
@@ -976,7 +976,7 @@ config/
 
 ## License
 
-**MIT** — see [LICENSE](LICENSE).
+**AGPLv3** — see [LICENSE](LICENSE).
 
 OpenLegion is free and open-source. Self-host it, fork it, build on it.
 
