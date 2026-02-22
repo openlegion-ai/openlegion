@@ -25,7 +25,7 @@
 
 ## Demo
 
-[INSERT 90-SECOND SCREEN RECORDING HERE]
+Uploading openlegion-demo.mp4…
 
 > `openlegion setup` → `openlegion start` → agents running in Telegram with
 > live cost tracking. No configuration files edited by hand.
