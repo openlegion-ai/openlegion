@@ -468,7 +468,7 @@ class TestAddKeyNormalization:
         def addkey_fn(svc, key):
             stored.append((svc, key))
         ch = _make_channel(addkey_fn=addkey_fn)
-        result = await ch.handle_message("u1", "/addkey openai_api_key sk-abc")
+        await ch.handle_message("u1", "/addkey openai_api_key sk-abc")
         assert stored == [("openai_api_key", "sk-abc")]
 
     @pytest.mark.asyncio
