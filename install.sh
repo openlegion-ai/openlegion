@@ -294,6 +294,5 @@ if [ -n "$PATH_UPDATED" ]; then
         echo "    Open a new terminal to pick up the PATH change, then:"
     fi
 fi
-echo "    openlegion setup             # configure API key + agents"
-echo "    openlegion start             # launch and start chatting"
+echo "    openlegion start             # configure + launch and start chatting"
 echo ""

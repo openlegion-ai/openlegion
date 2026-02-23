@@ -337,7 +337,7 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 
 **Cross-Channel Broadcasting** — Mirror agent responses across channels. PubSub topic per-agent for response events. Channels subscribe to agents they're interested in. Opt-in per channel in `mesh.yaml`.
 
-**Per-Agent Directory Configuration** — Per-agent SOUL.md and workspace paths configurable in `mesh.yaml`. `soul_md` field per agent pointing to a custom SOUL.md path. `workspace_dir` override per agent (default remains `/data`). Auto-scaffold SOUL.md on `openlegion setup` with personality prompt.
+**Per-Agent Directory Configuration** — Per-agent SOUL.md and workspace paths configurable in `mesh.yaml`. `soul_md` field per agent pointing to a custom SOUL.md path. `workspace_dir` override per agent (default remains `/data`). Auto-scaffold SOUL.md on `openlegion start` with personality prompt.
 
 **Skill Registry Cleanup** — Replace `_skill_staging` module-level mutable global with class-level registry or explicit registration API. Skills register directly onto a `SkillRegistry` instance instead of through a global.
 

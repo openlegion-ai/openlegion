@@ -1,10 +1,7 @@
-.PHONY: install setup start stop test lint clean
+.PHONY: install start stop test lint clean
 
 install:                         ## Check dependencies, create venv, install
 	@bash install.sh
-
-setup: install                   ## Run the guided setup wizard
-	@. .venv/bin/activate && openlegion setup
 
 start:                           ## Start the runtime
 	@. .venv/bin/activate && openlegion start
