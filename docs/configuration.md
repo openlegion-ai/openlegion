@@ -1,6 +1,6 @@
 # Configuration
 
-OpenLegion uses YAML and JSON files in the `config/` directory. All config files are created during `openlegion setup` and can be edited directly.
+OpenLegion uses YAML and JSON files in the `config/` directory. Config files are created during `openlegion start` (inline setup) or `openlegion setup` and can be edited directly.
 
 ## Config Files
 

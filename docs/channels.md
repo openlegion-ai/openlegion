@@ -83,6 +83,8 @@ The first user to send `/start ABC123` becomes the **owner**. The owner can then
 | `/revoke <user_id>` | Owner: revoke a user's access |
 | `/paired` | Owner: list paired users |
 
+After pairing, the bot sends a help summary with all available commands. Unauthorized users receive a one-time access denial message with their user ID.
+
 Pairing state is stored in `config/telegram_paired.json`.
 
 ### Features
@@ -126,19 +128,22 @@ When creating the Discord bot in the [Developer Portal](https://discord.com/deve
 
 ### Pairing
 
-Discord uses the same pairing pattern as Telegram, but with `!start` instead of `/start`:
+Discord uses the same pairing pattern as Telegram:
 
 | Command | Description |
 |---------|-------------|
-| `!start <code>` | Pair with the bot |
-| `!allow <user_id>` | Owner: allow a Discord user |
-| `!revoke <user_id>` | Owner: revoke a user's access |
+| `/start <code>` | Pair with the bot (first user becomes owner) |
+| `/allow <user_id>` | Owner: allow a Discord user |
+| `/revoke <user_id>` | Owner: revoke a user's access |
+
+After pairing, the bot sends a help summary with all available commands. Unauthorized users receive a one-time access denial message with their user ID.
 
 Pairing state is stored in `config/discord_paired.json`.
 
 ### Features
 
 - Token-level streaming with progressive message editing (debounced at 500ms)
+- Tool progress summary prepended to streaming responses
 - Typing indicators during dispatch
 - Messages chunked at 1900 characters (Discord limit) with overflow handling
 - Per-user agent tracking
@@ -182,15 +187,19 @@ Slack uses the same pairing pattern as other channels:
 
 | Command | Description |
 |---------|-------------|
-| `!start <code>` | Pair with the bot |
-| `!allow <user_id>` | Owner: allow a Slack user |
-| `!revoke <user_id>` | Owner: revoke a user's access |
+| `/start <code>` | Pair with the bot (first user becomes owner) |
+| `/allow <user_id>` | Owner: allow a Slack user |
+| `/revoke <user_id>` | Owner: revoke a user's access |
+| `/paired` | Owner: list paired users |
+
+After pairing, the bot sends a help summary with all available commands. Unauthorized users receive a one-time access denial message with their user ID.
 
 ### Features
 
 - Token-level streaming with progressive message editing via `chat.update` (debounced at 500ms)
+- Tool progress summary prepended to streaming responses
 - Thread-aware routing (each thread maps to its own agent context)
-- `!`-prefix commands translated to `/` internally
+- `!`-prefix commands still accepted (translated to `/` internally)
 - Messages chunked at 3000 characters with overflow handling
 - Per-user agent tracking via composite `user_id:thread_ts` key
 
@@ -233,13 +242,16 @@ WhatsApp uses the same pairing pattern:
 
 | Command | Description |
 |---------|-------------|
-| Send pairing code | First user to send the code becomes owner |
+| `/start <code>` | Pair with the bot (first user becomes owner) |
 | `/allow <phone>` | Owner: allow a phone number |
 | `/revoke <phone>` | Owner: revoke access |
+| `/paired` | Owner: list paired users |
+
+After pairing, the bot sends a help summary with all available commands. Unauthorized users receive a one-time access denial message with their phone number.
 
 ### Features
 
-- Text messages only (media logged and skipped)
+- Text messages only (non-text messages get a reply explaining this to allowed users)
 - Messages chunked at 4096 characters
 - Per-user agent tracking by phone number
 - Webhook verification challenge handled automatically

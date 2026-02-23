@@ -8,7 +8,7 @@
    
 [![AGPLv3 License](https://img.shields.io/badge/license-AGPLv3-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 1112](https://img.shields.io/badge/tests-1112%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 1124](https://img.shields.io/badge/tests-1124%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -28,9 +28,9 @@
 
 https://github.com/user-attachments/assets/643f7e71-b8e7-4960-bc01-afa31b45b107
 
-> `openlegion setup` → `openlegion start` → multiple agents running.
-> live cost tracking. No configuration files edited by hand.
-> connect Telegram, Whatsapp, Slack, and Discord
+> `openlegion start` → inline setup → multiple agents running.
+> Live cost tracking. No configuration files edited by hand.
+> Connect Telegram, WhatsApp, Slack, and Discord.
 
 ## Table of Contents
 
@@ -63,8 +63,7 @@ https://github.com/user-attachments/assets/643f7e71-b8e7-4960-bc01-afa31b45b107
 ```bash
 git clone https://github.com/openlegion-ai/openlegion.git && cd openlegion
 ./install.sh                     # checks deps, creates venv, makes CLI global
-openlegion setup                 # API key, project description, team template
-openlegion start                 # launch agents and start chatting
+openlegion start                 # inline setup on first run, then launch agents
 ```
 
 **Windows (PowerShell):**
@@ -73,7 +72,6 @@ openlegion start                 # launch agents and start chatting
 git clone https://github.com/openlegion-ai/openlegion.git
 cd openlegion
 powershell -ExecutionPolicy Bypass -File install.ps1
-openlegion setup
 openlegion start
 ```
 
@@ -118,7 +116,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 1112 tests including full Docker E2E |
+| **Test coverage** | Minimal | 1124 tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~19,000 lines — auditable in a day |
 
 ---
@@ -133,7 +131,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**1112 tests passing** across **~19,000 lines** of application code.
+**1124 tests passing** across **~19,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. AGPLv3 License.
 
@@ -604,9 +602,9 @@ openlegion start --sandbox
 ## CLI Reference
 
 ```
-openlegion
-├── setup                                # Guided setup wizard
-├── start [--config PATH] [-d] [--sandbox]  # Start runtime + interactive REPL
+openlegion [--version]
+├── setup                                # Pre-configure credentials (optional)
+├── start [--config PATH] [-d] [--sandbox]  # Start runtime + interactive REPL (inline setup on first run)
 ├── stop                                 # Stop all containers
 ├── chat <name> [--port PORT]            # Connect to a running agent
 ├── status [--port PORT]                 # Show agent status
@@ -631,29 +629,31 @@ openlegion
 ### Interactive REPL Commands
 
 ```
-@agent <message>     Send message to a specific agent
-/use <agent>         Switch active agent
-/agents              List all running agents
-/add                 Add a new agent (hot-adds to running system)
-/edit [name]         Edit agent settings (model, browser, budget)
-/remove [name]       Remove an agent
-/status              Show agent health
-/broadcast <msg>     Send message to all agents
-/steer <msg>         Inject message into busy agent's context
-/costs               Show today's LLM spend + context usage + model health
-/blackboard [cmd]    View/edit shared blackboard entries
-/queue               Show agent task queue status
-/workflow [cmd]      List or trigger workflows
-/cron [cmd]          Manage cron jobs (list, add, pause, resume, run, remove)
-/debug [trace]       Show recent request traces
-/addkey <svc> [key]  Add an API credential to the vault
-/reset               Clear conversation with active agent
-/quit                Exit and stop runtime
+@agent <message>                     Send message to a specific agent
+/use <agent>                         Switch active agent
+/agents                              List all running agents
+/add                                 Add a new agent (hot-adds to running system)
+/edit [name]                         Edit agent settings (model, browser, budget)
+/remove [name]                       Remove an agent
+/status                              Show agent health
+/broadcast <msg>                     Send message to all agents
+/steer <msg>                         Inject message into busy agent's context
+/costs                               Show today's LLM spend + context usage + model health
+/blackboard [list|get|set|del]       View/edit shared blackboard entries
+/queue                               Show agent task queue status
+/workflow [list|run]                 List or trigger workflows
+/cron [list|del|pause|resume|run]    Manage cron jobs
+/debug [trace]                       Show recent request traces
+/addkey <svc> [key]                  Add an API credential to the vault
+/reset                               Clear conversation with active agent
+/quit                                Exit and stop runtime
+
+Aliases: /exit = /quit, /agents = /status
 ```
 
 ### Team Templates
 
-Templates are offered during `openlegion setup`:
+Templates are offered during first-run setup (via `openlegion start` or `openlegion setup`):
 
 | Template | Agents | Description |
 |----------|--------|-------------|
@@ -700,7 +700,7 @@ llm:
 
 ### `config/agents.yaml` — Agent Definitions
 
-Created automatically by `openlegion setup` or `openlegion agent add`.
+Created automatically by `openlegion start` (inline setup) or `openlegion agent add`.
 
 ```yaml
 agents:
@@ -731,7 +731,7 @@ retry policies, and failure handlers.
 
 ### `.env` — API Keys
 
-Managed automatically by `openlegion setup` and `openlegion channels add`. You can also edit directly:
+Managed automatically by `openlegion start` and `openlegion channels add`. You can also edit directly:
 
 ```bash
 OPENLEGION_CRED_ANTHROPIC_API_KEY=sk-ant-...
@@ -837,13 +837,13 @@ pytest tests/
 |----------|-------|---------------|
 | Built-in Tools | 98 | exec, file, browser (incl. backend tiers + screenshots), memory, mesh tools, notifications, path traversal, discovery |
 | Dashboard | 72 | Index, agents, blackboard, costs, traces, queues, cron, settings, config |
-| CLI | 61 | Agent add/list/edit/remove, chat, setup, REPL commands, cron management |
+| CLI | 62 | Agent add/list/edit/remove, chat, setup, REPL commands, cron management, version |
 | Agent Loop | 57 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
 | Workspace | 55 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files |
 | Cron | 42 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM, concurrent mutations |
 | Credentials | 44 | Vault, API proxy, provider detection, credential lifecycle |
 | Sanitization | 38 | Invisible Unicode stripping, bidi overrides, tag chars, zero-width |
-| Channels (base) | 37 | Abstract channel, commands, per-user routing, chunking, steer, debug |
+| Channels (base) | 43 | Abstract channel, commands, per-user routing, chunking, steer, debug, addkey normalization, conditional help |
 | Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
 | Context Manager | 34 | Token estimation (tiktoken + model-aware), compaction, flushing, flush reset |
 | Mesh | 33 | Blackboard, PubSub, MessageRouter, permissions |
@@ -855,9 +855,9 @@ pytest tests/
 | Transcript | 24 | Transcript formatting, safety, round-trip fidelity |
 | Agent Server | 21 | Workspace API, heartbeat-context endpoint, content sanitization, file allowlist |
 | Slack Channel | 21 | Socket Mode, thread routing, pairing, command translation |
-| WhatsApp Channel | 21 | Cloud API, webhook verification, message chunking |
+| WhatsApp Channel | 22 | Cloud API, webhook verification, message chunking, non-text reply |
 | Skills | 20 | Discovery, execution, injection, MCP integration |
-| Setup Wizard | 21 | Quickstart, full setup, API key validation, templates |
+| Setup Wizard | 25 | Quickstart, full setup, API key validation, templates, inline setup |
 | Marketplace | 20 | Install, manifest parsing, validation, path traversal, remove |
 | Transport | 18 | HttpTransport, SandboxTransport, resolve_url |
 | Dashboard Workspace | 17 | Workspace proxy endpoints, filename validation, transport forwarding, sanitization |
@@ -878,7 +878,7 @@ pytest tests/
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **1112** | |
+| **Total** | **1124** | |
 
 ---
 

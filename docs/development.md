@@ -331,7 +331,7 @@ openlegion/
 │   ├── permissions.json
 │   ├── cron.json
 │   └── workflows/
-├── tests/                       # Test suite (1112 tests)
+├── tests/                       # Test suite (1124 tests)
 │   └── fixtures/                # Test fixtures (echo MCP server, etc.)
 ├── Dockerfile.agent             # Agent container image
 └── pyproject.toml               # Project metadata

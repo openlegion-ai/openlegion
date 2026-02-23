@@ -7,11 +7,10 @@
 ```bash
 git clone https://github.com/openlegion-ai/openlegion.git && cd openlegion
 ./install.sh         # checks dependencies, creates venv, installs everything
-openlegion setup     # API key, project description, team template
-openlegion start     # launch agents and start chatting
+openlegion start     # inline setup on first run, then launch agents
 ```
 
-That's it. The installer makes `openlegion` available globally — no need to activate a virtual environment. If `install.sh` passes, you're good. If it fails, it tells you exactly what's missing.
+That's it. On first run, `openlegion start` detects missing credentials and walks you through a quick setup (API key, model selection) right in the terminal — or you can skip and configure via the dashboard. The installer makes `openlegion` available globally — no need to activate a virtual environment.
 
 > **Note:** If `openlegion: command not found` after install, your `~/.local/bin` may not be on PATH. The installer will print the exact command to fix this.
 
@@ -19,8 +18,7 @@ You can also use `make`:
 
 ```bash
 make install         # same as ./install.sh
-make setup           # install + openlegion setup
-make start           # openlegion start
+make start           # openlegion start (includes inline setup on first run)
 make test            # run the test suite
 ```
 
@@ -32,8 +30,7 @@ make test            # run the test suite
 git clone https://github.com/openlegion-ai/openlegion.git
 cd openlegion
 powershell -ExecutionPolicy Bypass -File install.ps1
-openlegion setup     # API key, project description, team template
-openlegion start     # launch agents and start chatting
+openlegion start     # inline setup on first run, then launch agents
 ```
 
 > PowerShell blocks the script? Run: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
@@ -205,16 +202,17 @@ Verify: `openlegion --help`
 ## Setup and Start
 
 ```bash
-openlegion setup     # walks you through API key, project, team template, Docker build
-openlegion start     # launches agents and drops you into the chat REPL
+openlegion start     # inline setup on first run, then launch agents + chat REPL
 ```
 
-The setup wizard asks for:
-1. **LLM provider + API key** — pick one, paste your key
-2. **Project description** — one line about what your agents will do (optional)
-3. **Team template** — starter (1 agent), sales (3), devteam (3), or content (3)
+On first run (no credentials configured), `openlegion start` offers three paths:
+1. **Quick setup here** — pick a provider, paste your API key (validated), choose a model, then optionally create your first agent
+2. **Open the dashboard** — configure everything via the web UI at `/dashboard`
+3. **Skip** — start the runtime and use `/addkey` later in the REPL
 
 The Docker image builds automatically on your first `openlegion start` (~2 min).
+
+> **Pre-configure before starting?** You can still run `openlegion setup` to pre-configure credentials and team templates before launching the runtime.
 
 ---
 

@@ -182,6 +182,16 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `GET` | `/dashboard/api/workflows` | Workflow definitions |
 | `WS` | `/ws/events` | Real-time event stream |
 
+## Accessibility
+
+The dashboard includes several accessibility features:
+
+- **ARIA roles** — Tab containers use `role="tablist"` / `role="tab"` with `aria-selected`. The chat modal uses `role="dialog"` with `aria-modal` and `aria-label`.
+- **Keyboard navigation** — Escape closes the chat modal. Focus management within modal dialogs.
+- **Reduced motion** — A `prefers-reduced-motion` media query disables animations and transitions for users who prefer reduced motion.
+- **Color contrast** — Stat labels, action buttons, and queue status indicators use colors that meet accessibility contrast guidelines.
+- **Mobile responsive** — Navigation shows icons-only on narrow screens (< 640px).
+
 ## Source Files
 
 | File | Role |
