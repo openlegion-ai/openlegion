@@ -35,6 +35,8 @@ MODEL_COSTS: dict[str, tuple[float, float]] = {
     "minimax/MiniMax-M2.1-lightning": (0.0005, 0.002),
     "minimax/MiniMax-M2": (0.001, 0.005),
     "text-embedding-3-small": (0.00002, 0.0),
+    "minimax/MiniMax-M2.5": (0.0003, 0.0012),
+    "minimax/MiniMax-M2.5-Lightning": (0.0003, 0.0024),
 }
 
 _DEFAULT_COST = (0.003, 0.015)  # Conservative fallback
