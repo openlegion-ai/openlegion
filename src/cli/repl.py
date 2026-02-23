@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 import click
 
 from src.cli.config import (
-    _PROVIDERS,
     _create_agent,
     _default_description,
     _edit_agent_interactive,
@@ -53,15 +52,15 @@ class REPLSession:
             ("/remove [name]",    "Remove an agent"),
         ]),
         ("System", [
-            ("/blackboard [cmd]", "View/edit blackboard entries"),
-            ("/queue",            "Show agent queue status"),
-            ("/workflow [cmd]",   "List or trigger workflows"),
-            ("/costs",            "Show spend, context, and model health"),
-            ("/cron [cmd]",       "Manage cron jobs"),
-            ("/debug [trace]",    "Show recent request traces"),
-            ("/addkey [service]", "Store a credential"),
-            ("/help",             "Show this help"),
-            ("/quit",             "Exit and stop runtime"),
+            ("/blackboard [list|get|set|del]", "View/edit blackboard entries"),
+            ("/queue",                         "Show agent queue status"),
+            ("/workflow [list|run]",            "List or trigger workflows"),
+            ("/costs",                         "Show spend, context, and model health"),
+            ("/cron [list|del|pause|resume|run]", "Manage cron jobs"),
+            ("/debug [trace]",                 "Show recent request traces"),
+            ("/addkey [service]",              "Store a credential"),
+            ("/help",                          "Show this help"),
+            ("/quit",                          "Exit and stop runtime"),
         ]),
     ]
 
@@ -90,9 +89,11 @@ class REPLSession:
             "/help":       (self._cmd_help,       "Show this help"),
         }
 
-    def _first_run_guide(self) -> None:
+    def _inline_setup(self) -> None:
         """Show onboarding prompts for first-time users (no credentials, no agents)."""
-        has_creds = bool(self.ctx.credential_vault.credentials)
+        from src.setup_wizard import InlineSetup
+
+        has_creds = bool(self.ctx.credential_vault and self.ctx.credential_vault.credentials)
         has_agents = bool(self.ctx.agents)
 
         if has_creds and not has_agents:
@@ -126,39 +127,11 @@ class REPLSession:
             click.echo("\n  No problem. Use /addkey to add credentials and /add to create an agent.\n")
             return
 
-        # Option 1: interactive terminal setup
-        click.echo()
-        for i, p in enumerate(_PROVIDERS, 1):
-            click.echo(f"  {i}. {p['label']}")
-        click.echo()
-        try:
-            idx = click.prompt("  Provider", type=click.IntRange(1, len(_PROVIDERS)), default=1)
-        except (EOFError, KeyboardInterrupt):
-            return
-        provider = _PROVIDERS[idx - 1]["name"]
+        # Option 1: InlineSetup — provider, key with validation, model
+        from src.cli.config import PROJECT_ROOT
 
-        try:
-            api_key = click.prompt(f"  {provider} API key", hide_input=True)
-        except (EOFError, KeyboardInterrupt):
-            return
-        if not api_key.strip():
-            click.echo("  No key provided.")
-            return
-
-        service = f"{provider}_api_key"
-        self.ctx.credential_vault.add_credential(service, api_key.strip())
-        click.echo(f"  Credential '{service}' stored.")
-
-        # Optional base URL
-        try:
-            base_url = click.prompt(
-                "  Custom API base URL (leave blank for default)", default="", show_default=False,
-            ).strip()
-        except (EOFError, KeyboardInterrupt):
-            base_url = ""
-        if base_url:
-            self.ctx.credential_vault.add_credential(f"{provider}_api_base", base_url)
-            click.echo(f"  Custom base URL stored for {provider}.")
+        setup = InlineSetup(PROJECT_ROOT, credential_vault=self.ctx.credential_vault)
+        setup.run()
 
         click.echo()
         try:
@@ -172,7 +145,7 @@ class REPLSession:
 
     def run(self) -> None:
         """Main REPL loop."""
-        self._first_run_guide()
+        self._inline_setup()
         while True:
             try:
                 if self.current:
@@ -866,8 +839,9 @@ class REPLSession:
         for group_name, commands in self._COMMAND_GROUPS:
             click.echo(f"  {group_name}")
             for cmd, desc in commands:
-                click.echo(f"    {cmd:<20} {desc}")
+                click.echo(f"    {cmd:<34} {desc}")
             click.echo()
+        click.echo("  Aliases: /exit = /quit, /agents = /status\n")
 
     # ── Message sending ─────────────────────────────────────
 

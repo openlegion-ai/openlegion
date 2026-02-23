@@ -25,7 +25,7 @@ class PairingManager:
 
     Manages owner/allowed-user state persisted as a JSON file.
     All channels use the same pairing flow: the owner enters a code
-    shown during ``openlegion setup``, then can allow/revoke others.
+    shown during ``openlegion start``, then can allow/revoke others.
     """
 
     def __init__(self, config_path: str | Path):
@@ -287,8 +287,9 @@ class Channel(abc.ABC):
                 return f"Error: {e}"
 
         if cmd == "/reset":
-            if self.reset_fn:
-                self.reset_fn(current)
+            if not self.reset_fn:
+                return "Reset not available."
+            self.reset_fn(current)
             return f"Conversation with '{current}' reset."
 
         if cmd == "/addkey":
@@ -298,6 +299,10 @@ class Channel(abc.ABC):
             if len(args) < 2:
                 return "Usage: /addkey <service> <key>"
             service = args[1]
+            # Normalize bare provider names to include _api_key suffix
+            known_providers = {"anthropic", "openai", "gemini", "deepseek", "moonshot", "xai", "groq"}
+            if service.lower() in known_providers and not service.lower().endswith("_api_key"):
+                service = f"{service}_api_key"
             key = args[2] if len(args) > 2 else ""
             if not key:
                 return "Usage: /addkey <service> <key>"
@@ -338,20 +343,25 @@ class Channel(abc.ABC):
                 return f"Error: {e}"
 
         if cmd == "/help":
-            return (
-                "Commands:\n"
-                "  @agent <msg>      Send message to a specific agent\n"
-                "  /use <agent>      Switch active agent\n"
-                "  /agents           List all agents\n"
-                "  /status           Show agent health\n"
-                "  /broadcast <msg>  Send to all agents\n"
-                "  /steer <msg>      Inject message into busy agent's context\n"
-                "  /debug [trace_id] Show recent traces or trace detail\n"
-                "  /costs            Show today's LLM spend\n"
-                "  /addkey <svc> <key>  Add an API credential\n"
-                "  /reset            Clear conversation with active agent\n"
-                "  /help             Show this help"
-            )
+            lines = [
+                "Commands:",
+                "  @agent <msg>      Send message to a specific agent",
+                "  /use <agent>      Switch active agent",
+                "  /agents           List all agents",
+                "  /status           Show agent health",
+                "  /broadcast <msg>  Send to all agents",
+            ]
+            if self.steer_fn:
+                lines.append("  /steer <msg>      Inject message into busy agent's context")
+            if self.debug_fn:
+                lines.append("  /debug [trace_id] Show recent traces or trace detail")
+            lines.extend([
+                "  /costs            Show today's LLM spend",
+                "  /addkey <svc> <key>  Add an API credential",
+                "  /reset            Clear conversation with active agent",
+                "  /help             Show this help",
+            ])
+            return "\n".join(lines)
 
         return f"Unknown command: {cmd}. Type /help for commands."
 

@@ -422,8 +422,72 @@ class TestDebugCommand:
 
     @pytest.mark.asyncio
     async def test_steer_and_debug_in_help(self):
-        """'/steer' and '/debug' appear in /help output."""
-        ch = _make_channel()
+        """'/steer' and '/debug' appear in /help when their fns are set."""
+        def steer_fn(agent, msg):
+            pass
+        def debug_fn(trace_id=None):
+            return []
+        ch = _make_channel(steer_fn=steer_fn, debug_fn=debug_fn)
         result = await ch.handle_message("u1", "/help")
         assert "/steer" in result
         assert "/debug" in result
+
+    @pytest.mark.asyncio
+    async def test_help_hides_steer_when_no_fn(self):
+        """'/steer' not shown when steer_fn is None."""
+        ch = _make_channel(steer_fn=None)
+        result = await ch.handle_message("u1", "/help")
+        assert "/steer" not in result
+
+    @pytest.mark.asyncio
+    async def test_help_hides_debug_when_no_fn(self):
+        """'/debug' not shown when debug_fn is None."""
+        ch = _make_channel(debug_fn=None)
+        result = await ch.handle_message("u1", "/help")
+        assert "/debug" not in result
+
+
+# ── /addkey provider normalization ────────────────────────────
+
+class TestAddKeyNormalization:
+    @pytest.mark.asyncio
+    async def test_bare_provider_name_normalized(self):
+        """Bare provider names like 'anthropic' get _api_key suffix."""
+        stored = []
+        def addkey_fn(svc, key):
+            stored.append((svc, key))
+        ch = _make_channel(addkey_fn=addkey_fn)
+        result = await ch.handle_message("u1", "/addkey anthropic sk-test")
+        assert "stored" in result.lower()
+        assert stored == [("anthropic_api_key", "sk-test")]
+
+    @pytest.mark.asyncio
+    async def test_already_suffixed_not_doubled(self):
+        """Provider names already ending in _api_key are not doubled."""
+        stored = []
+        def addkey_fn(svc, key):
+            stored.append((svc, key))
+        ch = _make_channel(addkey_fn=addkey_fn)
+        result = await ch.handle_message("u1", "/addkey openai_api_key sk-abc")
+        assert stored == [("openai_api_key", "sk-abc")]
+
+    @pytest.mark.asyncio
+    async def test_unknown_service_unchanged(self):
+        """Non-provider service names are kept as-is."""
+        stored = []
+        def addkey_fn(svc, key):
+            stored.append((svc, key))
+        ch = _make_channel(addkey_fn=addkey_fn)
+        await ch.handle_message("u1", "/addkey brave_search my-key")
+        assert stored == [("brave_search", "my-key")]
+
+
+# ── /reset when reset_fn is None ──────────────────────────────
+
+class TestResetNotAvailable:
+    @pytest.mark.asyncio
+    async def test_reset_not_available(self):
+        """'/reset' returns 'not available' when reset_fn is None."""
+        ch = _make_channel(reset_fn=None)
+        result = await ch.handle_message("u1", "/reset")
+        assert "not available" in result.lower()

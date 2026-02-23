@@ -1,7 +1,8 @@
 """Setup wizard for OpenLegion first-run experience.
 
 Extracted from cli.py to keep module size manageable. Provides:
-  - SetupWizard.run_full()      Interactive multi-step setup
+  - SetupWizard.run_full()      Interactive multi-step setup (standalone)
+  - InlineSetup                 Streamlined setup with a live runtime
 """
 
 from __future__ import annotations
@@ -10,9 +11,13 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 import yaml
+
+if TYPE_CHECKING:
+    from src.host.credentials import CredentialVault
 
 # Validation models: cheapest model per provider for key checks
 _VALIDATION_MODELS = {
@@ -463,3 +468,105 @@ class SetupWizard:
         click.echo(f"├{border}┤")
         click.echo(f"│{lines[3]:<{inner_width}}│")
         click.echo(f"└{border}┘")
+
+
+class InlineSetup:
+    """Streamlined setup that works with a live runtime.
+
+    When ``credential_vault`` is provided, stores keys directly in the
+    vault (in-memory + .env) rather than only writing .env.
+    """
+
+    def __init__(
+        self,
+        project_root: Path,
+        credential_vault: CredentialVault | None = None,
+    ):
+        self.project_root = project_root
+        self.credential_vault = credential_vault
+        self.config_file = project_root / "config" / "mesh.yaml"
+
+    @staticmethod
+    def needs_setup(credential_vault: CredentialVault | None) -> bool:
+        """Return True when no LLM credentials are configured."""
+        if credential_vault is None:
+            return True
+        return not bool(credential_vault.credentials)
+
+    def run(self) -> None:
+        """Run the streamlined inline setup flow.
+
+        Steps: provider → key (with validation) → model selection →
+        optional base URL.  Simpler than the full wizard: no PROJECT.md
+        step, no collaboration step.
+        """
+        from src.cli.config import _PROVIDER_MODELS, _PROVIDERS, _set_env_key
+
+        click.echo()
+        for i, p in enumerate(_PROVIDERS, 1):
+            click.echo(f"  {i}. {p['label']}")
+        click.echo()
+        try:
+            idx = click.prompt(
+                "  Provider",
+                type=click.IntRange(1, len(_PROVIDERS)),
+                default=1,
+            )
+        except (EOFError, KeyboardInterrupt):
+            return
+        provider = _PROVIDERS[idx - 1]["name"]
+        label = _PROVIDERS[idx - 1]["label"]
+        click.echo(f"  Selected: {label}\n")
+
+        # API key with validation
+        try:
+            api_key = click.prompt(f"  {label} API key", hide_input=True)
+        except (EOFError, KeyboardInterrupt):
+            return
+        if not api_key.strip():
+            click.echo("  No key provided.")
+            return
+
+        # Validate the key
+        wizard = SetupWizard(self.project_root)
+        click.echo("  Validating API key...", nl=False)
+        valid = wizard._validate_api_key(provider, api_key.strip())
+        if valid:
+            click.echo(" valid.\n")
+        else:
+            click.echo(" could not validate (saved anyway).\n")
+
+        # Store the credential
+        service = f"{provider}_api_key"
+        if self.credential_vault:
+            self.credential_vault.add_credential(service, api_key.strip())
+        _set_env_key(service, api_key.strip())
+        click.echo(f"  Credential '{service}' stored.")
+
+        # Model selection
+        models = _PROVIDER_MODELS[provider]
+        click.echo("\n  Available models:")
+        for i, m in enumerate(models, 1):
+            click.echo(f"  {i}. {m}")
+        try:
+            raw = click.prompt(
+                "\n  Select model",
+                type=click.IntRange(1, len(models)),
+                default=1,
+            )
+        except (EOFError, KeyboardInterrupt):
+            return
+        selected_model = models[raw - 1]
+        click.echo(f"  Selected: {selected_model}\n")
+
+        # Write model to mesh.yaml
+        mesh_cfg: dict = {}
+        if self.config_file.exists():
+            with open(self.config_file) as f:
+                mesh_cfg = yaml.safe_load(f) or {}
+        mesh_cfg.setdefault("llm", {})["default_model"] = selected_model
+        self.config_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.config_file, "w") as f:
+            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+
+        click.echo("  Tip: Use /addkey or the dashboard to set a custom API base URL.\n")

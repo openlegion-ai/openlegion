@@ -47,6 +47,7 @@ logger = logging.getLogger("cli")
 # ── Main group ───────────────────────────────────────────────
 
 @click.group()
+@click.version_option(package_name="openlegion")
 def cli():
     """OpenLegion -- Autonomous AI agent fleet."""
     from dotenv import load_dotenv
@@ -307,10 +308,25 @@ def agent_remove(name: str | None, yes: bool):
 
 # ── channels subgroup ────────────────────────────────────────
 
-@cli.group()
-def channels():
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def channels(ctx):
     """Connect Telegram, Discord, or other messaging channels."""
-    pass
+    if ctx.invoked_subcommand is None:
+        commands = [
+            ("add", "Connect a messaging channel"),
+            ("list", "Show configured channels"),
+            ("remove", "Disconnect a channel"),
+        ]
+        click.echo("Channel management:\n")
+        for i, (name, desc) in enumerate(commands, 1):
+            click.echo(f"  {i}. {name:<10} {desc}")
+        choice = click.prompt(
+            "\nSelect action",
+            type=click.IntRange(1, len(commands)),
+            default=1,
+        )
+        ctx.invoke(channels.commands[commands[choice - 1][0]])
 
 
 @channels.command("add")
@@ -437,10 +453,25 @@ def channels_remove(channel_type: str):
 
 # ── skill marketplace ─────────────────────────────────────────
 
-@cli.group()
-def skill():
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def skill(ctx):
     """Install, list, or remove marketplace skills."""
-    pass
+    if ctx.invoked_subcommand is None:
+        commands = [
+            ("list", "List installed skills"),
+            ("install", "Install a skill from git"),
+            ("remove", "Remove an installed skill"),
+        ]
+        click.echo("Skill management:\n")
+        for i, (name, desc) in enumerate(commands, 1):
+            click.echo(f"  {i}. {name:<10} {desc}")
+        choice = click.prompt(
+            "\nSelect action",
+            type=click.IntRange(1, len(commands)),
+            default=1,
+        )
+        ctx.invoke(skill.commands[commands[choice - 1][0]])
 
 
 @skill.command("install")
@@ -510,7 +541,7 @@ def skill_remove(name: str, yes: bool):
 # ── start ────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("--config", "config_path", default="config/mesh.yaml", help="Path to mesh config")
+@click.option("--config", "config_path", default=str(cli_config.CONFIG_FILE), help="Path to mesh config")
 @click.option("--detach", "-d", is_flag=True, help="Run in background (no interactive REPL)")
 @click.option("--sandbox", is_flag=True, help="Use Docker Sandbox microVMs (requires Docker Desktop 4.58+)")
 @click.option("--serve", is_flag=True, hidden=True, help="Headless mode (used by -d internally)")
@@ -809,7 +840,7 @@ def status(port: int):
         logger.debug("Error checking mesh: %s", e)
 
     if not configured and not mesh_agents:
-        click.echo("No agents configured. Run: openlegion setup")
+        click.echo("No agents configured. Run: openlegion start")
         return
 
     all_names = sorted(set(list(configured.keys()) + list(mesh_agents.keys())))

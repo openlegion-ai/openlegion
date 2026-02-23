@@ -6,8 +6,8 @@ Bridges Slack to the OpenLegion mesh with the same UX as the CLI REPL:
   - /use, /agents, /status, /broadcast, /costs, /reset, /help commands
   - Agent name labels on all responses: [agent_name] response
   - Push notifications for cron/heartbeat results
-  - Pairing: owner must send !start <pairing_code> to claim the bot.
-    Code is generated during `openlegion setup`. Others need !allow.
+  - Pairing: owner must send /start <pairing_code> to claim the bot.
+    Code is generated during `openlegion start`. Others need /allow.
 
 Requires: pip install slack-bolt>=1.18
 Config: SLACK_BOT_TOKEN + SLACK_APP_TOKEN in .env, channels.slack in mesh.yaml
@@ -50,6 +50,7 @@ class SlackChannel(Channel):
         self._bolt_app = None
         self._handler = None
         self._channel_ids: set[str] = set()
+        self._denied_notified: set[str] = set()
         self._pairing = PairingManager("config/slack_paired.json")
 
     async def start(self) -> None:
@@ -121,7 +122,7 @@ class SlackChannel(Channel):
         if not text or not user_id:
             return
 
-        # Pairing: !start <code>
+        # Pairing: /start <code>
         if self._pairing.owner is None:
             if text.lower().startswith("!start") or text.lower().startswith("/start"):
                 parts = text.split(None, 1)
@@ -130,8 +131,8 @@ class SlackChannel(Channel):
                 if not expected or code_arg != expected:
                     await say(
                         text=(
-                            "Pairing required. Send:  `!start <pairing_code>`\n"
-                            "The code was shown during `openlegion setup`."
+                            "Pairing required. Send:  `/start <pairing_code>`\n"
+                            "The code was shown during `openlegion start`."
                         ),
                         thread_ts=thread_ts,
                     )
@@ -145,14 +146,21 @@ class SlackChannel(Channel):
                 await say(
                     text=(
                         f"Paired as owner. Your Slack ID: {user_id}\n"
-                        f"Only you can use this bot. Use `!allow <user_id>` to grant access."
+                        f"Only you can use this bot. Use `/allow <user_id>` to grant access."
                     ),
                     thread_ts=thread_ts,
                 )
+                # Send help after pairing
+                try:
+                    help_text = await self.handle_message(user_id, "/help")
+                    if help_text:
+                        await say(text=help_text[:MAX_SLACK_LEN], thread_ts=thread_ts)
+                except Exception:
+                    pass
                 return
             else:
                 await say(
-                    text="This bot requires pairing. Send `!start <pairing_code>` to begin.",
+                    text="This bot requires pairing. Send `/start <pairing_code>` to begin.",
                     thread_ts=thread_ts,
                 )
                 return
@@ -163,7 +171,16 @@ class SlackChannel(Channel):
                     text=(
                         f"Access denied. This bot is paired to its owner.\n"
                         f"Your Slack ID: {user_id}\n"
-                        f"Ask the owner to run `!allow {user_id}` to grant you access."
+                        f"Ask the owner to run `/allow {user_id}` to grant you access."
+                    ),
+                    thread_ts=thread_ts,
+                )
+            elif user_id not in self._denied_notified:
+                self._denied_notified.add(user_id)
+                await say(
+                    text=(
+                        f"Access denied. Ask the bot owner to grant you access.\n"
+                        f"Your Slack ID: {user_id}"
                     ),
                     thread_ts=thread_ts,
                 )
@@ -172,11 +189,11 @@ class SlackChannel(Channel):
         # Owner-only commands
         if text.startswith("!allow ") or text.startswith("/allow "):
             if not self._is_owner(user_id):
-                await say(text="Only the owner can use !allow.", thread_ts=thread_ts)
+                await say(text="Only the owner can use /allow.", thread_ts=thread_ts)
                 return
             parts = text.split(None, 1)
             if len(parts) < 2 or not parts[1].strip():
-                await say(text="Usage: !allow <slack_user_id>", thread_ts=thread_ts)
+                await say(text="Usage: /allow <slack_user_id>", thread_ts=thread_ts)
                 return
             target_id = parts[1].strip()
             self._pairing.allow(target_id)
@@ -186,11 +203,11 @@ class SlackChannel(Channel):
 
         if text.startswith("!revoke ") or text.startswith("/revoke "):
             if not self._is_owner(user_id):
-                await say(text="Only the owner can use !revoke.", thread_ts=thread_ts)
+                await say(text="Only the owner can use /revoke.", thread_ts=thread_ts)
                 return
             parts = text.split(None, 1)
             if len(parts) < 2 or not parts[1].strip():
-                await say(text="Usage: !revoke <slack_user_id>", thread_ts=thread_ts)
+                await say(text="Usage: /revoke <slack_user_id>", thread_ts=thread_ts)
                 return
             target_id = parts[1].strip()
             if self._pairing.revoke(target_id):
@@ -331,7 +348,11 @@ class SlackChannel(Channel):
             response_text = f"Error: {e}"
 
         if response_text:
-            final_text = f"[{target}] {response_text}"
+            if tool_lines:
+                names = [l.split(". ", 1)[1].split(" ")[0] if ". " in l else l for l in tool_lines]
+                final_text = f"[{target}] Tools: {', '.join(names)}\n\n{response_text}"
+            else:
+                final_text = f"[{target}] {response_text}"
             if streaming_ts and streaming_channel and self._bolt_app:
                 try:
                     await self._bolt_app.client.chat_update(

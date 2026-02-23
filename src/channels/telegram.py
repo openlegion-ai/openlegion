@@ -7,7 +7,7 @@ Bridges Telegram to the OpenLegion mesh with the same UX as the CLI REPL:
   - Agent name labels on all responses: [agent_name] response
   - Push notifications for cron/heartbeat results
   - Pairing: owner must send /start <pairing_code> to claim the bot.
-    Code is generated during `openlegion setup`. Others need /allow.
+    Code is generated during `openlegion start`. Others need /allow.
 
 Requires: pip install python-telegram-bot>=21.0
 Config: TELEGRAM_BOT_TOKEN in .env, channels.telegram in mesh.yaml
@@ -67,6 +67,7 @@ class TelegramChannel(Channel):
         self._explicit_allowed = set(allowed_users) if allowed_users else None
         self._app = None
         self._chat_ids: set[int] = set()
+        self._denied_notified: set[int] = set()
         self._pairing = PairingManager("config/telegram_paired.json")
 
     async def start(self) -> None:
@@ -145,7 +146,7 @@ class TelegramChannel(Channel):
             if not expected or code_arg != expected:
                 await update.message.reply_text(
                     "Pairing required. Send:  /start <pairing_code>\n"
-                    "The code was shown during `openlegion setup`."
+                    "The code was shown during `openlegion start`."
                 )
                 logger.warning(
                     f"Rejected /start without valid pairing code from {username} (id: {user_id})"
@@ -155,13 +156,16 @@ class TelegramChannel(Channel):
             logger.info(f"Paired owner via code: {username} (id: {user_id})")
             self._chat_ids.add(update.effective_chat.id)
             str_id = str(user_id)
-            response = await self.handle_message(str_id, "/help")
             welcome = (
                 f"Paired as owner. Your Telegram ID: {user_id}\n"
                 f"Active agent: {self._get_active_agent(str_id) or '(none)'}\n\n"
                 f"Only you can use this bot. Use /allow <user_id> to grant access.\n\n"
             )
-            await update.message.reply_text(welcome + response)
+            try:
+                response = await self.handle_message(str_id, "/help")
+                await update.message.reply_text(welcome + response)
+            except Exception:
+                await update.message.reply_text(welcome)
             return
 
         if not self._is_allowed(user_id):
@@ -175,12 +179,15 @@ class TelegramChannel(Channel):
 
         self._chat_ids.add(update.effective_chat.id)
         str_id = str(user_id)
-        response = await self.handle_message(str_id, "/help")
         welcome = (
             f"OpenLegion connected. Active agent: "
             f"{self._get_active_agent(str_id) or '(none)'}\n\n"
         )
-        await update.message.reply_text(welcome + response)
+        try:
+            response = await self.handle_message(str_id, "/help")
+            await update.message.reply_text(welcome + response)
+        except Exception:
+            await update.message.reply_text(welcome)
 
     async def _cmd_allow(self, update, context) -> None:
         """Owner-only: /allow <telegram_user_id> to grant access."""
@@ -235,7 +242,14 @@ class TelegramChannel(Channel):
 
     async def _on_repl_command(self, update, context) -> None:
         """Handle OpenLegion REPL commands (/status, /agents, /costs, etc.)."""
-        if not self._is_allowed(update.effective_user.id):
+        user_id = update.effective_user.id
+        if not self._is_allowed(user_id):
+            if user_id not in self._denied_notified:
+                self._denied_notified.add(user_id)
+                await update.message.reply_text(
+                    f"Access denied. Ask the bot owner to grant you access.\n"
+                    f"Your Telegram ID: {user_id}"
+                )
             return
         self._chat_ids.add(update.effective_chat.id)
         user_id = str(update.effective_user.id)
@@ -253,7 +267,14 @@ class TelegramChannel(Channel):
             await self._send_reply(chat_id, response)
 
     async def _on_message(self, update, context) -> None:
-        if not self._is_allowed(update.effective_user.id):
+        user_id = update.effective_user.id
+        if not self._is_allowed(user_id):
+            if user_id not in self._denied_notified:
+                self._denied_notified.add(user_id)
+                await update.message.reply_text(
+                    f"Access denied. Ask the bot owner to grant you access.\n"
+                    f"Your Telegram ID: {user_id}"
+                )
             return
         text = update.message.text or ""
         if not text.strip():

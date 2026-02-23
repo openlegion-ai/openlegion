@@ -10,7 +10,7 @@ import yaml
 from click.testing import CliRunner
 
 from src.cli import cli
-from src.setup_wizard import SetupWizard
+from src.setup_wizard import InlineSetup, SetupWizard
 
 
 def _make_project(tmp_path: Path) -> dict:
@@ -386,3 +386,44 @@ class TestKeyboardInterrupt:
                     result = runner.invoke(cli, ["setup"])
 
         assert "Setup cancelled" in result.output
+
+
+class TestInlineSetup:
+    def test_needs_setup_true_when_no_vault(self):
+        """needs_setup returns True when credential_vault is None."""
+        assert InlineSetup.needs_setup(None) is True
+
+    def test_needs_setup_true_when_empty_vault(self):
+        """needs_setup returns True when vault has no credentials."""
+        vault = MagicMock()
+        vault.credentials = {}
+        assert InlineSetup.needs_setup(vault) is True
+
+    def test_needs_setup_false_when_creds_exist(self):
+        """needs_setup returns False when vault has credentials."""
+        vault = MagicMock()
+        vault.credentials = {"anthropic_api_key": "sk-test"}
+        assert InlineSetup.needs_setup(vault) is False
+
+    def test_run_stores_credential(self, tmp_path):
+        """run() stores the credential via vault and writes mesh.yaml."""
+        vault = MagicMock()
+        vault.credentials = {}
+        setup = InlineSetup(tmp_path, credential_vault=vault)
+
+        # Input: provider=1 (Anthropic), key, model=1
+        with patch("click.prompt", side_effect=[1, "sk-test-key", 1]):
+            with patch.object(SetupWizard, "_validate_api_key", return_value=True):
+                with patch("src.cli.config._set_env_key"):
+                    setup.run()
+
+        vault.add_credential.assert_called_once()
+        call_args = vault.add_credential.call_args[0]
+        assert "api_key" in call_args[0]
+        assert call_args[1] == "sk-test-key"
+
+        # mesh.yaml should be written
+        config_file = tmp_path / "config" / "mesh.yaml"
+        assert config_file.exists()
+        cfg = yaml.safe_load(config_file.read_text())
+        assert "default_model" in cfg.get("llm", {})

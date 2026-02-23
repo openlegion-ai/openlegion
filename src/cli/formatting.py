@@ -123,11 +123,6 @@ def echo_fail(text: str) -> None:
     click.echo(click.style("  \u2717 ", fg="red") + text, err=True)
 
 
-def echo_dim(text: str) -> None:
-    """Dim/secondary info."""
-    click.echo(click.style(f"  {text}", fg="bright_black"))
-
-
 def agent_prompt(agent_name: str) -> str:
     """Styled agent response prefix."""
     return click.style(f"{agent_name}> ", fg="green", bold=True)

@@ -6,8 +6,8 @@ Bridges Discord to the OpenLegion mesh with the same UX as the CLI REPL:
   - /use, /agents, /status, /broadcast, /costs, /reset, /help commands
   - Agent name labels on all responses: [agent_name] response
   - Push notifications for cron/heartbeat results
-  - Pairing: owner must send !start <pairing_code> to claim the bot.
-    Code is generated during `openlegion setup`. Others need !allow.
+  - Pairing: owner must send /start <pairing_code> to claim the bot.
+    Code is generated during `openlegion start`. Others need /allow.
 
 Requires: pip install discord.py>=2.0
 Config: DISCORD_BOT_TOKEN in .env, channels.discord in mesh.yaml
@@ -41,6 +41,7 @@ class DiscordChannel(Channel):
         self.allowed_guilds = set(allowed_guilds) if allowed_guilds else None
         self._client = None
         self._notify_channel_ids: set[int] = set()
+        self._denied_notified: set[int] = set()
         self._pairing = PairingManager("config/discord_paired.json")
 
     def _is_allowed(self, user_id: int) -> bool:
@@ -82,7 +83,7 @@ class DiscordChannel(Channel):
 
             author_id = message.author.id
 
-            # Pairing via code: !start <code>
+            # Pairing via code: /start <code>
             if channel_ref._pairing.owner is None:
                 if text.lower().startswith("!start") or text.lower().startswith("/start"):
                     parts = text.split(None, 1)
@@ -90,8 +91,8 @@ class DiscordChannel(Channel):
                     expected = channel_ref._pairing.pairing_code
                     if not expected or code_arg != expected:
                         await message.channel.send(
-                            "Pairing required. Send:  `!start <pairing_code>`\n"
-                            "The code was shown during `openlegion setup`."
+                            "Pairing required. Send:  `/start <pairing_code>`\n"
+                            "The code was shown during `openlegion start`."
                         )
                         logger.warning(
                             f"Rejected !start without valid pairing code "
@@ -104,11 +105,19 @@ class DiscordChannel(Channel):
                     )
                     await message.channel.send(
                         f"Paired as owner. Your Discord ID: {author_id}\n"
-                        f"Only you can use this bot. Use `!allow <user_id>` to grant access."
+                        f"Only you can use this bot. Use `/allow <user_id>` to grant access."
                     )
+                    # Send help after pairing
+                    try:
+                        user_id = str(author_id)
+                        help_text = await channel_ref.handle_message(user_id, "/help")
+                        if help_text:
+                            await message.channel.send(help_text[:MAX_DC_LEN])
+                    except Exception:
+                        pass
                 else:
                     await message.channel.send(
-                        "This bot requires pairing. Send `!start <pairing_code>` to begin."
+                        "This bot requires pairing. Send `/start <pairing_code>` to begin."
                     )
                 return
 
@@ -117,19 +126,25 @@ class DiscordChannel(Channel):
                     await message.channel.send(
                         f"Access denied. This bot is paired to its owner.\n"
                         f"Your Discord ID: {author_id}\n"
-                        f"Ask the owner to run `!allow {author_id}` to grant you access."
+                        f"Ask the owner to run `/allow {author_id}` to grant you access."
+                    )
+                elif author_id not in channel_ref._denied_notified:
+                    channel_ref._denied_notified.add(author_id)
+                    await message.channel.send(
+                        f"Access denied. Ask the bot owner to grant you access.\n"
+                        f"Your Discord ID: {author_id}"
                     )
                 return
 
             # Owner-only commands
             if text.startswith("!allow ") or text.startswith("/allow "):
                 if not channel_ref._is_owner(author_id):
-                    await message.channel.send("Only the owner can use !allow.")
+                    await message.channel.send("Only the owner can use /allow.")
                     return
                 try:
                     target_id = int(text.split(None, 1)[1])
                 except (ValueError, IndexError):
-                    await message.channel.send("Usage: !allow <discord_user_id>")
+                    await message.channel.send("Usage: /allow <discord_user_id>")
                     return
                 channel_ref._pairing.allow(target_id)
                 await message.channel.send(f"User {target_id} is now allowed.")
@@ -137,12 +152,12 @@ class DiscordChannel(Channel):
 
             if text.startswith("!revoke ") or text.startswith("/revoke "):
                 if not channel_ref._is_owner(author_id):
-                    await message.channel.send("Only the owner can use !revoke.")
+                    await message.channel.send("Only the owner can use /revoke.")
                     return
                 try:
                     target_id = int(text.split(None, 1)[1])
                 except (ValueError, IndexError):
-                    await message.channel.send("Usage: !revoke <discord_user_id>")
+                    await message.channel.send("Usage: /revoke <discord_user_id>")
                     return
                 if channel_ref._pairing.revoke(target_id):
                     await message.channel.send(f"User {target_id} access revoked.")
@@ -250,7 +265,11 @@ class DiscordChannel(Channel):
             response_text = f"Error: {e}"
 
         if response_text:
-            final_text = f"[{target}] {response_text}"
+            if tool_lines:
+                names = [l.split(". ", 1)[1].split(" ")[0] if ". " in l else l for l in tool_lines]
+                final_text = f"[{target}] Tools: {', '.join(names)}\n\n{response_text}"
+            else:
+                final_text = f"[{target}] {response_text}"
             if streaming_msg:
                 try:
                     await streaming_msg.edit(content=final_text[:MAX_DC_LEN])

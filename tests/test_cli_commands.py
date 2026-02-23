@@ -11,6 +11,15 @@ from click.testing import CliRunner
 from src.cli import cli
 
 
+class TestVersion:
+    def test_version_flag(self):
+        """--version outputs version string and exits 0."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--version"])
+        assert result.exit_code == 0
+        assert "version" in result.output.lower() or "." in result.output
+
+
 class TestAgentAdd:
     def test_add_agent(self, tmp_path):
         config_file = tmp_path / "mesh.yaml"

@@ -140,12 +140,25 @@ class TestIncomingMessages:
         assert "[alpha]" in body
 
     @pytest.mark.asyncio
-    async def test_non_text_message_skipped(self):
+    async def test_non_text_message_replies_to_allowed_user(self):
         ch = _make_channel(paired={"owner": "+1234", "allowed": []})
         ch._http = AsyncMock()
         ch._http.post = AsyncMock()
 
         msg = {"from": "+1234", "type": "image", "image": {"id": "img123"}}
+        await ch._process_message(msg)
+
+        ch._http.post.assert_called_once()
+        body = ch._http.post.call_args[1]["json"]["text"]["body"]
+        assert "text messages" in body.lower()
+
+    @pytest.mark.asyncio
+    async def test_non_text_message_skipped_for_unknown_user(self):
+        ch = _make_channel(paired={"owner": "+1234", "allowed": []})
+        ch._http = AsyncMock()
+        ch._http.post = AsyncMock()
+
+        msg = {"from": "+9999", "type": "image", "image": {"id": "img123"}}
         await ch._process_message(msg)
 
         ch._http.post.assert_not_called()

@@ -31,8 +31,7 @@ function dashboard() {
     lastRefresh: 0,
     unreadEvents: 0,
     _lastSeenEventCount: 0,
-    toastMessage: '',
-    _toastTimer: null,
+    toastQueue: [],
 
     // Fleet
     agents: [],
@@ -41,7 +40,7 @@ function dashboard() {
 
     // Events
     events: [],
-    eventFilters: new Set(),
+    eventFilters: [],
     eventTypes: [
       'agent_state', 'message_sent', 'message_received',
       'tool_start', 'tool_result', 'text_delta', 'llm_call',
@@ -49,6 +48,7 @@ function dashboard() {
     ],
 
     // Agent detail
+    detailAgent: null,
     selectedAgent: null,
     agentDetail: null,
     agentEvents: [],
@@ -67,7 +67,7 @@ function dashboard() {
     // Blackboard
     bbEntries: [],
     bbPrefix: '',
-    bbHighlights: new Set(),
+    bbHighlights: [],
     bbLoading: false,
     bbWriteMode: false,
     bbNewKey: '',
@@ -165,11 +165,11 @@ function dashboard() {
     },
 
     get filteredEvents() {
-      if (this.eventFilters.size === 0) {
+      if (this.eventFilters.length === 0) {
         return this.events.filter(e =>
           !(e.type === 'agent_state' && e.data?.state === 'registered'));
       }
-      return this.events.filter(e => this.eventFilters.has(e.type));
+      return this.events.filter(e => this.eventFilters.includes(e.type));
     },
 
     get fleetTotalCost() {
@@ -238,6 +238,21 @@ function dashboard() {
       this.fetchAgents();
       this.fetchSettings();
       this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
+
+      // Pause polling when tab is hidden to save resources
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          if (this._refreshInterval) { clearInterval(this._refreshInterval); this._refreshInterval = null; }
+          if (this._queueInterval) { clearInterval(this._queueInterval); this._queueInterval = null; }
+          if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
+          this._stopActivityRefresh();
+        } else {
+          this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
+          this.fetchAgents();
+          // Re-establish tab-specific intervals
+          this.switchTab(this.activeTab);
+        }
+      });
     },
 
     destroy() {
@@ -247,7 +262,6 @@ function dashboard() {
       if (this._cronInterval) clearInterval(this._cronInterval);
       if (this._costDebounce) clearTimeout(this._costDebounce);
       if (this._fleetDebounce) clearTimeout(this._fleetDebounce);
-      if (this._toastTimer) clearTimeout(this._toastTimer);
       if (this._activityRefresh) clearInterval(this._activityRefresh);
       if (this._tracesDebounce) clearTimeout(this._tracesDebounce);
       if (this.costChart) this.costChart.destroy();
@@ -258,6 +272,7 @@ function dashboard() {
 
     switchTab(tab) {
       this.activeTab = tab;
+      this.detailAgent = null;
       // Clear tab-specific auto-refresh intervals
       if (this._queueInterval) { clearInterval(this._queueInterval); this._queueInterval = null; }
       if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
@@ -291,9 +306,8 @@ function dashboard() {
     // ── Toast helper ──────────────────────────────────────
 
     showToast(msg) {
-      this.toastMessage = msg;
-      if (this._toastTimer) clearTimeout(this._toastTimer);
-      this._toastTimer = setTimeout(() => { this.toastMessage = ''; }, 3000);
+      this.toastQueue.push(msg);
+      setTimeout(() => { this.toastQueue.shift(); }, 3000);
     },
 
     // ── WebSocket event handler ───────────────────────────
@@ -337,8 +351,8 @@ function dashboard() {
 
       // Highlight blackboard writes
       if (evt.type === 'blackboard_write' && evt.data && evt.data.key) {
-        this.bbHighlights.add(evt.data.key);
-        setTimeout(() => this.bbHighlights.delete(evt.data.key), 5000);
+        if (!this.bbHighlights.includes(evt.data.key)) this.bbHighlights.push(evt.data.key);
+        setTimeout(() => { const i = this.bbHighlights.indexOf(evt.data.key); if (i !== -1) this.bbHighlights.splice(i, 1); }, 5000);
         if (this.activeTab === 'blackboard') this.fetchBlackboard();
       }
 
@@ -427,10 +441,11 @@ function dashboard() {
     },
 
     toggleEventFilter(type) {
-      if (this.eventFilters.has(type)) {
-        this.eventFilters.delete(type);
+      const idx = this.eventFilters.indexOf(type);
+      if (idx !== -1) {
+        this.eventFilters.splice(idx, 1);
       } else {
-        this.eventFilters.add(type);
+        this.eventFilters.push(type);
       }
     },
 
@@ -1134,6 +1149,7 @@ function dashboard() {
 
     drillDown(agentId) {
       this.selectedAgent = agentId;
+      this.detailAgent = agentId;
       this.agentEvents = this.events.filter(e => e.agent === agentId).slice(0, 100);
       this.identityTab = 'config';
       this.identityFiles = [];
@@ -1146,7 +1162,7 @@ function dashboard() {
       this.fetchAgentDetail(agentId);
       this.fetchIdentityFiles(agentId);
       this.fetchAgentConfig(agentId);
-      this.activeTab = 'agent-detail';
+      this.activeTab = 'fleet';
     },
 
     // ── Chart.js rendering ────────────────────────────────
@@ -1154,17 +1170,25 @@ function dashboard() {
     renderCostChart() {
       const canvas = document.getElementById('costChart');
       if (!canvas) return;
-      if (this.costChart) this.costChart.destroy();
 
       const agents = (this.costData.agents || []);
       if (agents.length === 0) {
-        this.costChart = null;
+        if (this.costChart) { this.costChart.destroy(); this.costChart = null; }
         return;
       }
 
       const labels = agents.map(a => a.agent);
       const costs = agents.map(a => a.cost);
       const tokens = agents.map(a => a.tokens);
+
+      // Update existing chart in-place if possible
+      if (this.costChart) {
+        this.costChart.data.labels = labels;
+        this.costChart.data.datasets[0].data = costs;
+        this.costChart.data.datasets[1].data = tokens;
+        this.costChart.update();
+        return;
+      }
 
       this.costChart = new Chart(canvas, {
         type: 'bar',

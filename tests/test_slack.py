@@ -132,10 +132,16 @@ class TestPairing:
         assert "denied" in msg.lower()
 
     @pytest.mark.asyncio
-    async def test_disallowed_user_ignored_for_regular_messages(self):
+    async def test_disallowed_user_gets_one_time_denial(self):
         ch = _make_channel(paired={"owner": "U_OWNER", "allowed": []})
         say = _make_say()
         event = {"user": "U_OTHER", "text": "hello", "channel": "C1", "ts": "1.0"}
+        await ch._on_message(event, say)
+        # First message from denied user sends one-time access denied
+        say.assert_called_once()
+        assert "Access denied" in say.call_args[1]["text"]
+        # Subsequent messages are silently ignored
+        say.reset_mock()
         await ch._on_message(event, say)
         say.assert_not_called()
 

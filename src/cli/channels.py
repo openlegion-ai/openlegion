@@ -77,7 +77,7 @@ class ChannelManager:
                 **common,
             )
             self._start_async_channel(dc)
-            self._record_pairing("Discord", "DM your bot \u2192  !start", dc_code)
+            self._record_pairing("Discord", "DM your bot \u2192  /start", dc_code)
 
         # Slack
         sl_cfg = channels_cfg.get("slack", {})
@@ -101,7 +101,7 @@ class ChannelManager:
                 **common,
             )
             self._start_async_channel(sl)
-            self._record_pairing("Slack", "message your bot \u2192  !start", sl_code)
+            self._record_pairing("Slack", "message your bot \u2192  /start", sl_code)
 
         # WhatsApp
         wa_cfg = channels_cfg.get("whatsapp", {})
@@ -133,7 +133,7 @@ class ChannelManager:
             asyncio.run(wa.start())
             webhook_routers.append(wa.create_router())
             self.active.append(wa)
-            self._record_pairing("WhatsApp", "send to your number \u2192  !start", wa_code)
+            self._record_pairing("WhatsApp", "send to your number \u2192  /start", wa_code)
 
         return webhook_routers
 

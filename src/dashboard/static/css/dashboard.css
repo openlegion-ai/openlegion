@@ -160,7 +160,7 @@
 
 .action-btn-warn {
   background: transparent;
-  color: #6b7280;
+  color: #9ca3af;
 }
 .action-btn-warn:hover {
   background: rgba(245, 158, 11, 0.1);
@@ -170,7 +170,7 @@
 
 .action-btn-danger {
   background: transparent;
-  color: #6b7280;
+  color: #9ca3af;
 }
 .action-btn-danger:hover {
   background: rgba(239, 68, 68, 0.1);
@@ -250,7 +250,7 @@
 
 .stat-label {
   font-size: 0.75rem;
-  color: #6b7280;
+  color: #9ca3af;
   display: flex;
   align-items: center;
   gap: 0.375rem;
@@ -446,7 +446,7 @@ select:focus-visible,
 /* ── Queue status colors ──────────────────────────── */
 
 .queue-busy { color: #f59e0b; }
-.queue-idle { color: #6b7280; }
+.queue-idle { color: #9ca3af; }
 
 /* ── Toast notifications ──────────────────────────── */
 
@@ -506,4 +506,33 @@ select:focus-visible,
 .queue-badge {
   font-size: 0.625rem;
   letter-spacing: -0.01em;
+}
+
+/* ── Reduced motion ──────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-border,
+  .heartbeat-indicator,
+  .flash-yellow,
+  .toast,
+  main > div {
+    animation: none !important;
+  }
+  .agent-card,
+  .nav-tab,
+  .action-btn,
+  .waterfall-bar {
+    transition: none !important;
+  }
+}
+
+/* ── Mobile nav — icons only on narrow screens ───── */
+
+@media (max-width: 640px) {
+  .nav-tab span {
+    display: none;
+  }
+  .nav-tab {
+    padding: 0.375rem 0.5rem;
+  }
 }

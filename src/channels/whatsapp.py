@@ -7,8 +7,8 @@ same UX as the CLI REPL:
   - /use, /agents, /status, /broadcast, /costs, /reset, /help commands
   - Agent name labels on all responses: [agent_name] response
   - Push notifications for cron/heartbeat results
-  - Pairing: owner must send !start <pairing_code> to claim the bot.
-    Code is generated during `openlegion setup`. Others need !allow.
+  - Pairing: owner must send /start <pairing_code> to claim the bot.
+    Code is generated during `openlegion start`. Others need /allow.
 
 Uses httpx (already a core dependency) to call the Cloud API.
 Webhook-based: mounts GET/POST endpoints on the mesh FastAPI app.
@@ -49,6 +49,7 @@ class WhatsAppChannel(Channel):
         self.verify_token = verify_token
         self._http: httpx.AsyncClient | None = None
         self._phone_numbers: set[str] = set()
+        self._denied_notified: set[str] = set()
         self._pairing = PairingManager("config/whatsapp_paired.json")
 
     async def start(self) -> None:
@@ -150,8 +151,10 @@ class WhatsAppChannel(Channel):
         if not phone:
             return
 
-        # Text-only initially -- log and skip media
+        # Text-only — reply to allowed users, silently skip otherwise
         if msg_type != "text":
+            if self._pairing.owner and self._is_allowed(phone):
+                await self._send_text(phone, "I can only process text messages right now.")
             logger.info(f"Skipping non-text message type '{msg_type}' from {phone}")
             return
 
@@ -159,7 +162,7 @@ class WhatsAppChannel(Channel):
         if not text:
             return
 
-        # Pairing: !start <code>
+        # Pairing: /start <code>
         if self._pairing.owner is None:
             if text.lower().startswith("!start") or text.lower().startswith("/start"):
                 parts = text.split(None, 1)
@@ -168,8 +171,8 @@ class WhatsAppChannel(Channel):
                 if not expected or code_arg != expected:
                     await self._send_text(
                         phone,
-                        "Pairing required. Send:  !start <pairing_code>\n"
-                        "The code was shown during `openlegion setup`.",
+                        "Pairing required. Send:  /start <pairing_code>\n"
+                        "The code was shown during `openlegion start`.",
                     )
                     logger.warning(
                         f"Rejected !start without valid pairing code from {phone}"
@@ -181,13 +184,21 @@ class WhatsAppChannel(Channel):
                 await self._send_text(
                     phone,
                     f"Paired as owner. Your phone: {phone}\n"
-                    f"Only you can use this bot. Send !allow <phone> to grant access.",
+                    f"Only you can use this bot. Send /allow <phone> to grant access.",
                 )
+                # Send help after pairing
+                try:
+                    help_text = await self.handle_message(phone, "/help")
+                    if help_text:
+                        for part in chunk_text(help_text, MAX_WA_LEN):
+                            await self._send_text(phone, part)
+                except Exception:
+                    pass
                 return
             else:
                 await self._send_text(
                     phone,
-                    "This bot requires pairing. Send !start <pairing_code> to begin.",
+                    "This bot requires pairing. Send /start <pairing_code> to begin.",
                 )
                 return
 
@@ -197,18 +208,25 @@ class WhatsAppChannel(Channel):
                     phone,
                     f"Access denied. This bot is paired to its owner.\n"
                     f"Your phone: {phone}\n"
-                    f"Ask the owner to send !allow {phone} to grant you access.",
+                    f"Ask the owner to send /allow {phone} to grant you access.",
+                )
+            elif phone not in self._denied_notified:
+                self._denied_notified.add(phone)
+                await self._send_text(
+                    phone,
+                    f"Access denied. Ask the bot owner to grant you access.\n"
+                    f"Your phone: {phone}",
                 )
             return
 
         # Owner-only commands
         if text.startswith("!allow ") or text.startswith("/allow "):
             if not self._is_owner(phone):
-                await self._send_text(phone, "Only the owner can use !allow.")
+                await self._send_text(phone, "Only the owner can use /allow.")
                 return
             parts = text.split(None, 1)
             if len(parts) < 2 or not parts[1].strip():
-                await self._send_text(phone, "Usage: !allow <phone_number>")
+                await self._send_text(phone, "Usage: /allow <phone_number>")
                 return
             target = parts[1].strip()
             self._pairing.allow(target)
@@ -218,11 +236,11 @@ class WhatsAppChannel(Channel):
 
         if text.startswith("!revoke ") or text.startswith("/revoke "):
             if not self._is_owner(phone):
-                await self._send_text(phone, "Only the owner can use !revoke.")
+                await self._send_text(phone, "Only the owner can use /revoke.")
                 return
             parts = text.split(None, 1)
             if len(parts) < 2 or not parts[1].strip():
-                await self._send_text(phone, "Usage: !revoke <phone_number>")
+                await self._send_text(phone, "Usage: /revoke <phone_number>")
                 return
             target = parts[1].strip()
             if self._pairing.revoke(target):

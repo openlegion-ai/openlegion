@@ -478,6 +478,8 @@ class RuntimeContext:
         echo_ok(f"Dashboard: http://localhost:{mesh_port}/dashboard")
 
         if agents_cfg:
+            click.echo(f"  Starting {len(agents_cfg)} agent(s)...", nl=False)
+
             # Wait for agents
             async def _wait_all_agents():
                 async def _wait_one(aid):
@@ -486,6 +488,7 @@ class RuntimeContext:
                 return await asyncio.gather(*[_wait_one(aid) for aid in agents_cfg])
 
             agent_results = asyncio.run(_wait_all_agents())
+            click.echo(" ready.")
 
             echo_header("Agents")
             default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
