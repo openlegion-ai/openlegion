@@ -266,7 +266,7 @@ class DiscordChannel(Channel):
 
         if response_text:
             if tool_lines:
-                names = [l.split(". ", 1)[1].split(" ")[0] if ". " in l else l for l in tool_lines]
+                names = [line.split(". ", 1)[1].split(" ")[0] if ". " in line else line for line in tool_lines]
                 final_text = f"[{target}] Tools: {', '.join(names)}\n\n{response_text}"
             else:
                 final_text = f"[{target}] {response_text}"
