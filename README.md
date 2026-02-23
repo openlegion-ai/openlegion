@@ -603,7 +603,6 @@ openlegion start --sandbox
 
 ```
 openlegion [--version]
-├── setup                                # Pre-configure credentials (optional)
 ├── start [--config PATH] [-d] [--sandbox]  # Start runtime + interactive REPL (inline setup on first run)
 ├── stop                                 # Stop all containers
 ├── chat <name> [--port PORT]            # Connect to a running agent
@@ -653,7 +652,7 @@ Aliases: /exit = /quit, /agents = /status
 
 ### Team Templates
 
-Templates are offered during first-run setup (via `openlegion start` or `openlegion setup`):
+Templates are offered during first-run setup (via `openlegion start`):
 
 | Template | Agents | Description |
 |----------|--------|-------------|
@@ -837,7 +836,7 @@ pytest tests/
 |----------|-------|---------------|
 | Built-in Tools | 98 | exec, file, browser (incl. backend tiers + screenshots), memory, mesh tools, notifications, path traversal, discovery |
 | Dashboard | 72 | Index, agents, blackboard, costs, traces, queues, cron, settings, config |
-| CLI | 62 | Agent add/list/edit/remove, chat, setup, REPL commands, cron management, version |
+| CLI | 62 | Agent add/list/edit/remove, chat, REPL commands, cron management, version |
 | Agent Loop | 57 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
 | Workspace | 55 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files |
 | Cron | 42 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM, concurrent mutations |

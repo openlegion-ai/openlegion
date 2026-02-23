@@ -143,6 +143,5 @@ Write-Host ""
 if ($NeedRestart) {
     Write-Host "    Restart your terminal, then:" -ForegroundColor Yellow
 }
-Write-Host "    openlegion setup             # configure API key + agents"
-Write-Host "    openlegion start             # launch and start chatting"
+Write-Host "    openlegion start             # configure + launch and start chatting"
 Write-Host ""

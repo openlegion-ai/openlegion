@@ -212,8 +212,6 @@ On first run (no credentials configured), `openlegion start` offers three paths:
 
 The Docker image builds automatically on your first `openlegion start` (~2 min).
 
-> **Pre-configure before starting?** You can still run `openlegion setup` to pre-configure credentials and team templates before launching the runtime.
-
 ---
 
 ## Using the REPL

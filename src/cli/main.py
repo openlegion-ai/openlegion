@@ -1,7 +1,6 @@
 """CLI entry point for OpenLegion.
 
 Core:
-  setup                    First-time setup (API key, model, agents)
   start                    Start runtime + interactive REPL
   start -d                 Start in background (detached)
   stop                     Stop all containers
@@ -54,16 +53,6 @@ def cli():
 
     load_dotenv(cli_config.ENV_FILE)
     _suppress_host_logs()
-
-
-# ── setup ────────────────────────────────────────────────────
-
-@cli.command()
-def setup():
-    """Interactive setup: API key, project, agents, collaboration."""
-    from src.setup_wizard import SetupWizard
-    wizard = SetupWizard(cli_config.PROJECT_ROOT)
-    wizard.run_full()
 
 
 # ── agent subgroup ───────────────────────────────────────────
