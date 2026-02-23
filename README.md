@@ -6,7 +6,7 @@
 </h3>
 <div align="center">
    
-[![AGPLv3 License](https://img.shields.io/badge/license-AGPLv3-blue.svg)](LICENSE)
+[![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE.md)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 [![Tests: 1124](https://img.shields.io/badge/tests-1124%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
@@ -133,7 +133,7 @@ prompted.
 
 **1124 tests passing** across **~19,000 lines** of application code.
 **Fully auditable in a day.**
-No LangChain. No Redis. No Kubernetes. No CEO agent. AGPLv3 License.
+No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
 1. **Security by architecture** — every agent runs in an isolated Docker container
    (microVM when available). API keys live in the credential vault — agents call
@@ -1007,9 +1007,13 @@ config/
 
 ## License
 
-**AGPLv3** — see [LICENSE](LICENSE).
+OpenLegion.ai is source-available under the Business Source License 1.1 (BSL).
 
-OpenLegion is free and open-source. Self-host it, fork it, build on it.
+You may view, modify, and self-host the software.
+
+You may NOT offer it as a competing hosted or SaaS product.
+
+See [LICENSE](LICENSE). for details.
 
 ---
 
