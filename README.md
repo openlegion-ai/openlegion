@@ -1,9 +1,11 @@
-# OpenLegion 🪖
-
-> **Autonomous AI agent fleets — isolated, auditable, and production-ready.**
-> Every agent runs in its own Docker container. API keys never leave the vault.
-> Chat via Telegram, Discord, Slack, or WhatsApp. Built-in cost controls. 100+ LLM providers.
-
+<p align="center">
+  <img width="450" alt="openlegion-logo-new" src="https://github.com/user-attachments/assets/08912b04-8df1-4473-b679-6bbac0c3ae2f" />
+</p>
+<h3 align="center">
+  <b>The AI agent framework built for builders who can't afford a security incident.</b>
+</h3>
+<div align="center">
+   
 [![AGPLv3 License](https://img.shields.io/badge/license-AGPLv3-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 [![Tests: 1112](https://img.shields.io/badge/tests-1112%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
@@ -11,8 +13,12 @@
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
 [![Docker](https://img.shields.io/badge/isolation-Docker%20%2B%20microVM-blue.svg)]()
+   
+</div>
 
-**The AI agent framework built for builders who can't afford a security incident.**
+> **Autonomous AI agent fleets — isolated, auditable, and production-ready.**
+> Every agent runs in its own Docker container. API keys never leave the vault.
+> Chat via Telegram, Discord, Slack, or WhatsApp. Built-in cost controls. 100+ LLM providers.
 
 [Quick Start](#quick-start) · [Full Setup Guide](QUICKSTART.md) · [Why Not OpenClaw?](#why-not-openclaw) · [Docs](docs/)
 
