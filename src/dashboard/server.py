@@ -144,7 +144,8 @@ def create_dashboard_router(
             if permissions is not None:
                 permissions.reload()
 
-            acfg = _load_config().get("agents", {}).get(name, {})
+            cfg = _load_config()
+            acfg = cfg.get("agents", {}).get(name, {})
             import os
             skills_dir = os.path.abspath(acfg.get("skills_dir", ""))
             url = runtime.start_agent(
@@ -166,6 +167,9 @@ def create_dashboard_router(
                     transport.register(name, url)
             if health_monitor is not None:
                 health_monitor.register(name)
+            if cron_scheduler is not None:
+                hb_schedule = cfg.get("mesh", {}).get("heartbeat_schedule")
+                cron_scheduler.ensure_heartbeat(name, hb_schedule)
             ready = await runtime.wait_for_agent(name, timeout=60)
             if event_bus is not None:
                 event_bus.emit("agent_state", agent=name,
