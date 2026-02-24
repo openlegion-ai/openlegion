@@ -43,6 +43,7 @@ def _extract_prompt_preview(params: dict, max_len: int = 500) -> str:
 
 if TYPE_CHECKING:
     from src.dashboard.events import EventBus
+    from src.host.costs import CostTracker
     from src.host.credentials import CredentialVault
     from src.host.cron import CronScheduler
     from src.host.health import HealthMonitor
@@ -68,6 +69,7 @@ def create_mesh_app(
     trace_store: TraceStore | None = None,
     event_bus: EventBus | None = None,
     health_monitor: HealthMonitor | None = None,
+    cost_tracker: CostTracker | None = None,
     notify_fn: Callable[[str, str], Coroutine] | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
@@ -500,6 +502,54 @@ def create_mesh_app(
                 "role": router.agent_roles.get(agent_id, ""),
             }
         return agents
+
+    # === Agent Introspection ===
+
+    @app.get("/mesh/introspect")
+    async def introspect(section: str = "all", request: Request = ...):
+        """Return runtime state for the requesting agent.
+
+        Agents use this to understand their permissions, budget, fleet,
+        cron schedule, and health.  No sensitive data is exposed.
+        """
+        agent_id = request.headers.get("X-Agent-ID", "unknown")
+        _verify_auth(agent_id, request)
+        result: dict = {}
+
+        if section in ("permissions", "all"):
+            perms = permissions.get_permissions(agent_id)
+            result["permissions"] = {
+                "blackboard_read": perms.blackboard_read,
+                "blackboard_write": perms.blackboard_write,
+                "can_message": perms.can_message,
+                "can_publish": perms.can_publish,
+                "can_subscribe": perms.can_subscribe,
+                "allowed_apis": perms.allowed_apis,
+            }
+
+        if section in ("budget", "all") and cost_tracker:
+            result["budget"] = cost_tracker.check_budget(agent_id)
+
+        if section in ("fleet", "all"):
+            result["fleet"] = [
+                {"id": aid, "role": router.agent_roles.get(aid, "")}
+                for aid in router.agent_registry
+                if permissions.can_message(agent_id, aid) or aid == agent_id
+            ]
+
+        if section in ("cron", "all") and cron_scheduler:
+            result["cron"] = [
+                j for j in cron_scheduler.list_jobs()
+                if j.get("agent") == agent_id
+            ]
+
+        if section in ("health", "all") and health_monitor:
+            statuses = health_monitor.get_status()
+            result["health"] = next(
+                (s for s in statuses if s["agent"] == agent_id), None
+            )
+
+        return result
 
     # === Cron CRUD ===
 

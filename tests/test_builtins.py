@@ -1666,3 +1666,53 @@ class TestArtifactPathTraversal:
             assert "Invalid artifact name" in result["error"]
         finally:
             shutil.rmtree(ws.root, ignore_errors=True)
+
+
+# ── Introspect Tool ─────────────────────────────────────────────
+
+
+class TestIntrospectTool:
+    @pytest.mark.asyncio
+    async def test_introspect_success(self):
+        from src.agent.builtins.introspect_tool import introspect_tool
+
+        mock_data = {
+            "permissions": {"blackboard_read": ["context/*"]},
+            "budget": {"daily_used": 1.5, "daily_limit": 10.0},
+            "fleet": [{"id": "alice", "role": "researcher"}],
+        }
+        mock_mesh = AsyncMock()
+        mock_mesh.introspect = AsyncMock(return_value=mock_data)
+
+        result = await introspect_tool(section="all", mesh_client=mock_mesh)
+        assert result == mock_data
+        mock_mesh.introspect.assert_awaited_once_with("all")
+
+    @pytest.mark.asyncio
+    async def test_introspect_specific_section(self):
+        from src.agent.builtins.introspect_tool import introspect_tool
+
+        mock_mesh = AsyncMock()
+        mock_mesh.introspect = AsyncMock(return_value={"budget": {"daily_used": 0.5}})
+
+        result = await introspect_tool(section="budget", mesh_client=mock_mesh)
+        assert "budget" in result
+        mock_mesh.introspect.assert_awaited_once_with("budget")
+
+    @pytest.mark.asyncio
+    async def test_introspect_no_mesh_client(self):
+        from src.agent.builtins.introspect_tool import introspect_tool
+
+        result = await introspect_tool(section="all", mesh_client=None)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_introspect_mesh_failure(self):
+        from src.agent.builtins.introspect_tool import introspect_tool
+
+        mock_mesh = AsyncMock()
+        mock_mesh.introspect = AsyncMock(side_effect=RuntimeError("connection refused"))
+
+        result = await introspect_tool(section="all", mesh_client=mock_mesh)
+        assert "error" in result
+        assert "connection refused" in result["error"]

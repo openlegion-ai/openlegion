@@ -133,6 +133,8 @@ class AgentLoop:
         self._steer_queue: asyncio.Queue[str] = asyncio.Queue()
         self._fleet_roster: list[dict] | None = None  # cached fleet info
         self._fleet_roster_ts: float = 0  # timestamp of last fetch
+        self._introspect_cache: dict | None = None
+        self._introspect_cache_ts: float = 0
         self._loop_detector = ToolLoopDetector()
 
     async def _fetch_fleet_roster(self) -> list[dict]:
@@ -187,6 +189,80 @@ class AgentLoop:
         )
         return "\n".join(lines)
 
+    _INTROSPECT_TTL = 300  # 5 minutes
+
+    async def _fetch_introspect_cached(self) -> dict | None:
+        """Fetch and cache introspect data from the mesh (TTL: 5 min).
+
+        On cache miss (fresh fetch), also regenerates SYSTEM.md so the
+        bootstrap context stays reasonably fresh without a restart.
+        """
+        now = time.time()
+        if self._introspect_cache is not None and (now - self._introspect_cache_ts) < self._INTROSPECT_TTL:
+            return self._introspect_cache
+        try:
+            data = await self.mesh_client.introspect("all")
+            self._introspect_cache = data
+            self._introspect_cache_ts = now
+            # Refresh SYSTEM.md on disk so bootstrap picks it up next prompt
+            if self.workspace:
+                try:
+                    from src.agent.workspace import generate_system_md
+                    system_md = generate_system_md(data, self.agent_id)
+                    (self.workspace.root / "SYSTEM.md").write_text(system_md)
+                except Exception as e:
+                    logger.debug("Failed to refresh SYSTEM.md: %s", e)
+            return data
+        except Exception as e:
+            logger.debug("Introspect fetch failed, using cached data: %s", e)
+            return self._introspect_cache
+
+    @staticmethod
+    def _format_runtime_context(data: dict) -> str:
+        """Format introspect data into a compact runtime context block.
+
+        This is the authoritative source of live numbers in the system
+        prompt — SYSTEM.md contains the static preamble + a startup snapshot
+        while this block has fresh data fetched each turn (with a 5-min cache).
+        """
+        lines = ["## Runtime Context\n"]
+
+        perms = data.get("permissions")
+        if perms:
+            for key in (
+                "blackboard_read", "blackboard_write", "can_message",
+                "can_publish", "can_subscribe", "allowed_apis",
+            ):
+                patterns = perms.get(key, [])
+                if isinstance(patterns, list) and patterns:
+                    lines.append(f"- {key}: {', '.join(str(p) for p in patterns)}")
+
+        budget = data.get("budget")
+        if budget:
+            allowed = budget.get("allowed", True)
+            lines.append(
+                f"- Budget: daily ${budget.get('daily_used', 0):.2f}"
+                f"/${budget.get('daily_limit', 0):.2f}, "
+                f"monthly ${budget.get('monthly_used', 0):.2f}"
+                f"/${budget.get('monthly_limit', 0):.2f}"
+                + ("" if allowed else " [EXCEEDED]")
+            )
+
+        fleet = data.get("fleet")
+        if fleet:
+            names = [a.get("id", "?") for a in fleet]
+            lines.append(f"- Fleet: [{', '.join(names)}] ({len(fleet)} agents)")
+
+        cron = data.get("cron")
+        if cron:
+            summaries = []
+            for j in cron:
+                hb = " (heartbeat)" if j.get("heartbeat") else ""
+                summaries.append(f"{j.get('schedule', '?')}{hb}")
+            lines.append(f"- Cron: {'; '.join(summaries)}")
+
+        return "\n".join(lines) if len(lines) > 1 else ""
+
     async def inject_steer(self, message: str) -> bool:
         """Inject a steer message. Returns True if agent is working."""
         await self._steer_queue.put(message)
@@ -237,7 +313,8 @@ class AgentLoop:
         start = time.time()
         total_tokens = 0
 
-        system_prompt = self._build_system_prompt(assignment)
+        introspect_data = await self._fetch_introspect_cached()
+        system_prompt = self._build_system_prompt(assignment, introspect_data=introspect_data)
         messages = await self._build_initial_context(assignment)
 
         # Decay salience scores so old facts don't dominate forever
@@ -586,7 +663,9 @@ class AgentLoop:
             lines.append(f"- {h['tool_name']} [{status}]: {truncate(h['outcome'], 100)}")
         return "## Recent Tool History\n\n" + "\n".join(lines)
 
-    def _build_system_prompt(self, assignment: TaskAssignment) -> str:
+    def _build_system_prompt(
+        self, assignment: TaskAssignment, introspect_data: dict | None = None,
+    ) -> str:
         tools_desc = self.skills.get_descriptions()
         parts = []
         if self.system_prompt:
@@ -625,6 +704,12 @@ class AgentLoop:
         tool_history = self._build_tool_history_context()
         if tool_history:
             parts.append(sanitize_for_prompt(tool_history))
+
+        if introspect_data:
+            runtime_ctx = self._format_runtime_context(introspect_data)
+            if runtime_ctx:
+                parts.append(runtime_ctx)
+
         return "\n\n".join(parts)
 
     def _parse_final_output(self, content: str) -> tuple[dict, dict]:
@@ -700,7 +785,10 @@ class AgentLoop:
             self._chat_messages[-1]["content"] += f"\n\n[Additional context]: {combined}"
 
         roster = await self._fetch_fleet_roster()
-        system = self._build_chat_system_prompt(goals=goals, fleet_roster=roster)
+        introspect_data = await self._fetch_introspect_cached()
+        system = self._build_chat_system_prompt(
+            goals=goals, fleet_roster=roster, introspect_data=introspect_data,
+        )
         return user_message, system
 
     def _build_tool_call_entries(self, llm_response) -> list[dict]:
@@ -976,7 +1064,12 @@ class AgentLoop:
             if self.context_manager:
                 self.context_manager.reset()
 
-    def _build_chat_system_prompt(self, goals: dict | None = None, fleet_roster: list[dict] | None = None) -> str:
+    def _build_chat_system_prompt(
+        self,
+        goals: dict | None = None,
+        fleet_roster: list[dict] | None = None,
+        introspect_data: dict | None = None,
+    ) -> str:
         tools_desc = self.skills.get_descriptions()
         parts = []
         if self.system_prompt:
@@ -1096,6 +1189,11 @@ class AgentLoop:
         tool_history = self._build_tool_history_context()
         if tool_history:
             parts.append(sanitize_for_prompt(tool_history))
+
+        if introspect_data:
+            runtime_ctx = self._format_runtime_context(introspect_data)
+            if runtime_ctx:
+                parts.append(runtime_ctx)
 
         # Context usage warning at 80%+
         if self.context_manager and self._chat_messages:

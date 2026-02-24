@@ -66,6 +66,7 @@ _MAX_FILE_SIZE = 200_000
 
 # Bootstrap capping — limits for system prompt injection
 _MAX_BOOTSTRAP = 40_000
+_MAX_SYSTEM = 6_000
 _MAX_AGENTS = 8_000
 _MAX_SOUL = 4_000
 _MAX_USER = 4_000
@@ -166,6 +167,14 @@ class WorkspaceManager:
         project = self._read_file("PROJECT.md")
         if project and project.strip():
             parts.append(project.strip())
+
+        # SYSTEM.md — generated architecture guide (static preamble + snapshot)
+        system = self._read_file("SYSTEM.md")
+        if system and system.strip():
+            system = system.strip()
+            if len(system) > _MAX_SYSTEM:
+                system = system[:_MAX_SYSTEM] + "\n\n... (truncated)"
+            parts.append(system)
 
         for filename, cap in caps.items():
             content = self._read_file(filename)
@@ -375,6 +384,119 @@ class WorkspaceManager:
                 path.write_text("\n".join(lines[half:]) + "\n")
         except OSError as e:
             logger.debug("Failed to rotate learnings file %s: %s", path, e)
+
+
+# ── SYSTEM.md generation ──────────────────────────────────────
+
+# Static preamble: architecture concepts that change rarely.
+# This is the "how you tick" knowledge that helps agents self-improve.
+_SYSTEM_MD_PREAMBLE = """\
+# System Architecture
+
+You are an agent running inside an isolated container in the OpenLegion mesh.
+This document describes how the system works so you can operate effectively.
+
+## How Your World Works
+
+**Mesh host** — A central coordinator at your MESH_URL. Every external action
+you take goes through it: LLM calls, web requests, blackboard reads/writes,
+pub/sub events. You have no direct internet access.
+
+**Credential vault** — You never hold API keys. When you call an LLM or
+external API, the mesh injects credentials server-side. You cannot leak
+what you cannot see.
+
+**Blackboard** — A shared key-value store (SQLite) for agent-to-agent
+coordination. Keys are hierarchical (e.g. `context/market`, `tasks/alice`).
+You need explicit read/write permissions per key pattern.
+
+**Pub/Sub** — Event topics for broadcast signals (`research_complete`,
+`deploy_ready`). Subscribe to topics you care about; publish when you
+have something other agents should react to.
+
+## How Your Execution Works
+
+**Context window** — Your conversation history is sent to the LLM on every
+turn. Longer history = more tokens = higher cost. The system trims old
+exchanges when the window fills, but first flushes important facts to
+MEMORY.md (write-then-compact). To reduce cost: be concise, avoid
+unnecessary tool calls, and save important facts to memory early.
+
+**Tool calls** — Each tool round costs a full LLM call (system prompt +
+entire history re-sent). Batching multiple actions in one response is
+cheaper than one action per turn. The system detects repeated identical
+tool calls and will block you to prevent waste.
+
+**Memory search** — Your workspace files are searched with BM25 keyword
+matching. Good queries use specific, distinctive terms. Your SQLite memory
+DB supports both keyword (FTS5) and semantic (vector) search if embeddings
+are configured. Use `memory_save` for structured facts you'll need later.
+
+**Budget** — Each agent has daily and monthly cost caps. When you exceed
+your daily budget, LLM calls are blocked until the next day. You can check
+your budget with the `introspect` tool. Expensive operations: long
+conversations (large context), vision/screenshot tools, embedding calls.
+
+**Common errors and what they mean:**
+- 403 Forbidden = permission denied (check your blackboard_read/write patterns)
+- 429 Too Many Requests = rate limit hit (back off and retry)
+- Budget exceeded = daily/monthly cap reached (wait or ask user to adjust)
+- Tool loop detected = you called the same tool with same args too many times
+
+## Coordination Philosophy
+
+- **Fleet model**: no boss agent. You coordinate through the blackboard
+  and workflows, not through a chain of command.
+- **Private by default**: your memory and workspace are yours alone.
+  Promote facts to the blackboard only when another agent needs them.
+- **User-facing vs agent-facing**: report to the user via chat or
+  `notify_user`. The blackboard is for agent-to-agent data only.
+"""
+
+
+def generate_system_md(introspect_data: dict, agent_id: str) -> str:
+    """Generate SYSTEM.md content: static preamble + initial snapshot.
+
+    The preamble teaches agents *how the system works*. A compact snapshot
+    of permissions and fleet is appended as initial context but the
+    authoritative live data comes from the ``## Runtime Context`` block
+    injected into the system prompt on each turn by ``AgentLoop``.
+
+    Role strings from the fleet are sanitized to prevent prompt injection
+    via malicious agent registration data.
+    """
+    from src.shared.utils import sanitize_for_prompt
+
+    parts = [_SYSTEM_MD_PREAMBLE]
+
+    # Compact snapshot — helps agents on first message before runtime
+    # context kicks in.  Kept deliberately short to avoid duplication
+    # with the live runtime context block.
+    perms = introspect_data.get("permissions")
+    if perms:
+        lines = ["## Your Permissions (snapshot)\n"]
+        for key in (
+            "blackboard_read", "blackboard_write", "can_message",
+            "can_publish", "can_subscribe", "allowed_apis",
+        ):
+            patterns = perms.get(key, [])
+            if isinstance(patterns, list) and patterns:
+                lines.append(f"- **{key}**: {', '.join(str(p) for p in patterns)}")
+        parts.append("\n".join(lines))
+
+    fleet = introspect_data.get("fleet")
+    if fleet:
+        names = []
+        for agent in fleet:
+            aid = agent.get("id", "?")
+            role = sanitize_for_prompt(str(agent.get("role", "")))
+            # Truncate role to prevent bloat from malicious registration
+            role = role[:80]
+            marker = " (you)" if aid == agent_id else ""
+            names.append(f"{aid}{marker}" + (f" ({role})" if role else ""))
+        parts.append(f"## Fleet: {', '.join(names)}")
+
+    return "\n\n".join(parts)
 
 
 # ── BM25 implementation (no external deps) ───────────────────

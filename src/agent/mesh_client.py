@@ -276,6 +276,17 @@ class MeshClient:
         response.raise_for_status()
         return response.json().get("value")
 
+    async def introspect(self, section: str = "all") -> dict:
+        """Query runtime state from the mesh (permissions, budget, fleet, etc.)."""
+        client = await self._get_client()
+        response = await client.get(
+            f"{self.mesh_url}/mesh/introspect",
+            params={"section": section},
+            headers={"X-Agent-ID": self.agent_id, **self._trace_headers()},
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def api_call(
         self, service: str, action: str, params: dict | None = None, timeout: int = 30
     ) -> APIProxyResponse:

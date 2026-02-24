@@ -571,3 +571,226 @@ def test_notify_endpoint_truncates_long_message(tmp_path):
     assert calls[0][1] == "x" * 2000
 
     bb.close()
+
+
+# === Introspect Endpoint ===
+
+
+def test_introspect_returns_permissions(tmp_path):
+    """GET /mesh/introspect returns agent permissions."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "alice": AgentPermissions(
+            agent_id="alice",
+            blackboard_read=["context/*", "tasks/*"],
+            blackboard_write=["context/alice_*"],
+            can_message=["bob"],
+            can_publish=["updates"],
+            can_subscribe=["alerts"],
+            allowed_apis=["anthropic"],
+        ),
+    }
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    app = create_mesh_app(bb, pubsub, router, perms)
+    client = TestClient(app)
+
+    response = client.get(
+        "/mesh/introspect",
+        params={"section": "permissions"},
+        headers={"X-Agent-ID": "alice"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "permissions" in data
+    assert data["permissions"]["blackboard_read"] == ["context/*", "tasks/*"]
+    assert data["permissions"]["can_message"] == ["bob"]
+    assert data["permissions"]["allowed_apis"] == ["anthropic"]
+
+    bb.close()
+
+
+def test_introspect_returns_fleet(tmp_path):
+    """GET /mesh/introspect section=fleet lists visible agents (self + messageable)."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "alice": AgentPermissions(agent_id="alice", can_message=["bob"]),
+    }
+    router = MessageRouter(permissions=perms, agent_registry={})
+    router.register_agent("alice", "http://localhost:8401")
+    router.register_agent("bob", "http://localhost:8402")
+    router.register_agent("carol", "http://localhost:8403")
+
+    app = create_mesh_app(bb, pubsub, router, perms)
+    client = TestClient(app)
+
+    response = client.get(
+        "/mesh/introspect",
+        params={"section": "fleet"},
+        headers={"X-Agent-ID": "alice"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "fleet" in data
+    ids = [a["id"] for a in data["fleet"]]
+    # alice sees herself and bob (can_message), but NOT carol
+    assert "alice" in ids
+    assert "bob" in ids
+    assert "carol" not in ids
+
+    bb.close()
+
+
+def test_introspect_returns_budget_when_cost_tracker_present(tmp_path):
+    """GET /mesh/introspect section=budget returns budget info."""
+    from src.host.costs import CostTracker
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+    cost_tracker = CostTracker(db_path=str(tmp_path / "costs.db"))
+    cost_tracker.budgets = {"alice": {"daily_usd": 5.0, "monthly_usd": 100.0}}
+
+    app = create_mesh_app(bb, pubsub, router, perms, cost_tracker=cost_tracker)
+    client = TestClient(app)
+
+    response = client.get(
+        "/mesh/introspect",
+        params={"section": "budget"},
+        headers={"X-Agent-ID": "alice"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "budget" in data
+    assert data["budget"]["daily_limit"] == 5.0
+    assert data["budget"]["monthly_limit"] == 100.0
+    assert data["budget"]["allowed"] is True
+
+    bb.close()
+
+
+def test_introspect_all_returns_multiple_sections(tmp_path):
+    """GET /mesh/introspect section=all returns permissions + fleet."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "alice": AgentPermissions(
+            agent_id="alice",
+            blackboard_read=["*"],
+        ),
+    }
+    router = MessageRouter(permissions=perms, agent_registry={})
+    router.register_agent("alice", "http://localhost:8401")
+
+    app = create_mesh_app(bb, pubsub, router, perms)
+    client = TestClient(app)
+
+    response = client.get(
+        "/mesh/introspect",
+        params={"section": "all"},
+        headers={"X-Agent-ID": "alice"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "permissions" in data
+    assert "fleet" in data
+    # alice can always see herself even without can_message patterns
+    assert len(data["fleet"]) == 1
+    assert data["fleet"][0]["id"] == "alice"
+
+    bb.close()
+
+
+def test_introspect_unknown_agent_gets_default_perms(tmp_path):
+    """Introspect for unregistered agent falls back to default permissions."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    app = create_mesh_app(bb, pubsub, router, perms)
+    client = TestClient(app)
+
+    response = client.get(
+        "/mesh/introspect",
+        params={"section": "permissions"},
+        headers={"X-Agent-ID": "unknown_agent"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    # Should still return a permissions dict (deny-all defaults)
+    assert "permissions" in data
+    assert data["permissions"]["blackboard_read"] == []
+
+    bb.close()
+
+
+def test_introspect_returns_cron_for_agent(tmp_path):
+    """GET /mesh/introspect section=cron returns jobs for the requesting agent."""
+    from src.host.cron import CronScheduler
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+    cron = CronScheduler(config_path=str(tmp_path / "cron.json"))
+    cron.add_job(agent="alice", schedule="*/15 * * * *", message="heartbeat", heartbeat=True)
+    cron.add_job(agent="bob", schedule="0 9 * * *", message="morning")
+
+    app = create_mesh_app(bb, pubsub, router, perms, cron_scheduler=cron)
+    client = TestClient(app)
+
+    response = client.get(
+        "/mesh/introspect",
+        params={"section": "cron"},
+        headers={"X-Agent-ID": "alice"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "cron" in data
+    # Only alice's jobs should appear
+    assert len(data["cron"]) == 1
+    assert data["cron"][0]["agent"] == "alice"
+    assert data["cron"][0]["heartbeat"] is True
+
+    bb.close()
+
+
+def test_introspect_health_returns_none_for_unmonitored_agent(tmp_path):
+    """GET /mesh/introspect section=health returns null for unknown agent."""
+    from unittest.mock import MagicMock
+
+    from src.host.health import HealthMonitor
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+    health = HealthMonitor(
+        runtime=MagicMock(), transport=MagicMock(), router=router,
+    )
+
+    app = create_mesh_app(bb, pubsub, router, perms, health_monitor=health)
+    client = TestClient(app)
+
+    response = client.get(
+        "/mesh/introspect",
+        params={"section": "health"},
+        headers={"X-Agent-ID": "nonexistent"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "health" in data
+    assert data["health"] is None
+
+    bb.close()

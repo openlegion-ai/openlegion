@@ -432,6 +432,7 @@ class RuntimeContext:
             trace_store=self.trace_store,
             event_bus=self.event_bus,
             health_monitor=self.health_monitor,
+            cost_tracker=self.cost_tracker,
             notify_fn=self._handle_notify,
         )
         app.include_router(create_webhook_router(self.orchestrator))

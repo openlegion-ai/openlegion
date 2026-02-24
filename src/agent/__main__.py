@@ -135,6 +135,18 @@ def main() -> None:
                     await asyncio.sleep(_REGISTRATION_BACKOFF_SECONDS)
         if not registered:
             logger.warning(f"Agent '{agent_id}' started without mesh registration")
+
+        # Generate SYSTEM.md from live system state
+        if registered:
+            try:
+                from src.agent.workspace import generate_system_md
+                info = await mesh_client.introspect("all")
+                system_md = generate_system_md(info, agent_id)
+                Path("/data/workspace").mkdir(parents=True, exist_ok=True)
+                Path("/data/workspace/SYSTEM.md").write_text(system_md)
+                logger.info(f"Generated SYSTEM.md for '{agent_id}'")
+            except Exception as e:
+                logger.debug(f"Could not generate SYSTEM.md: {e}")
         yield
         if loop.state == "working":
             loop._cancel_requested = True
