@@ -88,7 +88,10 @@ class HealthMonitor:
                 logger.debug("Blackboard TTL cleanup failed: %s", e)
         agent_ids = list(self.agents.keys())
         if agent_ids:
-            await asyncio.gather(*(self._check_agent(aid) for aid in agent_ids))
+            await asyncio.gather(
+                *(self._check_agent(aid) for aid in agent_ids),
+                return_exceptions=True,
+            )
 
     async def _cleanup_ephemeral_agents(self) -> None:
         """Remove ephemeral (spawned) agents that have exceeded their TTL."""

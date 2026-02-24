@@ -261,9 +261,14 @@ class Channel(abc.ABC):
                 return "Usage: /broadcast <message>"
             bc_msg = parts[1]
             responses = await asyncio.gather(
-                *(self.dispatch(name, bc_msg) for name in agents)
+                *(self.dispatch(name, bc_msg) for name in agents),
+                return_exceptions=True,
             )
-            results = [f"[{name}] {resp}" for name, resp in zip(agents, responses)]
+            results = [
+                f"[{name}] {resp}" if not isinstance(resp, BaseException)
+                else f"[{name}] Error: {resp}"
+                for name, resp in zip(agents, responses)
+            ]
             return f"Broadcast to {len(agents)} agent(s):\n\n" + "\n\n".join(results)
 
         if cmd == "/costs":

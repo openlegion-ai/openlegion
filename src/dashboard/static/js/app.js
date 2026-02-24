@@ -120,7 +120,6 @@ function dashboard() {
     _chatAborts: {},           // { agentId: AbortController }
     chatMaxPanels: 3,          // Max simultaneous panels
     chatMinimized: {},         // { agentId: true/false } — minimized state per panel
-    chatUnread: {},            // { agentId: count } — unread messages on minimized panels
 
     // Identity panel
     identityTabs: _IDENTITY_TABS,
@@ -1028,8 +1027,7 @@ function dashboard() {
     openChat(agentId) {
       if (this.openChats.includes(agentId)) {
         // Already open — expand if minimized, scroll to latest and focus input
-        this.chatMinimized[agentId] = false;
-        this.chatUnread = { ...this.chatUnread, [agentId]: 0 };
+        this.chatMinimized = { ...this.chatMinimized, [agentId]: false };
         this.$nextTick(() => {
           this._scrollChat(agentId);
           const input = document.querySelector(`#chat-messages-${agentId}`)
@@ -1058,8 +1056,9 @@ function dashboard() {
       this.openChats = this.openChats.filter(id => id !== agentId);
       this.chatLoadingAgents[agentId] = false;
       this.chatStreamingAgents[agentId] = false;
-      delete this.chatMinimized[agentId];
-      delete this.chatUnread[agentId];
+      const mins = { ...this.chatMinimized };
+      delete mins[agentId];
+      this.chatMinimized = mins;
     },
 
     clearChat(agentId) {
@@ -1172,10 +1171,6 @@ function dashboard() {
       delete this._chatAborts[agentId];
       this.chatLoadingAgents[agentId] = false;
       this.chatStreamingAgents[agentId] = false;
-      // Track unread if panel is minimized
-      if (this.chatMinimized[agentId]) {
-        this.chatUnread = { ...this.chatUnread, [agentId]: (this.chatUnread[agentId] || 0) + 1 };
-      }
       this.$nextTick(() => this._scrollChat(agentId));
     },
 
@@ -1224,29 +1219,27 @@ function dashboard() {
             try { data = JSON.parse(line.slice(6)); } catch (_) { continue; }
 
             if (data.type === 'agent_start') {
-              this.broadcastResults[data.agent] = { streaming: true, content: '' };
-              this.broadcastResults = { ...this.broadcastResults };
+              // Spread needed: new key triggers x-for re-evaluation
+              this.broadcastResults = { ...this.broadcastResults, [data.agent]: { streaming: true, content: '' } };
             } else if (data.type === 'text_delta' && data.agent) {
               if (!this.broadcastResults[data.agent]) {
-                this.broadcastResults[data.agent] = { streaming: true, content: '' };
+                this.broadcastResults = { ...this.broadcastResults, [data.agent]: { streaming: true, content: '' } };
               }
               this.broadcastResults[data.agent].content += data.content || '';
-              this.broadcastResults = { ...this.broadcastResults };
             } else if ((data.type === 'done' || data.type === 'agent_done') && data.agent) {
               const entry = this.broadcastResults[data.agent];
               if (entry) {
                 if (data.response) entry.content = data.response;
                 entry.streaming = false;
               }
-              this.broadcastResults = { ...this.broadcastResults };
             } else if (data.type === 'error' && data.agent) {
               if (!this.broadcastResults[data.agent]) {
-                this.broadcastResults[data.agent] = { streaming: false, content: '' };
+                this.broadcastResults = { ...this.broadcastResults, [data.agent]: { streaming: false, content: '' } };
+              } else {
+                this.broadcastResults[data.agent].streaming = false;
+                this.broadcastResults[data.agent].error = true;
               }
               this.broadcastResults[data.agent].content = data.message || 'Error';
-              this.broadcastResults[data.agent].streaming = false;
-              this.broadcastResults[data.agent].error = true;
-              this.broadcastResults = { ...this.broadcastResults };
             } else if (data.type === 'all_done') {
               break;
             }

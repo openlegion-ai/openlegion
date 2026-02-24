@@ -247,7 +247,7 @@ def create_mesh_app(
                     payload=event.model_dump(mode="json"),
                 ))
                 for agent_id in subscribers
-            ))
+            ), return_exceptions=True)
         return {"subscribers_notified": len(subscribers)}
 
     @app.post("/mesh/subscribe")
