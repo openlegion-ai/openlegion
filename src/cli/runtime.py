@@ -69,6 +69,9 @@ class RuntimeContext:
 
     def start(self) -> None:
         """Initialize and start all components. Called once."""
+        # Match detached mode behavior so relative paths (pubsub.db, skills/, config/)
+        # resolve under the OpenLegion project root even when launched elsewhere.
+        os.chdir(PROJECT_ROOT)
         self._validate_prereqs()
         self._select_backend()
         self._create_components()
