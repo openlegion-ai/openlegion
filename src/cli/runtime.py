@@ -200,6 +200,7 @@ class RuntimeContext:
             _ensure_docker_image()
 
     def _create_components(self) -> None:
+        from src.cli.config import _ensure_all_agent_permissions
         from src.dashboard.events import EventBus
         from src.host.costs import CostTracker
         from src.host.credentials import CredentialVault
@@ -209,7 +210,6 @@ class RuntimeContext:
         from src.host.traces import TraceStore
 
         # Backfill permissions for agents missing from permissions.json
-        from src.cli.config import _ensure_all_agent_permissions
         _ensure_all_agent_permissions()
 
         # Ensure collaborative permissions are up to date before loading
@@ -321,9 +321,9 @@ class RuntimeContext:
                     )
                 else:
                     raise
-
-            # Clean up per-agent env var so it doesn't leak to the next agent
-            self.runtime.extra_env.pop("INITIAL_INSTRUCTIONS", None)
+            finally:
+                # Clean up per-agent env var so it doesn't leak to the next agent
+                self.runtime.extra_env.pop("INITIAL_INSTRUCTIONS", None)
             self.router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
             if isinstance(self.transport, HttpTransport):
                 self.transport.register(agent_id, url)

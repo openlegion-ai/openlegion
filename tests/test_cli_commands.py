@@ -1048,3 +1048,34 @@ class TestEnsureAllAgentPermissions:
         assert "alice" in perms["permissions"]
         assert "bob" in perms["permissions"]
         assert perms["permissions"]["bob"]["can_manage_vault"] is True
+
+
+class TestAddAgentToConfigInitialInstructions:
+    def test_initial_instructions_persisted(self, tmp_path):
+        """_add_agent_to_config writes initial_instructions to agents.yaml when provided."""
+        from src.cli.config import _add_agent_to_config
+
+        agents_file = tmp_path / "agents.yaml"
+
+        with patch("src.cli.config.AGENTS_FILE", agents_file):
+            _add_agent_to_config(
+                name="writer", role="content", model="openai/gpt-4o-mini",
+                initial_instructions="You write blog posts.",
+            )
+
+        data = yaml.safe_load(agents_file.read_text())
+        assert data["agents"]["writer"]["initial_instructions"] == "You write blog posts."
+
+    def test_no_initial_instructions_omitted(self, tmp_path):
+        """_add_agent_to_config omits initial_instructions when empty."""
+        from src.cli.config import _add_agent_to_config
+
+        agents_file = tmp_path / "agents.yaml"
+
+        with patch("src.cli.config.AGENTS_FILE", agents_file):
+            _add_agent_to_config(
+                name="helper", role="assistant", model="openai/gpt-4o-mini",
+            )
+
+        data = yaml.safe_load(agents_file.read_text())
+        assert "initial_instructions" not in data["agents"]["helper"]

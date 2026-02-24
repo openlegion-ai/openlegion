@@ -33,6 +33,45 @@ class TestWorkspaceScaffold:
         WorkspaceManager(workspace_dir=self._tmpdir)
         assert (root / "AGENTS.md").read_text() == "custom instructions"
 
+    def test_initial_instructions_seeds_agents_md(self):
+        """When initial_instructions is provided, AGENTS.md is seeded with that content."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            WorkspaceManager(workspace_dir=tmpdir, initial_instructions="You are a sales agent.\nBe concise.")
+            root = Path(tmpdir)
+            content = (root / "AGENTS.md").read_text()
+            assert content.startswith("# Agent Instructions")
+            assert "You are a sales agent." in content
+            assert "Be concise." in content
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_initial_instructions_does_not_overwrite_existing(self):
+        """If AGENTS.md already exists, initial_instructions is ignored."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            root = Path(tmpdir)
+            root.mkdir(exist_ok=True)
+            (root / "AGENTS.md").write_text("# Existing instructions\nDo not change.")
+            WorkspaceManager(workspace_dir=tmpdir, initial_instructions="New instructions")
+            assert (root / "AGENTS.md").read_text() == "# Existing instructions\nDo not change."
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_initial_instructions_empty_uses_default(self):
+        """When initial_instructions is empty, default scaffold content is used."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            WorkspaceManager(workspace_dir=tmpdir, initial_instructions="")
+            root = Path(tmpdir)
+            content = (root / "AGENTS.md").read_text()
+            # Default scaffold content, not custom instructions
+            assert "# Agent Instructions" in content
+            # Should not have the custom header format from initial_instructions
+            assert content == (root / "AGENTS.md").read_text()
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_load_prompt_context_returns_file_contents(self):
         root = Path(self._tmpdir)
         (root / "AGENTS.md").write_text("# My Agent\nDo X.")
