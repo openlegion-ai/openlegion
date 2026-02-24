@@ -1429,20 +1429,37 @@
                 </div>
                 <div class="space-y-1 mb-3">
                   <template x-for="name in settingsData.credentials.names" :key="name">
-                    <div class="flex items-center gap-2 text-xs">
+                    <div class="flex items-center gap-2 text-xs group">
                       <span class="w-2 h-2 rounded-full bg-green-500/50"></span>
-                      <span class="text-gray-300 font-mono" x-text="name"></span>
+                      <span class="text-gray-300 font-mono flex-1" x-text="name"></span>
+                      <button @click="deleteCredential(name)" class="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 transition-opacity text-base leading-none px-1" title="Remove credential">&times;</button>
                     </div>
                   </template>
                 </div>
                 <div class="border-t border-gray-800 pt-3">
-                  <div class="text-xs text-gray-500 mb-2">Add credential</div>
-                  <div class="flex gap-2">
-                    <input type="text" x-model="credService" class="dash-input flex-1" placeholder="Service (e.g. openai)">
-                    <input type="password" x-model="credKey" class="dash-input flex-1" placeholder="API key">
-                    <button @click="addCredential()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Add</button>
+                  <button x-show="!showCredForm && settingsData.credentials.count === 0" @click="showCredForm = true" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Credential</button>
+                  <div x-show="showCredForm" x-transition>
+                    <div class="text-xs text-gray-500 mb-2">New credential</div>
+                    <div class="flex gap-2 mb-2">
+                      <select x-model="credService" class="dash-select text-xs w-40">
+                        <option value="">Provider...</option>
+                        <option value="anthropic">Anthropic</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="gemini">Google Gemini</option>
+                        <option value="deepseek">DeepSeek</option>
+                        <option value="moonshot">Moonshot / Kimi</option>
+                        <option value="xai">xAI (Grok)</option>
+                        <option value="groq">Groq</option>
+                        <option value="minimax">MiniMax</option>
+                      </select>
+                      <input type="password" x-model="credKey" class="dash-input flex-1" placeholder="API key">
+                    </div>
+                    <input type="text" x-model="credBaseUrl" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
+                    <div class="flex justify-between">
+                      <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
+                      <button @click="addCredential()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save Credential</button>
+                    </div>
                   </div>
-                  <input type="text" x-model="credBaseUrl" class="dash-input w-full mt-2" placeholder="Custom API base URL (optional)">
                 </div>
               </div>
               <!-- PubSub subscriptions -->

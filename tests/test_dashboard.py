@@ -880,6 +880,35 @@ class TestDashboardCredentialBaseUrl:
         assert vault.add_credential.call_count == 1
 
 
+class TestDashboardCredentialRemove:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_delete_credential(self):
+        """DELETE /api/credentials/{name} removes the credential."""
+        vault = self.components["credential_vault"]
+        vault.remove_credential = MagicMock(return_value=True)
+        resp = self.client.delete("/dashboard/api/credentials/anthropic_api_key")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["removed"] is True
+        assert data["service"] == "anthropic_api_key"
+        vault.remove_credential.assert_called_once_with("anthropic_api_key")
+
+    def test_delete_credential_not_found(self):
+        """DELETE /api/credentials/{name} returns 404 when credential doesn't exist."""
+        vault = self.components["credential_vault"]
+        vault.remove_credential = MagicMock(return_value=False)
+        resp = self.client.delete("/dashboard/api/credentials/nonexistent")
+        assert resp.status_code == 404
+
+
 # ── V2 Tests: Messages ──────────────────────────────────────
 
 

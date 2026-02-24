@@ -595,6 +595,15 @@ def create_dashboard_router(
             credential_vault.add_credential(f"{provider}_api_base", base_url)
         return {"stored": True, "service": service}
 
+    @api_router.delete("/api/credentials/{name}")
+    async def api_remove_credential(name: str) -> dict:
+        if credential_vault is None:
+            raise HTTPException(status_code=503, detail="Credential vault not available")
+        existed = credential_vault.remove_credential(name)
+        if not existed:
+            raise HTTPException(status_code=404, detail=f"Credential '{name}' not found")
+        return {"removed": True, "service": name}
+
     # ── Cost detail per agent ────────────────────────────────
 
     @api_router.get("/api/costs/{agent_id}")

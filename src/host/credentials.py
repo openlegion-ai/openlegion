@@ -80,6 +80,24 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     os.environ[env_key] = value
 
 
+def _remove_from_env(env_key: str, env_file: str = "") -> None:
+    """Remove an environment variable from .env and os.environ."""
+    from pathlib import Path
+
+    if not env_file:
+        env_file = str(Path(__file__).resolve().parent.parent.parent / ".env")
+
+    env_path = Path(env_file)
+    if env_path.exists():
+        lines = [
+            line for line in env_path.read_text().splitlines()
+            if not line.startswith(f"{env_key}=")
+        ]
+        env_path.write_text("\n".join(lines) + "\n")
+
+    os.environ.pop(env_key, None)
+
+
 class CredentialVault:
     """Stores API credentials and executes proxied API calls."""
 
@@ -159,6 +177,21 @@ class CredentialVault:
     def list_credential_names(self) -> list[str]:
         """Return a list of credential names (never values)."""
         return list(self.credentials.keys())
+
+    def remove_credential(self, name: str) -> bool:
+        """Remove a credential from memory, .env, and os.environ. Returns True if it existed."""
+        cred_key = name.lower()
+        if cred_key.endswith("_api_base"):
+            existed = cred_key in self.api_bases
+            self.api_bases.pop(cred_key, None)
+        else:
+            existed = cred_key in self.credentials
+            self.credentials.pop(cred_key, None)
+        env_key = f"OPENLEGION_CRED_{name.upper()}"
+        _remove_from_env(env_key)
+        if existed:
+            logger.info(f"Credential removed: {cred_key}")
+        return existed
 
     def has_credential(self, name: str) -> bool:
         """Check if a credential exists by name."""

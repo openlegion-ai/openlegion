@@ -81,6 +81,46 @@ async def test_unknown_action_returns_error(monkeypatch):
     assert "Unknown action" in result.error
 
 
+# ── Remove credential tests ───────────────────────────────────
+
+
+def test_remove_credential():
+    vault = CredentialVault()
+    vault.add_credential("test_api_key", "sk-secret")
+    assert vault.has_credential("test_api_key")
+
+    existed = vault.remove_credential("test_api_key")
+    assert existed is True
+    assert not vault.has_credential("test_api_key")
+    assert vault.resolve_credential("test_api_key") is None
+
+
+def test_remove_credential_not_found():
+    vault = CredentialVault()
+    existed = vault.remove_credential("nonexistent_key")
+    assert existed is False
+
+
+def test_remove_api_base():
+    vault = CredentialVault()
+    vault.api_bases["openai_api_base"] = "https://example.com"
+    existed = vault.remove_credential("openai_api_base")
+    assert existed is True
+    assert "openai_api_base" not in vault.api_bases
+
+
+def test_remove_from_env_file(tmp_path):
+    from src.host.credentials import _remove_from_env
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("FOO=bar\nOPENLEGION_CRED_TEST=secret\nBAZ=qux\n")
+    _remove_from_env("OPENLEGION_CRED_TEST", env_file=str(env_file))
+    content = env_file.read_text()
+    assert "OPENLEGION_CRED_TEST" not in content
+    assert "FOO=bar" in content
+    assert "BAZ=qux" in content
+
+
 # ── Failover integration tests ────────────────────────────────
 
 
