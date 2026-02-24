@@ -946,6 +946,17 @@ class TestDashboardWorkflows:
 # ── V2 Tests: Streaming Broadcast ────────────────────────────
 
 
+def _parse_sse(resp_text: str) -> list[dict]:
+    """Parse SSE response text into a list of event dicts."""
+    import json
+
+    return [
+        json.loads(line[6:])
+        for line in resp_text.strip().split("\n")
+        if line.startswith("data: ")
+    ]
+
+
 class TestDashboardBroadcastStream:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
@@ -958,8 +969,6 @@ class TestDashboardBroadcastStream:
 
     def test_broadcast_stream_returns_sse(self):
         """Streaming broadcast yields agent_start, agent_done, and all_done SSE events."""
-        import json
-
         async def _mock_stream(aid, method, path, **kwargs):
             yield {"type": "text_delta", "content": f"Hello from {aid}"}
 
@@ -972,8 +981,7 @@ class TestDashboardBroadcastStream:
         assert resp.status_code == 200
         assert "text/event-stream" in resp.headers["content-type"]
 
-        lines = [l for l in resp.text.strip().split("\n") if l.startswith("data: ")]
-        events = [json.loads(l[len("data: "):]) for l in lines]
+        events = _parse_sse(resp.text)
 
         # Should have: agent_start(alpha), text_delta(alpha), agent_done(alpha),
         #              agent_start(beta), text_delta(beta), agent_done(beta), all_done
@@ -1006,8 +1014,6 @@ class TestDashboardBroadcastStream:
 
     def test_broadcast_stream_handles_agent_error(self):
         """If one agent's stream raises, an error event is emitted for that agent."""
-        import json
-
         async def _mock_stream(aid, method, path, **kwargs):
             if aid == "alpha":
                 raise ConnectionError("agent down")
@@ -1020,8 +1026,7 @@ class TestDashboardBroadcastStream:
             json={"message": "Hello"},
         )
         assert resp.status_code == 200
-        lines = [l for l in resp.text.strip().split("\n") if l.startswith("data: ")]
-        events = [json.loads(l[len("data: "):]) for l in lines]
+        events = _parse_sse(resp.text)
 
         error_events = [e for e in events if e["type"] == "error"]
         assert len(error_events) == 1
@@ -1045,8 +1050,6 @@ class TestDashboardBroadcastStream:
 
     def test_broadcast_stream_does_not_mutate_source_events(self):
         """Streaming broadcast copies event dicts instead of mutating them."""
-        import json
-
         captured_events = []
 
         async def _mock_stream(aid, method, path, **kwargs):

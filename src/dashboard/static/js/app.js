@@ -119,6 +119,8 @@ function dashboard() {
     chatStreamingAgents: {},   // { agentId: true/false }
     _chatAborts: {},           // { agentId: AbortController }
     chatMaxPanels: 3,          // Max simultaneous panels
+    chatMinimized: {},         // { agentId: true/false } — minimized state per panel
+    chatUnread: {},            // { agentId: count } — unread messages on minimized panels
 
     // Identity panel
     identityTabs: _IDENTITY_TABS,
@@ -1025,7 +1027,9 @@ function dashboard() {
 
     openChat(agentId) {
       if (this.openChats.includes(agentId)) {
-        // Already open — scroll to latest and focus input
+        // Already open — expand if minimized, scroll to latest and focus input
+        this.chatMinimized[agentId] = false;
+        this.chatUnread = { ...this.chatUnread, [agentId]: 0 };
         this.$nextTick(() => {
           this._scrollChat(agentId);
           const input = document.querySelector(`#chat-messages-${agentId}`)
@@ -1054,6 +1058,8 @@ function dashboard() {
       this.openChats = this.openChats.filter(id => id !== agentId);
       this.chatLoadingAgents[agentId] = false;
       this.chatStreamingAgents[agentId] = false;
+      delete this.chatMinimized[agentId];
+      delete this.chatUnread[agentId];
     },
 
     clearChat(agentId) {
@@ -1166,6 +1172,10 @@ function dashboard() {
       delete this._chatAborts[agentId];
       this.chatLoadingAgents[agentId] = false;
       this.chatStreamingAgents[agentId] = false;
+      // Track unread if panel is minimized
+      if (this.chatMinimized[agentId]) {
+        this.chatUnread = { ...this.chatUnread, [agentId]: (this.chatUnread[agentId] || 0) + 1 };
+      }
       this.$nextTick(() => this._scrollChat(agentId));
     },
 
