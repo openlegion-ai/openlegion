@@ -142,6 +142,7 @@ function dashboard() {
     broadcastLoading: false,
     broadcastResults: null,
     broadcastStreaming: false,
+    broadcastSentMessage: '',
     _broadcastAbort: null,
 
     // Credentials
@@ -299,6 +300,7 @@ function dashboard() {
       if (this._tracesDebounce) clearTimeout(this._tracesDebounce);
       if (this.costChart) this.costChart.destroy();
       Object.values(this._stateTimers).forEach(clearTimeout);
+      Object.values(this._scrollTimers).forEach(clearTimeout);
       Object.values(this._chatAborts).forEach(c => c?.abort());
       if (this._broadcastAbort) this._broadcastAbort.abort();
     },
@@ -340,9 +342,14 @@ function dashboard() {
 
     // ── Toast helper ──────────────────────────────────────
 
+    _toastId: 0,
+
     showToast(msg) {
-      this.toastQueue.push(msg);
-      setTimeout(() => { this.toastQueue.shift(); }, 3000);
+      const id = ++this._toastId;
+      this.toastQueue.push({ id, msg });
+      setTimeout(() => {
+        this.toastQueue = this.toastQueue.filter(t => t.id !== id);
+      }, 4000);
     },
 
     // ── WebSocket event handler ───────────────────────────
@@ -1017,7 +1024,16 @@ function dashboard() {
     // ── Multi-agent chat panels (docked bottom bar) ─────
 
     openChat(agentId) {
-      if (this.openChats.includes(agentId)) return;
+      if (this.openChats.includes(agentId)) {
+        // Already open — scroll to latest and focus input
+        this.$nextTick(() => {
+          this._scrollChat(agentId);
+          const input = document.querySelector(`#chat-messages-${agentId}`)
+            ?.closest('[x-data]')?.querySelector('input[type="text"]');
+          if (input) input.focus();
+        });
+        return;
+      }
       if (this.openChats.length >= this.chatMaxPanels) {
         // Evict leftmost (oldest) panel
         const evicted = this.openChats.shift();
@@ -1050,9 +1066,16 @@ function dashboard() {
       this.chatStreamingAgents[agentId] = false;
     },
 
+    _scrollTimers: {},
+
     _scrollChat(agentId) {
-      const el = document.getElementById('chat-messages-' + agentId);
-      if (el) el.scrollTop = el.scrollHeight;
+      // Debounce: batch rapid scroll calls during streaming (50ms)
+      if (this._scrollTimers[agentId]) return;
+      this._scrollTimers[agentId] = setTimeout(() => {
+        delete this._scrollTimers[agentId];
+        const el = document.getElementById('chat-messages-' + agentId);
+        if (el) el.scrollTop = el.scrollHeight;
+      }, 50);
     },
 
     async sendChatTo(agentId, inputValue) {
@@ -1154,6 +1177,7 @@ function dashboard() {
       this.broadcastLoading = true;
       this.broadcastStreaming = true;
       this.broadcastResults = {};  // Show results area immediately
+      this.broadcastSentMessage = msg;
       this.broadcastMessage = '';
 
       const controller = new AbortController();
@@ -1190,28 +1214,29 @@ function dashboard() {
             try { data = JSON.parse(line.slice(6)); } catch (_) { continue; }
 
             if (data.type === 'agent_start') {
-              this.broadcastResults = { ...this.broadcastResults, [data.agent]: { streaming: true, content: '' } };
-            } else if (data.type === 'text_delta') {
-              const entry = this.broadcastResults[data.agent];
-              if (entry) {
-                entry.content += data.content || '';
-                this.broadcastResults = { ...this.broadcastResults };
+              this.broadcastResults[data.agent] = { streaming: true, content: '' };
+              this.broadcastResults = { ...this.broadcastResults };
+            } else if (data.type === 'text_delta' && data.agent) {
+              if (!this.broadcastResults[data.agent]) {
+                this.broadcastResults[data.agent] = { streaming: true, content: '' };
               }
-            } else if (data.type === 'done' || data.type === 'agent_done') {
+              this.broadcastResults[data.agent].content += data.content || '';
+              this.broadcastResults = { ...this.broadcastResults };
+            } else if ((data.type === 'done' || data.type === 'agent_done') && data.agent) {
               const entry = this.broadcastResults[data.agent];
               if (entry) {
                 if (data.response) entry.content = data.response;
                 entry.streaming = false;
-                this.broadcastResults = { ...this.broadcastResults };
               }
+              this.broadcastResults = { ...this.broadcastResults };
             } else if (data.type === 'error' && data.agent) {
-              const entry = this.broadcastResults[data.agent];
-              if (entry) {
-                entry.content = data.message || 'Error';
-                entry.streaming = false;
-                entry.error = true;
-                this.broadcastResults = { ...this.broadcastResults };
+              if (!this.broadcastResults[data.agent]) {
+                this.broadcastResults[data.agent] = { streaming: false, content: '' };
               }
+              this.broadcastResults[data.agent].content = data.message || 'Error';
+              this.broadcastResults[data.agent].streaming = false;
+              this.broadcastResults[data.agent].error = true;
+              this.broadcastResults = { ...this.broadcastResults };
             } else if (data.type === 'all_done') {
               break;
             }

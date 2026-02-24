@@ -502,8 +502,11 @@ def create_dashboard_router(
         import asyncio
         import json as _json
 
-        queue: asyncio.Queue = asyncio.Queue()
         agents = list(agent_registry.keys())
+        if not agents:
+            return {"responses": {}, "message": "No agents registered"}
+
+        queue: asyncio.Queue = asyncio.Queue()
 
         async def _stream_agent(aid: str) -> None:
             await queue.put({"type": "agent_start", "agent": aid})
@@ -513,8 +516,13 @@ def create_dashboard_router(
                     json={"message": message}, timeout=120,
                 ):
                     if isinstance(event, dict):
-                        event["agent"] = aid
-                        await queue.put(event)
+                        tagged = {**event, "agent": aid}
+                        await queue.put(tagged)
+                        if event_bus:
+                            etype = event.get("type", "")
+                            if etype in ("tool_start", "tool_result"):
+                                event_bus.emit(etype, agent=aid,
+                                    data={k: v for k, v in tagged.items() if k != "type"})
             except Exception as e:
                 await queue.put({"type": "error", "agent": aid, "message": str(e)})
             await queue.put({"type": "agent_done", "agent": aid})

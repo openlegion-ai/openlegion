@@ -1030,3 +1030,37 @@ class TestDashboardBroadcastStream:
 
         # all_done should still be emitted
         assert events[-1]["type"] == "all_done"
+
+    def test_broadcast_stream_no_agents(self):
+        """Streaming broadcast with no agents returns empty JSON response."""
+        self.components["agent_registry"].clear()
+        self.client = _make_client(self.components)
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": "Hello"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["responses"] == {}
+
+    def test_broadcast_stream_does_not_mutate_source_events(self):
+        """Streaming broadcast copies event dicts instead of mutating them."""
+        import json
+
+        captured_events = []
+
+        async def _mock_stream(aid, method, path, **kwargs):
+            evt = {"type": "text_delta", "content": "reply"}
+            captured_events.append(evt)
+            yield evt
+
+        self.components["transport"].stream_request = _mock_stream
+
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": "test"},
+        )
+        assert resp.status_code == 200
+        # Source events should not have "agent" key injected
+        for evt in captured_events:
+            assert "agent" not in evt
