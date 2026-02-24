@@ -878,6 +878,8 @@ function dashboard() {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}`, { method: 'DELETE' });
         if (resp.ok) {
           this.showToast(`${agentId} removed`);
+          this.closeChat(agentId);
+          delete this.chatHistories[agentId];
           this.fetchAgents();
         } else {
           const err = await resp.json();
