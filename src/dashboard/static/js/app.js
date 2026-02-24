@@ -105,6 +105,9 @@ function dashboard() {
     cronJobs: [],
     editingCronJob: null,
     cronEditSchedule: '',
+    cronEditAmount: 15,
+    cronEditUnit: 'm',
+    cronEditCron: '',
 
     // Settings (V2)
     settingsData: null,
@@ -925,11 +928,45 @@ function dashboard() {
     editCronJob(job) {
       this.editingCronJob = job.id;
       this.cronEditSchedule = job.schedule;
+      const intervalMatch = job.schedule.match(/^every\s+(\d+)([smhd])$/i);
+      if (intervalMatch) {
+        this.cronEditAmount = parseInt(intervalMatch[1]);
+        this.cronEditUnit = intervalMatch[2].toLowerCase();
+        this.cronEditCron = '';
+      } else {
+        this.cronEditAmount = 15;
+        this.cronEditUnit = 'm';
+        this.cronEditCron = job.schedule;
+      }
     },
 
     cancelCronEdit() {
       this.editingCronJob = null;
       this.cronEditSchedule = '';
+      this.cronEditCron = '';
+    },
+
+    async saveCronPreset(jobId, preset) {
+      this.cronEditSchedule = 'every ' + preset;
+      await this.saveCronEdit(jobId);
+    },
+
+    async saveCronInterval(jobId) {
+      const n = Math.round(this.cronEditAmount);
+      if (!n || n < 1) {
+        this.showToast('Enter a positive number'); return;
+      }
+      this.cronEditAmount = n;
+      this.cronEditSchedule = `every ${n}${this.cronEditUnit}`;
+      await this.saveCronEdit(jobId);
+    },
+
+    async saveCronExpression(jobId) {
+      if (!this.cronEditCron.trim()) {
+        this.showToast('Enter a cron expression'); return;
+      }
+      this.cronEditSchedule = this.cronEditCron.trim();
+      await this.saveCronEdit(jobId);
     },
 
     async saveCronEdit(jobId) {
@@ -941,13 +978,13 @@ function dashboard() {
         });
         if (resp.ok) {
           this.showToast(`Schedule updated for ${jobId}`);
+          this.cancelCronEdit();
           this.fetchCronJobs();
         } else {
           const err = await resp.json();
           this.showToast(`Error: ${err.detail || 'Update failed'}`);
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
-      this.cancelCronEdit();
     },
 
     // ── Settings fetcher ─────────────────────────────────

@@ -1189,10 +1189,47 @@
                     <td class="py-2.5 px-4 text-white" x-text="job.agent"></td>
                     <td class="py-2.5 px-4">
                       <span x-show="editingCronJob !== job.id" class="font-mono text-gray-300 text-xs cursor-pointer hover:text-indigo-300 transition-colors" @click="editCronJob(job)" x-text="job.schedule"></span>
-                      <div x-show="editingCronJob === job.id" class="flex gap-1 items-center">
-                        <input type="text" x-model="cronEditSchedule" @keyup.enter="saveCronEdit(job.id)" @keyup.escape="cancelCronEdit()" class="dash-input text-xs py-1 px-2 w-32">
-                        <button @click="saveCronEdit(job.id)" class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save</button>
-                        <button @click="cancelCronEdit()" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">X</button>
+                      <div x-show="editingCronJob === job.id" class="space-y-1.5 min-w-[260px]">
+                        <!-- Preset chips -->
+                        <div class="flex flex-wrap gap-1">
+                          <template x-for="p in ['5m','15m','30m','1h','6h','12h','24h']" :key="p">
+                            <button @click="saveCronPreset(job.id, p)"
+                              class="text-[10px] px-1.5 py-0.5 rounded transition-colors"
+                              :class="cronEditSchedule === 'every ' + p
+                                ? 'bg-indigo-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-400'"
+                              x-text="p"></button>
+                          </template>
+                        </div>
+                        <!-- Custom interval -->
+                        <div class="flex gap-1 items-center">
+                          <span class="text-[10px] text-gray-500 w-8">Every</span>
+                          <input type="number" min="1" step="1" x-model.number="cronEditAmount"
+                            @keyup.enter="saveCronInterval(job.id)"
+                            @keyup.escape="cancelCronEdit()"
+                            class="dash-input text-xs py-0.5 px-1.5 w-14 text-center">
+                          <select x-model="cronEditUnit" class="dash-select text-xs py-0.5 px-1"
+                            @keyup.enter="saveCronInterval(job.id)"
+                            @keyup.escape="cancelCronEdit()">
+                            <option value="s">sec</option>
+                            <option value="m">min</option>
+                            <option value="h">hr</option>
+                            <option value="d">day</option>
+                          </select>
+                          <button @click="saveCronInterval(job.id)"
+                            class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Set</button>
+                        </div>
+                        <!-- Cron expression -->
+                        <div class="flex gap-1 items-center">
+                          <input type="text" x-model="cronEditCron"
+                            placeholder="0 9 * * 1-5"
+                            @keyup.enter="saveCronExpression(job.id)"
+                            @keyup.escape="cancelCronEdit()"
+                            class="dash-input text-xs py-0.5 px-1.5 w-32 font-mono">
+                          <button @click="saveCronExpression(job.id)"
+                            class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Set</button>
+                          <button @click="cancelCronEdit()"
+                            class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">X</button>
+                        </div>
                       </div>
                     </td>
                     <td class="py-2.5 px-4 text-gray-400 text-xs max-w-xs truncate" x-text="job.message"></td>
