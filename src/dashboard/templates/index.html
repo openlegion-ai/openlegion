@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenLegion Dashboard</title>
 
+  <!-- Favicon -->
+  <link rel="icon" href="/dashboard/static/favicon.ico" sizes="any">
+  <link rel="icon" href="/dashboard/static/favicon-16x16.png" sizes="16x16" type="image/png">
+  <link rel="icon" href="/dashboard/static/favicon-32x32.png" sizes="32x32" type="image/png">
+
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -57,11 +62,7 @@
     <nav class="nav-bar px-4 py-2.5 flex items-center justify-between shrink-0">
       <div class="flex items-center gap-5">
         <div class="flex items-center gap-2.5">
-          <div class="logo-mark">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
-            </svg>
-          </div>
+          <img src="/dashboard/static/logo.png" alt="OpenLegion" width="24" height="24" class="rounded-full">
           <span class="text-base font-bold text-white tracking-tight">OpenLegion</span>
         </div>
         <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5" role="tablist">
