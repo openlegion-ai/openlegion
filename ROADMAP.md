@@ -1,6 +1,6 @@
 # OpenLegion Roadmap
 
-Prioritized for public launch. Ordered by adoption impact — informed by competitive analysis across OpenClaw, MemU, NanoBot, NanoClaw, HermitClaw, and ZeroClaw. Tier 4 priorities driven by deep agent-level comparative analysis of OpenClaw (Feb 2026).
+Prioritized for public launch. Ordered by adoption impact — informed by competitive analysis across OpenClaw, MemU, NanoBot, NanoClaw, HermitClaw, and ZeroClaw. Tier 4 priorities driven by deep agent-level comparative analysis of OpenClaw (Feb 2026). Items 4.8–4.9 and backlog additions (Provider Flexibility, Channel Expansion, Security Hardening) driven by deep source-level analysis of ZeroClaw (Feb 25, 2026).
 
 **Design principle:** Ship what users need to adopt, then what power users demand, then what separates us from everyone else. Never compromise security boundaries for convenience.
 
@@ -175,7 +175,43 @@ DuckDuckGo is rate-limited and returns low-quality snippets. No content extracti
 - **Search result caching**: simple `dict[str, (float, list)]` with 15-minute TTL, cleared on agent restart. Key = query string, value = (timestamp, results). Check before hitting search API.
 - Add `trafilatura` to agent container dependencies
 
-### ~~4.8 Heartbeat Context Enrichment~~ ✅ Done
+### 4.8 Hybrid Memory Scoring
+
+Our memory system has both sqlite-vec (vector similarity) and FTS5 (BM25 keyword search), but queries them independently — `search()` returns vector results, workspace search returns BM25 results. ZeroClaw merges both score sources with weighted fusion (cosine + BM25 normalized into a single ranked list), producing significantly better recall than either alone. We have the pieces; we just need the merge function.
+
+**Impact:** Better memory retrieval quality on every agent interaction. Hybrid search catches both semantically similar and keyword-matching facts that single-method search misses.
+
+**Changes:**
+- Add `hybrid_search()` method to `MemoryStore` in `src/agent/memory.py`:
+  - Run vector similarity search (existing `search()`) and FTS5 BM25 search in parallel
+  - Normalize scores: vector scores already 0-1 (cosine), BM25 scores normalized via `score / max_score` across result set
+  - Weighted merge: `final_score = alpha * vector_score + (1 - alpha) * bm25_score` where `alpha=0.6` (favor semantic, tunable)
+  - Deduplicate by fact ID, keeping highest merged score
+  - Return top-K results sorted by merged score
+- Update `search_hierarchical()` to use `hybrid_search()` as its flat-fallback tier (tier 3)
+- Update memory context injection in `loop.py` to call `hybrid_search()` instead of separate vector-only search
+- Keep individual `search()` (vector-only) and FTS5 search available for direct use
+- Add tests in `tests/test_memory.py` comparing hybrid vs individual search recall
+
+### 4.9 Query Classification for Model Routing
+
+Zero-latency keyword/pattern classifier that routes different query types to different models without an LLM call. Simple greetings and status checks go to a cheap/fast model; coding tasks, complex reasoning, and planning go to the primary model. ZeroClaw implements this as configurable rules with priority ordering — pure regex/keyword matching, no LLM overhead.
+
+**Impact:** Cost savings on simple interactions (30-50% of typical queries are greetings, status checks, or simple lookups). No quality loss on complex tasks. Works alongside existing fleet-level failover.
+
+**Changes:**
+- New `src/agent/classifier.py` module:
+  - `QueryClassifier` class with configurable rules list
+  - Each rule: `{pattern: str, keywords: list[str], min_length: int, route_to: str, priority: int}`
+  - `classify(message: str) -> Optional[str]` returns model override or None (use default)
+  - Rules evaluated in priority order, first match wins
+  - Built-in defaults: greetings/simple queries → cheapest configured model, everything else → default
+- Per-agent config in `agents.yaml`: `routing_rules` list (optional, disabled by default)
+- `AgentLoop` checks classifier before `_llm_call_with_retry()` — if classifier returns a model, temporarily override for that call
+- Propagate actual model used to cost tracking (already handled by mesh proxy)
+- Log route decisions at debug level: `logger.debug("Classified as %s, routing to %s", category, model)`
+
+### ~~4.10 Heartbeat Context Enrichment~~ ✅ Done
 
 Agents waking from heartbeat lacked crucial context: HEARTBEAT.md wasn't loaded, daily logs weren't available, and pending signals/tasks showed only counts. Task completion wrote nothing to daily logs, and chat turn logs were too terse.
 
@@ -317,8 +353,6 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 
 **Search Result Diversity (MMR)** — Add Maximal Marginal Relevance to `memory.py:search()` to avoid returning near-duplicate hits. After initial retrieval, re-rank results penalizing similarity to already-selected results. Lambda=0.7 (70% relevance, 30% diversity). OpenClaw has this as a configurable option.
 
-**Embedding Provider Flexibility** — Currently hardcoded to OpenAI `text-embedding-3-small` (1536 dims). Allow configuring the embedding model and dimension per agent. Enables: local embedding models for privacy, Voyage for higher quality, Gemini for cost savings. Requires schema migration for different vector dimensions.
-
 **Session Memory Indexing** — Index past task transcripts so agents learn from previous sessions. After each task completes, extract key facts and store in memory DB with source=`session:{task_id}`. OpenClaw has this as an experimental feature — directionally correct for long-running agents.
 
 ### Agent Customization
@@ -333,7 +367,31 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 
 **Apply-Patch Tool** — A `apply_patch` tool for multi-file unified diffs. For coding-focused agents, applying a single patch is significantly more efficient than multiple individual `write_file` calls and preserves better context for the LLM. Accept standard unified diff format, validate before applying, support dry-run mode.
 
+### Provider Flexibility
+
+**XML Tool-Calling Fallback for Local Models** — When a provider doesn't support native function calling (Ollama, llama.cpp, vLLM, custom endpoints), inject tool specifications as XML into the system prompt and parse `<tool_call>` tags from the response. ZeroClaw's `XmlToolDispatcher` does this transparently — the agent loop doesn't need to know whether tools are native or prompt-guided. This unlocks the entire local model ecosystem for tool use. Implementation: add `XmlToolDispatcher` alongside existing native dispatch in `loop.py`. Detect provider capability via LiteLLM's `supports_function_calling()`. When false, inject tool XML into system prompt and parse `<tool_call><name>...</name><arguments>...</arguments></tool_call>` from response text. Also handle MiniMax-style `<invoke>` format.
+
+**Embedding Provider Flexibility** — Currently hardcoded to OpenAI `text-embedding-3-small` (1536 dims). Allow configuring the embedding model and dimension per agent. Enables: local embedding models for privacy, Voyage for higher quality, Gemini for cost savings. Requires schema migration for different vector dimensions.
+
+### Channel Expansion
+
+**Matrix Channel** — Self-hosted, open-protocol, E2EE support. Appeals to privacy-conscious and self-hosting communities. ZeroClaw supports Matrix with end-to-end encryption via `matrix-sdk`. Implementation: subclass `Channel`, use `matrix-nio` Python library (async, E2EE-capable). Verification flow for encrypted rooms. Priority: high — Matrix users are exactly our target demographic (technical, privacy-aware, self-hosting).
+
+**Email Channel (SMTP + IMAP)** — Enterprise users expect email integration. Agents receive tasks via email, respond via email. ZeroClaw has this. Implementation: IMAP polling for inbound (configurable interval), SMTP for outbound. Vault-managed credentials. Parse email threads for conversation context. Priority: medium — enterprise use cases.
+
+**Signal Channel** — Privacy-focused messaging. ZeroClaw supports it. Implementation: use `signal-cli` or `signald` as a bridge process. More complex than Telegram/Discord due to Signal's anti-bot stance. Priority: low — small user base, complex integration.
+
+**MQTT Channel** — IoT messaging protocol. Enables agents to interact with IoT devices and home automation systems. ZeroClaw uses this for hardware integration. Implementation: `asyncio-mqtt` library, topic-based routing. Priority: low — niche but differentiating for IoT use cases.
+
+### Security Hardening
+
+**Credential Encryption at Rest** — API keys stored as `OPENLEGION_CRED_*` environment variables and in `.env` files are plaintext on disk. ZeroClaw uses ChaCha20-Poly1305 AEAD to encrypt credentials at rest, decrypting only in memory at startup. Implementation: `cryptography` library (already a transitive dep), derive encryption key from a master passphrase via Argon2id, encrypt credential values in a `credentials.enc` file. Vault loads and decrypts on startup. Plaintext `.env` remains as fallback for simple setups. Priority: medium — security hardening for production deployments.
+
+**Credential Scrubbing in Tool Output** — Regex-based redaction of API keys, tokens, and passwords in tool output before they reach the LLM context. ZeroClaw scrubs tool results with pattern matching (AWS keys, Bearer tokens, API key formats, etc.) as a safety net against accidental exfiltration. We have `_redact_credentials()` for browser output but not for general tool results. Implementation: expand `_redact_credentials()` patterns and apply in the tool result path in `loop.py` (all 3 execution modes). Patterns: `sk-...`, `ghp_...`, `AKIA...`, `Bearer ...`, common password field names. Priority: medium — defense in depth.
+
 ### Infrastructure
+
+**Composable System Prompt Builder** — Replace ad-hoc system prompt assembly in `loop.py` with a modular builder pattern. ZeroClaw's `SystemPromptBuilder` uses `Vec<Box<dyn PromptSection>>` where each section (identity, tools, safety, skills, workspace, datetime) independently generates its portion. Our `_build_chat_system_prompt()` and `execute_task()` prompt assembly is inline and hard to test. Implementation: `PromptBuilder` class with `add_section(name, content_fn)` — each section is a callable that returns optional text. Sections: identity (SOUL.md), tools (tool history), safety (sanitization notes), workspace (bootstrap), context (warning), memory (relevant facts), datetime. Testable in isolation. Priority: low — code quality, not user-facing.
 
 **Cross-Channel Broadcasting** — Mirror agent responses across channels. PubSub topic per-agent for response events. Channels subscribe to agents they're interested in. Opt-in per channel in `mesh.yaml`.
 
@@ -344,6 +402,14 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 ---
 
 ## Completed
+
+### Session 23 (Parallel Broadcasting + Multi-Agent Chat UX)
+- [x] **Parallel broadcasting** — Replaced sequential `for`/`await` loops with `asyncio.gather(return_exceptions=True)` in 4 fan-out paths: channel `/broadcast` command (`channels/base.py`), pubsub event delivery (`host/server.py`), health check sweep (`host/health.py`), and notification fan-out (`cli/runtime.py`). One agent failure no longer crashes the entire operation.
+- [x] **Streaming broadcast endpoint** — `POST /api/broadcast/stream` SSE endpoint in `dashboard/server.py`. Launches parallel agent streams via `asyncio.create_task`, funnels events through `asyncio.Queue`, yields `agent_start`/`text_delta`/`agent_done`/`all_done` SSE events. Frontend shows per-agent responses as they arrive with progress counter and abort support.
+- [x] **Multi-agent docked chat panels** — Replaced single-agent modal with docked bottom bar supporting up to 3 simultaneous chat panels. Each panel has independent streaming, minimize/expand, clear history, and per-agent loading/streaming state. Panels wrap on narrow screens (`flex-wrap-reverse`).
+- [x] **Notification event type** — Added `"notification"` to `DashboardEvent.type` Literal in `shared/types.py`. Runtime notification handler emits events to EventBus. Dashboard displays notification toasts and renders them in the activity feed.
+- [x] **Dashboard UX polish** — Toasts moved to top-right (no z-index conflict with chat panels). Broadcast input disabled during streaming. Agent count in broadcast header. Progress counter ("2/3 done") during streaming. Clear button for broadcast results. Close-all button for chat panels. Broadcast results capped with max-height scroll. Chat empty state with icon. ARIA attributes for accessibility.
+- [x] 10 new tests: 6 streaming broadcast (SSE format, empty message, no transport, agent error, no agents, event immutability), 1 notification event type, 1 parallel broadcast timing, 2 parallel health checks. 1165 non-E2E tests passing. PR #130 merged.
 
 ### Session 22 (Tool Loop Detection)
 - [x] **4.3 Tool Loop Detection** — `ToolLoopDetector` class in `src/agent/loop_detector.py` with SHA-256 hash-based sliding window (15 entries) and 3-level escalation.
@@ -558,28 +624,35 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 
 | Capability | OpenLegion | OpenClaw | ZeroClaw | NanoBot | NanoClaw | MemU | HermitClaw |
 |---|---|---|---|---|---|---|---|
-| Container isolation | **Docker + Sandbox** | Local process | None | None | Docker | N/A | None |
-| Multi-agent | **Fleet (mesh)** | Single + sub-agents | Single | Single | Claude Code | N/A | Single |
-| Browser automation | **3-tier: basic + stealth + CDP** | Playwright (3 modes: sandbox/host/node) | None | None | Playwright | N/A | None |
-| Memory | **Hierarchical vec+BM25 + salience decay** | SQLite vec + hybrid search (no hierarchy) | SQLite basic | None | Claude memory | **Hierarchical** | Generative Agents |
-| Model support | OpenAI + Anthropic via mesh proxy | **15+ providers (Anthropic, OpenAI, Gemini, Bedrock, Ollama, Together, etc.)** | Multi | Multi | Claude only | N/A | Single |
+| Container isolation | **Docker + Sandbox** | Local process | Single process (optional sandbox) | None | Docker | N/A | None |
+| Multi-agent | **Fleet (mesh)** | Single + sub-agents | Single (delegation tool) | Single | Claude Code | N/A | Single |
+| Browser automation | **3-tier: basic + stealth + CDP** | Playwright (3 modes: sandbox/host/node) | Fantoccini + computer-use sidecar | None | Playwright | N/A | None |
+| Memory | **Hierarchical vec+BM25 + salience decay** | SQLite vec + hybrid search (no hierarchy) | **SQLite hybrid merge (cosine+BM25 weighted fusion)** | None | Claude memory | **Hierarchical** | Generative Agents |
+| Model support | OpenAI + Anthropic via mesh proxy | **15+ providers** | **15+ native (incl. Ollama, llama.cpp, vLLM, Bedrock)** | Multi | Claude only | N/A | Single |
+| Tool calling | Native only | Native only | **Native + XML fallback (any LLM can use tools)** | Native | Native | N/A | Native |
 | LLM streaming | **Token-level streaming (all channels)** | **True token-level streaming** | Native | SSE | Claude native | N/A | None |
-| Model failover | **Health + cascade (fleet-level)** | Auth rotation + model fallback + thinking fallback | None | None | None | N/A | None |
+| Model failover | **Health + cascade (fleet-level)** | Auth rotation + model fallback + thinking fallback | Retry + exponential backoff + provider cascade | None | None | N/A | None |
+| Model routing | None | None | **Zero-latency query classifier (keyword/pattern → model)** | None | None | N/A | None |
 | Extended thinking | Not yet | **Configurable levels (off/low/med/high)** | None | None | Claude native | N/A | None |
-| Credential mgmt | **Blind vault + $CRED handles** | Env vars (visible to agent) | None | None | None | N/A | None |
+| Credential mgmt | **Blind vault + $CRED handles** | Env vars (visible to agent) | **ChaCha20-Poly1305 encrypted at rest** | None | None | N/A | None |
+| Credential scrubbing | Browser output only | None | **Regex scrub on all tool output** | None | None | N/A | None |
 | Tool loop detection | **SHA-256 hash-based + 3-level escalation (warn/block/terminate)** | SHA-256 hash-based + circuit breaker | None | None | None | N/A | None |
-| Error recovery | 3x retry with backoff | **Multi-layer: auth rotation → model fallback → thinking fallback → compaction → truncation** | None | Basic | None | N/A | None |
-| Self-authoring tools | **Yes (create_skill + AST validation)** | No | No | No | No | N/A | No |
-| Channels | 5 (CLI, TG, Discord, Slack, WA) | **12+ (WA, TG, Slack, Discord, Signal, iMessage, etc.)** | **17+** | 9 | 2 (WA, Web) | N/A | 1 (CLI) |
+| Error recovery | 3x retry with backoff | **Multi-layer: auth rotation → model fallback → thinking fallback → compaction → truncation** | Intelligent error classification (retryable vs permanent) + provider cascade | Basic | None | N/A | None |
+| Self-authoring tools | **Yes (create_skill + AST validation)** | No | No (TOML skill manifests, not runtime) | No | No | N/A | No |
+| Channels | 5 (CLI, TG, Discord, Slack, WA) | **12+ (WA, TG, Slack, Discord, Signal, iMessage, etc.)** | **25 (incl. Matrix E2EE, Signal, Email, IRC, MQTT, Nostr)** | 9 | 2 (WA, Web) | N/A | 1 (CLI) |
 | MCP support | **Yes (stdio)** | Yes | Yes | Yes | Partial | N/A | No |
 | Web search | DuckDuckGo only | **Brave + Perplexity + Grok (cached)** | None | None | None | N/A | None |
 | Cost tracking | **Per-agent SQLite** | Provider API via usage accumulator | None | None | None | N/A | None |
-| Prompt injection defense | **Unicode sanitization at 3 choke points** | None | None | None | None | N/A | None |
-| Context mgmt | **Write-then-compact (60%/70%/80% thresholds)** | Reactive compaction on overflow only | None | None | Claude native | N/A | None |
-| Compaction quality | Single-pass summary | **Multi-chunk split → summarize → merge** | None | None | N/A | N/A | None |
-| Setup DX | **Guided + quickstart** | Good | **Excellent** | **Excellent** | Simple | N/A | Simple |
-| Skill ecosystem | **Marketplace + MCP + self-authoring** | **60+ bundled skills** | **17+ tools** | Community | MCP | N/A | None |
-| Observability | **Dashboard planned (Tier 5)** | Logs only | None | None | None | N/A | None |
+| Prompt injection defense | **Unicode sanitization at 3 choke points** | None | **Prompt guard + leak detection** | None | None | N/A | None |
+| Context mgmt | **Write-then-compact (60%/70%/80% thresholds)** | Reactive compaction on overflow only | **Auto-compaction with LLM summarization (bullet points)** | None | Claude native | N/A | None |
+| Compaction quality | Single-pass summary | **Multi-chunk split → summarize → merge** | LLM-summarized bullet points | None | N/A | N/A | None |
+| Setup DX | **Guided + quickstart** | Good | **Excellent (8.8MB single binary, sub-10ms start)** | **Excellent** | Simple | N/A | Simple |
+| Skill ecosystem | **Marketplace + MCP + self-authoring** | **60+ bundled skills** | **40+ built-in tools + TOML skill manifests** | Community | MCP | N/A | None |
+| Hardware/IoT | None | None | **USB, STM32, RPi GPIO, Arduino, datasheet RAG** | None | None | N/A | None |
+| Sandbox backends | Docker + Sandbox microVMs | None | **Firejail, Bubblewrap, Landlock, Docker** | None | Docker | N/A | None |
+| Observability | **Real-time dashboard (fleet view, multi-chat, streaming broadcast, traces, cost charts)** | Logs only | **Noop, Log, Prometheus, OpenTelemetry** | None | None | N/A | None |
+| Runtime targets | Docker/Sandbox | Local process | **Native, Docker, WASM** | Local | Docker | N/A | Local |
+| Binary size / footprint | ~512MB container | ~200MB Python env | **8.8MB binary, 4MB RAM** | Small | ~200MB | N/A | Small |
 
 ### What We Win On (vs OpenClaw)
 
@@ -596,8 +669,8 @@ These are genuine architectural advantages that OpenClaw cannot easily replicate
 
 These are the items driving Tier 4 priority:
 
-1. ~~**Token-level streaming** (→ 4.2) — Closed. Token-level streaming implemented across CLI, dashboard, Telegram, Discord, and Slack.~~
-2. ~~**Tool loop detection** (→ 4.3) — Closed. SHA-256 hash-based detection with 3-level escalation (warn/block/terminate) and sliding window.~~
+1. ~~**Token-level streaming** (→ 4.2) — Closed.~~
+2. ~~**Tool loop detection** (→ 4.3) — Closed.~~
 3. **Extended thinking** (→ 4.4) — Configurable reasoning levels vs our no support. Free quality boost on complex tasks.
 4. **Multi-chunk compaction** (→ 4.5) — Split/summarize/merge vs our single-pass. Better long-conversation fidelity.
 5. **Error recovery depth** (→ 4.6 + backlog) — 5-layer recovery vs our 3x retry on same model. Auth rotation, model fallback, thinking fallback.
@@ -605,11 +678,26 @@ These are the items driving Tier 4 priority:
 7. **Bundled skill library** (→ backlog) — 60+ integrations vs our sparse marketplace. GitHub, email, calendar, notes.
 8. **Provider breadth** — 15+ LLM providers vs our model-agnostic-but-only-2-configured setup. Less urgent since mesh proxy can route to any provider.
 
+### What ZeroClaw Wins On (our gaps to close)
+
+ZeroClaw is architecturally different (single-agent Rust binary vs our multi-agent Python fleet), but several of their patterns are directly adoptable:
+
+1. **Hybrid memory scoring** (→ 4.8) — Weighted fusion of cosine + BM25 vs our separate searches. We have both engines; just need the merge.
+2. **Query classification for model routing** (→ 4.9) — Zero-latency keyword classifier routes queries to appropriate models. Saves cost without LLM overhead.
+3. **XML tool-calling fallback** (→ backlog) — Prompt-injected tool specs for providers without native function calling. Unlocks Ollama, llama.cpp, vLLM.
+4. **Channel coverage** (→ backlog) — 25 channels vs our 5. Matrix (E2EE), Email (SMTP+IMAP), Signal, MQTT are highest priority.
+5. **Credential encryption at rest** (→ backlog) — ChaCha20-Poly1305 for API keys on disk. We vault and proxy but don't encrypt at rest.
+6. **Credential scrubbing on all tool output** (→ backlog) — We only scrub browser output. They scrub everything with regex patterns.
+7. **Performance footprint** — 8.8MB binary, 4MB RAM, sub-10ms start. Not actionable (Rust vs Python), but worth noting for positioning.
+8. **Observability backends** — Prometheus + OpenTelemetry export. Our Tier 5 dashboard is richer (fleet-level), but they ship standard observability hooks today.
+
 ### Our Moat
 
-Container-isolated multi-agent orchestration with blind credential vault, fleet coordination, hierarchical memory, and self-authoring tools. No competitor combines all five. OpenClaw is closest on individual agent capability but fundamentally cannot match security isolation (in-process agents see credentials) or fleet coordination (no mesh, no blackboard, no DAG workflows).
+Container-isolated multi-agent orchestration with blind credential vault, fleet coordination, hierarchical memory, and self-authoring tools. No competitor combines all five. OpenClaw is closest on individual agent capability but fundamentally cannot match security isolation (in-process agents see credentials) or fleet coordination (no mesh, no blackboard, no DAG workflows). ZeroClaw is closest on raw performance and channel breadth but has no multi-agent orchestration, no fleet coordination, no per-agent budgets, and no DAG workflows.
 
 ### Next Differentiators
 
-1. **Agent intelligence** (Tier 4) — Close the remaining individual agent gaps (extended thinking, compaction, model fallback, web search). Token-level streaming and tool loop detection gaps already closed.
+1. **Agent intelligence** (Tier 4) — Close remaining individual agent gaps: extended thinking, compaction, model fallback, web search, hybrid memory scoring, and query-based model routing. Token-level streaming and tool loop detection gaps already closed.
 2. **Real-time observability** (Tier 5) — No competitor offers fleet-level visibility into multi-agent reasoning, tool usage, and collaboration. Served from the existing mesh server — zero additional infrastructure.
+3. **Provider flexibility** (Backlog) — XML tool-calling fallback unlocks the entire local model ecosystem. Combined with query classification, enables hybrid local+cloud deployments.
+4. **Channel reach** (Backlog) — Matrix, Email, Signal expand into privacy-conscious and enterprise markets where ZeroClaw currently leads.

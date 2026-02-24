@@ -8,7 +8,7 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE.md)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 1173](https://img.shields.io/badge/tests-1173%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 1182](https://img.shields.io/badge/tests-1182%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -116,7 +116,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 1173 tests including full Docker E2E |
+| **Test coverage** | Minimal | 1182 tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~20,000 lines — auditable in a day |
 
 ---
@@ -131,7 +131,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**1173 tests passing** across **~20,000 lines** of application code.
+**1182 tests passing** across **~20,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
@@ -156,7 +156,7 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
 7. **Multi-channel** — connect agents to Telegram, Discord, Slack, and WhatsApp. Also accessible via CLI and API.
 
-8. **Real-time dashboard** — web-based fleet observability at `/dashboard` with grouped request traces, live event streaming, token-level streaming chat, LLM prompt/response previews, agent management, agent identity editor (personality, instructions, preferences, heartbeat rules, memory, activity logs, learnings), cost charts, and cron management.
+8. **Real-time dashboard** — web-based fleet observability at `/dashboard` with grouped request traces, live event streaming, multi-agent docked chat panels (up to 3 simultaneous), streaming broadcast to all agents with real-time per-agent responses, LLM prompt/response previews, agent management, agent identity editor (personality, instructions, preferences, heartbeat rules, memory, activity logs, learnings), notification toasts, cost charts, and cron management.
 
 9. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly budget enforcement.
 
@@ -841,20 +841,20 @@ pytest tests/
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
 | Built-in Tools | 112 | exec, file, browser (incl. backend tiers, screenshots, reset/recovery), memory, mesh tools, notifications, path traversal, discovery |
-| Dashboard | 71 | Index, agents, blackboard, costs, traces, queues, cron, settings, config |
+| Dashboard | 77 | Index, agents, blackboard, costs, traces, queues, cron, settings, config, streaming broadcast |
 | CLI | 65 | Agent add/list/edit/remove, chat, REPL commands, cron management, version |
 | Agent Loop | 57 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
 | Workspace | 58 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files |
 | Cron | 42 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM, concurrent mutations |
 | Credentials | 44 | Vault, API proxy, provider detection, credential lifecycle |
 | Sanitization | 38 | Invisible Unicode stripping, bidi overrides, tag chars, zero-width |
-| Channels (base) | 43 | Abstract channel, commands, per-user routing, chunking, steer, debug, addkey normalization, conditional help |
+| Channels (base) | 44 | Abstract channel, commands, per-user routing, chunking, steer, debug, addkey normalization, conditional help, parallel broadcast |
 | Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
 | Context Manager | 34 | Token estimation (tiktoken + model-aware), compaction, flushing, flush reset |
 | Mesh | 33 | Blackboard, PubSub, MessageRouter, permissions |
 | Runtime Backend | 31 | DockerBackend, SandboxBackend, browser_backend, extra_env, name sanitization, detection, selection |
 | Traces | 30 | Trace recording, grouping, summaries, prompt preview extraction |
-| Events | 30 | Event streaming, filtering, WebSocket |
+| Events | 31 | Event streaming, filtering, WebSocket, notification events |
 | Integration | 28 | Multi-component mesh operations, notifications |
 | Orchestrator | 26 | Workflows, conditions, retries, failures |
 | Transcript | 24 | Transcript formatting, safety, round-trip fidelity |
@@ -880,11 +880,11 @@ pytest tests/
 | MCP E2E | 7 | Real MCP protocol with live server subprocess |
 | Webhooks | 7 | Add/remove, persistence, dispatch |
 | File Watchers | 7 | Polling, dispatch, pattern matching |
-| Health Monitor | 7 | Ephemeral cleanup, TTL expiry, event emission, restart with missing config |
+| Health Monitor | 9 | Ephemeral cleanup, TTL expiry, event emission, restart with missing config, parallel health checks |
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **1173** | |
+| **Total** | **1182** | |
 
 ---
 
