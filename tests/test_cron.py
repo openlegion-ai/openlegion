@@ -280,6 +280,22 @@ class TestHeartbeat:
 
         assert sched.find_heartbeat_job("nonexistent") is None
 
+    def test_ensure_heartbeat_creates_when_missing(self):
+        sched = CronScheduler(config_path=self.config_path)
+        job = sched.ensure_heartbeat("researcher", "every 20m")
+        assert job.agent == "researcher"
+        assert job.heartbeat is True
+        assert job.schedule == "every 20m"
+        assert len(sched.jobs) == 1
+
+    def test_ensure_heartbeat_returns_existing(self):
+        sched = CronScheduler(config_path=self.config_path)
+        first = sched.ensure_heartbeat("researcher", "every 20m")
+        second = sched.ensure_heartbeat("researcher", "every 1h")
+        assert first.id == second.id  # same job, not duplicated
+        assert second.schedule == "every 20m"  # schedule unchanged
+        assert len(sched.jobs) == 1
+
     @pytest.mark.asyncio
     async def test_update_job(self):
         sched = CronScheduler(config_path=self.config_path)

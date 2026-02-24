@@ -70,6 +70,7 @@ class CronScheduler:
     """
 
     TICK_INTERVAL = 5
+    DEFAULT_HEARTBEAT_SCHEDULE = "every 15m"
 
     def __init__(
         self,
@@ -159,6 +160,19 @@ class CronScheduler:
             if job.agent == agent and job.heartbeat:
                 return job
         return None
+
+    def ensure_heartbeat(self, agent: str, schedule: str | None = None) -> CronJob:
+        """Idempotently ensure an agent has a heartbeat cron job.
+
+        Returns the existing job if one exists, otherwise creates one.
+        """
+        existing = self.find_heartbeat_job(agent)
+        if existing:
+            return existing
+        return self.add_job(
+            agent=agent, schedule=schedule or self.DEFAULT_HEARTBEAT_SCHEDULE,
+            message=f"Heartbeat check for {agent}", heartbeat=True,
+        )
 
     async def update_job(self, job_id: str, **kwargs) -> CronJob | None:
         """Update fields on an existing cron job. Returns updated job or None."""
