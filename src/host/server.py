@@ -238,15 +238,16 @@ def create_mesh_app(
                     event_type="pubsub_publish", detail=event.topic,
                 )
         subscribers = pubsub.get_subscribers(event.topic)
-        for agent_id in subscribers:
-            await router.route(
-                AgentMessage(
+        if subscribers:
+            await asyncio.gather(*(
+                router.route(AgentMessage(
                     from_agent="mesh",
                     to=agent_id,
                     type="event",
                     payload=event.model_dump(mode="json"),
-                )
-            )
+                ))
+                for agent_id in subscribers
+            ))
         return {"subscribers_notified": len(subscribers)}
 
     @app.post("/mesh/subscribe")

@@ -44,7 +44,7 @@ function dashboard() {
     eventTypes: [
       'agent_state', 'message_sent', 'message_received',
       'tool_start', 'tool_result', 'text_delta', 'llm_call',
-      'blackboard_write', 'health_change',
+      'blackboard_write', 'health_change', 'notification',
     ],
 
     // Agent detail
@@ -112,13 +112,13 @@ function dashboard() {
     // Settings (V2)
     settingsData: null,
 
-    // Chat (persistent per agent until cleared)
-    chatAgent: null,
-    chatMessage: '',
-    chatHistories: {},
-    chatLoading: false,
-    chatStreaming: false,
-    _chatAbort: null,
+    // Multi-agent chat panels (docked bottom bar)
+    openChats: [],             // Array of agent IDs with open chat panels
+    chatHistories: {},         // Preserved — keyed by agent ID
+    chatLoadingAgents: {},     // { agentId: true/false }
+    chatStreamingAgents: {},   // { agentId: true/false }
+    _chatAborts: {},           // { agentId: AbortController }
+    chatMaxPanels: 3,          // Max simultaneous panels
 
     // Identity panel
     identityTabs: _IDENTITY_TABS,
@@ -141,6 +141,8 @@ function dashboard() {
     broadcastMessage: '',
     broadcastLoading: false,
     broadcastResults: null,
+    broadcastStreaming: false,
+    _broadcastAbort: null,
 
     // Credentials
     credService: '',
@@ -297,6 +299,8 @@ function dashboard() {
       if (this._tracesDebounce) clearTimeout(this._tracesDebounce);
       if (this.costChart) this.costChart.destroy();
       Object.values(this._stateTimers).forEach(clearTimeout);
+      Object.values(this._chatAborts).forEach(c => c?.abort());
+      if (this._broadcastAbort) this._broadcastAbort.abort();
     },
 
     // ── Tab switching ─────────────────────────────────────
@@ -378,6 +382,11 @@ function dashboard() {
       // Live-update fleet on llm_call/health changes (debounced)
       if (evt.type === 'llm_call' || evt.type === 'health_change') {
         this._debouncedFleetRefresh();
+      }
+
+      // Show toast for agent notifications
+      if (evt.type === 'notification' && evt.agent) {
+        this.showToast(`[${evt.agent}] ${(evt.data?.message || '').substring(0, 120)}`);
       }
 
       // Highlight blackboard writes
@@ -1005,57 +1014,64 @@ function dashboard() {
       } catch (e) { console.warn('fetchSettings failed:', e); }
     },
 
-    // ── Chat with agent (persistent per agent) ───────────
+    // ── Multi-agent chat panels (docked bottom bar) ─────
 
     openChat(agentId) {
-      this.chatAgent = agentId;
-      this.chatMessage = '';
-      this.$nextTick(() => this._scrollChat());
-    },
-
-    closeChat() {
-      if (this._chatAbort) { this._chatAbort.abort(); this._chatAbort = null; }
-      this.chatAgent = null;
-      this.chatMessage = '';
-      this.chatLoading = false;
-      this.chatStreaming = false;
-    },
-
-    clearChat() {
-      if (this.chatAgent && this.chatHistories[this.chatAgent]) {
-        if (this._chatAbort) { this._chatAbort.abort(); this._chatAbort = null; }
-        this.chatHistories[this.chatAgent] = [];
-        this.chatLoading = false;
-        this.chatStreaming = false;
+      if (this.openChats.includes(agentId)) return;
+      if (this.openChats.length >= this.chatMaxPanels) {
+        // Evict leftmost (oldest) panel
+        const evicted = this.openChats.shift();
+        if (evicted && this._chatAborts[evicted]) {
+          this._chatAborts[evicted].abort();
+          delete this._chatAborts[evicted];
+        }
       }
+      this.openChats.push(agentId);
+      this.$nextTick(() => this._scrollChat(agentId));
     },
 
-    _scrollChat() {
-      const el = document.getElementById('chat-messages');
+    closeChat(agentId) {
+      if (this._chatAborts[agentId]) {
+        this._chatAborts[agentId].abort();
+        delete this._chatAborts[agentId];
+      }
+      this.openChats = this.openChats.filter(id => id !== agentId);
+      this.chatLoadingAgents[agentId] = false;
+      this.chatStreamingAgents[agentId] = false;
+    },
+
+    clearChat(agentId) {
+      if (this._chatAborts[agentId]) {
+        this._chatAborts[agentId].abort();
+        delete this._chatAborts[agentId];
+      }
+      this.chatHistories[agentId] = [];
+      this.chatLoadingAgents[agentId] = false;
+      this.chatStreamingAgents[agentId] = false;
+    },
+
+    _scrollChat(agentId) {
+      const el = document.getElementById('chat-messages-' + agentId);
       if (el) el.scrollTop = el.scrollHeight;
     },
 
-    async sendChat() {
-      if (!this.chatMessage.trim() || !this.chatAgent) return;
-      const msg = this.chatMessage.trim();
-      const agent = this.chatAgent;
-      if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
-      this.chatHistories[agent].push({ role: 'user', content: msg });
-      this.chatMessage = '';
-      this.chatLoading = true;
-      this.chatStreaming = true;
+    async sendChatTo(agentId, inputValue) {
+      const msg = (inputValue || '').trim();
+      if (!msg) return;
+      if (!this.chatHistories[agentId]) this.chatHistories[agentId] = [];
+      this.chatHistories[agentId].push({ role: 'user', content: msg });
+      this.chatLoadingAgents[agentId] = true;
+      this.chatStreamingAgents[agentId] = true;
 
-      // Add streaming placeholder — reference via reactive array index
-      this.chatHistories[agent].push({ role: 'agent', content: '', streaming: true, tools: [] });
-      const idx = this.chatHistories[agent].length - 1;
-      this.$nextTick(() => this._scrollChat());
+      this.chatHistories[agentId].push({ role: 'agent', content: '', streaming: true, tools: [] });
+      const idx = this.chatHistories[agentId].length - 1;
+      this.$nextTick(() => this._scrollChat(agentId));
 
-      // AbortController to cancel fetch when modal is closed
       const controller = new AbortController();
-      this._chatAbort = controller;
+      this._chatAborts[agentId] = controller;
 
       try {
-        const resp = await fetch(`${window.__config.apiBase}/agents/${agent}/chat/stream`, {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/chat/stream`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ message: msg }),
           signal: controller.signal,
@@ -1063,11 +1079,11 @@ function dashboard() {
         if (!resp.ok) {
           let errMsg = `HTTP ${resp.status}`;
           try { const err = await resp.json(); errMsg = err.detail || errMsg; } catch (_) {}
-          this.chatHistories[agent][idx].content = errMsg;
-          this.chatHistories[agent][idx].role = 'error';
-          this.chatHistories[agent][idx].streaming = false;
-          this.chatLoading = false;
-          this.chatStreaming = false;
+          this.chatHistories[agentId][idx].content = errMsg;
+          this.chatHistories[agentId][idx].role = 'error';
+          this.chatHistories[agentId][idx].streaming = false;
+          this.chatLoadingAgents[agentId] = false;
+          this.chatStreamingAgents[agentId] = false;
           return;
         }
 
@@ -1089,16 +1105,16 @@ function dashboard() {
             let data;
             try { data = JSON.parse(line.slice(6)); } catch (_) { continue; }
 
-            const entry = this.chatHistories[agent][idx];
+            const entry = this.chatHistories[agentId][idx];
 
             if (data.type === 'text_delta') {
-              if (firstToken) { this.chatLoading = false; firstToken = false; }
+              if (firstToken) { this.chatLoadingAgents[agentId] = false; firstToken = false; }
               entry.content += data.content || '';
-              this._scrollChat();
+              this._scrollChat(agentId);
             } else if (data.type === 'tool_start') {
-              if (firstToken) { this.chatLoading = false; firstToken = false; }
+              if (firstToken) { this.chatLoadingAgents[agentId] = false; firstToken = false; }
               entry.tools.push({ name: data.name, status: 'running', input: data.input });
-              this._scrollChat();
+              this._scrollChat(agentId);
             } else if (data.type === 'tool_result') {
               const tool = entry.tools.find(t => t.name === data.name && t.status === 'running');
               if (tool) {
@@ -1117,38 +1133,105 @@ function dashboard() {
             }
           }
         }
-        this.chatHistories[agent][idx].streaming = false;
+        this.chatHistories[agentId][idx].streaming = false;
       } catch (e) {
-        if (e.name === 'AbortError') return;  // Modal closed — ignore
-        this.chatHistories[agent][idx].content = e.message;
-        this.chatHistories[agent][idx].role = 'error';
-        this.chatHistories[agent][idx].streaming = false;
+        if (e.name === 'AbortError') return;
+        this.chatHistories[agentId][idx].content = e.message;
+        this.chatHistories[agentId][idx].role = 'error';
+        this.chatHistories[agentId][idx].streaming = false;
       }
-      this._chatAbort = null;
-      this.chatLoading = false;
-      this.chatStreaming = false;
-      this.$nextTick(() => this._scrollChat());
+      delete this._chatAborts[agentId];
+      this.chatLoadingAgents[agentId] = false;
+      this.chatStreamingAgents[agentId] = false;
+      this.$nextTick(() => this._scrollChat(agentId));
     },
 
     // ── Broadcast ────────────────────────────────────────
 
     async sendBroadcast() {
       if (!this.broadcastMessage.trim()) return;
+      const msg = this.broadcastMessage.trim();
       this.broadcastLoading = true;
-      this.broadcastResults = null;
+      this.broadcastStreaming = true;
+      this.broadcastResults = {};  // Show results area immediately
+      this.broadcastMessage = '';
+
+      const controller = new AbortController();
+      this._broadcastAbort = controller;
+
       try {
-        const resp = await fetch(`${window.__config.apiBase}/broadcast`, {
+        const resp = await fetch(`${window.__config.apiBase}/broadcast/stream`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ message: this.broadcastMessage.trim() }),
+          body: JSON.stringify({ message: msg }),
+          signal: controller.signal,
         });
-        if (resp.ok) {
-          this.broadcastResults = (await resp.json()).responses;
-          this.broadcastMessage = '';
-          this.showToast('Broadcast sent');
-        } else {
+        if (!resp.ok) {
           this.showToast('Broadcast failed');
+          this.broadcastLoading = false;
+          this.broadcastStreaming = false;
+          return;
         }
-      } catch (e) { this.showToast(`Error: ${e.message}`); }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            let data;
+            try { data = JSON.parse(line.slice(6)); } catch (_) { continue; }
+
+            if (data.type === 'agent_start') {
+              this.broadcastResults = { ...this.broadcastResults, [data.agent]: { streaming: true, content: '' } };
+            } else if (data.type === 'text_delta') {
+              const entry = this.broadcastResults[data.agent];
+              if (entry) {
+                entry.content += data.content || '';
+                this.broadcastResults = { ...this.broadcastResults };
+              }
+            } else if (data.type === 'done' || data.type === 'agent_done') {
+              const entry = this.broadcastResults[data.agent];
+              if (entry) {
+                if (data.response) entry.content = data.response;
+                entry.streaming = false;
+                this.broadcastResults = { ...this.broadcastResults };
+              }
+            } else if (data.type === 'error' && data.agent) {
+              const entry = this.broadcastResults[data.agent];
+              if (entry) {
+                entry.content = data.message || 'Error';
+                entry.streaming = false;
+                entry.error = true;
+                this.broadcastResults = { ...this.broadcastResults };
+              }
+            } else if (data.type === 'all_done') {
+              break;
+            }
+          }
+        }
+        this.showToast('Broadcast complete');
+      } catch (e) {
+        if (e.name !== 'AbortError') this.showToast(`Error: ${e.message}`);
+      }
+      this._broadcastAbort = null;
+      this.broadcastLoading = false;
+      this.broadcastStreaming = false;
+    },
+
+    cancelBroadcast() {
+      if (this._broadcastAbort) {
+        this._broadcastAbort.abort();
+        this._broadcastAbort = null;
+      }
+      this.broadcastStreaming = false;
       this.broadcastLoading = false;
     },
 
@@ -1324,6 +1407,7 @@ function dashboard() {
         llm_call: 'text-purple-400',
         blackboard_write: 'text-cyan-400',
         health_change: 'text-red-400',
+        notification: 'text-amber-300',
         // V2 trace event types
         chat: 'text-green-400',
         chat_response: 'text-green-300',
@@ -1351,6 +1435,7 @@ function dashboard() {
         llm_call: 'bg-purple-400',
         blackboard_write: 'bg-cyan-400',
         health_change: 'bg-red-400',
+        notification: 'bg-amber-300',
         chat: 'bg-green-400',
         chat_response: 'bg-green-300',
         message_route: 'bg-teal-400',
@@ -1423,6 +1508,9 @@ function dashboard() {
           add('Written by', d.written_by);
           add('Value', d.value_preview || d.value);
           break;
+        case 'notification':
+          add('Message', d.message);
+          break;
         case 'agent_state':
           add('State', d.state);
           add('Role', d.role);
@@ -1471,6 +1559,8 @@ function dashboard() {
           return `${d.previous || '?'} \u2192 ${d.current || '?'}${d.failures ? ` (${d.failures} failures)` : ''}`;
         case 'blackboard_write':
           return [d.key, d.version && `v${d.version}`, d.written_by && `by ${d.written_by}`].filter(Boolean).join(' \u00b7 ');
+        case 'notification':
+          return (d.message || '').substring(0, 80);
         case 'agent_state': {
           const s = d.state || '?';
           if (s === 'registered' && d.capabilities) return `registered (${Array.isArray(d.capabilities) ? d.capabilities.length : '?'} tools)`;

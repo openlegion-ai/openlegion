@@ -107,6 +107,40 @@ class TestHealthRestartMissingConfig:
         assert health.restart_count == 1
 
 
+class TestParallelHealthChecks:
+    @pytest.mark.asyncio
+    async def test_check_all_runs_concurrently(self):
+        """_check_all dispatches health checks concurrently via asyncio.gather."""
+        import asyncio
+
+        call_times = []
+
+        async def slow_reachable(agent_id, timeout=5):
+            call_times.append(time.monotonic())
+            await asyncio.sleep(0.1)
+            return True
+
+        monitor = _make_monitor({
+            "a": {"role": "assistant"},
+            "b": {"role": "assistant"},
+            "c": {"role": "assistant"},
+        })
+        monitor.register("a")
+        monitor.register("b")
+        monitor.register("c")
+        monitor.transport.is_reachable = slow_reachable
+
+        t0 = time.monotonic()
+        await monitor._check_all()
+        elapsed = time.monotonic() - t0
+
+        assert len(call_times) == 3
+        # Parallel: total ~0.1s, not ~0.3s
+        assert elapsed < 0.25, f"Expected parallel but took {elapsed:.2f}s"
+        # All calls started at roughly the same time
+        assert max(call_times) - min(call_times) < 0.05
+
+
 class TestHealthRecoveryEvent:
     @pytest.mark.asyncio
     async def test_recovery_emits_health_change(self):

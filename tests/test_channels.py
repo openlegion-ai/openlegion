@@ -186,6 +186,30 @@ class TestCommands:
         assert "Broadcast" in result
 
     @pytest.mark.asyncio
+    async def test_broadcast_parallel(self):
+        """Broadcast dispatches to all agents concurrently, not sequentially."""
+        import asyncio
+        import time
+
+        call_times = []
+
+        async def slow_dispatch(agent: str, message: str) -> str:
+            call_times.append(time.monotonic())
+            await asyncio.sleep(0.1)
+            return f"reply from {agent}"
+
+        ch = _make_channel(agents=["a", "b", "c"], dispatch_fn=slow_dispatch)
+        t0 = time.monotonic()
+        result = await ch.handle_message("u1", "/broadcast test")
+        elapsed = time.monotonic() - t0
+        assert "Broadcast to 3 agent(s)" in result
+        # All 3 agents dispatched concurrently: total time should be ~0.1s, not ~0.3s
+        assert elapsed < 0.25, f"Expected parallel dispatch but took {elapsed:.2f}s"
+        # All calls should start within a tight window
+        assert len(call_times) == 3
+        assert max(call_times) - min(call_times) < 0.05
+
+    @pytest.mark.asyncio
     async def test_help_command(self):
         ch = _make_channel()
         result = await ch.handle_message("u1", "/help")

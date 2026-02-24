@@ -488,6 +488,55 @@ def create_dashboard_router(
             results[aid] = resp
         return {"responses": results}
 
+    @api_router.post("/api/broadcast/stream")
+    async def api_broadcast_stream(request: Request):
+        """SSE streaming broadcast — streams per-agent responses as they arrive."""
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        body = await request.json()
+        message = body.get("message", "").strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="Message is required")
+        message = sanitize_for_prompt(message)
+
+        import asyncio
+        import json as _json
+
+        queue: asyncio.Queue = asyncio.Queue()
+        agents = list(agent_registry.keys())
+
+        async def _stream_agent(aid: str) -> None:
+            await queue.put({"type": "agent_start", "agent": aid})
+            try:
+                async for event in transport.stream_request(
+                    aid, "POST", "/chat/stream",
+                    json={"message": message}, timeout=120,
+                ):
+                    if isinstance(event, dict):
+                        event["agent"] = aid
+                        await queue.put(event)
+            except Exception as e:
+                await queue.put({"type": "error", "agent": aid, "message": str(e)})
+            await queue.put({"type": "agent_done", "agent": aid})
+
+        async def event_generator():
+            tasks = [asyncio.create_task(_stream_agent(aid)) for aid in agents]
+            done_count = 0
+            try:
+                while done_count < len(agents):
+                    event = await queue.get()
+                    if event.get("type") == "agent_done":
+                        done_count += 1
+                    yield f"data: {_json.dumps(event, default=str)}\n\n"
+            except asyncio.CancelledError:
+                for t in tasks:
+                    t.cancel()
+                raise
+            yield f"data: {_json.dumps({'type': 'all_done'})}\n\n"
+
+        from starlette.responses import StreamingResponse
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
     @api_router.post("/api/agents/{agent_id}/steer")
     async def api_steer(agent_id: str, request: Request) -> dict:
         if agent_id not in agent_registry:

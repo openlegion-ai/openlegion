@@ -287,6 +287,7 @@ class DashboardEvent(BaseModel):
         "llm_call",
         "blackboard_write",
         "health_change",
+        "notification",
     ]
     agent: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))

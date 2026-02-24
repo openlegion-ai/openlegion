@@ -9,6 +9,7 @@ agent labels on responses.
 from __future__ import annotations
 
 import abc
+import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Callable, Coroutine
@@ -259,10 +260,10 @@ class Channel(abc.ABC):
             if len(parts) < 2:
                 return "Usage: /broadcast <message>"
             bc_msg = parts[1]
-            results = []
-            for name in agents:
-                resp = await self.dispatch(name, bc_msg)
-                results.append(f"[{name}] {resp}")
+            responses = await asyncio.gather(
+                *(self.dispatch(name, bc_msg) for name in agents)
+            )
+            results = [f"[{name}] {resp}" for name, resp in zip(agents, responses)]
             return f"Broadcast to {len(agents)} agent(s):\n\n" + "\n\n".join(results)
 
         if cmd == "/costs":

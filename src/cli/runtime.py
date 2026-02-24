@@ -404,11 +404,14 @@ class RuntimeContext:
         notification = f"[{agent_name}] {message}"
         sys.stdout.write(f"\n{notification}\n")
         sys.stdout.flush()
-        for ch in self._active_channels:
-            try:
-                await ch.send_notification(notification)
-            except Exception as e:
-                logger.debug("Notify to %s failed: %s", type(ch).__name__, e)
+        if self._active_channels:
+            await asyncio.gather(*(
+                ch.send_notification(notification)
+                for ch in self._active_channels
+            ), return_exceptions=True)
+        if self.event_bus:
+            self.event_bus.emit("notification", agent=agent_name,
+                               data={"message": message})
 
     def _start_mesh_server(self) -> None:
         import uvicorn

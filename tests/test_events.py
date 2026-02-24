@@ -13,11 +13,11 @@ from src.shared.types import DashboardEvent
 
 
 def test_dashboard_event_model():
-    """DashboardEvent creation with defaults and all 8 valid types."""
+    """DashboardEvent creation with defaults and all 9 valid types."""
     valid_types = [
         "agent_state", "message_sent", "message_received",
         "tool_start", "tool_result", "llm_call",
-        "blackboard_write", "health_change",
+        "blackboard_write", "health_change", "notification",
     ]
     for t in valid_types:
         evt = DashboardEvent(type=t, agent="test", data={"key": "val"})
@@ -250,6 +250,17 @@ async def test_broadcast_removes_dead_connections():
 
 
 # === Integration: Blackboard emits on write ===
+
+
+def test_notification_event_type():
+    """Notification event type is valid and stores in buffer."""
+    bus = EventBus()
+    bus.emit("notification", agent="agent1", data={"message": "Task complete"})
+    assert len(bus._buffer) == 1
+    evt = bus._buffer[0]
+    assert evt["type"] == "notification"
+    assert evt["agent"] == "agent1"
+    assert evt["data"]["message"] == "Task complete"
 
 
 def test_blackboard_emits_on_write(tmp_path):

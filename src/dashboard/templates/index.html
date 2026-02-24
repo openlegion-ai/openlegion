@@ -406,14 +406,32 @@
               <span x-show="broadcastLoading">Sending...</span>
             </button>
           </div>
-          <div x-show="broadcastResults" class="mt-3 space-y-2" x-cloak>
-            <template x-for="[aid, resp] in Object.entries(broadcastResults || {})" :key="aid">
+          <div x-show="broadcastResults && Object.keys(broadcastResults).length > 0" class="mt-3 space-y-2" x-cloak>
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-[10px] text-gray-600 uppercase tracking-wider">Responses</span>
+              <button x-show="broadcastStreaming" @click="cancelBroadcast()"
+                class="text-[10px] px-2 py-0.5 rounded bg-red-900/30 text-red-400 hover:bg-red-900/50 border border-red-800/40">Abort</button>
+            </div>
+            <template x-for="[aid, entry] in Object.entries(broadcastResults || {})" :key="aid">
               <div class="text-xs bg-gray-800/50 rounded p-2" x-data="{ expanded: false }">
                 <div class="flex items-start gap-2">
-                  <span class="text-indigo-400 font-medium shrink-0" x-text="aid"></span>
-                  <span class="text-gray-400 whitespace-pre-wrap break-words" x-text="expanded ? resp : resp.substring(0, 200)"></span>
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <template x-if="entry.streaming">
+                      <span class="inline-block w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse"></span>
+                    </template>
+                    <template x-if="!entry.streaming && !entry.error">
+                      <span class="text-emerald-400 text-[10px]">&#10003;</span>
+                    </template>
+                    <template x-if="!entry.streaming && entry.error">
+                      <span class="text-red-400 text-[10px]">&#10007;</span>
+                    </template>
+                    <span class="text-indigo-400 font-medium" x-text="aid"></span>
+                  </div>
+                  <span class="text-gray-400 whitespace-pre-wrap break-words" :class="entry.error && 'text-red-400'"
+                    x-text="expanded ? entry.content : (entry.content || '').substring(0, 200)"></span>
+                  <span x-show="entry.streaming && !entry.content" class="text-gray-600 italic">streaming...</span>
                 </div>
-                <button x-show="resp.length > 200" @click="expanded = !expanded"
+                <button x-show="(entry.content || '').length > 200" @click="expanded = !expanded"
                   class="text-indigo-500 hover:text-indigo-400 mt-1 text-[10px]"
                   x-text="expanded ? 'Show less' : '...show more'"></button>
               </div>
@@ -422,68 +440,83 @@
         </div>
       </div>
 
-      <!-- Chat modal overlay -->
-      <div x-show="chatAgent" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/60" @click.self="closeChat()" @keydown.escape.window="if (chatAgent) closeChat()" role="dialog" aria-modal="true" aria-label="Chat with agent">
-        <div class="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col">
-          <div class="flex items-center justify-between px-5 py-3 border-b border-gray-800">
-            <div class="flex items-center gap-3">
-              <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(chatAgent || '')">
-                <span x-text="agentInitials(chatAgent || '')"></span>
-              </div>
-              <h3 class="text-sm font-medium text-white">Chat with <span class="text-indigo-400" x-text="chatAgent"></span></h3>
-              <button x-show="(chatHistories[chatAgent] || []).length > 0" @click="clearChat()"
-                class="text-[10px] text-gray-600 hover:text-gray-400 transition-colors" title="Clear chat history">Clear</button>
-            </div>
-            <button @click="closeChat()" class="text-gray-500 hover:text-white transition-colors text-lg">&times;</button>
-          </div>
-          <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar min-h-[200px]">
-            <template x-for="(msg, i) in (chatHistories[chatAgent] || [])" :key="i">
-              <div :class="msg.role === 'user' ? 'text-right' : 'text-left'">
-                <div class="inline-block max-w-[80%] px-3 py-2 rounded-lg text-sm"
-                  :class="{
-                    'bg-indigo-600 text-white': msg.role === 'user',
-                    'bg-gray-800 text-gray-200': msg.role === 'agent',
-                    'bg-red-900/40 text-red-300': msg.role === 'error',
-                  }"
-                >
-                  <!-- Tool calls -->
-                  <template x-if="msg.tools && msg.tools.length > 0">
-                    <div class="mb-2 space-y-1">
-                      <template x-for="(tool, ti) in msg.tools" :key="ti">
-                        <div class="flex items-center gap-1.5 text-xs py-1 px-2 rounded bg-gray-900/60 text-gray-400">
-                          <template x-if="tool.status === 'running'">
-                            <svg class="animate-spin h-3 w-3 text-indigo-400 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-                          </template>
-                          <template x-if="tool.status === 'done'">
-                            <span class="text-emerald-400 shrink-0">&#10003;</span>
-                          </template>
-                          <span class="font-mono truncate" x-text="tool.name"></span>
-                          <span x-show="tool.output" class="text-gray-600 truncate ml-1" x-text="tool.output ? '→ ' + tool.output : ''"></span>
-                        </div>
-                      </template>
-                    </div>
-                  </template>
-                  <!-- Message content -->
-                  <div class="whitespace-pre-wrap break-words" x-text="msg.content"></div>
-                  <!-- Streaming cursor -->
-                  <span x-show="msg.streaming" class="inline-block w-1.5 h-4 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
+      <!-- Docked chat panel bar (multi-agent) -->
+      <div x-show="openChats.length > 0" x-cloak class="fixed bottom-0 right-0 z-40 flex items-end gap-2 p-3 pointer-events-none">
+        <template x-for="chatId in openChats" :key="chatId">
+          <div class="pointer-events-auto w-80 bg-gray-900 border border-gray-700 rounded-t-xl shadow-2xl flex flex-col max-h-[60vh]" x-data="{ minimized: false, chatInput: '' }">
+            <!-- Panel header -->
+            <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800 cursor-pointer select-none" @click="minimized = !minimized">
+              <div class="flex items-center gap-2 min-w-0">
+                <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(chatId)">
+                  <span x-text="agentInitials(chatId)"></span>
+                  <span class="activity-dot"
+                    :class="chatStreamingAgents[chatId] ? 'bg-green-400' : (chatLoadingAgents[chatId] ? 'bg-purple-400' : 'bg-gray-600')"
+                  ></span>
                 </div>
+                <span class="text-xs font-medium text-white truncate" x-text="chatId"></span>
+                <button x-show="(chatHistories[chatId] || []).length > 0" @click.stop="clearChat(chatId)"
+                  class="text-[10px] text-gray-600 hover:text-gray-400 transition-colors" title="Clear">Clear</button>
               </div>
-            </template>
-            <div x-show="chatLoading" class="text-center text-gray-600 text-sm">
-              <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-              Thinking...
+              <div class="flex items-center gap-1">
+                <button @click.stop="minimized = !minimized" class="text-gray-500 hover:text-white text-xs px-1 transition-colors" :title="minimized ? 'Expand' : 'Minimize'">
+                  <svg x-show="!minimized" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                  <svg x-show="minimized" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7"/></svg>
+                </button>
+                <button @click.stop="closeChat(chatId)" class="text-gray-500 hover:text-white transition-colors text-sm">&times;</button>
+              </div>
+            </div>
+            <!-- Messages area (hidden when minimized) -->
+            <div x-show="!minimized" class="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar min-h-[160px] max-h-[40vh]" :id="'chat-messages-' + chatId">
+              <template x-for="(msg, i) in (chatHistories[chatId] || [])" :key="i">
+                <div :class="msg.role === 'user' ? 'text-right' : 'text-left'">
+                  <div class="inline-block max-w-[90%] px-2.5 py-1.5 rounded-lg text-xs"
+                    :class="{
+                      'bg-indigo-600 text-white': msg.role === 'user',
+                      'bg-gray-800 text-gray-200': msg.role === 'agent',
+                      'bg-red-900/40 text-red-300': msg.role === 'error',
+                    }"
+                  >
+                    <template x-if="msg.tools && msg.tools.length > 0">
+                      <div class="mb-1.5 space-y-0.5">
+                        <template x-for="(tool, ti) in msg.tools" :key="ti">
+                          <div class="flex items-center gap-1 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400">
+                            <template x-if="tool.status === 'running'">
+                              <svg class="animate-spin h-2.5 w-2.5 text-indigo-400 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                            </template>
+                            <template x-if="tool.status === 'done'">
+                              <span class="text-emerald-400 shrink-0">&#10003;</span>
+                            </template>
+                            <span class="font-mono truncate" x-text="tool.name"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                    <div class="whitespace-pre-wrap break-words" x-text="msg.content"></div>
+                    <span x-show="msg.streaming" class="inline-block w-1 h-3 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
+                  </div>
+                </div>
+              </template>
+              <div x-show="chatLoadingAgents[chatId]" class="text-center text-gray-600 text-[10px]">
+                <svg class="animate-spin h-3 w-3 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                Thinking...
+              </div>
+              <div x-show="(chatHistories[chatId] || []).length === 0 && !chatLoadingAgents[chatId]" class="text-center text-gray-700 text-[10px] py-4">
+                Start a conversation
+              </div>
+            </div>
+            <!-- Input area (hidden when minimized) -->
+            <div x-show="!minimized" class="px-2.5 py-2 border-t border-gray-800">
+              <div class="flex gap-1.5">
+                <input type="text" x-model="chatInput"
+                  @keydown.enter="if (chatInput.trim()) { sendChatTo(chatId, chatInput); chatInput = ''; }"
+                  class="dash-input flex-1 text-xs py-1.5" placeholder="Message..." :disabled="chatStreamingAgents[chatId]">
+                <button @click="if (chatInput.trim()) { sendChatTo(chatId, chatInput); chatInput = ''; }"
+                  :disabled="chatStreamingAgents[chatId] || chatLoadingAgents[chatId] || !chatInput.trim()"
+                  class="text-[10px] px-2.5 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">Send</button>
+              </div>
             </div>
           </div>
-          <div class="px-4 py-3 border-t border-gray-800">
-            <div class="flex gap-2">
-              <input type="text" x-model="chatMessage" @keydown.enter="sendChat()"
-                class="dash-input flex-1" placeholder="Type a message..." :disabled="chatStreaming">
-              <button @click="sendChat()" :disabled="chatStreaming || chatLoading || !chatMessage.trim()"
-                class="text-xs px-4 py-2 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">Send</button>
-            </div>
-          </div>
-        </div>
+        </template>
       </div>
 
       <!-- Activity Feed (Traces + Live Events) -->
@@ -637,7 +670,7 @@
       </div>
 
       <!-- Agent Detail -->
-      <div x-show="activeTab === 'fleet' && detailAgent" x-cloak @keydown.escape.window="if (detailAgent && !identityEditing && !configEditing && !chatAgent) detailAgent = null">
+      <div x-show="activeTab === 'fleet' && detailAgent" x-cloak @keydown.escape.window="if (detailAgent && !identityEditing && !configEditing && openChats.length === 0) detailAgent = null">
         <div class="text-sm text-gray-500 mb-4 flex items-center gap-1">
           <button @click="detailAgent = null" class="hover:text-gray-300 transition-colors flex items-center gap-1">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>

@@ -941,3 +941,92 @@ class TestDashboardWorkflows:
         assert len(data["workflows"]) == 1
         assert data["workflows"][0]["name"] == "test_wf"
         assert data["workflows"][0]["steps"] == 3
+
+
+# ── V2 Tests: Streaming Broadcast ────────────────────────────
+
+
+class TestDashboardBroadcastStream:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_broadcast_stream_returns_sse(self):
+        """Streaming broadcast yields agent_start, agent_done, and all_done SSE events."""
+        import json
+
+        async def _mock_stream(aid, method, path, **kwargs):
+            yield {"type": "text_delta", "content": f"Hello from {aid}"}
+
+        self.components["transport"].stream_request = _mock_stream
+
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": "Hello all"},
+        )
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+
+        lines = [l for l in resp.text.strip().split("\n") if l.startswith("data: ")]
+        events = [json.loads(l[len("data: "):]) for l in lines]
+
+        # Should have: agent_start(alpha), text_delta(alpha), agent_done(alpha),
+        #              agent_start(beta), text_delta(beta), agent_done(beta), all_done
+        types = [e["type"] for e in events]
+        assert types.count("agent_start") == 2
+        assert types.count("agent_done") == 2
+        assert types[-1] == "all_done"
+
+        # Each text_delta should carry agent info
+        deltas = [e for e in events if e["type"] == "text_delta"]
+        assert len(deltas) == 2
+        delta_agents = {e["agent"] for e in deltas}
+        assert delta_agents == {"alpha", "beta"}
+
+    def test_broadcast_stream_empty_message_rejected(self):
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": ""},
+        )
+        assert resp.status_code == 400
+
+    def test_broadcast_stream_no_transport(self):
+        self.components["transport"] = None
+        self.client = _make_client(self.components)
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": "Hello"},
+        )
+        assert resp.status_code == 503
+
+    def test_broadcast_stream_handles_agent_error(self):
+        """If one agent's stream raises, an error event is emitted for that agent."""
+        import json
+
+        async def _mock_stream(aid, method, path, **kwargs):
+            if aid == "alpha":
+                raise ConnectionError("agent down")
+            yield {"type": "text_delta", "content": "ok"}
+
+        self.components["transport"].stream_request = _mock_stream
+
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": "Hello"},
+        )
+        assert resp.status_code == 200
+        lines = [l for l in resp.text.strip().split("\n") if l.startswith("data: ")]
+        events = [json.loads(l[len("data: "):]) for l in lines]
+
+        error_events = [e for e in events if e["type"] == "error"]
+        assert len(error_events) == 1
+        assert error_events[0]["agent"] == "alpha"
+        assert "agent down" in error_events[0]["message"]
+
+        # all_done should still be emitted
+        assert events[-1]["type"] == "all_done"
