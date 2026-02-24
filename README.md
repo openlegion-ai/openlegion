@@ -8,7 +8,7 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE.md)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 1124](https://img.shields.io/badge/tests-1124%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 1173](https://img.shields.io/badge/tests-1173%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -116,8 +116,8 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 1124 tests including full Docker E2E |
-| **Codebase size** | 430,000+ lines | ~19,000 lines — auditable in a day |
+| **Test coverage** | Minimal | 1173 tests including full Docker E2E |
+| **Codebase size** | 430,000+ lines | ~20,000 lines — auditable in a day |
 
 ---
 
@@ -131,7 +131,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**1124 tests passing** across **~19,000 lines** of application code.
+**1173 tests passing** across **~20,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
@@ -409,7 +409,12 @@ canonicalized parameters and results over a 15-call sliding window.
 | `create_skill` | Write a new Python skill at runtime |
 | `list_custom_skills` | List all custom skills the agent has created |
 | `reload_skills` | Hot-reload all skills |
-| `spawn_agent` | Spawn an ephemeral sub-agent |
+| `spawn_agent` | Spawn an ephemeral sub-agent in a new container |
+| `spawn_subagent` | Spawn a lightweight in-container subagent for parallel subtasks |
+| `list_subagents` | List active subagents and their status |
+| `vault_generate_secret` | Generate and store a random secret (returns opaque handle) |
+| `vault_capture_from_page` | Capture text from browser element and store as credential |
+| `vault_list` / `vault_status` | List credential names or check if a credential exists |
 | `read_agent_history` | Read another agent's conversation logs |
 
 Custom skills are Python functions decorated with `@skill`, auto-discovered
@@ -836,10 +841,10 @@ pytest tests/
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
 | Built-in Tools | 112 | exec, file, browser (incl. backend tiers, screenshots, reset/recovery), memory, mesh tools, notifications, path traversal, discovery |
-| Dashboard | 72 | Index, agents, blackboard, costs, traces, queues, cron, settings, config |
-| CLI | 62 | Agent add/list/edit/remove, chat, REPL commands, cron management, version |
+| Dashboard | 71 | Index, agents, blackboard, costs, traces, queues, cron, settings, config |
+| CLI | 65 | Agent add/list/edit/remove, chat, REPL commands, cron management, version |
 | Agent Loop | 57 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
-| Workspace | 55 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files |
+| Workspace | 58 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files |
 | Cron | 42 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM, concurrent mutations |
 | Credentials | 44 | Vault, API proxy, provider detection, credential lifecycle |
 | Sanitization | 38 | Invisible Unicode stripping, bidi overrides, tag chars, zero-width |
@@ -855,9 +860,10 @@ pytest tests/
 | Transcript | 24 | Transcript formatting, safety, round-trip fidelity |
 | Agent Server | 21 | Workspace API, heartbeat-context endpoint, content sanitization, file allowlist |
 | Slack Channel | 21 | Socket Mode, thread routing, pairing, command translation |
+| Discord Channel | 36 | Slash commands, message routing, pairing, chunking, embed formatting |
 | WhatsApp Channel | 22 | Cloud API, webhook verification, message chunking, non-text reply |
 | Skills | 20 | Discovery, execution, injection, MCP integration |
-| Setup Wizard | 25 | Quickstart, full setup, API key validation, templates, inline setup |
+| Setup Wizard | 19 | Quickstart, full setup, API key validation, templates, inline setup |
 | Marketplace | 20 | Install, manifest parsing, validation, path traversal, remove |
 | Transport | 18 | HttpTransport, SandboxTransport, resolve_url |
 | Dashboard Workspace | 17 | Workspace proxy endpoints, filename validation, transport forwarding, sanitization |
@@ -878,7 +884,7 @@ pytest tests/
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **1124** | |
+| **Total** | **1173** | |
 
 ---
 
@@ -998,7 +1004,7 @@ config/
 | The mesh is the only door | No agent has network access except through the mesh. No agent holds credentials. |
 | Private by default, shared by promotion | Agents keep knowledge private. Facts are explicitly promoted to the blackboard. |
 | Explicit failure handling | Every workflow step declares what happens on failure. No silent error swallowing. |
-| Small enough to audit | ~19,000 total lines. The entire codebase is auditable in a day. |
+| Small enough to audit | ~20,000 total lines. The entire codebase is auditable in a day. |
 | Skills over features | New capabilities are agent skills, not mesh or orchestrator code. |
 | SQLite for all state | Single-file databases. No external services. WAL mode for concurrent reads. |
 | Zero vendor lock-in | LiteLLM supports 100+ providers. Markdown workspace files. No proprietary formats. |

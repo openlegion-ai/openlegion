@@ -78,6 +78,7 @@ pytest tests/ -x
 | `src/agent/loop_detector.py` | `tests/test_loop_detector.py` |
 | `src/marketplace.py` | `tests/test_marketplace.py` |
 | `src/channels/base.py` | `tests/test_channels.py` |
+| `src/channels/discord.py` | `tests/test_discord.py` |
 | `src/channels/slack.py` | `tests/test_slack.py` |
 | `src/channels/whatsapp.py` | `tests/test_whatsapp.py` |
 | `src/shared/types.py` | `tests/test_types.py` |
