@@ -40,12 +40,13 @@ The backend is selected per-agent via the `BROWSER_BACKEND` environment variable
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `browser_navigate` | `url`, `wait_ms` | Open URL, wait, extract page text (default wait: 1000ms) |
+| `browser_navigate` | `url`, `wait_ms` | Open URL, wait, extract page text (default wait: 1000ms). Auto-recovers from dead CDP sessions. |
 | `browser_snapshot` | -- | Accessibility tree snapshot with element refs (e1, e2, ...) |
 | `browser_screenshot` | `filename`, `full_page` | Save screenshot to /data (default: screenshot.png) |
 | `browser_click` | `ref` or `selector` | Click element by accessibility ref or CSS selector |
 | `browser_type` | `ref` or `selector`, `text` | Type into input field (supports `$CRED{name}` handles) |
 | `browser_evaluate` | `script` | Run JavaScript in page context |
+| `browser_reset` | -- | Force-close browser session and reconnect fresh (new IP for Bright Data) |
 
 ### Memory
 

@@ -384,12 +384,13 @@ canonicalized parameters and results over a 15-call sliding window.
 | `write_file` | Write/append file in `/data` |
 | `list_files` | List/glob files in `/data` |
 | `http_request` | HTTP GET/POST/PUT/DELETE/PATCH |
-| `browser_navigate` | Open URL, extract page text (basic/stealth/advanced backends) |
+| `browser_navigate` | Open URL, extract page text (auto-recovers from dead CDP sessions) |
 | `browser_snapshot` | Accessibility tree snapshot with element refs (e1, e2, ...) |
 | `browser_screenshot` | Capture page screenshot |
 | `browser_click` | Click element by ref or CSS selector |
 | `browser_type` | Fill input by ref or CSS selector |
 | `browser_evaluate` | Run JavaScript in page |
+| `browser_reset` | Force-close browser and reconnect fresh (new IP for Bright Data) |
 | `memory_search` | Hybrid search across workspace files and structured DB |
 | `memory_save` | Save fact to workspace and structured memory DB |
 | `memory_recall` | Semantic search over structured facts with category filtering |
@@ -834,7 +835,7 @@ pytest tests/
 
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
-| Built-in Tools | 98 | exec, file, browser (incl. backend tiers + screenshots), memory, mesh tools, notifications, path traversal, discovery |
+| Built-in Tools | 112 | exec, file, browser (incl. backend tiers, screenshots, reset/recovery), memory, mesh tools, notifications, path traversal, discovery |
 | Dashboard | 72 | Index, agents, blackboard, costs, traces, queues, cron, settings, config |
 | CLI | 62 | Agent add/list/edit/remove, chat, REPL commands, cron management, version |
 | Agent Loop | 57 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
