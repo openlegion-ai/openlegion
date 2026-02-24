@@ -353,6 +353,17 @@ function dashboard() {
       }
     },
 
+    // ── Markdown rendering for chat messages ─────────────
+
+    renderMarkdown(text) {
+      if (!text) return '';
+      // Strip <think>...</think> blocks and unclosed <think> (still streaming)
+      let cleaned = text.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').trim();
+      if (!cleaned) return '';
+      const html = marked.parse(cleaned, { breaks: true, gfm: true });
+      return DOMPurify.sanitize(html);
+    },
+
     // ── Toast helper ──────────────────────────────────────
 
     _toastId: 0,

@@ -38,6 +38,10 @@
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 
+  <!-- Markdown rendering for chat messages -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+
   <!-- Custom CSS -->
   <link rel="stylesheet" href="/dashboard/static/css/dashboard.css">
 </head>
@@ -523,7 +527,8 @@
                     <template x-if="msg.role === 'notification'">
                       <div class="text-[9px] font-semibold text-amber-400/70 uppercase tracking-wide mb-0.5">Notification</div>
                     </template>
-                    <div class="whitespace-pre-wrap break-words" x-text="msg.content"></div>
+                    <div x-show="msg.role === 'user'" class="whitespace-pre-wrap break-words" x-text="msg.content"></div>
+                    <div x-show="msg.role !== 'user'" class="chat-markdown break-words" x-html="renderMarkdown(msg.content)"></div>
                     <span x-show="msg.streaming" class="inline-block w-1 h-3 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
                   </div>
                 </div>
