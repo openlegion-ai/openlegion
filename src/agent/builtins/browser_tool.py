@@ -1,9 +1,12 @@
-"""Browser automation via Playwright.
+"""Browser automation via Playwright / Patchright.
 
-Provides headless Chromium access for web scraping, testing, and interaction.
+Provides Chromium access for web scraping, testing, and interaction.
 A single browser instance is lazily initialized per agent process and reused.
 Supports four backends via BROWSER_BACKEND env var:
 basic, stealth, advanced, persistent.
+
+The persistent backend uses Patchright (a Playwright fork with CDP-level
+anti-detection patches).  The other backends use standard Playwright.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.browser")
 
-_pw = None  # Playwright instance (needs explicit stop on cleanup)
+_pw = None  # Playwright/Patchright instance (needs explicit stop on cleanup)
 _camoufox_cm = None  # Camoufox context manager (needs __aexit__ on cleanup)
 _browser = None
 _context = None
@@ -238,7 +241,7 @@ window.navigator.permissions.query = (params) => {
     return origQuery(params);
 };
 
-// 4. Hide Playwright-injected globals
+// 4. Hide automation-injected globals
 delete window.__playwright;
 delete window.__pw_manual;
 
@@ -284,16 +287,15 @@ async def _launch_persistent():
     context = await _pw.chromium.launch_persistent_context(
         user_data_dir=profile_dir,
         headless=False,
-        viewport={"width": 1280, "height": 720},
+        no_viewport=True,  # let browser use Xvnc's native resolution
         args=[
             "--disable-dev-shm-usage",
             "--no-first-run",
             "--disable-infobars",
         ],
-        user_agent=(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ),
+        # Do NOT set custom user_agent — Patchright docs warn against it.
+        # A mismatched UA is a detection vector.  The browser's real UA
+        # matches its actual version and capabilities.
     )
     await context.add_init_script(_STEALTH_INIT_SCRIPT)
     page = context.pages[0] if context.pages else await context.new_page()
