@@ -4,7 +4,7 @@ FROM --platform=linux/amd64 python:3.12-slim
 
 # System tools useful for agent operations
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl wget git jq vim-tiny procps xvfb \
+    curl wget git jq vim-tiny procps xvfb x11vnc novnc websockify \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user (created early so /data ownership is correct)
@@ -42,5 +42,5 @@ RUN chown -R agent:agent /app
 
 USER agent
 
-EXPOSE 8400
+EXPOSE 8400 6080
 CMD ["python", "-m", "src.agent"]

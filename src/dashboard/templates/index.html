@@ -293,6 +293,14 @@
                   </span>
                   <span class="stat-value text-yellow-400" x-text="agent.restarts"></span>
                 </div>
+                <div class="stat-row" x-show="agent.vnc_url">
+                  <span class="stat-label">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                    Browser
+                  </span>
+                  <a :href="agent.vnc_url + '&password=' + (agent.vnc_password || '')" target="_blank" rel="noopener"
+                    class="stat-value text-indigo-400 hover:text-indigo-300 transition-colors">Open noVNC</a>
+                </div>
               </div>
 
               <!-- Mini container audit preview -->
@@ -783,6 +791,13 @@
                   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
                   Restart
                 </button>
+                <a x-show="agentDetail?.vnc_url"
+                  :href="agentDetail?.vnc_url + '&password=' + (agentDetail?.vnc_password || '')"
+                  target="_blank" rel="noopener"
+                  class="action-btn action-btn-primary px-3 py-1.5" x-cloak>
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                  Browser
+                </a>
               </div>
             </div>
             <!-- Agent Identity Panel -->

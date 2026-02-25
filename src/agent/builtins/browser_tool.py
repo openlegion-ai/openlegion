@@ -26,6 +26,8 @@ _launch_lock = asyncio.Lock()
 _page_refs: dict[str, object] = {}
 _credential_filled_refs: set[str] = set()  # refs that had $CRED{} typed into them
 _page_op_lock = asyncio.Lock()  # serializes all page operations (Playwright pages aren't concurrent-safe)
+_vnc_proc = None  # x11vnc subprocess (persistent backend)
+_novnc_proc = None  # websockify/noVNC subprocess (persistent backend)
 
 _ACTIONABLE_ROLES = frozenset({
     "button", "link", "textbox", "checkbox", "radio", "combobox",
@@ -85,6 +87,8 @@ async def _get_page(*, mesh_client=None):
             _browser, _context, _page = await _launch_stealth()
         elif backend == "advanced":
             _browser, _context, _page = await _launch_advanced(mesh_client)
+        elif backend == "persistent":
+            _browser, _context, _page = await _launch_persistent()
         else:
             _browser, _context, _page = await _launch_basic()
 
@@ -197,9 +201,122 @@ async def _launch_advanced(mesh_client):
     return browser, context, page
 
 
+async def _launch_persistent():
+    """Launch Playwright Chromium with a persistent profile.
+
+    Uses ``launch_persistent_context`` so cookies and sessions survive
+    browser restarts.  Returns ``(None, context, page)`` — persistent
+    contexts have no separate Browser object.
+    """
+    global _pw
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        raise RuntimeError(
+            "playwright is not installed. The agent container must include "
+            "playwright and chromium. See Dockerfile.agent."
+        )
+    _ensure_xvfb()
+    _pw = await async_playwright().start()
+    profile_dir = "/data/browser_profile"
+    Path(profile_dir).mkdir(parents=True, exist_ok=True)
+    context = await _pw.chromium.launch_persistent_context(
+        user_data_dir=profile_dir,
+        headless=False,
+        viewport={"width": 1280, "height": 720},
+    )
+    page = context.pages[0] if context.pages else await context.new_page()
+    logger.info("Browser backend: persistent (Chromium + noVNC)")
+    return None, context, page
+
+
+async def _browser_cleanup_soft():
+    """Close browser/context/page/playwright but leave Xvfb and VNC alive.
+
+    Used by ``browser_reset`` in persistent mode to restart the browser
+    while keeping the VNC session and profile directory intact.
+    """
+    global _pw, _browser, _context, _page
+    try:
+        if _page and not _page.is_closed():
+            await _page.close()
+    except Exception as e:
+        logger.debug("Error closing browser page (soft): %s", e)
+    try:
+        if _context:
+            await _context.close()
+    except Exception as e:
+        logger.debug("Error closing browser context (soft): %s", e)
+    try:
+        if _browser:
+            await _browser.close()
+    except Exception as e:
+        logger.debug("Error closing browser (soft): %s", e)
+    try:
+        if _pw:
+            await _pw.stop()
+    except Exception as e:
+        logger.debug("Error stopping playwright (soft): %s", e)
+    _pw = _browser = _context = _page = None
+    _page_refs.clear()
+    _credential_filled_refs.clear()
+
+
+async def start_persistent_browser():
+    """Start persistent browser + VNC stack at container boot.
+
+    Called from ``__main__.py`` lifespan when ``BROWSER_BACKEND=persistent``.
+    Starts Xvfb, launches the browser, then starts x11vnc and noVNC
+    so the user can interact with the browser via a web viewer on port 6080.
+    """
+    global _vnc_proc, _novnc_proc
+    import subprocess
+    import tempfile
+
+    _ensure_xvfb()
+    await _get_page()
+
+    vnc_password = os.environ.get("VNC_PASSWORD", "openlegion")
+
+    # Write VNC password file
+    passwd_file = tempfile.NamedTemporaryFile(
+        prefix="vnc_", suffix=".passwd", delete=False,
+    )
+    passwd_path = passwd_file.name
+    passwd_file.close()
+    subprocess.run(
+        ["x11vnc", "-storepasswd", vnc_password, passwd_path],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    # Start x11vnc
+    display = os.environ.get("DISPLAY", ":99")
+    _vnc_proc = subprocess.Popen(
+        [
+            "x11vnc", "-display", display,
+            "-rfbauth", passwd_path,
+            "-rfbport", "5900",
+            "-shared", "-forever", "-noxdamage",
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    logger.info("Started x11vnc on :5900")
+
+    # Start websockify / noVNC
+    novnc_dir = "/usr/share/novnc"
+    _novnc_proc = subprocess.Popen(
+        [
+            "websockify", "--web", novnc_dir,
+            "6080", "localhost:5900",
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    logger.info("Started noVNC (websockify) on :6080")
+
+
 async def browser_cleanup():
     """Release browser resources. Called on agent shutdown."""
-    global _pw, _camoufox_cm, _browser, _context, _page
+    global _pw, _camoufox_cm, _browser, _context, _page, _vnc_proc, _novnc_proc
     try:
         if _page and not _page.is_closed():
             await _page.close()
@@ -225,7 +342,15 @@ async def browser_cleanup():
             await _pw.stop()
     except Exception as e:
         logger.debug("Error stopping playwright: %s", e)
+    for proc_name, proc in [("x11vnc", _vnc_proc), ("noVNC", _novnc_proc)]:
+        if proc:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception as e:
+                logger.debug("Error stopping %s: %s", proc_name, e)
     _pw = _camoufox_cm = _browser = _context = _page = None
+    _vnc_proc = _novnc_proc = None
     _page_refs.clear()
     _credential_filled_refs.clear()
 
@@ -262,6 +387,17 @@ async def browser_reset(*, mesh_client=None) -> dict:
     """Force-close the browser session so the next call gets a fresh one."""
     async with _page_op_lock:
         backend = os.environ.get("BROWSER_BACKEND", "basic")
+        if backend == "persistent":
+            await _browser_cleanup_soft()
+            logger.info("Browser session reset (backend: persistent, profile preserved)")
+            return {
+                "status": "reset",
+                "backend": backend,
+                "message": (
+                    "Browser session closed. Profile and VNC are preserved. "
+                    "Next browser call will reopen with existing cookies/sessions."
+                ),
+            }
         await browser_cleanup()
         logger.info("Browser session reset (backend: %s)", backend)
         return {

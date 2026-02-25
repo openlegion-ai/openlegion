@@ -1995,3 +1995,87 @@ class TestIntrospectTool:
         result = await introspect_tool(section="all", mesh_client=mock_mesh)
         assert "error" in result
         assert "connection refused" in result["error"]
+
+
+# ── persistent browser backend ───────────────────────────────
+
+
+class TestPersistentBrowserBackend:
+    @pytest.mark.asyncio
+    async def test_persistent_dispatches_to_launch_persistent(self):
+        """BROWSER_BACKEND=persistent calls _launch_persistent()."""
+        import src.agent.builtins.browser_tool as bt
+        bt._browser = bt._context = bt._page = None
+        with patch.dict(os.environ, {"BROWSER_BACKEND": "persistent"}):
+            with patch.object(bt, "_launch_persistent", new_callable=AsyncMock) as mock_persistent:
+                mock_page = AsyncMock()
+                mock_page.is_closed.return_value = False
+                mock_persistent.return_value = (None, MagicMock(), mock_page)
+                await bt._get_page()
+                mock_persistent.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_browser_reset_preserves_profile_in_persistent_mode(self):
+        """browser_reset in persistent mode calls _browser_cleanup_soft, not browser_cleanup."""
+        import src.agent.builtins.browser_tool as bt
+
+        bt._page_refs["e1"] = MagicMock()
+        bt._page = MagicMock()
+        bt._page.is_closed = MagicMock(return_value=False)
+        bt._page.close = AsyncMock()
+        bt._context = MagicMock()
+        bt._context.close = AsyncMock()
+        bt._browser = None  # persistent context has no Browser object
+
+        with patch.dict(os.environ, {"BROWSER_BACKEND": "persistent"}):
+            with patch.object(bt, "_browser_cleanup_soft", new_callable=AsyncMock) as mock_soft, \
+                 patch.object(bt, "browser_cleanup", new_callable=AsyncMock) as mock_full:
+                result = await bt.browser_reset()
+
+            mock_soft.assert_awaited_once()
+            mock_full.assert_not_awaited()
+            assert result["status"] == "reset"
+            assert result["backend"] == "persistent"
+            assert "preserved" in result["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_start_persistent_browser_launches_stack(self):
+        """start_persistent_browser starts Xvfb, browser, x11vnc, websockify."""
+        import src.agent.builtins.browser_tool as bt
+
+        bt._page = None
+        bt._context = None
+        bt._browser = None
+        bt._pw = None
+        bt._vnc_proc = None
+        bt._novnc_proc = None
+
+        mock_page = AsyncMock()
+        mock_page.is_closed.return_value = False
+
+        popen_calls = []
+
+        def mock_popen(cmd, **kwargs):
+            popen_calls.append(cmd)
+            m = MagicMock()
+            m.returncode = 0
+            return m
+
+        with patch.dict(os.environ, {"BROWSER_BACKEND": "persistent", "VNC_PASSWORD": "test123"}):
+            with patch.object(bt, "_ensure_xvfb") as mock_xvfb, \
+                 patch.object(bt, "_get_page", new_callable=AsyncMock) as mock_get, \
+                 patch("subprocess.Popen", side_effect=mock_popen), \
+                 patch("subprocess.run", return_value=MagicMock(returncode=0)), \
+                 patch("tempfile.NamedTemporaryFile") as mock_tmp:
+                mock_tmp.return_value.__enter__ = MagicMock(return_value=mock_tmp.return_value)
+                mock_tmp.return_value.__exit__ = MagicMock(return_value=False)
+                mock_tmp.return_value.name = "/tmp/vnc_test.passwd"
+                mock_tmp.return_value.close = MagicMock()
+                await bt.start_persistent_browser()
+
+            mock_xvfb.assert_called_once()
+            mock_get.assert_awaited_once()
+            # Two Popen calls: x11vnc and websockify
+            assert len(popen_calls) == 2
+            assert "x11vnc" in popen_calls[0][0]
+            assert "websockify" in popen_calls[1][0]

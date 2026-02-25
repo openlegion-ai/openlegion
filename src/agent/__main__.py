@@ -116,6 +116,16 @@ def main() -> None:
             except Exception as e:
                 logger.error(f"Failed to start MCP servers: {e}")
 
+        # Start persistent browser + VNC stack before mesh registration
+        # so noVNC is accessible before the agent is marked healthy.
+        if os.environ.get("BROWSER_BACKEND") == "persistent":
+            from src.agent.builtins.browser_tool import start_persistent_browser
+            try:
+                await start_persistent_browser()
+                logger.info("Persistent browser + VNC stack started")
+            except Exception as e:
+                logger.error(f"Failed to start persistent browser: {e}")
+
         registered = False
         for attempt in range(1, _MAX_REGISTRATION_ATTEMPTS + 1):
             try:

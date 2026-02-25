@@ -517,6 +517,11 @@ class RuntimeContext:
                 browser = agent_cfg.get("browser_backend", "basic") or "basic"
                 if ready:
                     echo_ok(f"{agent_id:<20} ready     model: {model:<20} browser: {browser}")
+                    # Print noVNC URL for persistent browser agents
+                    agent_info = self.runtime.agents.get(agent_id, {})
+                    if agent_info.get("vnc_url"):
+                        click.echo(f"    noVNC: {agent_info['vnc_url']}")
+                        click.echo(f"    VNC password: {agent_info.get('vnc_password', '')}")
                 else:
                     logs = self.runtime.get_logs(agent_id, tail=15)
                     echo_fail(f"{agent_id:<20} failed to start")

@@ -175,6 +175,11 @@ class DockerBackend(RuntimeBackend):
         with self._port_lock:
             port = self._next_port
             self._next_port += 1
+            # Allocate an additional port for VNC when using persistent browser
+            vnc_port = None
+            if browser_backend == "persistent":
+                vnc_port = self._next_port
+                self._next_port += 1
 
         # Generate per-agent auth token for mesh request verification
         auth_token = secrets.token_urlsafe(32)
@@ -193,8 +198,12 @@ class DockerBackend(RuntimeBackend):
             environment["LLM_MODEL"] = model
         if mcp_servers:
             environment["MCP_SERVERS"] = json.dumps(mcp_servers)
+        vnc_password = None
         if browser_backend:
             environment["BROWSER_BACKEND"] = browser_backend
+            if browser_backend == "persistent" and vnc_port is not None:
+                vnc_password = secrets.token_urlsafe(12)
+                environment["VNC_PASSWORD"] = vnc_password
         if thinking:
             environment["THINKING"] = thinking
         environment.update(self.extra_env)
@@ -224,12 +233,15 @@ class DockerBackend(RuntimeBackend):
                 mp_path = marketplace_dir.as_posix()
             volumes[mp_path] = {"bind": "/app/marketplace_skills", "mode": "ro"}
 
+        # Persistent browser (visible Chromium + VNC stack) needs more memory
+        mem_limit = "1g" if browser_backend == "persistent" else "512m"
+
         run_kwargs: dict[str, Any] = {
             "detach": True,
             "name": f"openlegion_{safe_name}",
             "environment": environment,
             "volumes": volumes,
-            "mem_limit": "512m",
+            "mem_limit": mem_limit,
             "cpu_quota": 50000,
             "security_opt": ["no-new-privileges"],
         }
@@ -237,7 +249,10 @@ class DockerBackend(RuntimeBackend):
         if self.use_host_network:
             run_kwargs["network_mode"] = "host"
         else:
-            run_kwargs["ports"] = {"8400/tcp": port}
+            ports = {"8400/tcp": port}
+            if vnc_port is not None:
+                ports["6080/tcp"] = vnc_port
+            run_kwargs["ports"] = ports
             # On Linux Docker Engine, host.docker.internal isn't automatic
             if platform.system() == "Linux":
                 run_kwargs["extra_hosts"] = {
@@ -253,7 +268,7 @@ class DockerBackend(RuntimeBackend):
 
         container = self.client.containers.run(self.BASE_IMAGE, **run_kwargs)
         url = f"http://127.0.0.1:{port}"
-        self.agents[agent_id] = {
+        agent_info: dict[str, Any] = {
             "container": container,
             "url": url,
             "port": port,
@@ -265,6 +280,15 @@ class DockerBackend(RuntimeBackend):
             "browser_backend": browser_backend,
             "thinking": thinking,
         }
+        if vnc_port is not None and vnc_password is not None:
+            vnc_url = (
+                f"http://127.0.0.1:{vnc_port}"
+                f"/vnc.html?autoconnect=true"
+            )
+            agent_info["vnc_port"] = vnc_port
+            agent_info["vnc_password"] = vnc_password
+            agent_info["vnc_url"] = vnc_url
+        self.agents[agent_id] = agent_info
         logger.info(f"Started agent '{agent_id}' (role={role}) at {url}")
         return url
 

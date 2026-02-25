@@ -439,6 +439,11 @@ BROWSER_BACKENDS = [
         "label": "Advanced (Bright Data)",
         "description": "Cloud proxy browser. Bypasses CAPTCHAs and geo-blocks. Requires Bright Data account.",
     },
+    {
+        "name": "persistent",
+        "label": "Persistent (noVNC)",
+        "description": "Visible browser with noVNC. Login manually, solve CAPTCHAs. Sessions survive restarts.",
+    },
 ]
 
 

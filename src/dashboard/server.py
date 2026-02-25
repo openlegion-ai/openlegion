@@ -92,7 +92,7 @@ def create_dashboard_router(
             h = health_map.get(agent_id, {})
             c = cost_map.get(agent_id, {})
             acfg = agents_cfg.get(agent_id, {})
-            agents.append({
+            entry = {
                 "id": agent_id,
                 "url": url,
                 "health_status": h.get("status", "unknown"),
@@ -104,7 +104,13 @@ def create_dashboard_router(
                 "daily_tokens": c.get("tokens", 0),
                 "role": acfg.get("role", ""),
                 "model": acfg.get("model", default_model),
-            })
+            }
+            if runtime:
+                agent_info = runtime.agents.get(agent_id, {})
+                if agent_info.get("vnc_url"):
+                    entry["vnc_url"] = agent_info["vnc_url"]
+                    entry["vnc_password"] = agent_info.get("vnc_password", "")
+            agents.append(entry)
         return {"agents": agents}
 
     @api_router.post("/api/agents")
@@ -255,7 +261,7 @@ def create_dashboard_router(
         spend_week = cost_tracker.get_spend(agent_id, "week")
         budget = cost_tracker.check_budget(agent_id)
 
-        return {
+        result = {
             "id": agent_id,
             "url": url,
             "health": health or {"status": "unknown"},
@@ -263,6 +269,13 @@ def create_dashboard_router(
             "spend_week": spend_week,
             "budget": budget,
         }
+        # Include VNC info for persistent browser agents
+        if runtime:
+            agent_info = runtime.agents.get(agent_id, {})
+            if agent_info.get("vnc_url"):
+                result["vnc_url"] = agent_info["vnc_url"]
+                result["vnc_password"] = agent_info.get("vnc_password", "")
+        return result
 
     # ── Agent config CRUD ────────────────────────────────────
 
@@ -290,7 +303,7 @@ def create_dashboard_router(
             if any(fnmatch(c, p) for p in allowed_creds)
         ) if allowed_creds else []
 
-        return {
+        cfg_result = {
             "id": agent_id,
             "model": agent_cfg.get("model", default_model),
             "role": agent_cfg.get("role", ""),
@@ -301,6 +314,11 @@ def create_dashboard_router(
             "system_credentials": system_cred_names,
             "resolved_credentials": resolved,
         }
+        if runtime:
+            agent_info = runtime.agents.get(agent_id, {})
+            if agent_info.get("vnc_url"):
+                cfg_result["vnc_url"] = agent_info["vnc_url"]
+        return cfg_result
 
     @api_router.put("/api/agents/{agent_id}/config")
     async def api_update_agent_config(agent_id: str, request: Request) -> dict:
