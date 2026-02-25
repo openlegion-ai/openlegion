@@ -1305,6 +1305,45 @@ class TestBrowserNavigateAutoRecovery:
         assert "error" in result
 
 
+class TestBrowserNavigatePersistentRecovery:
+    @pytest.mark.asyncio
+    async def test_navigate_uses_soft_cleanup_for_persistent_backend(self):
+        """In persistent mode, auto-recovery uses _browser_cleanup_soft (preserves VNC)."""
+        import src.agent.builtins.browser_tool as bt
+
+        dead_page = AsyncMock()
+        dead_page.goto = AsyncMock(
+            side_effect=Exception("Target closed")
+        )
+
+        fresh_page = AsyncMock()
+        fresh_page.url = "https://example.com"
+        fresh_page.title = AsyncMock(return_value="Example")
+        fresh_response = AsyncMock()
+        fresh_response.status = 200
+        fresh_page.goto = AsyncMock(return_value=fresh_response)
+        fresh_page.inner_text = AsyncMock(return_value="OK")
+
+        call_count = 0
+
+        async def mock_get_page(*, mesh_client=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return dead_page
+            return fresh_page
+
+        with patch.dict(os.environ, {"BROWSER_BACKEND": "persistent"}):
+            with patch.object(bt, "_get_page", side_effect=mock_get_page), \
+                 patch.object(bt, "_browser_cleanup_soft", new_callable=AsyncMock) as mock_soft, \
+                 patch.object(bt, "browser_cleanup", new_callable=AsyncMock) as mock_full:
+                result = await bt.browser_navigate(url="https://example.com")
+
+        mock_soft.assert_awaited_once()
+        mock_full.assert_not_awaited()
+        assert result["status"] == 200
+
+
 class TestIsDeadSessionError:
     def test_detects_navigation_limit(self):
         from src.agent.builtins.browser_tool import _is_dead_session_error
@@ -2040,7 +2079,7 @@ class TestPersistentBrowserBackend:
 
     @pytest.mark.asyncio
     async def test_start_persistent_browser_launches_stack(self):
-        """start_persistent_browser starts Xvfb, browser, x11vnc, websockify."""
+        """start_persistent_browser starts browser, x11vnc, websockify."""
         import src.agent.builtins.browser_tool as bt
 
         bt._page = None
@@ -2050,32 +2089,97 @@ class TestPersistentBrowserBackend:
         bt._vnc_proc = None
         bt._novnc_proc = None
 
-        mock_page = AsyncMock()
-        mock_page.is_closed.return_value = False
-
         popen_calls = []
 
         def mock_popen(cmd, **kwargs):
             popen_calls.append(cmd)
             m = MagicMock()
-            m.returncode = 0
+            m.poll.return_value = None  # process still running
             return m
 
         with patch.dict(os.environ, {"BROWSER_BACKEND": "persistent", "VNC_PASSWORD": "test123"}):
-            with patch.object(bt, "_ensure_xvfb") as mock_xvfb, \
-                 patch.object(bt, "_get_page", new_callable=AsyncMock) as mock_get, \
+            with patch.object(bt, "_get_page", new_callable=AsyncMock) as mock_get, \
                  patch("subprocess.Popen", side_effect=mock_popen), \
                  patch("subprocess.run", return_value=MagicMock(returncode=0)), \
-                 patch("tempfile.NamedTemporaryFile") as mock_tmp:
+                 patch("tempfile.NamedTemporaryFile") as mock_tmp, \
+                 patch("time.sleep"):
                 mock_tmp.return_value.__enter__ = MagicMock(return_value=mock_tmp.return_value)
                 mock_tmp.return_value.__exit__ = MagicMock(return_value=False)
                 mock_tmp.return_value.name = "/tmp/vnc_test.passwd"
                 mock_tmp.return_value.close = MagicMock()
                 await bt.start_persistent_browser()
 
-            mock_xvfb.assert_called_once()
             mock_get.assert_awaited_once()
             # Two Popen calls: x11vnc and websockify
             assert len(popen_calls) == 2
             assert "x11vnc" in popen_calls[0][0]
             assert "websockify" in popen_calls[1][0]
+            # Default port 6080 when VNC_PORT not set
+            assert "6080" in popen_calls[1]
+
+    @pytest.mark.asyncio
+    async def test_start_persistent_browser_uses_vnc_port_env(self):
+        """VNC_PORT env var overrides the default websockify listen port."""
+        import src.agent.builtins.browser_tool as bt
+
+        bt._page = None
+        bt._context = None
+        bt._browser = None
+        bt._pw = None
+        bt._vnc_proc = None
+        bt._novnc_proc = None
+
+        popen_calls = []
+
+        def mock_popen(cmd, **kwargs):
+            popen_calls.append(cmd)
+            m = MagicMock()
+            m.poll.return_value = None
+            return m
+
+        env = {"BROWSER_BACKEND": "persistent", "VNC_PASSWORD": "pw", "VNC_PORT": "9999"}
+        with patch.dict(os.environ, env):
+            with patch.object(bt, "_get_page", new_callable=AsyncMock), \
+                 patch("subprocess.Popen", side_effect=mock_popen), \
+                 patch("subprocess.run", return_value=MagicMock(returncode=0)), \
+                 patch("tempfile.NamedTemporaryFile") as mock_tmp, \
+                 patch("time.sleep"):
+                mock_tmp.return_value.__enter__ = MagicMock(return_value=mock_tmp.return_value)
+                mock_tmp.return_value.__exit__ = MagicMock(return_value=False)
+                mock_tmp.return_value.name = "/tmp/vnc_test.passwd"
+                mock_tmp.return_value.close = MagicMock()
+                await bt.start_persistent_browser()
+
+            # websockify should use port 9999
+            assert "9999" in popen_calls[1]
+
+    @pytest.mark.asyncio
+    async def test_start_persistent_browser_raises_on_vnc_crash(self):
+        """start_persistent_browser raises if x11vnc exits immediately."""
+        import src.agent.builtins.browser_tool as bt
+
+        bt._page = None
+        bt._context = None
+        bt._browser = None
+        bt._pw = None
+        bt._vnc_proc = None
+        bt._novnc_proc = None
+
+        def mock_popen(cmd, **kwargs):
+            m = MagicMock()
+            m.poll.return_value = 1  # exited immediately
+            m.returncode = 1
+            return m
+
+        with patch.dict(os.environ, {"BROWSER_BACKEND": "persistent", "VNC_PASSWORD": "pw"}):
+            with patch.object(bt, "_get_page", new_callable=AsyncMock), \
+                 patch("subprocess.Popen", side_effect=mock_popen), \
+                 patch("subprocess.run", return_value=MagicMock(returncode=0)), \
+                 patch("tempfile.NamedTemporaryFile") as mock_tmp, \
+                 patch("time.sleep"):
+                mock_tmp.return_value.__enter__ = MagicMock(return_value=mock_tmp.return_value)
+                mock_tmp.return_value.__exit__ = MagicMock(return_value=False)
+                mock_tmp.return_value.name = "/tmp/vnc_test.passwd"
+                mock_tmp.return_value.close = MagicMock()
+                with pytest.raises(RuntimeError, match="x11vnc exited immediately"):
+                    await bt.start_persistent_browser()

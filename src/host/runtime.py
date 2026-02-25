@@ -204,6 +204,8 @@ class DockerBackend(RuntimeBackend):
             if browser_backend == "persistent" and vnc_port is not None:
                 vnc_password = secrets.token_urlsafe(12)
                 environment["VNC_PASSWORD"] = vnc_password
+                if self.use_host_network:
+                    environment["VNC_PORT"] = str(vnc_port)
         if thinking:
             environment["THINKING"] = thinking
         environment.update(self.extra_env)

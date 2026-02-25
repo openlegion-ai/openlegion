@@ -408,3 +408,49 @@ class TestDockerBackendVNCPort:
         # VNC_PASSWORD should not be in environment
         env = run_call.kwargs.get("environment", {})
         assert "VNC_PASSWORD" not in env
+
+    def test_persistent_host_network_sets_vnc_port_env(self):
+        """In host-network mode, VNC_PORT env var is set for persistent agents."""
+        import docker as _docker
+
+        backend = self._make_backend()
+        backend.use_host_network = True
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        backend.start_agent(
+            agent_id="test-host-vnc",
+            role="test",
+            skills_dir="",
+            browser_backend="persistent",
+        )
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert "VNC_PORT" in env
+        assert env["VNC_PORT"] == str(backend.agents["test-host-vnc"]["vnc_port"])
+
+    def test_persistent_bridge_network_no_vnc_port_env(self):
+        """In bridge mode (default), VNC_PORT env var is NOT set."""
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        backend.start_agent(
+            agent_id="test-bridge-vnc",
+            role="test",
+            skills_dir="",
+            browser_backend="persistent",
+        )
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert "VNC_PORT" not in env

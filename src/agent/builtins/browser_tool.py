@@ -2,7 +2,8 @@
 
 Provides headless Chromium access for web scraping, testing, and interaction.
 A single browser instance is lazily initialized per agent process and reused.
-Supports three backends via BROWSER_BACKEND env var: basic, stealth, advanced.
+Supports four backends via BROWSER_BACKEND env var:
+basic, stealth, advanced, persistent.
 """
 
 from __future__ import annotations
@@ -266,14 +267,19 @@ async def start_persistent_browser():
     """Start persistent browser + VNC stack at container boot.
 
     Called from ``__main__.py`` lifespan when ``BROWSER_BACKEND=persistent``.
-    Starts Xvfb, launches the browser, then starts x11vnc and noVNC
-    so the user can interact with the browser via a web viewer on port 6080.
+    Launches the browser (which calls ``_ensure_xvfb`` internally), then
+    starts x11vnc and noVNC so the user can interact via a web viewer.
+
+    The websockify listen port defaults to 6080 but can be overridden via
+    the ``VNC_PORT`` env var (used in host-network mode to avoid collisions
+    when multiple persistent agents share the host network namespace).
     """
     global _vnc_proc, _novnc_proc
     import subprocess
     import tempfile
+    import time as _time
 
-    _ensure_xvfb()
+    # _launch_persistent() (via _get_page) already calls _ensure_xvfb()
     await _get_page()
 
     vnc_password = os.environ.get("VNC_PASSWORD", "openlegion")
@@ -300,18 +306,31 @@ async def start_persistent_browser():
         ],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    _time.sleep(0.3)
+    if _vnc_proc.poll() is not None:
+        raise RuntimeError(
+            f"x11vnc exited immediately (code {_vnc_proc.returncode})"
+        )
     logger.info("Started x11vnc on :5900")
 
     # Start websockify / noVNC
+    # VNC_PORT is set by DockerBackend in host-network mode so each agent
+    # gets a unique external port; in bridge mode 6080 is mapped via Docker.
+    listen_port = os.environ.get("VNC_PORT", "6080")
     novnc_dir = "/usr/share/novnc"
     _novnc_proc = subprocess.Popen(
         [
             "websockify", "--web", novnc_dir,
-            "6080", "localhost:5900",
+            listen_port, "localhost:5900",
         ],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    logger.info("Started noVNC (websockify) on :6080")
+    _time.sleep(0.3)
+    if _novnc_proc.poll() is not None:
+        raise RuntimeError(
+            f"websockify exited immediately (code {_novnc_proc.returncode})"
+        )
+    logger.info("Started noVNC (websockify) on :%s", listen_port)
 
 
 async def browser_cleanup():
@@ -491,7 +510,10 @@ async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -
                         "Dead CDP session detected (%s), resetting browser and retrying",
                         error_msg[:120],
                     )
-                    await browser_cleanup()
+                    if backend == "persistent":
+                        await _browser_cleanup_soft()
+                    else:
+                        await browser_cleanup()
                     continue
                 return {"error": error_msg, "url": url}
         return {"error": "Navigation failed after session reset", "url": url}
