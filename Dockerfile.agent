@@ -24,6 +24,7 @@ RUN pip install --no-cache-dir \
 # Both need o+rx so the non-root agent user can execute them.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN playwright install chromium --with-deps \
+    && playwright install-deps firefox \
     && chmod -R o+rx /opt/pw-browsers \
     && python -m camoufox fetch \
     && (chmod -R o+rx /root/.camoufox 2>/dev/null || true)
