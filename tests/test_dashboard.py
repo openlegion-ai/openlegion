@@ -67,6 +67,7 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         permissions_mock = MagicMock()
         credential_vault = MagicMock()
         credential_vault.list_credential_names.return_value = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+        credential_vault.list_agent_credential_names.return_value = []
 
         msg_router = MagicMock()
         msg_router.agent_registry = agent_registry
@@ -1121,3 +1122,107 @@ class TestDashboardBroadcastStream:
         # Source events should not have "agent" key injected
         for evt in captured_events:
             assert "agent" not in evt
+
+
+# ── Credential Scoping Tests ────────────────────────────────
+
+
+class TestDashboardPermissionsEndpoint:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        # Set up permissions mock with get_permissions and get_allowed_credentials
+        from src.shared.types import AgentPermissions
+        self.components["permissions"].get_permissions.return_value = AgentPermissions(
+            agent_id="alpha",
+            allowed_credentials=["brightdata_*"],
+            allowed_apis=["llm"],
+        )
+        self.components["permissions"].get_allowed_credentials.return_value = ["brightdata_*"]
+        self.components["credential_vault"].list_agent_credential_names.return_value = [
+            "brightdata_cdp_url", "myapp_password",
+        ]
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_get_agent_permissions(self):
+        resp = self.client.get("/dashboard/api/agents/alpha/permissions")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["agent_id"] == "alpha"
+        assert data["allowed_credentials"] == ["brightdata_*"]
+        assert data["allowed_apis"] == ["llm"]
+        assert "brightdata_cdp_url" in data["available_credentials"]
+        assert "myapp_password" in data["available_credentials"]
+
+    def test_get_permissions_not_found(self):
+        resp = self.client.get("/dashboard/api/agents/nonexistent/permissions")
+        assert resp.status_code == 404
+
+    def test_put_agent_permissions(self):
+        # Patch config loading/saving to avoid filesystem side effects
+        with patch("src.cli.config._load_permissions", return_value={"permissions": {"alpha": {}}}), \
+             patch("src.cli.config._save_permissions") as mock_save:
+            resp = self.client.put(
+                "/dashboard/api/agents/alpha/permissions",
+                json={"allowed_credentials": ["*"], "allowed_apis": ["llm", "brave_search"]},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "allowed_credentials" in data["updated"]
+        assert "allowed_apis" in data["updated"]
+        # Verify permissions.reload was called
+        self.components["permissions"].reload.assert_called()
+
+    def test_put_permissions_invalid_type(self):
+        with patch("src.cli.config._load_permissions", return_value={"permissions": {"alpha": {}}}), \
+             patch("src.cli.config._save_permissions"):
+            resp = self.client.put(
+                "/dashboard/api/agents/alpha/permissions",
+                json={"allowed_credentials": "not_a_list"},
+            )
+        assert resp.status_code == 400
+
+
+class TestDashboardSettingsAgentCredentials:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.components["credential_vault"].list_agent_credential_names.return_value = [
+            "brightdata_cdp_url", "myapp_password",
+        ]
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_settings_includes_agent_credentials(self):
+        resp = self.client.get("/dashboard/api/settings")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "agent_credentials" in data
+        assert "brightdata_cdp_url" in data["agent_credentials"]
+        assert "myapp_password" in data["agent_credentials"]
+
+
+class TestDashboardAgentConfigAllowedCredentials:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.components["permissions"].get_allowed_credentials.return_value = ["brightdata_*"]
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_config_includes_allowed_credentials(self):
+        resp = self.client.get("/dashboard/api/agents/alpha/config")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "allowed_credentials" in data
+        assert data["allowed_credentials"] == ["brightdata_*"]

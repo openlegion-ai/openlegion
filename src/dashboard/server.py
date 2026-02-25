@@ -274,12 +274,16 @@ def create_dashboard_router(
         cfg = _load_config()
         agent_cfg = cfg.get("agents", {}).get(agent_id, {})
         default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        allowed_creds = []
+        if permissions is not None:
+            allowed_creds = permissions.get_allowed_credentials(agent_id)
         return {
             "id": agent_id,
             "model": agent_cfg.get("model", default_model),
             "role": agent_cfg.get("role", ""),
             "budget": agent_cfg.get("budget", {}),
             "browser_backend": agent_cfg.get("browser_backend", "basic") or "basic",
+            "allowed_credentials": allowed_creds,
         }
 
     @api_router.put("/api/agents/{agent_id}/config")
@@ -387,6 +391,55 @@ def create_dashboard_router(
         from src.cli.config import _update_agent_field
         _update_agent_field(agent_id, "budget", {"daily_usd": daily_usd})
         return {"updated": True, "agent": agent_id, "daily_usd": daily_usd}
+
+    @api_router.get("/api/agents/{agent_id}/permissions")
+    async def api_agent_permissions(agent_id: str) -> dict:
+        """Return agent permissions and available agent-tier credentials."""
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if permissions is None:
+            raise HTTPException(status_code=503, detail="Permissions not available")
+        perms = permissions.get_permissions(agent_id)
+        available_creds = []
+        if credential_vault is not None:
+            available_creds = credential_vault.list_agent_credential_names()
+        return {
+            "agent_id": agent_id,
+            "allowed_credentials": perms.allowed_credentials,
+            "allowed_apis": perms.allowed_apis,
+            "available_credentials": available_creds,
+        }
+
+    @api_router.put("/api/agents/{agent_id}/permissions")
+    async def api_update_agent_permissions(agent_id: str, request: Request) -> dict:
+        """Update allowed_credentials and/or allowed_apis for an agent."""
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if permissions is None:
+            raise HTTPException(status_code=503, detail="Permissions not available")
+        body = await request.json()
+        from src.cli.config import _load_permissions, _save_permissions
+        perms_data = _load_permissions()
+        agent_perms = perms_data.get("permissions", {}).get(agent_id, {})
+
+        updated = []
+        if "allowed_credentials" in body:
+            val = body["allowed_credentials"]
+            if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
+                raise HTTPException(status_code=400, detail="allowed_credentials must be a list of strings")
+            agent_perms["allowed_credentials"] = val
+            updated.append("allowed_credentials")
+        if "allowed_apis" in body:
+            val = body["allowed_apis"]
+            if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
+                raise HTTPException(status_code=400, detail="allowed_apis must be a list of strings")
+            agent_perms["allowed_apis"] = val
+            updated.append("allowed_apis")
+
+        perms_data.setdefault("permissions", {})[agent_id] = agent_perms
+        _save_permissions(perms_data)
+        permissions.reload()
+        return {"updated": updated, "agent_id": agent_id}
 
     @api_router.get("/api/agents/{agent_id}/status")
     async def api_agent_live_status(agent_id: str) -> dict:
@@ -808,6 +861,7 @@ def create_dashboard_router(
         from src.host.costs import MODEL_COSTS
 
         cred_names = credential_vault.list_credential_names() if credential_vault else []
+        agent_cred_names = credential_vault.list_agent_credential_names() if credential_vault else []
         _llm_key_names = {"anthropic_api_key", "openai_api_key", "gemini_api_key",
                           "deepseek_api_key", "moonshot_api_key", "minimax_api_key",
                           "xai_api_key", "groq_api_key"}
@@ -815,6 +869,7 @@ def create_dashboard_router(
         pubsub_subs = pubsub.subscriptions if pubsub else {}
         return {
             "credentials": {"names": cred_names, "count": len(cred_names)},
+            "agent_credentials": agent_cred_names,
             "has_llm_credentials": has_llm,
             "pubsub_subscriptions": pubsub_subs,
             "model_costs": {k: {"input_per_1k": v[0], "output_per_1k": v[1]} for k, v in MODEL_COSTS.items()},
