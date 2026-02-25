@@ -50,6 +50,25 @@ Agents **never** hold API keys. The credential vault (`src/host/credentials.py`)
 4. The response is relayed back to the agent
 5. Budget limits are enforced before dispatching, token usage recorded after
 
+### Two-Tier Credential Scoping
+
+Credentials are split into two tiers to prevent agents from accessing LLM provider keys:
+
+| Tier | Examples | Who Can Access |
+|------|----------|---------------|
+| **System** | `anthropic_api_key`, `openai_api_key`, `gemini_api_base` | Mesh proxy only (internal). Agents can **never** resolve these. |
+| **Agent** | `brightdata_cdp_url`, `myservice_password`, user-created credentials | Only agents in the `allowed_credentials` allowlist |
+
+System credentials are identified by matching known provider names (`anthropic`, `openai`, `gemini`, `deepseek`, `moonshot`, `minimax`, `xai`, `groq`, `zai`) with key suffixes (`_api_key`, `_api_base`). Everything else is an agent credential.
+
+Per-agent access is controlled by `allowed_credentials` glob patterns in `config/permissions.json`:
+
+- `["*"]` -- access all agent-tier credentials (default for new agents)
+- `["brightdata_*", "myapp_*"]` -- access only matching names
+- `[]` -- no vault access
+
+Even with `allowed_credentials: ["*"]`, system credentials are **always** blocked. Agents also cannot store or overwrite system credential names via `vault_store`.
+
 ### Adding New Service Integrations
 
 New external services are added as vault handlers, not as agent-side code:
@@ -73,13 +92,14 @@ Every inter-agent operation checks per-agent ACLs defined in `config/permissions
     "can_subscribe": ["new_lead"],
     "blackboard_read": ["tasks/*", "context/*"],
     "blackboard_write": ["context/prospect_*"],
-    "allowed_apis": ["llm", "brave_search"]
+    "allowed_apis": ["llm", "brave_search"],
+    "allowed_credentials": ["brightdata_*"]
   }
 }
 ```
 
-- **Glob patterns** for blackboard paths (`tasks/*` matches `tasks/abc123`)
-- **Explicit allowlists** for messaging, pub/sub, and API access
+- **Glob patterns** for blackboard paths and credential access (`tasks/*` matches `tasks/abc123`)
+- **Explicit allowlists** for messaging, pub/sub, API access, and credential access
 - **Default deny** -- if not listed, it's blocked
 - Enforced at the mesh host before every operation
 

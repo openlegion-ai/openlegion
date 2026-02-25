@@ -1165,7 +1165,7 @@ class TestDashboardPermissionsEndpoint:
     def test_put_agent_permissions(self):
         # Patch config loading/saving to avoid filesystem side effects
         with patch("src.cli.config._load_permissions", return_value={"permissions": {"alpha": {}}}), \
-             patch("src.cli.config._save_permissions") as mock_save:
+             patch("src.cli.config._save_permissions"):
             resp = self.client.put(
                 "/dashboard/api/agents/alpha/permissions",
                 json={"allowed_credentials": ["*"], "allowed_apis": ["llm", "brave_search"]},

@@ -150,7 +150,8 @@ Per-agent access control lists. Default policy is **deny** -- if not listed, it'
       "can_subscribe": ["new_lead"],
       "blackboard_read": ["tasks/*", "context/*"],
       "blackboard_write": ["context/prospect_*"],
-      "allowed_apis": ["llm", "brave_search"]
+      "allowed_apis": ["llm", "brave_search"],
+      "allowed_credentials": ["brightdata_*"]
     },
     "writer": {
       "can_message": ["*"],
@@ -158,7 +159,8 @@ Per-agent access control lists. Default policy is **deny** -- if not listed, it'
       "can_subscribe": ["*"],
       "blackboard_read": ["*"],
       "blackboard_write": ["artifacts/*"],
-      "allowed_apis": ["llm"]
+      "allowed_apis": ["llm"],
+      "allowed_credentials": ["*"]
     }
   }
 }
@@ -174,6 +176,7 @@ Per-agent access control lists. Default policy is **deny** -- if not listed, it'
 | `blackboard_read` | list[string] | Glob patterns for readable blackboard keys |
 | `blackboard_write` | list[string] | Glob patterns for writable blackboard keys |
 | `allowed_apis` | list[string] | External APIs accessible through the vault proxy |
+| `allowed_credentials` | list[string] | Glob patterns for accessible credential names. `["*"]` grants access to all agent-tier credentials; `[]` denies all. System credentials (LLM provider keys) are always blocked regardless of patterns. |
 
 ### Glob Patterns
 
