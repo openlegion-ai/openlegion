@@ -151,6 +151,7 @@ function dashboard() {
     // Credentials
     showCredForm: false,
     credService: '',
+    credCustomService: '',
     credKey: '',
     credBaseUrl: '',
 
@@ -775,12 +776,18 @@ function dashboard() {
     startConfigEdit() {
       const cfg = this.agentConfigs[this.selectedAgent];
       if (!cfg) return;
+      const creds = cfg.allowed_credentials || [];
+      const credsStr = creds.join(', ');
+      let credMode = 'none';
+      if (creds.length === 1 && creds[0] === '*') credMode = 'all';
+      else if (creds.length > 0) credMode = 'custom';
       this.editForm = {
         model: cfg.model || '',
         browser_backend: cfg.browser_backend || 'basic',
         role: cfg.role || '',
         budget_daily: cfg.budget?.daily_usd || '',
-        allowed_credentials: (cfg.allowed_credentials || []).join(', '),
+        allowed_credentials: credsStr,
+        _credMode: credMode,
       };
       this.configEditing = true;
     },
@@ -1353,9 +1360,10 @@ function dashboard() {
     // ── Credentials ──────────────────────────────────────
 
     async addCredential() {
-      if (!this.credService.trim() || !this.credKey.trim()) return;
+      const service = this.credService === '__custom__' ? this.credCustomService.trim() : this.credService.trim();
+      if (!service || !this.credKey.trim()) return;
       try {
-        const body = { service: this.credService.trim(), key: this.credKey.trim() };
+        const body = { service, key: this.credKey.trim() };
         if (this.credBaseUrl.trim()) body.base_url = this.credBaseUrl.trim();
         const resp = await fetch(`${window.__config.apiBase}/credentials`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1363,8 +1371,9 @@ function dashboard() {
         });
         if (resp.ok) {
           const data = await resp.json();
-          this.showToast(`Credential stored: ${data.service}`);
+          this.showToast(`Credential stored: ${data.service} (${data.tier} tier)`);
           this.credService = '';
+          this.credCustomService = '';
           this.credKey = '';
           this.credBaseUrl = '';
           this.showCredForm = false;

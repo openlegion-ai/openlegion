@@ -162,11 +162,17 @@ def _save_permissions(perms: dict) -> None:
         f.write("\n")
 
 
-def _set_env_key(name: str, value: str) -> None:
-    """Set or update a key in the .env file."""
-    from src.host.credentials import _persist_to_env
+def _set_env_key(name: str, value: str, *, system: bool = False) -> None:
+    """Set or update a key in the .env file.
 
-    env_key = f"OPENLEGION_CRED_{name.upper()}"
+    Args:
+        system: If True, uses the ``OPENLEGION_SYSTEM_`` prefix (for
+                provider keys). Otherwise uses ``OPENLEGION_CRED_``.
+    """
+    from src.host.credentials import AGENT_PREFIX, SYSTEM_PREFIX, _persist_to_env
+
+    prefix = SYSTEM_PREFIX if system else AGENT_PREFIX
+    env_key = f"{prefix}{name.upper()}"
     _persist_to_env(env_key, value, env_file=str(ENV_FILE))
 
 

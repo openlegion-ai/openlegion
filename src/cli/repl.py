@@ -59,6 +59,7 @@ class REPLSession:
             ("/cron [list|del|pause|resume|run]", "Manage cron jobs"),
             ("/debug [trace]",                 "Show recent request traces"),
             ("/addkey [service]",              "Store a credential"),
+            ("/removekey [name]",             "Remove a credential"),
             ("/help",                          "Show this help"),
             ("/quit",                          "Exit and stop runtime"),
         ]),
@@ -85,6 +86,7 @@ class REPLSession:
             "/debug":      (self._cmd_debug,      "Show recent request traces"),
             "/cron":       (self._cmd_cron,       "Manage cron jobs"),
             "/addkey":     (self._cmd_addkey,     "Store a credential"),
+            "/removekey":  (self._cmd_removekey,  "Remove a credential"),
             "/reset":      (self._cmd_reset,      "Clear conversation history"),
             "/help":       (self._cmd_help,       "Show this help"),
         }
@@ -93,7 +95,10 @@ class REPLSession:
         """Show onboarding prompts for first-time users (no credentials, no agents)."""
         from src.setup_wizard import InlineSetup
 
-        has_creds = bool(self.ctx.credential_vault and self.ctx.credential_vault.credentials)
+        has_creds = bool(
+            self.ctx.credential_vault
+            and (self.ctx.credential_vault.credentials or self.ctx.credential_vault.system_credentials)
+        )
         has_agents = bool(self.ctx.agents)
 
         if has_creds and not has_agents:
@@ -642,14 +647,14 @@ class REPLSession:
 
     def _cmd_addkey(self, arg: str) -> None:
         if not arg.strip():
-            click.echo("  Known services: anthropic, openai, gemini, deepseek, moonshot, minimax, xai, groq")
+            click.echo("  Known services: anthropic, openai, gemini, deepseek, moonshot, minimax, xai, groq, zai")
             click.echo("  Other keys: brave_search, brightdata_cdp_url, or any custom name")
             service = click.prompt("Service name")
         else:
             service = arg.split()[0]
         # Normalize: bare provider names get _api_key suffix
-        known_providers = {"anthropic", "openai", "gemini", "deepseek", "moonshot", "minimax", "xai", "groq"}
-        if service.lower() in known_providers and not service.lower().endswith("_api_key"):
+        from src.host.credentials import SYSTEM_CREDENTIAL_PROVIDERS
+        if service.lower() in SYSTEM_CREDENTIAL_PROVIDERS and not service.lower().endswith("_api_key"):
             service = f"{service}_api_key"
         inline_parts = arg.split(None, 1) if arg.strip() else []
         if len(inline_parts) > 1:
@@ -659,18 +664,45 @@ class REPLSession:
         if not key_value:
             click.echo("No key provided.")
             return
-        self.ctx.credential_vault.add_credential(service, key_value)
-        click.echo(f"Credential '{service}' stored.")
-        # Prompt for optional base URL when the key is for a known LLM provider
+        # Detect known LLM providers → store as system tier
+        is_llm_provider = False
         if service.lower().endswith("_api_key"):
             provider = service.lower().replace("_api_key", "")
-            if provider in known_providers:
-                base_url = click.prompt(
-                    "  Custom API base URL (leave blank for default)", default="", show_default=False,
-                ).strip()
-                if base_url:
-                    self.ctx.credential_vault.add_credential(f"{provider}_api_base", base_url)
-                    click.echo(f"  Custom base URL stored for {provider}.")
+            if provider in SYSTEM_CREDENTIAL_PROVIDERS:
+                is_llm_provider = True
+        self.ctx.credential_vault.add_credential(service, key_value, system=is_llm_provider)
+        tier_label = "system" if is_llm_provider else "agent"
+        click.echo(f"Credential '{service}' stored ({tier_label} tier).")
+        # Prompt for optional base URL when the key is for a known LLM provider
+        if is_llm_provider:
+            base_url = click.prompt(
+                "  Custom API base URL (leave blank for default)", default="", show_default=False,
+            ).strip()
+            if base_url:
+                self.ctx.credential_vault.add_credential(f"{provider}_api_base", base_url, system=True)
+                click.echo(f"  Custom base URL stored for {provider}.")
+
+    def _cmd_removekey(self, arg: str) -> None:
+        if not arg.strip():
+            names = self.ctx.credential_vault.list_credential_names()
+            if not names:
+                click.echo("  No credentials configured.")
+                return
+            click.echo("  Credentials:")
+            agent_names = set(self.ctx.credential_vault.list_agent_credential_names())
+            for n in names:
+                tier = "agent" if n in agent_names else "system"
+                click.echo(f"    {n}  ({tier})")
+            name = click.prompt("Credential name to remove")
+        else:
+            name = arg.split()[0]
+        if not click.confirm(f"  Remove credential '{name}'?"):
+            return
+        existed = self.ctx.credential_vault.remove_credential(name)
+        if existed:
+            click.echo(f"  Credential '{name}' removed.")
+        else:
+            click.echo(f"  Credential '{name}' not found.")
 
     def _cmd_reset(self, arg: str) -> None:
         if self.current is None:

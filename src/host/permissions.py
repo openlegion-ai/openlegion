@@ -115,6 +115,15 @@ class PermissionMatrix:
         Uses fnmatch against allowed_credentials patterns.
         Falls back to wildcard when legacy can_manage_vault is set without
         allowed_credentials (backwards compat only).
+
+        Defense-in-depth: The ``is_system_credential()`` check here blocks
+        agent access to provider-key-shaped names regardless of which tier
+        they landed in.  The primary separation is at loading time
+        (``OPENLEGION_SYSTEM_`` → ``system_credentials``, ``OPENLEGION_CRED_``
+        → ``credentials``), and ``resolve_credential()`` only returns
+        agent-tier values.  This check catches edge cases where a
+        provider-key name might appear in the agent-tier dict (e.g. via
+        ``add_credential()`` without ``system=True``).
         """
         if agent_id in ("mesh", "orchestrator"):
             return True

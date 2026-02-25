@@ -44,7 +44,9 @@ openlegion start --sandbox  # MicroVM isolation (Docker Desktop 4.58+)
 
 Agents **never** hold API keys. The credential vault (`src/host/credentials.py`) works as follows:
 
-1. Credentials are loaded from `OPENLEGION_CRED_*` environment variables on the host
+1. Credentials are loaded from environment variables on the host using two prefixes:
+   - `OPENLEGION_SYSTEM_*` — system tier (LLM provider keys, never agent-accessible)
+   - `OPENLEGION_CRED_*` — agent tier (tool/service keys, access controlled by `allowed_credentials`)
 2. Agents make API calls by POSTing to `/mesh/api` on the mesh host
 3. The vault injects the appropriate credentials server-side
 4. The response is relayed back to the agent

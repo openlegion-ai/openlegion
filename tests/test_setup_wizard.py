@@ -176,15 +176,24 @@ class TestInlineSetup:
         assert InlineSetup.needs_setup(None) is True
 
     def test_needs_setup_true_when_empty_vault(self):
-        """needs_setup returns True when vault has no credentials."""
+        """needs_setup returns True when vault has no credentials in either tier."""
         vault = MagicMock()
         vault.credentials = {}
+        vault.system_credentials = {}
         assert InlineSetup.needs_setup(vault) is True
 
     def test_needs_setup_false_when_creds_exist(self):
         """needs_setup returns False when vault has credentials."""
         vault = MagicMock()
-        vault.credentials = {"anthropic_api_key": "sk-test"}
+        vault.credentials = {"myapp_key": "val"}
+        vault.system_credentials = {}
+        assert InlineSetup.needs_setup(vault) is False
+
+    def test_needs_setup_false_when_system_creds_exist(self):
+        """needs_setup returns False when vault has system credentials."""
+        vault = MagicMock()
+        vault.credentials = {}
+        vault.system_credentials = {"anthropic_api_key": "sk-test"}
         assert InlineSetup.needs_setup(vault) is False
 
     def test_run_stores_credential(self, tmp_path):

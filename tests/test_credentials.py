@@ -5,7 +5,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.host.credentials import (
+    AGENT_PREFIX,
     SYSTEM_CREDENTIAL_PROVIDERS,
+    SYSTEM_PREFIX,
     CredentialVault,
     _extract_content,
     is_system_credential,
@@ -20,10 +22,13 @@ def vault():
 
 
 def test_load_credentials_from_env(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-test-123")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-test-123")
     monkeypatch.setenv("OPENLEGION_CRED_BRAVE_SEARCH_API_KEY", "bsk-456")
     v = CredentialVault()
-    assert v.credentials.get("anthropic_api_key") == "sk-test-123"
+    # System-prefix keys go to system tier
+    assert v.system_credentials.get("anthropic_api_key") == "sk-test-123"
+    assert "anthropic_api_key" not in v.credentials
+    # Agent-prefix keys stay in agent tier
     assert v.credentials.get("brave_search_api_key") == "bsk-456"
 
 
@@ -35,6 +40,7 @@ async def test_unknown_service_returns_error(vault):
 
 
 async def test_missing_api_key_returns_error(monkeypatch):
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     v = CredentialVault()
@@ -55,6 +61,7 @@ def test_handler_dispatch():
 
 
 async def test_llm_missing_key_returns_error(monkeypatch):
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENLEGION_CRED_OPENAI_API_KEY", raising=False)
     v = CredentialVault()
     req = APIProxyRequest(
@@ -68,8 +75,8 @@ async def test_llm_missing_key_returns_error(monkeypatch):
 
 
 def test_get_api_key_for_model(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-openai")
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-anthropic")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-anthropic")
     v = CredentialVault()
     assert v._get_api_key_for_model("openai/gpt-4o-mini") == "sk-openai"
     assert v._get_api_key_for_model("gpt-4o") == "sk-openai"
@@ -78,7 +85,7 @@ def test_get_api_key_for_model(monkeypatch):
 
 
 async def test_unknown_action_returns_error(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-test")
     v = CredentialVault()
     req = APIProxyRequest(service="anthropic", action="nonexistent_action")
     result = await v.execute_api_call(req)
@@ -130,8 +137,8 @@ def test_remove_from_env_file(tmp_path):
 
 
 def test_vault_with_failover_config(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai")
     v = CredentialVault(
         failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
     )
@@ -141,8 +148,8 @@ def test_vault_with_failover_config(monkeypatch):
 
 async def test_handle_llm_failover_on_rate_limit(monkeypatch):
     """First model rate-limited, second succeeds."""
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai")
     v = CredentialVault(
         failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
     )
@@ -182,8 +189,8 @@ async def test_handle_llm_failover_on_rate_limit(monkeypatch):
 
 async def test_handle_llm_no_failover_on_bad_request(monkeypatch):
     """400 BadRequestError doesn't cascade — it's a permanent error."""
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai")
     v = CredentialVault(
         failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
     )
@@ -208,8 +215,8 @@ async def test_handle_llm_no_failover_on_bad_request(monkeypatch):
 
 async def test_handle_llm_all_models_exhausted(monkeypatch):
     """All models fail → error returned."""
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai")
     v = CredentialVault(
         failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
     )
@@ -234,8 +241,8 @@ async def test_handle_llm_all_models_exhausted(monkeypatch):
 
 async def test_stream_failover(monkeypatch):
     """Streaming: first model fails on connection, second streams OK."""
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai")
     v = CredentialVault(
         failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
     )
@@ -350,17 +357,20 @@ def test_resolve_credential():
 
 def test_list_credential_names(monkeypatch):
     monkeypatch.setenv("OPENLEGION_CRED_ALPHA_KEY", "a")
-    monkeypatch.setenv("OPENLEGION_CRED_BETA_KEY", "b")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_BETA_KEY", "b")
     v = CredentialVault()
     names = v.list_credential_names()
+    # list_credential_names returns both tiers combined
     assert "alpha_key" in names
     assert "beta_key" in names
 
 
 def test_has_credential(monkeypatch):
     monkeypatch.setenv("OPENLEGION_CRED_EXISTS_KEY", "yes")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_SYS_KEY", "sys-yes")
     v = CredentialVault()
     assert v.has_credential("exists_key") is True
+    assert v.has_credential("sys_key") is True  # system tier
     assert v.has_credential("nope_key") is False
 
 
@@ -370,18 +380,18 @@ def test_has_credential(monkeypatch):
 def test_load_api_base_from_env(monkeypatch):
     """OPENLEGION_CRED_*_API_BASE env vars are loaded into api_bases dict."""
     monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_BASE", "https://gateway.example.com/v1")
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
     v = CredentialVault()
     assert v.api_bases.get("openai_api_base") == "https://gateway.example.com/v1"
     # API base should NOT appear in regular credentials
     assert "openai_api_base" not in v.credentials
-    # Regular key should still be loaded
-    assert v.credentials.get("openai_api_key") == "sk-test"
+    # Regular key should be in system tier
+    assert v.system_credentials.get("openai_api_key") == "sk-test"
 
 
 def test_get_api_base_for_model(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_BASE", "https://custom.example.com/v1")
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_BASE", "https://anthropic.proxy.com")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_BASE", "https://custom.example.com/v1")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_BASE", "https://anthropic.proxy.com")
     v = CredentialVault()
     assert v._get_api_base_for_model("openai/gpt-4o-mini") == "https://custom.example.com/v1"
     assert v._get_api_base_for_model("gpt-4o") == "https://custom.example.com/v1"
@@ -392,15 +402,15 @@ def test_get_api_base_for_model(monkeypatch):
 
 def test_no_api_base_configured(monkeypatch):
     """When no API base is set, _get_api_base_for_model returns None."""
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
     v = CredentialVault()
     assert v._get_api_base_for_model("openai/gpt-4o") is None
 
 
 async def test_llm_chat_passes_api_base(monkeypatch):
     """api_base is forwarded to litellm.acompletion when configured."""
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_BASE", "https://gateway.example.com/v1")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_BASE", "https://gateway.example.com/v1")
     v = CredentialVault()
 
     captured_kwargs = {}
@@ -430,7 +440,7 @@ async def test_llm_chat_passes_api_base(monkeypatch):
 
 async def test_llm_chat_no_api_base_when_not_configured(monkeypatch):
     """api_base is NOT passed to litellm when not configured."""
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
     v = CredentialVault()
 
     captured_kwargs = {}
@@ -460,8 +470,8 @@ async def test_llm_chat_no_api_base_when_not_configured(monkeypatch):
 
 async def test_stream_passes_api_base(monkeypatch):
     """api_base is forwarded during streaming LLM calls."""
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-test")
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_BASE", "https://gateway.example.com/v1")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_BASE", "https://gateway.example.com/v1")
     v = CredentialVault()
 
     captured_kwargs = {}
@@ -491,8 +501,8 @@ async def test_stream_passes_api_base(monkeypatch):
 
 async def test_cost_tracking_uses_actual_model(monkeypatch):
     """Cost is attributed to the model that actually responded."""
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai")
 
     cost_tracker = MagicMock()
     cost_tracker.check_budget.return_value = {"allowed": True}
@@ -588,7 +598,7 @@ def test_extract_content_multiple_thinking_blocks():
 
 async def test_llm_chat_handles_list_content(monkeypatch):
     """Full path: list content from LiteLLM → extracted text + thinking_content."""
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
     v = CredentialVault()
 
     async def mock_acompletion(model, messages, api_key, **kwargs):
@@ -703,7 +713,7 @@ def test_thinking_invalid_level_falls_back_to_off():
 
 async def test_stream_collects_thinking_content(monkeypatch):
     """Streaming: reasoning_content tokens are collected and included in done event."""
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
     v = CredentialVault()
 
     async def mock_chunk_generator():
@@ -763,7 +773,7 @@ async def test_stream_collects_thinking_content(monkeypatch):
 
 async def test_stream_no_thinking_content_when_absent(monkeypatch):
     """Streaming: done event omits thinking_content when no reasoning tokens."""
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-oai")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai")
     v = CredentialVault()
 
     async def mock_chunk_generator():
@@ -796,7 +806,7 @@ async def test_stream_no_thinking_content_when_absent(monkeypatch):
 
 async def test_reasoning_content_attribute_fallback(monkeypatch):
     """Non-streaming: thinking extracted from msg.reasoning_content when content is a string."""
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
     v = CredentialVault()
 
     async def mock_acompletion(model, messages, api_key, **kwargs):
@@ -829,7 +839,7 @@ async def test_reasoning_content_attribute_fallback(monkeypatch):
 
 async def test_reasoning_content_not_duplicated(monkeypatch):
     """When both content blocks AND reasoning_content exist, don't duplicate."""
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
     v = CredentialVault()
 
     async def mock_acompletion(model, messages, api_key, **kwargs):
@@ -905,27 +915,29 @@ def test_is_system_credential_non_system():
 
 def test_list_agent_credential_names(monkeypatch):
     """list_agent_credential_names excludes system credentials."""
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
     monkeypatch.setenv("OPENLEGION_CRED_BRIGHTDATA_CDP_URL", "wss://...")
     monkeypatch.setenv("OPENLEGION_CRED_MYAPP_PASSWORD", "secret")
     v = CredentialVault()
     agent_creds = v.list_agent_credential_names()
     assert "brightdata_cdp_url" in agent_creds
     assert "myapp_password" in agent_creds
+    # System-prefix key stays in system tier
     assert "anthropic_api_key" not in agent_creds
 
 
 def test_list_agent_credential_names_empty():
     """list_agent_credential_names returns empty when only system creds exist."""
     v = CredentialVault()
-    # Only add system creds
     import src.host.credentials as cred_mod
     original = cred_mod._persist_to_env
     cred_mod._persist_to_env = lambda *a, **kw: None
     try:
-        v.add_credential("anthropic_api_key", "sk-test")
+        v.add_credential("anthropic_api_key", "sk-test", system=True)
         agent_creds = v.list_agent_credential_names()
         assert "anthropic_api_key" not in agent_creds
+        # But it should be in system credentials
+        assert "anthropic_api_key" in v.list_system_credential_names()
     finally:
         cred_mod._persist_to_env = original
 
@@ -943,3 +955,148 @@ def test_system_credential_providers_matches_provider_key_map():
         f"Missing from SYSTEM_CREDENTIAL_PROVIDERS: {map_providers - SYSTEM_CREDENTIAL_PROVIDERS}. "
         f"Extra in SYSTEM_CREDENTIAL_PROVIDERS: {SYSTEM_CREDENTIAL_PROVIDERS - map_providers}."
     )
+
+
+# ── Two-tier credential system tests ──────────────────────────
+
+
+def test_system_prefix_loads_to_system_credentials(monkeypatch):
+    """OPENLEGION_SYSTEM_* env vars load into system_credentials dict."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-sys")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "gk-sys")
+    v = CredentialVault()
+    assert v.system_credentials["openai_api_key"] == "sk-sys"
+    assert v.system_credentials["gemini_api_key"] == "gk-sys"
+    # Should NOT appear in agent-tier credentials
+    assert "openai_api_key" not in v.credentials
+    assert "gemini_api_key" not in v.credentials
+
+
+def test_cred_prefix_provider_keys_stay_in_agent_tier(monkeypatch):
+    """OPENLEGION_CRED_ provider keys are NOT auto-promoted — they stay agent-tier."""
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-legacy")
+    v = CredentialVault()
+    # Key stays in agent tier, not promoted
+    assert "openai_api_key" in v.credentials
+    assert "openai_api_key" not in v.system_credentials
+
+
+def test_both_prefixes_land_in_respective_tiers(monkeypatch):
+    """OPENLEGION_SYSTEM_ and OPENLEGION_CRED_ for same name go to their own tiers."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-system")
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-agent")
+    v = CredentialVault()
+    assert v.system_credentials["openai_api_key"] == "sk-system"
+    assert v.credentials["openai_api_key"] == "sk-agent"
+    # Proxy only uses system tier
+    assert v._get_api_key_for_model("openai/gpt-4o-mini") == "sk-system"
+
+
+def test_get_api_key_only_uses_system_tier(monkeypatch):
+    """_get_api_key_for_model only checks system_credentials."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-system")
+    v = CredentialVault()
+    assert v._get_api_key_for_model("openai/gpt-4o-mini") == "sk-system"
+
+
+def test_get_api_key_ignores_agent_tier(monkeypatch):
+    """_get_api_key_for_model does NOT fall back to agent-tier credentials."""
+    v = CredentialVault()
+    v.credentials["openai_api_key"] = "sk-agent-only"
+    assert v._get_api_key_for_model("openai/gpt-4o-mini") is None
+
+
+def test_add_credential_system_true():
+    """add_credential(system=True) stores in system_credentials."""
+    v = CredentialVault()
+    import src.host.credentials as cred_mod
+    original = cred_mod._persist_to_env
+    persisted = {}
+    cred_mod._persist_to_env = lambda k, val, **kw: persisted.update({k: val})
+    try:
+        v.add_credential("openai_api_key", "sk-new", system=True)
+        assert v.system_credentials["openai_api_key"] == "sk-new"
+        assert "openai_api_key" not in v.credentials
+        # Env key should use SYSTEM prefix
+        assert f"{SYSTEM_PREFIX}OPENAI_API_KEY" in persisted
+    finally:
+        cred_mod._persist_to_env = original
+
+
+def test_add_credential_system_false():
+    """add_credential(system=False) stores in credentials (agent tier)."""
+    v = CredentialVault()
+    import src.host.credentials as cred_mod
+    original = cred_mod._persist_to_env
+    persisted = {}
+    cred_mod._persist_to_env = lambda k, val, **kw: persisted.update({k: val})
+    try:
+        v.add_credential("myapp_token", "tok-123", system=False)
+        assert v.credentials["myapp_token"] == "tok-123"
+        assert "myapp_token" not in v.system_credentials
+        # Env key should use CRED prefix
+        assert f"{AGENT_PREFIX}MYAPP_TOKEN" in persisted
+    finally:
+        cred_mod._persist_to_env = original
+
+
+def test_resolve_credential_never_returns_system_tier(monkeypatch):
+    """resolve_credential only returns agent-tier credentials."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-system")
+    monkeypatch.setenv("OPENLEGION_CRED_MYAPP_KEY", "app-key")
+    v = CredentialVault()
+    # System tier: not resolvable
+    assert v.resolve_credential("openai_api_key") is None
+    # Agent tier: resolvable
+    assert v.resolve_credential("myapp_key") == "app-key"
+
+
+def test_list_system_credential_names(monkeypatch):
+    """list_system_credential_names returns only system tier."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-sys")
+    monkeypatch.setenv("OPENLEGION_CRED_MYAPP_KEY", "app-key")
+    v = CredentialVault()
+    sys_names = v.list_system_credential_names()
+    assert "openai_api_key" in sys_names
+    assert "myapp_key" not in sys_names
+
+
+def test_remove_credential_both_tiers():
+    """remove_credential searches both tiers and cleans both env prefixes."""
+    v = CredentialVault()
+    v.system_credentials["test_key"] = "sys-val"
+    v.credentials["test_key"] = "agent-val"
+
+    import src.host.credentials as cred_mod
+    original = cred_mod._remove_from_env
+    removed_keys = []
+    cred_mod._remove_from_env = lambda k, **kw: removed_keys.append(k)
+    try:
+        existed = v.remove_credential("test_key")
+        assert existed is True
+        assert "test_key" not in v.system_credentials
+        assert "test_key" not in v.credentials
+        # Both prefixes should be cleaned
+        assert f"{SYSTEM_PREFIX}TEST_KEY" in removed_keys
+        assert f"{AGENT_PREFIX}TEST_KEY" in removed_keys
+    finally:
+        cred_mod._remove_from_env = original
+
+
+def test_system_api_base_takes_precedence(monkeypatch):
+    """OPENLEGION_SYSTEM_*_API_BASE takes precedence over OPENLEGION_CRED_*_API_BASE."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_BASE", "https://system-proxy.com")
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_BASE", "https://legacy-proxy.com")
+    v = CredentialVault()
+    assert v.api_bases["openai_api_base"] == "https://system-proxy.com"
+
+
+def test_agent_tier_cred_not_auto_promoted(monkeypatch):
+    """Non-provider OPENLEGION_CRED_ keys stay in agent tier."""
+    monkeypatch.setenv("OPENLEGION_CRED_BRIGHTDATA_CDP_URL", "wss://test")
+    monkeypatch.setenv("OPENLEGION_CRED_BRAVE_SEARCH_API_KEY", "bsk-123")
+    v = CredentialVault()
+    assert "brightdata_cdp_url" in v.credentials
+    assert "brave_search_api_key" in v.credentials
+    assert "brightdata_cdp_url" not in v.system_credentials
+    assert "brave_search_api_key" not in v.system_credentials

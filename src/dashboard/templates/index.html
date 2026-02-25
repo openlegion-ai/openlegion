@@ -931,7 +931,41 @@
                     </div>
                     <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
                       <div class="text-[11px] text-gray-500 mb-1">Credential Access</div>
-                      <div class="text-sm text-gray-200 font-mono" x-text="(agentConfigs[selectedAgent]?.allowed_credentials || []).join(', ') || 'none'"></div>
+                      <!-- Pattern display -->
+                      <div class="text-sm text-gray-200 font-mono mb-2">
+                        Pattern: <span x-text="(agentConfigs[selectedAgent]?.allowed_credentials || []).join(', ') || 'none'" :class="(agentConfigs[selectedAgent]?.allowed_credentials || []).length ? 'text-indigo-400' : 'text-gray-500'"></span>
+                      </div>
+                      <!-- Resolved credentials this agent can actually access -->
+                      <template x-if="(agentConfigs[selectedAgent]?.resolved_credentials || []).length > 0">
+                        <div class="mb-2">
+                          <div class="text-[11px] text-gray-500 mb-1">Accessible credentials</div>
+                          <div class="flex flex-wrap gap-1.5">
+                            <template x-for="c in agentConfigs[selectedAgent].resolved_credentials" :key="c">
+                              <span class="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded bg-green-900/30 text-green-400 border border-green-800/50">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                <span x-text="c"></span>
+                              </span>
+                            </template>
+                          </div>
+                        </div>
+                      </template>
+                      <template x-if="(agentConfigs[selectedAgent]?.resolved_credentials || []).length === 0 && (agentConfigs[selectedAgent]?.allowed_credentials || []).length > 0">
+                        <div class="text-[11px] text-gray-500 italic mb-2">No agent credentials configured in the vault yet</div>
+                      </template>
+                      <!-- System credentials (always blocked) -->
+                      <template x-if="(agentConfigs[selectedAgent]?.system_credentials || []).length > 0">
+                        <div>
+                          <div class="text-[11px] text-gray-500 mb-1">System credentials (always blocked)</div>
+                          <div class="flex flex-wrap gap-1.5">
+                            <template x-for="c in agentConfigs[selectedAgent].system_credentials" :key="c">
+                              <span class="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded bg-red-900/20 text-red-400/70 border border-red-800/30">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg>
+                                <span x-text="c"></span>
+                              </span>
+                            </template>
+                          </div>
+                        </div>
+                      </template>
                     </div>
                   </div>
                 </div>
@@ -964,8 +998,61 @@
                         <input type="number" step="0.5" min="0.1" x-model="editForm.budget_daily" class="dash-input w-full" placeholder="10.0">
                       </div>
                       <div class="md:col-span-2">
-                        <label class="text-[11px] text-gray-500 mb-1 block">Credential Access (comma-separated glob patterns, e.g. *, brightdata_*, or leave empty for none)</label>
-                        <input type="text" x-model="editForm.allowed_credentials" class="dash-input w-full" placeholder="*">
+                        <label class="text-[11px] text-gray-500 mb-1.5 block">Credential Access</label>
+                        <!-- Quick-select: all or none -->
+                        <div class="flex items-center gap-3 mb-2">
+                          <button type="button" @click="editForm.allowed_credentials = '*'; editForm._credMode = 'all'"
+                            class="text-[11px] px-2.5 py-1 rounded transition-colors"
+                            :class="editForm._credMode === 'all' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">
+                            All credentials
+                          </button>
+                          <button type="button" @click="editForm.allowed_credentials = ''; editForm._credMode = 'none'"
+                            class="text-[11px] px-2.5 py-1 rounded transition-colors"
+                            :class="editForm._credMode === 'none' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">
+                            No access
+                          </button>
+                          <button type="button" @click="editForm._credMode = 'custom'"
+                            class="text-[11px] px-2.5 py-1 rounded transition-colors"
+                            :class="editForm._credMode === 'custom' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">
+                            Select specific
+                          </button>
+                        </div>
+                        <!-- Checkbox list for available agent-tier credentials -->
+                        <template x-if="editForm._credMode === 'custom'">
+                          <div>
+                            <template x-if="(agentConfigs[selectedAgent]?.available_credentials || []).length > 0">
+                              <div class="grid grid-cols-1 sm:grid-cols-2 gap-1 mb-2">
+                                <template x-for="cred in agentConfigs[selectedAgent].available_credentials" :key="cred">
+                                  <label class="flex items-center gap-2 text-sm text-gray-300 py-1 px-2 rounded hover:bg-gray-800/50 cursor-pointer">
+                                    <input type="checkbox" :value="cred"
+                                      :checked="editForm.allowed_credentials.split(',').map(s => s.trim()).includes(cred)"
+                                      @change="
+                                        let creds = editForm.allowed_credentials.split(',').map(s => s.trim()).filter(s => s && s !== '*');
+                                        if ($event.target.checked) { if (!creds.includes(cred)) creds.push(cred); }
+                                        else { creds = creds.filter(c => c !== cred); }
+                                        editForm.allowed_credentials = creds.join(', ');
+                                      "
+                                      class="rounded border-gray-600 bg-gray-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-0">
+                                    <span class="font-mono text-[12px]" x-text="cred"></span>
+                                  </label>
+                                </template>
+                              </div>
+                            </template>
+                            <template x-if="(agentConfigs[selectedAgent]?.available_credentials || []).length === 0">
+                              <div class="text-[11px] text-gray-500 italic mb-2">No agent credentials in the vault. Add credentials via environment variables (OPENLEGION_CRED_*).</div>
+                            </template>
+                            <div>
+                              <label class="text-[11px] text-gray-500 mb-1 block">Or enter glob patterns (comma-separated)</label>
+                              <input type="text" x-model="editForm.allowed_credentials" class="dash-input w-full text-sm" placeholder="brightdata_*, myapp_*">
+                            </div>
+                          </div>
+                        </template>
+                        <!-- System credentials note -->
+                        <template x-if="(agentConfigs[selectedAgent]?.system_credentials || []).length > 0">
+                          <div class="mt-2 text-[11px] text-gray-600">
+                            System credentials (<span x-text="agentConfigs[selectedAgent].system_credentials.join(', ')"></span>) are always blocked — agents can never access LLM provider keys.
+                          </div>
+                        </template>
                       </div>
                     </div>
                     <div class="flex gap-2">
@@ -1443,33 +1530,45 @@
                 <div class="space-y-1 mb-3">
                   <template x-for="name in settingsData.credentials.names" :key="name">
                     <div class="flex items-center gap-2 text-xs group">
-                      <span class="w-2 h-2 rounded-full bg-green-500/50"></span>
+                      <span class="w-2 h-2 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-500/50' : 'bg-amber-500/50'"></span>
                       <span class="text-gray-300 font-mono flex-1" x-text="name"></span>
+                      <span class="text-[10px] px-1.5 py-0.5 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-900/40 text-green-400' : 'bg-amber-900/40 text-amber-400'" x-text="(settingsData.agent_credentials || []).includes(name) ? 'agent' : 'system'"></span>
                       <button @click="deleteCredential(name)" class="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 transition-opacity text-base leading-none px-1" title="Remove credential">&times;</button>
                     </div>
                   </template>
                 </div>
                 <div class="border-t border-gray-800 pt-3">
-                  <button x-show="!showCredForm && settingsData.credentials.count === 0" @click="showCredForm = true" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Credential</button>
+                  <button x-show="!showCredForm" @click="showCredForm = true" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Credential</button>
                   <div x-show="showCredForm" x-transition>
                     <div class="text-xs text-gray-500 mb-2">New credential</div>
                     <div class="flex gap-2 mb-2">
                       <select x-model="credService" class="dash-select text-xs w-40">
-                        <option value="">Provider...</option>
-                        <option value="anthropic">Anthropic</option>
-                        <option value="openai">OpenAI</option>
-                        <option value="gemini">Google Gemini</option>
-                        <option value="deepseek">DeepSeek</option>
-                        <option value="moonshot">Moonshot / Kimi</option>
-                        <option value="xai">xAI (Grok)</option>
-                        <option value="groq">Groq</option>
-                        <option value="minimax">MiniMax</option>
+                        <option value="">Service...</option>
+                        <optgroup label="LLM Providers (system tier)">
+                          <option value="anthropic">Anthropic</option>
+                          <option value="openai">OpenAI</option>
+                          <option value="gemini">Google Gemini</option>
+                          <option value="deepseek">DeepSeek</option>
+                          <option value="moonshot">Moonshot / Kimi</option>
+                          <option value="xai">xAI (Grok)</option>
+                          <option value="groq">Groq</option>
+                          <option value="minimax">MiniMax</option>
+                          <option value="zai">ZAI</option>
+                        </optgroup>
+                        <optgroup label="Agent tools">
+                          <option value="brave_search_api_key">Brave Search</option>
+                          <option value="apollo_api_key">Apollo</option>
+                          <option value="hunter_api_key">Hunter</option>
+                          <option value="brightdata_cdp_url">Brightdata CDP</option>
+                        </optgroup>
+                        <option value="__custom__">Custom...</option>
                       </select>
-                      <input type="password" x-model="credKey" class="dash-input flex-1" placeholder="API key">
+                      <input x-show="credService === '__custom__'" type="text" x-model="credCustomService" class="dash-input text-xs w-40" placeholder="credential_name">
+                      <input type="password" x-model="credKey" class="dash-input flex-1" placeholder="API key or value">
                     </div>
                     <input type="text" x-model="credBaseUrl" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
                     <div class="flex justify-between">
-                      <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
+                      <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
                       <button @click="addCredential()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save Credential</button>
                     </div>
                   </div>

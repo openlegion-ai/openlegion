@@ -410,8 +410,8 @@ def create_mesh_app(
             raise HTTPException(403, f"Agent {agent_id} cannot manage vault")
         if credential_vault is None:
             raise HTTPException(503, "No credential vault configured")
-        # Filter: exclude system credentials, apply agent's allowed_credentials globs
-        all_names = credential_vault.list_credential_names()
+        # Agent-tier only: system credentials are never resolvable by agents
+        all_names = credential_vault.list_agent_credential_names()
         names = [n for n in all_names if permissions.can_access_credential(agent_id, n)]
         return {"credentials": names, "count": len(names)}
 

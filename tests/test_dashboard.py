@@ -68,6 +68,7 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         credential_vault = MagicMock()
         credential_vault.list_credential_names.return_value = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
         credential_vault.list_agent_credential_names.return_value = []
+        credential_vault.list_system_credential_names.return_value = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
 
         msg_router = MagicMock()
         msg_router.agent_registry = agent_registry
@@ -1194,6 +1195,7 @@ class TestDashboardSettingsAgentCredentials:
         self.components["credential_vault"].list_agent_credential_names.return_value = [
             "brightdata_cdp_url", "myapp_password",
         ]
+        self.components["credential_vault"].list_system_credential_names.return_value = []
         self.client = _make_client(self.components)
 
     def teardown_method(self):
@@ -1214,6 +1216,15 @@ class TestDashboardAgentConfigAllowedCredentials:
         self._tmpdir = tempfile.mkdtemp()
         self.components = _make_components(self._tmpdir, include_v2=True)
         self.components["permissions"].get_allowed_credentials.return_value = ["brightdata_*"]
+        self.components["credential_vault"].list_credential_names.return_value = [
+            "anthropic_api_key", "openai_api_key", "brightdata_cdp_url", "myapp_password",
+        ]
+        self.components["credential_vault"].list_agent_credential_names.return_value = [
+            "brightdata_cdp_url", "myapp_password",
+        ]
+        self.components["credential_vault"].list_system_credential_names.return_value = [
+            "anthropic_api_key", "openai_api_key",
+        ]
         self.client = _make_client(self.components)
 
     def teardown_method(self):
@@ -1226,3 +1237,31 @@ class TestDashboardAgentConfigAllowedCredentials:
         data = resp.json()
         assert "allowed_credentials" in data
         assert data["allowed_credentials"] == ["brightdata_*"]
+
+    def test_config_includes_credential_visibility(self):
+        """Config endpoint returns available, system, and resolved credentials."""
+        resp = self.client.get("/dashboard/api/agents/alpha/config")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Agent-tier credentials available for assignment
+        assert data["available_credentials"] == ["brightdata_cdp_url", "myapp_password"]
+        # System credentials (always blocked)
+        assert data["system_credentials"] == ["anthropic_api_key", "openai_api_key"]
+        # Resolved: brightdata_* matches brightdata_cdp_url but not myapp_password
+        assert data["resolved_credentials"] == ["brightdata_cdp_url"]
+
+    def test_config_resolved_credentials_wildcard(self):
+        """Wildcard pattern resolves to all agent-tier credentials."""
+        self.components["permissions"].get_allowed_credentials.return_value = ["*"]
+        self.client = _make_client(self.components)
+        resp = self.client.get("/dashboard/api/agents/alpha/config")
+        data = resp.json()
+        assert data["resolved_credentials"] == ["brightdata_cdp_url", "myapp_password"]
+
+    def test_config_resolved_credentials_none(self):
+        """Empty allowed_credentials resolves to nothing."""
+        self.components["permissions"].get_allowed_credentials.return_value = []
+        self.client = _make_client(self.components)
+        resp = self.client.get("/dashboard/api/agents/alpha/config")
+        data = resp.json()
+        assert data["resolved_credentials"] == []
