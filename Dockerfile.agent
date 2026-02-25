@@ -4,8 +4,11 @@ FROM --platform=linux/amd64 python:3.12-slim
 
 # System tools useful for agent operations
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl wget git jq vim-tiny procps xvfb tigervnc-standalone-server \
-    tightvncpasswd novnc websockify \
+    curl wget git jq vim-tiny procps xvfb \
+    && curl -fSL -o /tmp/kasmvnc.deb \
+       https://github.com/kasmtech/KasmVNC/releases/download/v1.4.0/kasmvncserver_bookworm_1.4.0_amd64.deb \
+    && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb \
+    && rm /tmp/kasmvnc.deb \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user (created early so /data ownership is correct)

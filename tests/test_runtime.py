@@ -337,7 +337,7 @@ class TestDockerBackendVNCPort:
         return backend
 
     def test_persistent_backend_allocates_vnc_port(self):
-        """persistent browser_backend gets VNC port, password, URL in agent info."""
+        """persistent browser_backend gets VNC port and URL in agent info."""
         import docker as _docker
 
         backend = self._make_backend()
@@ -356,9 +356,7 @@ class TestDockerBackendVNCPort:
 
         agent_info = backend.agents["test-agent"]
         assert "vnc_port" in agent_info
-        assert "vnc_password" in agent_info
         assert "vnc_url" in agent_info
-        assert "autoconnect=true" in agent_info["vnc_url"]
         assert str(agent_info["vnc_port"]) in agent_info["vnc_url"]
 
         # Verify port mapping includes 6080/tcp
@@ -370,9 +368,8 @@ class TestDockerBackendVNCPort:
         # Memory should be 1g for persistent
         assert run_call.kwargs.get("mem_limit") == "1g"
 
-        # VNC_PASSWORD should be in environment
-        env = run_call.kwargs.get("environment", {})
-        assert "VNC_PASSWORD" in env
+        # CPU quota should be 100000 for persistent
+        assert run_call.kwargs.get("cpu_quota") == 100000
 
     def test_basic_backend_no_vnc_port(self):
         """Non-persistent backends do not allocate VNC port."""
@@ -394,13 +391,15 @@ class TestDockerBackendVNCPort:
 
         agent_info = backend.agents["test-basic"]
         assert "vnc_port" not in agent_info
-        assert "vnc_password" not in agent_info
         assert "vnc_url" not in agent_info
 
         # Verify port mapping does NOT include 6080/tcp
         run_call = mock_client.containers.run.call_args
         ports = run_call.kwargs.get("ports", {})
         assert "6080/tcp" not in ports
+
+        # CPU quota should be 50000 for non-persistent
+        assert run_call.kwargs.get("cpu_quota") == 50000
 
         # Memory should be 512m for basic
         assert run_call.kwargs.get("mem_limit") == "512m"

@@ -198,12 +198,9 @@ class DockerBackend(RuntimeBackend):
             environment["LLM_MODEL"] = model
         if mcp_servers:
             environment["MCP_SERVERS"] = json.dumps(mcp_servers)
-        vnc_password = None
         if browser_backend:
             environment["BROWSER_BACKEND"] = browser_backend
             if browser_backend == "persistent" and vnc_port is not None:
-                vnc_password = secrets.token_urlsafe(12)
-                environment["VNC_PASSWORD"] = vnc_password
                 if self.use_host_network:
                     environment["VNC_PORT"] = str(vnc_port)
         if thinking:
@@ -235,8 +232,10 @@ class DockerBackend(RuntimeBackend):
                 mp_path = marketplace_dir.as_posix()
             volumes[mp_path] = {"bind": "/app/marketplace_skills", "mode": "ro"}
 
-        # Persistent browser (visible Chromium + VNC stack) needs more memory
-        mem_limit = "1g" if browser_backend == "persistent" else "512m"
+        # Persistent browser (visible Chromium + VNC stack) needs more resources
+        is_persistent = browser_backend == "persistent"
+        mem_limit = "1g" if is_persistent else "512m"
+        cpu_quota = 100000 if is_persistent else 50000
 
         run_kwargs: dict[str, Any] = {
             "detach": True,
@@ -244,7 +243,7 @@ class DockerBackend(RuntimeBackend):
             "environment": environment,
             "volumes": volumes,
             "mem_limit": mem_limit,
-            "cpu_quota": 50000,
+            "cpu_quota": cpu_quota,
             "security_opt": ["no-new-privileges"],
         }
 
@@ -282,13 +281,9 @@ class DockerBackend(RuntimeBackend):
             "browser_backend": browser_backend,
             "thinking": thinking,
         }
-        if vnc_port is not None and vnc_password is not None:
-            vnc_url = (
-                f"http://127.0.0.1:{vnc_port}"
-                f"/vnc.html?autoconnect=true"
-            )
+        if vnc_port is not None:
+            vnc_url = f"http://127.0.0.1:{vnc_port}/"
             agent_info["vnc_port"] = vnc_port
-            agent_info["vnc_password"] = vnc_password
             agent_info["vnc_url"] = vnc_url
         self.agents[agent_id] = agent_info
         logger.info(f"Started agent '{agent_id}' (role={role}) at {url}")

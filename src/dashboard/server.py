@@ -78,13 +78,13 @@ def create_dashboard_router(
 
         The runtime stores ``vnc_url`` with ``127.0.0.1`` which only works
         from the same machine.  Rewriting with the request's ``Host`` header
-        lets the noVNC iframe work from any browser that can reach the mesh.
+        lets the KasmVNC iframe work from any browser that can reach the mesh.
         """
         vnc_port = agent_info.get("vnc_port")
         if not vnc_port:
             return None
         host = request.headers.get("host", "127.0.0.1:8420").split(":")[0]
-        return f"http://{host}:{vnc_port}/vnc.html?autoconnect=true"
+        return f"http://{host}:{vnc_port}/"
 
     # ── Fleet overview ───────────────────────────────────────
 
@@ -123,7 +123,6 @@ def create_dashboard_router(
                 vnc_url = _vnc_url_for_request(request, agent_info)
                 if vnc_url:
                     entry["vnc_url"] = vnc_url
-                    entry["vnc_password"] = agent_info.get("vnc_password", "")
             agents.append(entry)
         return {"agents": agents}
 
@@ -289,7 +288,6 @@ def create_dashboard_router(
             vnc_url = _vnc_url_for_request(request, agent_info)
             if vnc_url:
                 result["vnc_url"] = vnc_url
-                result["vnc_password"] = agent_info.get("vnc_password", "")
         return result
 
     # ── Agent config CRUD ────────────────────────────────────

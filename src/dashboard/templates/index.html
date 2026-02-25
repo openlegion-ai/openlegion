@@ -851,13 +851,13 @@
                 </button>
               </div>
             </div>
-            <!-- Inline noVNC Browser Viewer -->
+            <!-- Inline KasmVNC Browser Viewer -->
             <div x-show="showBrowserViewer && agentDetail?.vnc_url" x-cloak
               class="bg-gray-900 border border-gray-800 rounded-lg mb-5 overflow-hidden">
               <div class="flex items-center justify-between px-4 py-2 border-b border-gray-800">
                 <span class="text-xs text-gray-400 uppercase tracking-wider">Live Browser</span>
                 <div class="flex items-center gap-2">
-                  <a :href="agentDetail?.vnc_url + '&password=' + (agentDetail?.vnc_password || '')"
+                  <a :href="agentDetail?.vnc_url"
                     target="_blank" rel="noopener"
                     class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
                     title="Open in new tab">&#x2197; Pop out</a>
@@ -867,7 +867,7 @@
                 </div>
               </div>
               <iframe
-                :src="showBrowserViewer ? (agentDetail?.vnc_url + '&password=' + (agentDetail?.vnc_password || '')) : ''"
+                :src="showBrowserViewer ? agentDetail?.vnc_url : ''"
                 class="w-full border-0"
                 style="height: 520px;"
                 allow="clipboard-read; clipboard-write"
