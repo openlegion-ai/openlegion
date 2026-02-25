@@ -18,6 +18,7 @@ Layer 4: Learnings                <- Self-improvement through failure tracking
   |
 Layer 3: Workspace Files          <- Durable, human-readable storage
   |  AGENTS.md, SOUL.md, USER.md  (loaded into system prompt)
+  |  SYSTEM.md                    (auto-generated architecture guide + runtime snapshot)
   |  MEMORY.md                    (curated long-term facts)
   |  HEARTBEAT.md                 (autonomous monitoring rules)
   |  memory/YYYY-MM-DD.md         (daily session logs)
@@ -82,7 +83,17 @@ Persistent markdown files stored on the agent's `/data/workspace` volume.
 | `USER.md` | User preferences and working style | System prompt |
 | `MEMORY.md` | Curated long-term facts | System prompt |
 | `PROJECT.md` | Project-wide context (optional, mounted read-only from host) | System prompt |
+| `SYSTEM.md` | System architecture guide + runtime snapshot (auto-generated, read-only) | System prompt |
 | `HEARTBEAT.md` | Autonomous monitoring rules | Heartbeat dispatch (auto-loaded) |
+
+### System File (`SYSTEM.md`)
+
+Auto-generated at startup and refreshed every 5 minutes. Contains two parts:
+
+1. **Static preamble** — Explains how the mesh, credential vault, blackboard, pub/sub, context window, and tool costs work. Includes a "common errors and what they mean" section (403, 429, budget exceeded, tool loop detected). This teaches agents *how the system works* so they can self-diagnose issues.
+2. **Runtime snapshot** — Compact permissions and fleet roster from the `/mesh/introspect` endpoint. Gives agents initial awareness of their capabilities before the live Runtime Context block kicks in.
+
+SYSTEM.md is capped at 6,000 characters to limit system prompt bloat. It is read-only — agents cannot modify it via `update_workspace`. The authoritative live data comes from the **Runtime Context** block injected into the system prompt on each turn (see [Agent Tools — System Introspection](agent-tools.md#system-introspection)).
 
 ### Daily Logs
 

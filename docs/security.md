@@ -153,6 +153,21 @@ Normal text in all scripts (Arabic, Hebrew, CJK, Devanagari, etc.), emoji with Z
 
 If you add a new path where untrusted text reaches LLM context (new tool, new system prompt section, new message source), wrap it with `sanitize_for_prompt()`. See `tests/test_sanitize.py` for the full test suite.
 
+## System Introspection
+
+The `/mesh/introspect` endpoint lets agents query their own runtime state (permissions, budget, fleet, cron, health). Security controls:
+
+- **Auth enforced** — requires valid `MESH_AUTH_TOKEN` like all mesh endpoints
+- **No sensitive data** — returns permission patterns, budget numbers, and fleet roster; never credentials, host paths, or container config
+- **Fleet filtering** — agents only see teammates they have `can_message` permission for, plus themselves
+- **Cron scoping** — agents only see their own scheduled jobs
+- **Input sanitization** — all introspect data (agent IDs, roles, cron schedules) is sanitized via `sanitize_for_prompt()` before reaching LLM context, with agent IDs truncated to 60 chars and roles to 80 chars
+
+The introspect data flows into agents through three layers, each with its own sanitization:
+1. `SYSTEM.md` — generated at startup, refreshed on cache miss (5-min TTL)
+2. Runtime Context block — injected into the system prompt each turn
+3. `introspect` tool — on-demand fresh data
+
 ## Mesh Authentication
 
 Each agent receives a unique auth token at startup (`MESH_AUTH_TOKEN`). All requests from agents to the mesh include this token for verification. This prevents:

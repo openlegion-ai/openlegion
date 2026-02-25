@@ -8,7 +8,7 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE.md)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 1182](https://img.shields.io/badge/tests-1182%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 1222](https://img.shields.io/badge/tests-1222%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -131,7 +131,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**1182 tests passing** across **~20,000 lines** of application code.
+**1222 tests passing** across **~20,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
@@ -150,7 +150,7 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
 4. **Acts autonomously** — cron schedules, heartbeat probes, webhook triggers, and file watchers let agents work without being prompted.
 
-5. **Self-improves** — agents learn from tool failures and user corrections, injecting past learnings into future sessions.
+5. **Self-aware and self-improving** — agents understand their own permissions, budget, fleet topology, and system architecture via auto-generated `SYSTEM.md` and live runtime context. They learn from tool failures and user corrections, injecting past learnings into future sessions.
 
 6. **Self-extends** — agents write their own Python skills at runtime and hot-reload them. Agents can also spawn sub-agents for specialized work.
 
@@ -276,7 +276,8 @@ Every inter-agent operation is checked against per-agent ACLs:
     "can_subscribe": ["new_lead"],
     "blackboard_read": ["tasks/*", "context/*"],
     "blackboard_write": ["context/prospect_*"],
-    "allowed_apis": ["llm", "brave_search"]
+    "allowed_apis": ["llm", "brave_search"],
+    "allowed_credentials": ["brightdata_*"]
   }
 }
 ```
@@ -355,8 +356,9 @@ structured output and optional blackboard promotions.
 ### Chat Mode (`chat`)
 
 Accepts a user message. On the first message, loads workspace context
-(AGENTS.md, SOUL.md, USER.md, MEMORY.md) into the system prompt and
-searches memory for relevant facts. Executes tool calls in a bounded loop
+(AGENTS.md, SOUL.md, USER.md, MEMORY.md, SYSTEM.md) into the system prompt,
+injects a live Runtime Context block (permissions, budget, fleet, cron),
+and searches memory for relevant facts. Executes tool calls in a bounded loop
 (max 30 rounds) and runs context compaction when needed.
 
 ### Tool Loop Detection
@@ -415,6 +417,7 @@ canonicalized parameters and results over a 15-call sliding window.
 | `vault_generate_secret` | Generate and store a random secret (returns opaque handle) |
 | `vault_capture_from_page` | Capture text from browser element and store as credential |
 | `vault_list` / `vault_status` | List credential names or check if a credential exists |
+| `introspect` | Query own runtime state: permissions, budget, fleet, cron, health |
 | `read_agent_history` | Read another agent's conversation logs |
 
 Custom skills are Python functions decorated with `@skill`, auto-discovered
@@ -445,6 +448,7 @@ Layer 4: Learnings                ← Self-improvement through failure tracking
   │
 Layer 3: Workspace Files          ← Durable, human-readable storage
   │  AGENTS.md, SOUL.md, USER.md  (loaded into system prompt)
+  │  SYSTEM.md                    (auto-generated architecture guide + runtime snapshot)
   │  MEMORY.md                    (curated long-term facts)
   │  HEARTBEAT.md                 (autonomous monitoring rules)
   │  memory/YYYY-MM-DD.md         (daily session logs)

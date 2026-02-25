@@ -118,6 +118,20 @@ Agents never see credential values. All operations return opaque `$CRED{name}` h
 | `vault_list` | -- | List credential names the agent can access (names only, filtered by permissions) |
 | `vault_status` | `name` | Check if an accessible credential exists in the vault |
 
+### System Introspection
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `introspect` | `section` | Query live runtime state: permissions, budget, fleet, cron, health, or all |
+
+Agents receive system awareness through three layers:
+
+1. **SYSTEM.md** — Generated at startup and refreshed every 5 minutes. Contains a static architecture guide (mesh concepts, context window mechanics, tool cost model, common errors) plus a compact snapshot of permissions and fleet. Loaded into the system prompt via workspace bootstrap.
+2. **Runtime Context** — A compact block injected into the system prompt on each turn (5-minute cache). Shows live budget numbers, permission patterns, fleet roster, and cron schedule.
+3. **`introspect` tool** — On-demand access to fresh data when agents need exact numbers mid-conversation.
+
+The `section` parameter accepts: `permissions`, `budget`, `fleet`, `cron`, `health`, or `all` (default). Fleet data is filtered by `can_message` permissions — agents only see teammates they can interact with.
+
 ### Agent History
 
 | Tool | Parameters | Description |
