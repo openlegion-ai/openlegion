@@ -73,10 +73,23 @@ def create_dashboard_router(
         )
         return HTMLResponse(html)
 
+    def _vnc_url_for_request(request: Request, agent_info: dict) -> str | None:
+        """Build VNC URL using the request host so the iframe connects correctly.
+
+        The runtime stores ``vnc_url`` with ``127.0.0.1`` which only works
+        from the same machine.  Rewriting with the request's ``Host`` header
+        lets the noVNC iframe work from any browser that can reach the mesh.
+        """
+        vnc_port = agent_info.get("vnc_port")
+        if not vnc_port:
+            return None
+        host = request.headers.get("host", "127.0.0.1:8420").split(":")[0]
+        return f"http://{host}:{vnc_port}/vnc.html?autoconnect=true"
+
     # ── Fleet overview ───────────────────────────────────────
 
     @api_router.get("/api/agents")
-    async def api_agents() -> dict:
+    async def api_agents(request: Request) -> dict:
         from src.cli.config import _load_config
         cfg = _load_config()
         agents_cfg = cfg.get("agents", {})
@@ -107,8 +120,9 @@ def create_dashboard_router(
             }
             if runtime:
                 agent_info = runtime.agents.get(agent_id, {})
-                if agent_info.get("vnc_url"):
-                    entry["vnc_url"] = agent_info["vnc_url"]
+                vnc_url = _vnc_url_for_request(request, agent_info)
+                if vnc_url:
+                    entry["vnc_url"] = vnc_url
                     entry["vnc_password"] = agent_info.get("vnc_password", "")
             agents.append(entry)
         return {"agents": agents}
@@ -250,7 +264,7 @@ def create_dashboard_router(
     # ── Agent detail ─────────────────────────────────────────
 
     @api_router.get("/api/agents/{agent_id}")
-    async def api_agent_detail(agent_id: str) -> dict:
+    async def api_agent_detail(agent_id: str, request: Request) -> dict:
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -272,15 +286,16 @@ def create_dashboard_router(
         # Include VNC info for persistent browser agents
         if runtime:
             agent_info = runtime.agents.get(agent_id, {})
-            if agent_info.get("vnc_url"):
-                result["vnc_url"] = agent_info["vnc_url"]
+            vnc_url = _vnc_url_for_request(request, agent_info)
+            if vnc_url:
+                result["vnc_url"] = vnc_url
                 result["vnc_password"] = agent_info.get("vnc_password", "")
         return result
 
     # ── Agent config CRUD ────────────────────────────────────
 
     @api_router.get("/api/agents/{agent_id}/config")
-    async def api_agent_config(agent_id: str) -> dict:
+    async def api_agent_config(agent_id: str, request: Request) -> dict:
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
         from fnmatch import fnmatch
@@ -316,8 +331,9 @@ def create_dashboard_router(
         }
         if runtime:
             agent_info = runtime.agents.get(agent_id, {})
-            if agent_info.get("vnc_url"):
-                cfg_result["vnc_url"] = agent_info["vnc_url"]
+            vnc_url = _vnc_url_for_request(request, agent_info)
+            if vnc_url:
+                cfg_result["vnc_url"] = vnc_url
         return cfg_result
 
     @api_router.put("/api/agents/{agent_id}/config")
