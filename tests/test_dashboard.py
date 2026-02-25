@@ -68,6 +68,7 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         credential_vault = MagicMock()
         credential_vault.list_credential_names.return_value = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
         credential_vault.list_agent_credential_names.return_value = []
+        credential_vault.list_system_credential_names.return_value = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
 
         msg_router = MagicMock()
         msg_router.agent_registry = agent_registry
@@ -1194,6 +1195,7 @@ class TestDashboardSettingsAgentCredentials:
         self.components["credential_vault"].list_agent_credential_names.return_value = [
             "brightdata_cdp_url", "myapp_password",
         ]
+        self.components["credential_vault"].list_system_credential_names.return_value = []
         self.client = _make_client(self.components)
 
     def teardown_method(self):
@@ -1219,6 +1221,9 @@ class TestDashboardAgentConfigAllowedCredentials:
         ]
         self.components["credential_vault"].list_agent_credential_names.return_value = [
             "brightdata_cdp_url", "myapp_password",
+        ]
+        self.components["credential_vault"].list_system_credential_names.return_value = [
+            "anthropic_api_key", "openai_api_key",
         ]
         self.client = _make_client(self.components)
 

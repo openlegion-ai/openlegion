@@ -209,17 +209,20 @@ class SetupWizard:
 
         # API key with validation
         key_name = f"{provider}_api_key"
-        existing_key = os.environ.get(f"OPENLEGION_CRED_{key_name.upper()}", "")
+        existing_key = (
+            os.environ.get(f"OPENLEGION_SYSTEM_{key_name.upper()}", "")
+            or os.environ.get(f"OPENLEGION_CRED_{key_name.upper()}", "")
+        )
         if existing_key:
             click.echo(f"  API key already set for {provider}.")
             if click.confirm("  Replace it?", default=False):
                 api_key = self._prompt_and_validate_key(provider, _PROVIDERS[choice - 1]["label"])
                 if api_key:
-                    _set_env_key(key_name, api_key)
+                    _set_env_key(key_name, api_key, system=True)
         else:
             api_key = self._prompt_and_validate_key(provider, _PROVIDERS[choice - 1]["label"])
             if api_key:
-                _set_env_key(key_name, api_key)
+                _set_env_key(key_name, api_key, system=True)
 
         click.echo("  Tip: Use /addkey or the dashboard to set a custom API base URL.\n")
 
@@ -494,7 +497,7 @@ class InlineSetup:
         """Return True when no LLM credentials are configured."""
         if credential_vault is None:
             return True
-        return not bool(credential_vault.credentials)
+        return not bool(credential_vault.credentials or credential_vault.system_credentials)
 
     def run(self) -> None:
         """Run the streamlined inline setup flow.
@@ -539,12 +542,12 @@ class InlineSetup:
         else:
             click.echo(" could not validate (saved anyway).\n")
 
-        # Store the credential
+        # Store the credential (system tier — LLM provider key)
         service = f"{provider}_api_key"
         if self.credential_vault:
-            self.credential_vault.add_credential(service, api_key.strip())
-        _set_env_key(service, api_key.strip())
-        click.echo(f"  Credential '{service}' stored.")
+            self.credential_vault.add_credential(service, api_key.strip(), system=True)
+        _set_env_key(service, api_key.strip(), system=True)
+        click.echo(f"  Credential '{service}' stored (system tier).")
 
         # Model selection
         models = _PROVIDER_MODELS[provider]

@@ -151,6 +151,7 @@ function dashboard() {
     // Credentials
     showCredForm: false,
     credService: '',
+    credCustomService: '',
     credKey: '',
     credBaseUrl: '',
 
@@ -1359,9 +1360,10 @@ function dashboard() {
     // ── Credentials ──────────────────────────────────────
 
     async addCredential() {
-      if (!this.credService.trim() || !this.credKey.trim()) return;
+      const service = this.credService === '__custom__' ? this.credCustomService.trim() : this.credService.trim();
+      if (!service || !this.credKey.trim()) return;
       try {
-        const body = { service: this.credService.trim(), key: this.credKey.trim() };
+        const body = { service, key: this.credKey.trim() };
         if (this.credBaseUrl.trim()) body.base_url = this.credBaseUrl.trim();
         const resp = await fetch(`${window.__config.apiBase}/credentials`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1369,8 +1371,9 @@ function dashboard() {
         });
         if (resp.ok) {
           const data = await resp.json();
-          this.showToast(`Credential stored: ${data.service}`);
+          this.showToast(`Credential stored: ${data.service} (${data.tier} tier)`);
           this.credService = '';
+          this.credCustomService = '';
           this.credKey = '';
           this.credBaseUrl = '';
           this.showCredForm = false;

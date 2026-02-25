@@ -281,9 +281,10 @@ def create_dashboard_router(
             allowed_creds = permissions.get_allowed_credentials(agent_id)
 
         # Compute credential visibility for the dashboard UI
-        all_names = credential_vault.list_credential_names() if credential_vault else []
         agent_cred_names = credential_vault.list_agent_credential_names() if credential_vault else []
-        system_cred_names = sorted(n for n in all_names if n not in set(agent_cred_names))
+        system_cred_names = sorted(
+            credential_vault.list_system_credential_names()
+        ) if credential_vault else []
         resolved = sorted(
             c for c in agent_cred_names
             if any(fnmatch(c, p) for p in allowed_creds)
@@ -655,17 +656,23 @@ def create_dashboard_router(
         if not service or not key:
             raise HTTPException(status_code=400, detail="service and key are required")
         # Normalize bare provider names
-        known_providers = {"anthropic", "openai", "gemini", "deepseek", "moonshot", "minimax", "xai", "groq"}
-        if service.lower() in known_providers and not service.lower().endswith("_api_key"):
+        from src.host.credentials import SYSTEM_CREDENTIAL_PROVIDERS
+        if service.lower() in SYSTEM_CREDENTIAL_PROVIDERS and not service.lower().endswith("_api_key"):
             service = f"{service}_api_key"
-        credential_vault.add_credential(service, key)
+        # Detect known LLM providers → system tier
+        is_system = False
+        if service.lower().endswith("_api_key"):
+            provider = service.lower().replace("_api_key", "")
+            if provider in SYSTEM_CREDENTIAL_PROVIDERS:
+                is_system = True
+        credential_vault.add_credential(service, key, system=is_system)
         # Store optional custom API base URL alongside the key
         base_url = body.get("base_url", "").strip()
         if base_url:
-            # Derive provider name: "openai_api_key" → "openai"
             provider = service.replace("_api_key", "")
-            credential_vault.add_credential(f"{provider}_api_base", base_url)
-        return {"stored": True, "service": service}
+            credential_vault.add_credential(f"{provider}_api_base", base_url, system=is_system)
+        tier = "system" if is_system else "agent"
+        return {"stored": True, "service": service, "tier": tier}
 
     @api_router.delete("/api/credentials/{name}")
     async def api_remove_credential(name: str) -> dict:
@@ -874,12 +881,11 @@ def create_dashboard_router(
     @api_router.get("/api/settings")
     async def api_settings() -> dict:
         from src.host.costs import MODEL_COSTS
+        from src.host.credentials import SYSTEM_CREDENTIAL_PROVIDERS
 
         cred_names = credential_vault.list_credential_names() if credential_vault else []
         agent_cred_names = credential_vault.list_agent_credential_names() if credential_vault else []
-        _llm_key_names = {"anthropic_api_key", "openai_api_key", "gemini_api_key",
-                          "deepseek_api_key", "moonshot_api_key", "minimax_api_key",
-                          "xai_api_key", "groq_api_key"}
+        _llm_key_names = {f"{p}_api_key" for p in SYSTEM_CREDENTIAL_PROVIDERS}
         has_llm = bool(set(cred_names) & _llm_key_names)
         pubsub_subs = pubsub.subscriptions if pubsub else {}
         return {

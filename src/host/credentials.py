@@ -4,8 +4,15 @@ Stores and manages API credentials loaded from environment variables.
 Agents NEVER see credentials -- they request API calls through the mesh,
 and the vault authenticates on their behalf.
 
-Env var format: OPENLEGION_CRED_<SERVICE>_<KEY_NAME>
-  e.g. OPENLEGION_CRED_ANTHROPIC_API_KEY
+Two-tier credential system:
+  OPENLEGION_SYSTEM_<NAME>  — System-tier. Used by mesh proxy internally.
+                              Never resolvable by agents.
+  OPENLEGION_CRED_<NAME>    — Agent-tier. Accessible based on
+                              ``allowed_credentials`` permission patterns.
+
+Backwards compat: old-style ``OPENLEGION_CRED_`` provider keys (e.g.
+``OPENLEGION_CRED_ANTHROPIC_API_KEY``) are auto-promoted to system tier
+with a deprecation warning.
 """
 
 from __future__ import annotations
@@ -13,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import warnings
 from collections.abc import Callable
 
 import httpx
@@ -98,7 +106,12 @@ def _remove_from_env(env_key: str, env_file: str = "") -> None:
     os.environ.pop(env_key, None)
 
 
-# System credential patterns — these are never resolvable by agents.
+# ── Prefix constants ───────────────────────────────────────
+SYSTEM_PREFIX = "OPENLEGION_SYSTEM_"
+AGENT_PREFIX = "OPENLEGION_CRED_"
+
+# System credential patterns — used as a backwards-compat fallback to
+# auto-promote old-style OPENLEGION_CRED_ provider keys to system tier.
 # Derived from _PROVIDER_KEY_MAP providers.
 SYSTEM_CREDENTIAL_PROVIDERS = frozenset({
     "anthropic", "openai", "gemini", "deepseek", "moonshot",
@@ -130,6 +143,7 @@ class CredentialVault:
         cost_tracker: object | None = None,
         failover_config: dict[str, list[str]] | None = None,
     ) -> None:
+        self.system_credentials: dict[str, str] = {}
         self.credentials: dict[str, str] = {}
         self.api_bases: dict[str, str] = {}
         self.service_handlers: dict[str, Callable] = {}
@@ -159,71 +173,135 @@ class CredentialVault:
         self._budget_locks.pop(agent_id, None)
 
     def _load_credentials(self) -> None:
-        """Load credentials from environment variables.
+        """Load credentials from environment variables (two-phase).
 
-        Standard credentials: ``OPENLEGION_CRED_<SERVICE>_<KEY_NAME>``
-        Custom base URLs:     ``OPENLEGION_CRED_<PROVIDER>_API_BASE``
+        Phase 1: Scan ``OPENLEGION_SYSTEM_*`` → ``system_credentials`` / ``api_bases``.
+        Phase 2: Scan ``OPENLEGION_CRED_*`` → if ``is_system_credential(name)``
+                 AND not already in system tier, auto-promote with deprecation
+                 warning.  Otherwise → ``credentials`` (agent tier).
 
-        Base URLs are stored separately from credentials to keep the
-        API key lookup path clean.
+        ``OPENLEGION_SYSTEM_`` takes precedence when both prefixes exist
+        for the same credential name.
         """
-        prefix = "OPENLEGION_CRED_"
+        # Phase 1: explicit system-tier credentials
         for key, value in os.environ.items():
-            if key.startswith(prefix):
-                cred_name = key[len(prefix) :].lower()
+            if key.startswith(SYSTEM_PREFIX):
+                cred_name = key[len(SYSTEM_PREFIX):].lower()
                 if cred_name.endswith("_api_base"):
-                    # e.g. OPENLEGION_CRED_OPENAI_API_BASE → openai_api_base
                     self.api_bases[cred_name] = value
                 else:
+                    self.system_credentials[cred_name] = value
+
+        # Phase 2: agent-tier credentials (with auto-promotion for legacy keys)
+        for key, value in os.environ.items():
+            if key.startswith(AGENT_PREFIX):
+                cred_name = key[len(AGENT_PREFIX):].lower()
+                if cred_name.endswith("_api_base"):
+                    # Only store if not already set by SYSTEM_ prefix
+                    if cred_name not in self.api_bases:
+                        self.api_bases[cred_name] = value
+                elif is_system_credential(cred_name):
+                    # Auto-promote old-style provider keys to system tier
+                    if cred_name not in self.system_credentials:
+                        self.system_credentials[cred_name] = value
+                        warnings.warn(
+                            f"Credential '{key}' is a provider key. "
+                            f"Rename to '{SYSTEM_PREFIX}{cred_name.upper()}' "
+                            f"for explicit system-tier classification. "
+                            f"Auto-promoted to system tier.",
+                            DeprecationWarning,
+                            stacklevel=2,
+                        )
+                else:
                     self.credentials[cred_name] = value
-        loaded = list(self.credentials.keys())
-        if loaded:
-            logger.info(f"Loaded credentials: {', '.join(loaded)}")
+
+        loaded_system = list(self.system_credentials.keys())
+        loaded_agent = list(self.credentials.keys())
+        if loaded_system:
+            logger.info(f"Loaded system credentials: {', '.join(loaded_system)}")
+        if loaded_agent:
+            logger.info(f"Loaded agent credentials: {', '.join(loaded_agent)}")
         if self.api_bases:
             logger.info(f"Loaded custom API bases: {', '.join(self.api_bases.keys())}")
 
-    def add_credential(self, name: str, value: str) -> str:
-        """Store a credential in memory and persist to .env. Returns a $CRED{name} handle."""
+    def add_credential(self, name: str, value: str, *, system: bool = False) -> str:
+        """Store a credential in memory and persist to .env.
+
+        Args:
+            system: If True, stores in ``system_credentials`` with the
+                    ``OPENLEGION_SYSTEM_`` prefix. Otherwise stores in
+                    ``credentials`` (agent tier) with ``OPENLEGION_CRED_``.
+
+        Returns a ``$CRED{name}`` handle.
+        """
         cred_key = name.lower()
+        prefix = SYSTEM_PREFIX if system else AGENT_PREFIX
         if cred_key.endswith("_api_base"):
             self.api_bases[cred_key] = value
+        elif system:
+            self.system_credentials[cred_key] = value
         else:
             self.credentials[cred_key] = value
-        env_key = f"OPENLEGION_CRED_{name.upper()}"
+        env_key = f"{prefix}{name.upper()}"
         _persist_to_env(env_key, value)
-        logger.info(f"Credential stored: {cred_key}")
+        tier = "system" if system else "agent"
+        logger.info(f"Credential stored ({tier}): {cred_key}")
         return f"$CRED{{{name}}}"
 
     def resolve_credential(self, name: str) -> str | None:
-        """Resolve a credential name to its value. Returns None if not found."""
+        """Resolve a credential name to its value (agent-tier only).
+
+        System-tier credentials are never returned here — they are only
+        accessible internally by the mesh proxy handlers.
+        """
         return self.credentials.get(name.lower())
 
     def list_credential_names(self) -> list[str]:
-        """Return a list of credential names (never values)."""
-        return list(self.credentials.keys())
+        """Return all credential names across both tiers (never values)."""
+        combined = set(self.system_credentials.keys()) | set(self.credentials.keys())
+        return sorted(combined)
 
     def list_agent_credential_names(self) -> list[str]:
-        """Return only non-system credential names (available for agent access)."""
-        return [n for n in self.credentials if not is_system_credential(n)]
+        """Return agent-tier credential names only.
+
+        Since loading already sorts credentials into the correct tier,
+        this simply returns ``credentials`` keys — no filtering needed.
+        """
+        return list(self.credentials.keys())
+
+    def list_system_credential_names(self) -> list[str]:
+        """Return system-tier credential names only."""
+        return list(self.system_credentials.keys())
 
     def remove_credential(self, name: str) -> bool:
-        """Remove a credential from memory, .env, and os.environ. Returns True if it existed."""
+        """Remove a credential from memory, .env, and os.environ.
+
+        Searches both tiers and removes from both ``OPENLEGION_SYSTEM_``
+        and ``OPENLEGION_CRED_`` env prefixes.  Returns True if it existed.
+        """
         cred_key = name.lower()
+        existed = False
         if cred_key.endswith("_api_base"):
             existed = cred_key in self.api_bases
             self.api_bases.pop(cred_key, None)
         else:
-            existed = cred_key in self.credentials
-            self.credentials.pop(cred_key, None)
-        env_key = f"OPENLEGION_CRED_{name.upper()}"
-        _remove_from_env(env_key)
+            if cred_key in self.system_credentials:
+                existed = True
+                self.system_credentials.pop(cred_key, None)
+            if cred_key in self.credentials:
+                existed = True
+                self.credentials.pop(cred_key, None)
+        # Remove from both possible env prefixes
+        _remove_from_env(f"{SYSTEM_PREFIX}{name.upper()}")
+        _remove_from_env(f"{AGENT_PREFIX}{name.upper()}")
         if existed:
             logger.info(f"Credential removed: {cred_key}")
         return existed
 
     def has_credential(self, name: str) -> bool:
-        """Check if a credential exists by name."""
-        return name.lower() in self.credentials
+        """Check if a credential exists by name (either tier)."""
+        lower = name.lower()
+        return lower in self.credentials or lower in self.system_credentials
 
     def _register_handlers(self) -> None:
         """Register API call handlers for each supported service."""
@@ -321,18 +399,27 @@ class CredentialVault:
     }
 
     def _get_api_key_for_model(self, model: str) -> str | None:
-        """Resolve the API key for a model based on its provider prefix."""
+        """Resolve the API key for a model based on its provider prefix.
+
+        Checks system_credentials first, then falls back to credentials
+        (agent tier) for backwards compatibility.
+        """
         for prefix, provider in self._PROVIDER_KEY_MAP.items():
             if model.startswith(prefix):
-                return self.credentials.get(f"{provider}_api_key")
+                key_name = f"{provider}_api_key"
+                return (
+                    self.system_credentials.get(key_name)
+                    or self.credentials.get(key_name)
+                )
         return None
 
     def _get_api_base_for_model(self, model: str) -> str | None:
         """Resolve a custom API base URL for a model's provider.
 
-        Looks up ``OPENLEGION_CRED_<PROVIDER>_API_BASE`` (e.g.
-        ``OPENLEGION_CRED_OPENAI_API_BASE``). Returns *None* when no
-        custom base is configured — LiteLLM uses its own defaults.
+        Checks ``OPENLEGION_SYSTEM_<PROVIDER>_API_BASE`` first, then
+        falls back to ``OPENLEGION_CRED_<PROVIDER>_API_BASE``.
+        Returns *None* when no custom base is configured — LiteLLM
+        uses its own defaults.
         """
         for prefix, provider in self._PROVIDER_KEY_MAP.items():
             if model.startswith(prefix):
@@ -587,7 +674,10 @@ class CredentialVault:
 
     async def _handle_anthropic(self, request: APIProxyRequest) -> APIProxyResponse:
         """Handle Anthropic API calls (LLM completions, embeddings) via LiteLLM."""
-        api_key = self.credentials.get("anthropic_api_key")
+        api_key = (
+            self.system_credentials.get("anthropic_api_key")
+            or self.credentials.get("anthropic_api_key")
+        )
         if not api_key:
             return APIProxyResponse(success=False, error="Anthropic API key not configured")
 
@@ -645,7 +735,10 @@ class CredentialVault:
 
     async def _handle_openai(self, request: APIProxyRequest) -> APIProxyResponse:
         """Handle OpenAI API calls (embeddings)."""
-        api_key = self.credentials.get("openai_api_key")
+        api_key = (
+            self.system_credentials.get("openai_api_key")
+            or self.credentials.get("openai_api_key")
+        )
         if not api_key:
             return APIProxyResponse(success=False, error="OpenAI API key not configured")
 
