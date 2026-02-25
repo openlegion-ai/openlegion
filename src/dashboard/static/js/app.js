@@ -1124,13 +1124,163 @@ function dashboard() {
     _scrollTimers: {},
 
     _scrollChat(agentId) {
-      // Debounce: batch rapid scroll calls during streaming (50ms)
       if (this._scrollTimers[agentId]) return;
       this._scrollTimers[agentId] = setTimeout(() => {
         delete this._scrollTimers[agentId];
         const el = document.getElementById('chat-messages-' + agentId);
         if (el) el.scrollTop = el.scrollHeight;
       }, 50);
+    },
+
+    _escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    },
+
+    _truncateText(value, max = 220) {
+      const text = String(value ?? '');
+      if (text.length <= max) return text;
+      return text.slice(0, max) + '…';
+    },
+
+    _chatToolValueToText(value) {
+      if (value == null) return '';
+      if (typeof value === 'string') return value;
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch (_) {
+        return String(value);
+      }
+    },
+
+    chatToolValueBlock(value) {
+      return this._chatToolValueToText(value);
+    },
+
+    chatToolPreview(value) {
+      const text = this._chatToolValueToText(value).replace(/\s+/g, ' ').trim();
+      return this._truncateText(text, 140);
+    },
+
+    chatToolCount(msg) {
+      if (!msg) return 0;
+      if (Array.isArray(msg.tools)) return msg.tools.length;
+      if (!Array.isArray(msg.timeline)) return 0;
+      return msg.timeline.filter(step => step && step.kind === 'tool').length;
+    },
+
+    chatPhaseLabel(msg) {
+      if (!msg) return 'Idle';
+      if (msg.role === 'error') return 'Error';
+      if (msg.streaming) {
+        if (msg.phase === 'tool') return 'Using tools';
+        if (msg.phase === 'responding') return 'Responding';
+        return 'Thinking';
+      }
+      if (msg.phase === 'done') return 'Completed';
+      if (msg.phase === 'responding') return 'Responded';
+      if (msg.phase === 'tool') return 'Tool run';
+      return 'Ready';
+    },
+
+    chatPhaseClass(msg) {
+      if (!msg) return 'chat-phase-neutral';
+      if (msg.role === 'error') return 'chat-phase-error';
+      if (msg.streaming) {
+        if (msg.phase === 'tool') return 'chat-phase-tool';
+        if (msg.phase === 'responding') return 'chat-phase-responding';
+        return 'chat-phase-thinking';
+      }
+      if (msg.phase === 'done' || msg.phase === 'responding') return 'chat-phase-done';
+      if (msg.phase === 'tool') return 'chat-phase-tool';
+      return 'chat-phase-neutral';
+    },
+
+    chatPhaseMarkerClass(phase) {
+      return ({
+        thinking: 'chat-phase-thinking',
+        tool: 'chat-phase-tool',
+        responding: 'chat-phase-responding',
+        done: 'chat-phase-done',
+        error: 'chat-phase-error',
+      })[phase] || 'chat-phase-neutral';
+    },
+
+    renderChatMarkdown(text) {
+      const source = String(text ?? '');
+      if (!source) return '';
+      const fallback = this._escapeHtml(source).replace(/\n/g, '<br>');
+      const markedLib = window.marked;
+      const purify = window.DOMPurify;
+      if (!markedLib || !purify) return fallback;
+      try {
+        const raw = markedLib.parse(source, {
+          gfm: true,
+          breaks: true,
+          headerIds: false,
+          mangle: false,
+        });
+        const sanitized = purify.sanitize(raw, { USE_PROFILES: { html: true } });
+        const tpl = document.createElement('template');
+        tpl.innerHTML = sanitized;
+        tpl.content.querySelectorAll('a[href]').forEach((a) => {
+          a.setAttribute('target', '_blank');
+          a.setAttribute('rel', 'noopener noreferrer');
+        });
+        return tpl.innerHTML;
+      } catch (_) {
+        return fallback;
+      }
+    },
+
+    _findRunningToolIndex(tools, name) {
+      for (let i = tools.length - 1; i >= 0; i -= 1) {
+        if (tools[i].name === name && tools[i].status === 'running') return i;
+      }
+      return -1;
+    },
+
+    _chatPhaseStepLabel(phase) {
+      const labels = {
+        thinking: 'Thinking',
+        tool: 'Tool call',
+        responding: 'Drafting response',
+        done: 'Done',
+        error: 'Error',
+      };
+      return labels[phase] || 'Update';
+    },
+
+    _pushChatTimelinePhase(entry, phase) {
+      if (!entry) return;
+      if (!Array.isArray(entry.timeline)) entry.timeline = [];
+      const last = entry.timeline[entry.timeline.length - 1];
+      if (last && last.kind === 'phase' && last.phase === phase) return;
+      entry.timeline.push({
+        kind: 'phase',
+        phase,
+        label: this._chatPhaseStepLabel(phase),
+      });
+    },
+
+    _appendChatTimelineText(entry, chunk) {
+      if (!entry || !chunk) return;
+      if (!Array.isArray(entry.timeline)) entry.timeline = [];
+      const last = entry.timeline[entry.timeline.length - 1];
+      if (last && last.kind === 'text') {
+        last.content += chunk;
+        return;
+      }
+      entry.timeline.push({ kind: 'text', content: chunk });
+    },
+
+    _chatTimelineHasText(entry) {
+      return !!(entry && Array.isArray(entry.timeline) &&
+        entry.timeline.some(step => step && step.kind === 'text' && step.content));
     },
 
     async sendChatTo(agentId, inputValue) {
@@ -1141,8 +1291,17 @@ function dashboard() {
       this.chatLoadingAgents[agentId] = true;
       this.chatStreamingAgents[agentId] = true;
 
-      this.chatHistories[agentId].push({ role: 'agent', content: '', streaming: true, tools: [] });
+      this.chatHistories[agentId].push({
+        role: 'agent',
+        content: '',
+        streaming: true,
+        phase: 'thinking',
+        tools: [],
+        timeline: [],
+        _sawTextDelta: false,
+      });
       const idx = this.chatHistories[agentId].length - 1;
+      this._pushChatTimelinePhase(this.chatHistories[agentId][idx], 'thinking');
       this.$nextTick(() => this._scrollChat(agentId));
 
       const controller = new AbortController();
@@ -1187,36 +1346,74 @@ function dashboard() {
 
             if (data.type === 'text_delta') {
               if (firstToken) { this.chatLoadingAgents[agentId] = false; firstToken = false; }
+              entry.phase = 'responding';
+              entry._sawTextDelta = true;
+              this._pushChatTimelinePhase(entry, 'responding');
+              this._appendChatTimelineText(entry, data.content || '');
               entry.content += data.content || '';
               this._scrollChat(agentId);
             } else if (data.type === 'tool_start') {
               if (firstToken) { this.chatLoadingAgents[agentId] = false; firstToken = false; }
-              entry.tools.push({ name: data.name, status: 'running', input: data.input });
+              entry.phase = 'tool';
+              this._pushChatTimelinePhase(entry, 'tool');
+              const toolEntry = {
+                id: `${Date.now()}-${entry.tools.length}`,
+                name: data.name,
+                status: 'running',
+                input: data.input,
+                inputPreview: this.chatToolPreview(data.input),
+                output: null,
+                outputPreview: '',
+              };
+              entry.tools.push(toolEntry);
+              entry.timeline.push({ kind: 'tool', ...toolEntry });
               this._scrollChat(agentId);
             } else if (data.type === 'tool_result') {
-              const tool = entry.tools.find(t => t.name === data.name && t.status === 'running');
-              if (tool) {
+              const ti = this._findRunningToolIndex(entry.tools, data.name);
+              if (ti >= 0) {
+                const tool = entry.tools[ti];
                 tool.status = 'done';
-                const raw = typeof data.output === 'string'
-                  ? data.output : JSON.stringify(data.output, null, 0);
-                tool.output = raw.length > 200 ? raw.substring(0, 200) + '...' : raw;
+                tool.output = data.output;
+                tool.outputPreview = this.chatToolPreview(data.output);
+                const timelineToolIndex = this._findRunningToolIndex(entry.timeline, data.name);
+                if (timelineToolIndex >= 0) {
+                  const timelineTool = entry.timeline[timelineToolIndex];
+                  timelineTool.status = 'done';
+                  timelineTool.output = data.output;
+                  timelineTool.outputPreview = tool.outputPreview;
+                }
               }
+              entry.phase = 'thinking';
+              this._pushChatTimelinePhase(entry, 'thinking');
             } else if (data.type === 'done') {
-              entry.content = data.response || entry.content;
+              const finalResponse = data.response || '';
+              if (finalResponse && !entry._sawTextDelta && !this._chatTimelineHasText(entry)) {
+                this._pushChatTimelinePhase(entry, 'responding');
+                this._appendChatTimelineText(entry, finalResponse);
+              }
+              entry.content = finalResponse || entry.content;
               entry.streaming = false;
+              entry.phase = 'done';
             } else if (data.type === 'error') {
               entry.content = data.message || 'Stream error';
               entry.role = 'error';
               entry.streaming = false;
+              entry.phase = 'error';
+              this._pushChatTimelinePhase(entry, 'error');
             }
           }
         }
         this.chatHistories[agentId][idx].streaming = false;
+        if (this.chatHistories[agentId][idx].role !== 'error' && this.chatHistories[agentId][idx].phase !== 'done') {
+          this.chatHistories[agentId][idx].phase = 'done';
+        }
       } catch (e) {
         if (e.name === 'AbortError') return;
         this.chatHistories[agentId][idx].content = e.message;
         this.chatHistories[agentId][idx].role = 'error';
         this.chatHistories[agentId][idx].streaming = false;
+        this.chatHistories[agentId][idx].phase = 'error';
+        this._pushChatTimelinePhase(this.chatHistories[agentId][idx], 'error');
       }
       delete this._chatAborts[agentId];
       this.chatLoadingAgents[agentId] = false;
@@ -1544,6 +1741,83 @@ function dashboard() {
         llm_stream: 'bg-purple-300',
       };
       return map[type] || 'bg-gray-400';
+    },
+
+    eventTypeLabel(type) {
+      const map = {
+        agent_state: 'state',
+        message_sent: 'msg out',
+        message_received: 'msg in',
+        tool_start: 'tool start',
+        tool_result: 'tool result',
+        text_delta: 'stream',
+        llm_call: 'llm',
+        blackboard_write: 'blackboard',
+        health_change: 'health',
+      };
+      if (!type) return 'event';
+      return map[type] || String(type).replace(/_/g, ' ');
+    },
+
+    eventClock(ts) {
+      if (!ts) return '';
+      const ms = typeof ts === 'number' ? ts * 1000 : Date.parse(ts);
+      if (!Number.isFinite(ms)) return '';
+      return new Date(ms).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+    },
+
+    _isOverviewNoiseEvent(evt) {
+      if (!evt) return true;
+      if (evt.type === 'text_delta') return true;
+      if (evt.type === 'agent_state' && evt.data?.state === 'registered') return true;
+      return false;
+    },
+
+    agentAuditPreviewEvents(agentId, limit = 3) {
+      if (!agentId || !Array.isArray(this.events) || this.events.length === 0) return [];
+      const preferred = [];
+      const fallback = [];
+      for (const evt of this.events) {
+        if (evt.agent !== agentId) continue;
+        if (this._isOverviewNoiseEvent(evt)) {
+          if (fallback.length < limit) fallback.push(evt);
+        } else if (preferred.length < limit) {
+          preferred.push(evt);
+        }
+        if (preferred.length >= limit) break;
+      }
+      return preferred.length > 0 ? preferred : fallback;
+    },
+
+    agentLastAuditEvent(agentId) {
+      const rows = this.agentAuditPreviewEvents(agentId, 1);
+      return rows.length ? rows[0] : null;
+    },
+
+    agentActivityStateLabel(agentId) {
+      const state = this.agentStates?.[agentId] || 'idle';
+      const labels = {
+        idle: 'Idle',
+        thinking: 'Thinking',
+        tool: 'Tool run',
+        streaming: 'Responding',
+      };
+      return labels[state] || state;
+    },
+
+    agentActivityStateClass(agentId) {
+      const state = this.agentStates?.[agentId] || 'idle';
+      const map = {
+        thinking: 'agent-audit-state-thinking',
+        tool: 'agent-audit-state-tool',
+        streaming: 'agent-audit-state-streaming',
+        idle: 'agent-audit-state-idle',
+      };
+      return map[state] || 'agent-audit-state-idle';
     },
 
     eventDetail(evt) {
