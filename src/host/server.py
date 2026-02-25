@@ -530,6 +530,7 @@ def create_mesh_app(
                 "can_publish": perms.can_publish,
                 "can_subscribe": perms.can_subscribe,
                 "allowed_apis": perms.allowed_apis,
+                "allowed_credentials": perms.allowed_credentials,
             }
 
         if section in ("budget", "all") and cost_tracker:

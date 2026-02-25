@@ -703,6 +703,7 @@ def test_introspect_returns_permissions(tmp_path):
             can_publish=["updates"],
             can_subscribe=["alerts"],
             allowed_apis=["anthropic"],
+            allowed_credentials=["brightdata_*"],
         ),
     }
     router = MessageRouter(permissions=perms, agent_registry={})
@@ -721,6 +722,15 @@ def test_introspect_returns_permissions(tmp_path):
     assert data["permissions"]["blackboard_read"] == ["context/*", "tasks/*"]
     assert data["permissions"]["can_message"] == ["bob"]
     assert data["permissions"]["allowed_apis"] == ["anthropic"]
+    assert data["permissions"]["allowed_credentials"] == ["brightdata_*"]
+
+    # Sync guard: introspect response keys must match INTROSPECT_PERM_KEYS
+    from src.agent.workspace import INTROSPECT_PERM_KEYS
+    assert set(data["permissions"].keys()) == set(INTROSPECT_PERM_KEYS), (
+        f"Introspect permissions keys out of sync with INTROSPECT_PERM_KEYS. "
+        f"Endpoint: {sorted(data['permissions'].keys())}. "
+        f"Constant: {sorted(INTROSPECT_PERM_KEYS)}."
+    )
 
     bb.close()
 

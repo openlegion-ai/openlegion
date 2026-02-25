@@ -6,7 +6,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from src.agent.workspace import WorkspaceManager, _bm25_score, _tokenize, generate_system_md
+from src.agent.workspace import _MAX_SYSTEM, WorkspaceManager, _bm25_score, _tokenize, generate_system_md
 
 
 class TestWorkspaceScaffold:
@@ -580,12 +580,14 @@ class TestGenerateSystemMd:
                 "can_publish": [],
                 "can_subscribe": [],
                 "allowed_apis": ["anthropic"],
+                "allowed_credentials": ["brightdata_*"],
             }
         }
         result = generate_system_md(data, "alice")
         assert "## Your Permissions (snapshot)" in result
         assert "context/*, tasks/*" in result
         assert "anthropic" in result
+        assert "brightdata_*" in result
 
     def test_includes_fleet(self):
         data = {
@@ -628,6 +630,33 @@ class TestGenerateSystemMd:
         # Role should be truncated — the full 200-char role should not appear
         assert "x" * 200 not in result
         assert "x" * 80 in result
+
+    def test_output_capped_at_max_system(self):
+        """Output is capped at _MAX_SYSTEM chars to prevent oversized files."""
+        # Create a fleet with many agents to blow past the limit
+        data = {
+            "fleet": [
+                {"id": f"agent_{i}", "role": f"role description {i} " * 10}
+                for i in range(200)
+            ]
+        }
+        result = generate_system_md(data, "agent_0")
+        # rsplit trims partial line, then "\n\n... (truncated)" (19 chars) appended
+        assert len(result) <= _MAX_SYSTEM + 20
+        assert result.endswith("... (truncated)")
+
+    def test_agent_ids_sanitized(self):
+        """Agent IDs in fleet are sanitized to prevent prompt injection."""
+        data = {
+            "fleet": [
+                {"id": "good_agent", "role": "helper"},
+                {"id": "evil\u200bagent", "role": "normal"},
+            ]
+        }
+        result = generate_system_md(data, "good_agent")
+        # Zero-width space should be stripped by sanitize_for_prompt
+        assert "\u200b" not in result
+        assert "evilagent" in result
 
 
 class TestBootstrapIncludesSystemMd:

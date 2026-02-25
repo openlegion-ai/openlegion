@@ -67,6 +67,14 @@ _MAX_FILE_SIZE = 200_000
 # Bootstrap capping — limits for system prompt injection
 _MAX_BOOTSTRAP = 40_000
 _MAX_SYSTEM = 6_000
+
+# Permission keys surfaced to agents in SYSTEM.md and Runtime Context.
+# Keep in sync with the introspect endpoint in src/host/server.py.
+INTROSPECT_PERM_KEYS = (
+    "blackboard_read", "blackboard_write", "can_message",
+    "can_publish", "can_subscribe", "allowed_apis",
+    "allowed_credentials",
+)
 _MAX_AGENTS = 8_000
 _MAX_SOUL = 4_000
 _MAX_USER = 4_000
@@ -475,10 +483,7 @@ def generate_system_md(introspect_data: dict, agent_id: str) -> str:
     perms = introspect_data.get("permissions")
     if perms:
         lines = ["## Your Permissions (snapshot)\n"]
-        for key in (
-            "blackboard_read", "blackboard_write", "can_message",
-            "can_publish", "can_subscribe", "allowed_apis",
-        ):
+        for key in INTROSPECT_PERM_KEYS:
             patterns = perms.get(key, [])
             if isinstance(patterns, list) and patterns:
                 lines.append(f"- **{key}**: {', '.join(str(p) for p in patterns)}")
@@ -488,15 +493,19 @@ def generate_system_md(introspect_data: dict, agent_id: str) -> str:
     if fleet:
         names = []
         for agent in fleet:
-            aid = agent.get("id", "?")
+            aid = sanitize_for_prompt(str(agent.get("id", "?")))
             role = sanitize_for_prompt(str(agent.get("role", "")))
-            # Truncate role to prevent bloat from malicious registration
+            # Truncate to prevent bloat from malicious registration
+            aid = aid[:60]
             role = role[:80]
             marker = " (you)" if aid == agent_id else ""
             names.append(f"{aid}{marker}" + (f" ({role})" if role else ""))
         parts.append(f"## Fleet: {', '.join(names)}")
 
-    return "\n\n".join(parts)
+    content = "\n\n".join(parts)
+    if len(content) > _MAX_SYSTEM:
+        content = content[:_MAX_SYSTEM].rsplit("\n", 1)[0] + "\n\n... (truncated)"
+    return content
 
 
 # ── BM25 implementation (no external deps) ───────────────────

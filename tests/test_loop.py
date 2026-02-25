@@ -1185,3 +1185,148 @@ class TestCollectToolNames:
             {"role": "assistant", "content": "hello"},
         ]
         assert AgentLoop._collect_tool_names(messages) == []
+
+
+# ── Runtime context injection ────────────────────────────────────
+
+
+class TestRuntimeContextInjection:
+    """Verify ## Runtime Context is injected into system prompts."""
+
+    _INTROSPECT_DATA = {
+        "permissions": {
+            "blackboard_read": ["context/*"],
+            "blackboard_write": ["context/test_*"],
+            "can_message": ["bob"],
+            "can_publish": [],
+            "can_subscribe": [],
+            "allowed_apis": ["anthropic"],
+            "allowed_credentials": ["brightdata_*"],
+        },
+        "budget": {
+            "allowed": True,
+            "daily_used": 0.50,
+            "daily_limit": 5.00,
+            "monthly_used": 3.00,
+            "monthly_limit": 50.00,
+        },
+        "fleet": [
+            {"id": "test_agent", "role": "research"},
+            {"id": "bob", "role": "engineer"},
+        ],
+    }
+
+    def test_task_mode_includes_runtime_context(self):
+        """_build_system_prompt includes ## Runtime Context with introspect data."""
+        from src.shared.types import TaskAssignment
+
+        loop = _make_loop()
+        assignment = TaskAssignment(
+            workflow_id="wf1", step_id="s1", task_type="test",
+            input_data={"instruction": "do stuff"},
+        )
+        prompt = loop._build_system_prompt(assignment, introspect_data=self._INTROSPECT_DATA)
+        assert "## Runtime Context" in prompt
+        assert "Budget: daily $0.50/$5.00" in prompt
+        assert "allowed_credentials: brightdata_*" in prompt
+
+    def test_chat_mode_includes_runtime_context(self):
+        """_build_chat_system_prompt includes ## Runtime Context."""
+        loop = _make_loop()
+        prompt = loop._build_chat_system_prompt(introspect_data=self._INTROSPECT_DATA)
+        assert "## Runtime Context" in prompt
+        assert "Budget: daily $0.50/$5.00" in prompt
+        assert "allowed_credentials: brightdata_*" in prompt
+
+    def test_chat_mode_excludes_fleet_from_runtime_when_fleet_ctx_present(self):
+        """When fleet_roster is provided, fleet line is excluded from runtime context."""
+        loop = _make_loop()
+        roster = [{"name": "bob", "role": "engineer"}]
+        prompt = loop._build_chat_system_prompt(
+            fleet_roster=roster,
+            introspect_data=self._INTROSPECT_DATA,
+        )
+        # Detailed fleet block should be present
+        assert "Your Team" in prompt
+        # Runtime context should NOT duplicate fleet
+        # Split on "## Runtime Context" to check just that section
+        runtime_section = prompt.split("## Runtime Context")[1] if "## Runtime Context" in prompt else ""
+        assert "Fleet:" not in runtime_section
+
+    def test_task_mode_includes_fleet_in_runtime(self):
+        """Task mode has no detailed fleet block, so fleet shows in runtime context."""
+        from src.shared.types import TaskAssignment
+
+        loop = _make_loop()
+        assignment = TaskAssignment(
+            workflow_id="wf1", step_id="s1", task_type="test",
+            input_data={"instruction": "do stuff"},
+        )
+        prompt = loop._build_system_prompt(assignment, introspect_data=self._INTROSPECT_DATA)
+        assert "Fleet: [test_agent, bob]" in prompt
+
+    def test_no_introspect_data_no_runtime_context(self):
+        """Without introspect data, no runtime context block."""
+        from src.shared.types import TaskAssignment
+
+        loop = _make_loop()
+        assignment = TaskAssignment(
+            workflow_id="wf1", step_id="s1", task_type="test",
+            input_data={"instruction": "do stuff"},
+        )
+        prompt = loop._build_system_prompt(assignment, introspect_data=None)
+        assert "## Runtime Context" not in prompt
+
+
+class TestFormatRuntimeContext:
+    """Unit tests for _format_runtime_context static method."""
+
+    def test_empty_data_returns_empty(self):
+        result = AgentLoop._format_runtime_context({})
+        assert result == ""
+
+    def test_exclude_fleet(self):
+        data = {
+            "fleet": [{"id": "alice"}, {"id": "bob"}],
+            "permissions": {"can_message": ["bob"]},
+        }
+        with_fleet = AgentLoop._format_runtime_context(data)
+        assert "Fleet:" in with_fleet
+
+        without_fleet = AgentLoop._format_runtime_context(data, exclude_fleet=True)
+        assert "Fleet:" not in without_fleet
+        # Permissions should still be present
+        assert "can_message: bob" in without_fleet
+
+    def test_budget_exceeded_flag(self):
+        data = {
+            "budget": {
+                "allowed": False,
+                "daily_used": 5.00,
+                "daily_limit": 5.00,
+                "monthly_used": 10.00,
+                "monthly_limit": 50.00,
+            },
+        }
+        result = AgentLoop._format_runtime_context(data)
+        assert "[EXCEEDED]" in result
+
+    def test_cron_formatting(self):
+        data = {
+            "cron": [
+                {"schedule": "*/30 * * * *", "heartbeat": True},
+                {"schedule": "0 9 * * *", "heartbeat": False},
+            ],
+        }
+        result = AgentLoop._format_runtime_context(data)
+        assert "*/30 * * * * (heartbeat)" in result
+        assert "0 9 * * *" in result
+        assert result.count("(heartbeat)") == 1
+
+    def test_fleet_ids_sanitized(self):
+        """Fleet IDs in runtime context are sanitized."""
+        data = {
+            "fleet": [{"id": "good"}, {"id": "evil\u200bagent"}],
+        }
+        result = AgentLoop._format_runtime_context(data)
+        assert "\u200b" not in result

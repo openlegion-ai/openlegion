@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import httpx
 
 from src.agent.loop_detector import ToolLoopDetector
+from src.agent.workspace import INTROSPECT_PERM_KEYS
 from src.shared.types import AgentStatus, TaskAssignment, TaskResult
 from src.shared.utils import format_dict, generate_id, sanitize_for_prompt, setup_logging, truncate
 
@@ -218,21 +219,21 @@ class AgentLoop:
             return self._introspect_cache
 
     @staticmethod
-    def _format_runtime_context(data: dict) -> str:
+    def _format_runtime_context(data: dict, *, exclude_fleet: bool = False) -> str:
         """Format introspect data into a compact runtime context block.
 
         This is the authoritative source of live numbers in the system
         prompt — SYSTEM.md contains the static preamble + a startup snapshot
         while this block has fresh data fetched each turn (with a 5-min cache).
+
+        Set *exclude_fleet* when the detailed fleet context block is already
+        present (chat mode) to avoid token-wasting duplication.
         """
         lines = ["## Runtime Context\n"]
 
         perms = data.get("permissions")
         if perms:
-            for key in (
-                "blackboard_read", "blackboard_write", "can_message",
-                "can_publish", "can_subscribe", "allowed_apis",
-            ):
+            for key in INTROSPECT_PERM_KEYS:
                 patterns = perms.get(key, [])
                 if isinstance(patterns, list) and patterns:
                     lines.append(f"- {key}: {', '.join(str(p) for p in patterns)}")
@@ -248,17 +249,19 @@ class AgentLoop:
                 + ("" if allowed else " [EXCEEDED]")
             )
 
-        fleet = data.get("fleet")
-        if fleet:
-            names = [a.get("id", "?") for a in fleet]
-            lines.append(f"- Fleet: [{', '.join(names)}] ({len(fleet)} agents)")
+        if not exclude_fleet:
+            fleet = data.get("fleet")
+            if fleet:
+                names = [sanitize_for_prompt(str(a.get("id", "?"))) for a in fleet]
+                lines.append(f"- Fleet: [{', '.join(names)}] ({len(fleet)} agents)")
 
         cron = data.get("cron")
         if cron:
             summaries = []
             for j in cron:
                 hb = " (heartbeat)" if j.get("heartbeat") else ""
-                summaries.append(f"{j.get('schedule', '?')}{hb}")
+                schedule = sanitize_for_prompt(str(j.get("schedule", "?")))
+                summaries.append(f"{schedule}{hb}")
             lines.append(f"- Cron: {'; '.join(summaries)}")
 
         return "\n".join(lines) if len(lines) > 1 else ""
@@ -1181,17 +1184,21 @@ class AgentLoop:
         )
 
         # Fleet collaboration context (only for multi-agent setups)
+        has_fleet_ctx = False
         if fleet_roster:
             fleet_ctx = self._build_fleet_context(fleet_roster)
             if fleet_ctx:
                 parts.append(fleet_ctx)
+                has_fleet_ctx = True
 
         tool_history = self._build_tool_history_context()
         if tool_history:
             parts.append(sanitize_for_prompt(tool_history))
 
         if introspect_data:
-            runtime_ctx = self._format_runtime_context(introspect_data)
+            runtime_ctx = self._format_runtime_context(
+                introspect_data, exclude_fleet=has_fleet_ctx,
+            )
             if runtime_ctx:
                 parts.append(runtime_ctx)
 
