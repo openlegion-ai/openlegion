@@ -165,9 +165,11 @@ async def _launch_advanced(mesh_client):
         )
     _pw = await async_playwright().start()
     browser = await _pw.chromium.connect_over_cdp(cdp_url, timeout=120000)
-    # Always create a fresh context for a clean state with known viewport
-    context = await browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
+    # Use Bright Data's default context — it includes managed fingerprinting,
+    # CAPTCHA solving, and anti-detection.  Creating a new context would strip
+    # those protections away.
+    context = browser.contexts[0]
+    page = context.pages[0] if context.pages else await context.new_page()
     logger.info("Browser backend: advanced (Bright Data CDP)")
     return browser, context, page
 
