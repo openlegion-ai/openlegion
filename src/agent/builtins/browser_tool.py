@@ -617,7 +617,9 @@ async def browser_click(selector: str = "", ref: str = "", *, mesh_client=None) 
     description=(
         "Type text into a form field on the current page. Clears the field first, "
         "then enters the new text. Preferred: use ref from browser_snapshot "
-        "(e.g. ref='e5'). Fallback: use a CSS selector."
+        "(e.g. ref='e5'). Fallback: use a CSS selector. "
+        "Use $CRED{name} handles to type secrets (e.g. text='$CRED{twitter_password}') "
+        "— the value is resolved from the vault and never exposed to you."
     ),
     parameters={
         "selector": {
@@ -625,7 +627,13 @@ async def browser_click(selector: str = "", ref: str = "", *, mesh_client=None) 
             "description": "CSS selector of the input element (optional if ref is given)",
             "default": "",
         },
-        "text": {"type": "string", "description": "Text to type"},
+        "text": {
+            "type": "string",
+            "description": (
+                "Text to type. Use $CRED{name} for secrets, "
+                "e.g. '$CRED{twitter_password}'"
+            ),
+        },
         "ref": {
             "type": "string",
             "description": "Element ref from browser_snapshot (e.g. 'e1')",
