@@ -399,6 +399,10 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 
 **Skill Registry Cleanup** — Replace `_skill_staging` module-level mutable global with class-level registry or explicit registration API. Skills register directly onto a `SkillRegistry` instance instead of through a global.
 
+### Browser & Network
+
+**Residential IP Rotation** — Add proxy support to the browser backend so agents can route traffic through rotating residential IPs. Playwright's `chromium.launch()` already accepts a `proxy` parameter (`--proxy-server`). Implementation: configure proxy in `agents.yaml` per agent (`proxy: {type: "socks5", url: "..."}`) with credentials resolved via vault. Support HTTP/HTTPS/SOCKS5 proxy protocols. Compatible with all browser backends (basic, persistent, stealth, advanced). When self-hosting on cloud, server region handles geo; residential proxies handle IP reputation for sites that block datacenter ranges. Proxy services (Smartproxy, IPRoyal, etc.) or self-hosted Squid for datacenter rotation. Priority: low — add when scraping at scale or when datacenter IPs get blocked.
+
 ---
 
 ## Completed
