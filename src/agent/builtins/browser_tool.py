@@ -129,7 +129,7 @@ async def _launch_stealth():
             "camoufox is not installed. The agent container must include "
             "camoufox. See Dockerfile.agent."
         )
-    _camoufox_cm = AsyncCamoufox(headless=True)
+    _camoufox_cm = AsyncCamoufox(headless="virtual")
     browser = await _camoufox_cm.__aenter__()
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
