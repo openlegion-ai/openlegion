@@ -165,7 +165,6 @@ class AgentPermissions(BaseModel):
     blackboard_write: list[str] = []
     allowed_apis: list[str] = []
     allowed_credentials: list[str] = []
-    can_manage_vault: bool = False
 
 
 # === Memory (inside agent container) ===

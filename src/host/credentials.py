@@ -289,8 +289,6 @@ class CredentialVault:
         """Register API call handlers for each supported service."""
         self.service_handlers = {
             "llm": self._handle_llm,
-            "anthropic": self._handle_anthropic,
-            "openai": self._handle_openai,
             "apollo": self._handle_apollo,
             "hunter": self._handle_hunter,
             "brave_search": self._handle_brave_search,
@@ -305,7 +303,7 @@ class CredentialVault:
         prevent two concurrent calls from both passing the budget check
         before either is charged.
         """
-        is_llm = request.service in ("llm", "anthropic", "openai")
+        is_llm = request.service == "llm"
         use_budget_lock = bool(self.cost_tracker and agent_id and is_llm)
 
         if use_budget_lock:
@@ -543,7 +541,7 @@ class CredentialVault:
         """
         import litellm
 
-        if self.cost_tracker and agent_id and request.service in ("llm", "anthropic", "openai"):
+        if self.cost_tracker and agent_id and request.service == "llm":
             model = request.params.get("model", "unknown")
             preflight = self.cost_tracker.preflight_check(agent_id, model)
             if not preflight["allowed"]:
@@ -650,90 +648,6 @@ class CredentialVault:
                 used_model, type(e).__name__, self._get_status_code(e),
             )
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
-
-    async def _handle_anthropic(self, request: APIProxyRequest) -> APIProxyResponse:
-        """Handle Anthropic API calls (LLM completions, embeddings) via LiteLLM."""
-        api_key = self.system_credentials.get("anthropic_api_key")
-        if not api_key:
-            return APIProxyResponse(success=False, error="Anthropic API key not configured")
-
-        import litellm
-
-        api_base = self.api_bases.get("anthropic_api_base")
-
-        if request.action == "chat":
-            model = request.params.get("model", "anthropic/claude-sonnet-4-5-20250929")
-            sanitized = sanitize_for_provider(request.params.get("messages", []), model)
-            extra = {k: v for k, v in request.params.items() if k not in ("model", "messages")}
-            if api_base:
-                extra["api_base"] = api_base
-            response = await litellm.acompletion(
-                model=model,
-                messages=sanitized,
-                api_key=api_key,
-                **extra,
-            )
-            msg = response.choices[0].message
-            usage = response.usage
-            content, thinking_content = _extract_content(msg.content)
-            # Fallback: some litellm versions put thinking in a separate attribute
-            if thinking_content is None:
-                thinking_content = getattr(msg, "reasoning_content", None) or None
-            data = {
-                "content": content,
-                "tokens_used": usage.total_tokens if usage else 0,
-                "input_tokens": usage.prompt_tokens if usage else 0,
-                "output_tokens": usage.completion_tokens if usage else 0,
-                "tool_calls": [
-                    {"name": tc.function.name, "arguments": tc.function.arguments}
-                    for tc in (msg.tool_calls or [])
-                ],
-            }
-            if thinking_content is not None:
-                data["thinking_content"] = thinking_content
-            return APIProxyResponse(success=True, data=data)
-
-        elif request.action == "embed":
-            embed_kwargs: dict = {}
-            if api_base:
-                embed_kwargs["api_base"] = api_base
-            response = await litellm.aembedding(
-                model=request.params["model"],
-                input=request.params.get("text", ""),
-                api_key=api_key,
-                **embed_kwargs,
-            )
-            item = response.data[0]
-            embedding = item["embedding"] if isinstance(item, dict) else item.embedding
-            return APIProxyResponse(success=True, data={"embedding": embedding})
-
-        return APIProxyResponse(success=False, error=f"Unknown action: {request.action}")
-
-    async def _handle_openai(self, request: APIProxyRequest) -> APIProxyResponse:
-        """Handle OpenAI API calls (embeddings)."""
-        api_key = self.system_credentials.get("openai_api_key")
-        if not api_key:
-            return APIProxyResponse(success=False, error="OpenAI API key not configured")
-
-        import litellm
-
-        api_base = self.api_bases.get("openai_api_base")
-
-        if request.action == "embed":
-            embed_kwargs: dict = {}
-            if api_base:
-                embed_kwargs["api_base"] = api_base
-            response = await litellm.aembedding(
-                model=request.params["model"],
-                input=request.params.get("text", ""),
-                api_key=api_key,
-                **embed_kwargs,
-            )
-            item = response.data[0]
-            embedding = item["embedding"] if isinstance(item, dict) else item.embedding
-            return APIProxyResponse(success=True, data={"embedding": embedding})
-
-        return APIProxyResponse(success=False, error=f"Unknown action: {request.action}")
 
     async def _handle_apollo(self, request: APIProxyRequest) -> APIProxyResponse:
         """Handle Apollo.io API calls."""

@@ -306,7 +306,7 @@ class Channel(abc.ABC):
                 return "Usage: /addkey <service> <key>"
             service = args[1]
             # Normalize bare provider names to include _api_key suffix
-            known_providers = {"anthropic", "openai", "gemini", "deepseek", "moonshot", "minimax", "xai", "groq"}
+            known_providers = {"anthropic", "openai", "gemini", "deepseek", "moonshot", "minimax", "xai", "groq", "zai"}
             if service.lower() in known_providers and not service.lower().endswith("_api_key"):
                 service = f"{service}_api_key"
             key = args[2] if len(args) > 2 else ""

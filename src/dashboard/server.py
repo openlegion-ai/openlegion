@@ -38,7 +38,7 @@ def create_dashboard_router(
     event_bus: EventBus | None,
     agent_registry: dict[str, str],
     mesh_port: int = 8420,
-    # V2: additional dependencies (all optional for backward compat)
+    # Optional subsystem dependencies (not all deployments include all subsystems)
     lane_manager: Any = None,
     cron_scheduler: Any = None,
     orchestrator: Any = None,
@@ -659,9 +659,11 @@ def create_dashboard_router(
         from src.host.credentials import SYSTEM_CREDENTIAL_PROVIDERS
         if service.lower() in SYSTEM_CREDENTIAL_PROVIDERS and not service.lower().endswith("_api_key"):
             service = f"{service}_api_key"
+        # Explicit tier override from request body
+        tier_field = body.get("tier", "").strip().lower()
         # Detect known LLM providers → system tier
-        is_system = False
-        if service.lower().endswith("_api_key"):
+        is_system = tier_field == "system"
+        if not is_system and service.lower().endswith("_api_key"):
             provider = service.lower().replace("_api_key", "")
             if provider in SYSTEM_CREDENTIAL_PROVIDERS:
                 is_system = True

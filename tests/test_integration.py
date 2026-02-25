@@ -221,7 +221,7 @@ def test_webhook_unknown_workflow(tmp_path):
 
 @pytest.fixture
 def vault_components(tmp_path):
-    """Mesh components with vault support and can_manage_vault permission."""
+    """Mesh components with vault support and allowed_credentials permission."""
     from src.host.credentials import CredentialVault
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))

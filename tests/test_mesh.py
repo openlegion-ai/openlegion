@@ -355,7 +355,7 @@ def test_can_manage_vault_default_false(permissions):
 
 
 def test_can_manage_vault_granted(tmp_path):
-    """Agent with can_manage_vault=True passes the check."""
+    """Agent with allowed_credentials passes the can_manage_vault check."""
     config = {
         "permissions": {
             "admin": {
@@ -363,7 +363,7 @@ def test_can_manage_vault_granted(tmp_path):
                 "blackboard_read": ["*"],
                 "blackboard_write": ["*"],
                 "allowed_apis": ["llm"],
-                "can_manage_vault": True,
+                "allowed_credentials": ["*"],
             },
             "worker": {
                 "can_message": ["orchestrator"],
@@ -486,23 +486,22 @@ def test_can_access_credential_orchestrator_always_allowed(tmp_path):
     assert pm.can_access_credential("mesh", "openai_api_key") is True
 
 
-def test_backwards_compat_can_manage_vault_to_allowed_credentials(tmp_path):
-    """Existing config with can_manage_vault: true auto-converts to allowed_credentials: ['*']."""
+def test_allowed_credentials_controls_vault_access(tmp_path):
+    """allowed_credentials patterns control both vault access and credential resolution."""
     config = {
         "permissions": {
-            "old_agent": {
+            "full_access": {
                 "can_message": ["orchestrator"],
                 "blackboard_read": ["*"],
                 "blackboard_write": [],
                 "allowed_apis": ["llm"],
-                "can_manage_vault": True,
+                "allowed_credentials": ["*"],
             },
-            "restricted_agent": {
+            "restricted": {
                 "can_message": ["orchestrator"],
                 "blackboard_read": [],
                 "blackboard_write": [],
                 "allowed_apis": [],
-                "can_manage_vault": False,
             },
         }
     }
@@ -510,13 +509,11 @@ def test_backwards_compat_can_manage_vault_to_allowed_credentials(tmp_path):
     config_path.write_text(json.dumps(config))
     pm = PermissionMatrix(config_path=str(config_path))
 
-    # old_agent should be auto-converted to ["*"]
-    assert pm.can_manage_vault("old_agent") is True
-    assert pm.can_access_credential("old_agent", "brightdata_cdp_url") is True
+    assert pm.can_manage_vault("full_access") is True
+    assert pm.can_access_credential("full_access", "brightdata_cdp_url") is True
 
-    # restricted_agent should remain denied
-    assert pm.can_manage_vault("restricted_agent") is False
-    assert pm.can_access_credential("restricted_agent", "brightdata_cdp_url") is False
+    assert pm.can_manage_vault("restricted") is False
+    assert pm.can_access_credential("restricted", "brightdata_cdp_url") is False
 
 
 def test_get_allowed_credentials(tmp_path):

@@ -44,20 +44,21 @@ async def test_missing_api_key_returns_error(monkeypatch):
     monkeypatch.delenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     v = CredentialVault()
-    req = APIProxyRequest(service="anthropic", action="chat")
+    req = APIProxyRequest(
+        service="llm", action="chat",
+        params={"model": "anthropic/claude-sonnet-4-5-20250929", "messages": []},
+    )
     result = await v.execute_api_call(req)
     assert not result.success
-    assert "not configured" in result.error
+    assert "No API key" in result.error
 
 
 def test_handler_dispatch():
     v = CredentialVault()
     assert "llm" in v.service_handlers
-    assert "anthropic" in v.service_handlers
     assert "apollo" in v.service_handlers
     assert "hunter" in v.service_handlers
     assert "brave_search" in v.service_handlers
-    assert "openai" in v.service_handlers
 
 
 async def test_llm_missing_key_returns_error(monkeypatch):
@@ -87,7 +88,10 @@ def test_get_api_key_for_model(monkeypatch):
 async def test_unknown_action_returns_error(monkeypatch):
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-test")
     v = CredentialVault()
-    req = APIProxyRequest(service="anthropic", action="nonexistent_action")
+    req = APIProxyRequest(
+        service="llm", action="nonexistent_action",
+        params={"model": "anthropic/claude-sonnet-4-5-20250929"},
+    )
     result = await v.execute_api_call(req)
     assert not result.success
     assert "Unknown action" in result.error

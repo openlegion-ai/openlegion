@@ -670,8 +670,14 @@ class REPLSession:
             provider = service.lower().replace("_api_key", "")
             if provider in SYSTEM_CREDENTIAL_PROVIDERS:
                 is_llm_provider = True
-        self.ctx.credential_vault.add_credential(service, key_value, system=is_llm_provider)
-        tier_label = "system" if is_llm_provider else "agent"
+        if is_llm_provider:
+            is_system = True
+        else:
+            is_system = click.confirm(
+                f"  Store '{service}' as system-level? (No = agent-level)", default=False,
+            )
+        self.ctx.credential_vault.add_credential(service, key_value, system=is_system)
+        tier_label = "system" if is_system else "agent"
         click.echo(f"Credential '{service}' stored ({tier_label} tier).")
         # Prompt for optional base URL when the key is for a known LLM provider
         if is_llm_provider:

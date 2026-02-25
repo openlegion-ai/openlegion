@@ -38,12 +38,6 @@ class PermissionMatrix:
         with open(path) as f:
             data = json.load(f)
         for agent_id, perms in data.get("permissions", {}).items():
-            # Backwards compat: convert boolean can_manage_vault to allowed_credentials
-            if "allowed_credentials" not in perms:
-                if perms.get("can_manage_vault", False):
-                    perms["allowed_credentials"] = ["*"]
-                else:
-                    perms["allowed_credentials"] = []
             self.permissions[agent_id] = AgentPermissions(agent_id=agent_id, **perms)
 
     def get_permissions(self, agent_id: str) -> AgentPermissions:
@@ -61,7 +55,6 @@ class PermissionMatrix:
                 blackboard_write=default.blackboard_write,
                 allowed_apis=default.allowed_apis,
                 allowed_credentials=default.allowed_credentials,
-                can_manage_vault=default.can_manage_vault,
             )
         return AgentPermissions(agent_id=agent_id)
 
@@ -102,19 +95,17 @@ class PermissionMatrix:
         return service in perms.allowed_apis
 
     def can_manage_vault(self, agent_id: str) -> bool:
-        """Check if agent has any vault access (backwards compat convenience)."""
+        """Check if agent has any vault access (has allowed_credentials patterns)."""
         if agent_id in ("mesh", "orchestrator"):
             return True
         perms = self.get_permissions(agent_id)
-        return bool(perms.allowed_credentials) or perms.can_manage_vault
+        return bool(perms.allowed_credentials)
 
     def can_access_credential(self, agent_id: str, credential_name: str) -> bool:
         """Check if an agent can access a specific credential.
 
         Returns False for system credentials (always).
         Uses fnmatch against allowed_credentials patterns.
-        Falls back to wildcard when legacy can_manage_vault is set without
-        allowed_credentials (backwards compat only).
 
         Defense-in-depth: The ``is_system_credential()`` check here blocks
         agent access to provider-key-shaped names regardless of which tier
@@ -132,11 +123,7 @@ class PermissionMatrix:
         perms = self.get_permissions(agent_id)
         patterns = perms.allowed_credentials
         if not patterns:
-            # Backwards compat: legacy can_manage_vault without allowed_credentials
-            if perms.can_manage_vault:
-                patterns = ["*"]
-            else:
-                return False
+            return False
         lower_name = credential_name.lower()
         return any(fnmatch.fnmatch(lower_name, p.lower()) for p in patterns)
 

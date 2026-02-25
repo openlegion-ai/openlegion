@@ -487,8 +487,6 @@ class Orchestrator:
     async def _wait_for_task_result(self, agent_url: str, assignment: TaskAssignment, timeout: int) -> TaskResult:
         """Poll agent status until task completes, then fetch the real result.
 
-        Deprecated: prefer push-based resolve_task_result() via _pending_results.
-        Kept as fallback for cases where the push path is unavailable.
         Uses exponential backoff: 1s, 2s, 4s, ... up to 30s between polls.
         """
         start = time.time()

@@ -1564,11 +1564,15 @@
                         <option value="__custom__">Custom...</option>
                       </select>
                       <input x-show="credService === '__custom__'" type="text" x-model="credCustomService" class="dash-input text-xs w-40" placeholder="credential_name">
+                      <select x-show="credService === '__custom__'" x-model="credTier" class="dash-select text-xs w-28">
+                        <option value="agent">Agent tier</option>
+                        <option value="system">System tier</option>
+                      </select>
                       <input type="password" x-model="credKey" class="dash-input flex-1" placeholder="API key or value">
                     </div>
                     <input type="text" x-model="credBaseUrl" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
                     <div class="flex justify-between">
-                      <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
+                      <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
                       <button @click="addCredential()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save Credential</button>
                     </div>
                   </div>

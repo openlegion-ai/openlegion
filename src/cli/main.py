@@ -344,14 +344,14 @@ def channels_add(channel_type: str | None):
         click.echo("  No token provided. Skipped.")
         return
 
-    _set_env_key(ch["env_key"], token.strip())
+    _set_env_key(ch["env_key"], token.strip(), system=True)
 
     # Slack needs a second token
     if channel_type == "slack":
         click.echo("\n  Socket Mode requires an app-level token (xapp-...).")
         app_token = click.prompt("  Slack app-level token", hide_input=True)
         if app_token.strip():
-            _set_env_key("slack_app_token", app_token.strip())
+            _set_env_key("slack_app_token", app_token.strip(), system=True)
         else:
             click.echo("  No app token provided. Socket Mode will not work.")
             return
@@ -360,7 +360,7 @@ def channels_add(channel_type: str | None):
     if channel_type == "whatsapp":
         phone_id = click.prompt("  WhatsApp phone number ID")
         if phone_id.strip():
-            _set_env_key("whatsapp_phone_number_id", phone_id.strip())
+            _set_env_key("whatsapp_phone_number_id", phone_id.strip(), system=True)
         else:
             click.echo("  No phone number ID provided.")
             return
@@ -395,8 +395,9 @@ def channels_list():
     click.echo("-" * 28)
     for key, info in CHANNEL_TYPES.items():
         section = channel_cfg.get(info["config_section"], {})
-        env_key = f"OPENLEGION_CRED_{info['env_key'].upper()}"
-        has_token = bool(os.environ.get(env_key))
+        sys_key = f"OPENLEGION_SYSTEM_{info['env_key'].upper()}"
+        cred_key = f"OPENLEGION_CRED_{info['env_key'].upper()}"
+        has_token = bool(os.environ.get(sys_key) or os.environ.get(cred_key))
         if section.get("enabled"):
             status = "ready" if has_token else "no token"
             click.echo(f"{info['label']:<16} {status:<12}")

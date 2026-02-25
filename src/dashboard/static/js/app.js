@@ -53,7 +53,7 @@ function dashboard() {
     agentDetail: null,
     agentEvents: [],
 
-    // Agent config (V2)
+    // Agent config
     agentConfigs: {},
     editForm: {},
     availableModels: [],
@@ -99,7 +99,7 @@ function dashboard() {
     _activityRefresh: null,
     _tracesDebounce: null,
 
-    // Queues (V2)
+    // Queues
     queueStatus: {},
 
     // Cron / Automation
@@ -110,7 +110,7 @@ function dashboard() {
     cronEditUnit: 'm',
     cronEditCron: '',
 
-    // Settings (V2)
+    // Settings
     settingsData: null,
 
     // Multi-agent chat panels (docked bottom bar)
@@ -154,6 +154,7 @@ function dashboard() {
     credCustomService: '',
     credKey: '',
     credBaseUrl: '',
+    credTier: 'agent',
 
     // Onboarding
     onboardProvider: '',
@@ -759,7 +760,7 @@ function dashboard() {
       this.tracesLoading = false;
     },
 
-    // ── V2: Agent config fetchers ─────────────────────────
+    // ── Agent config fetchers ─────────────────────────────
 
     async fetchAgentConfig(agentId) {
       try {
@@ -932,7 +933,7 @@ function dashboard() {
       } catch (e) { this.showToast(`Error: ${e.message}`); }
     },
 
-    // ── V2: Blackboard write/delete ───────────────────────
+    // ── Blackboard write/delete ────────────────────────────
 
     async writeBlackboard() {
       if (!this.bbNewKey.trim()) return;
@@ -964,7 +965,7 @@ function dashboard() {
       this.bbExpanded = { ...this.bbExpanded, [key]: !this.bbExpanded[key] };
     },
 
-    // ── V2: Queue fetcher ─────────────────────────────────
+    // ── Queue fetcher ────────────────────────────────────
 
     async fetchQueues() {
       try {
@@ -973,7 +974,7 @@ function dashboard() {
       } catch (e) { console.warn('fetchQueues failed:', e); }
     },
 
-    // ── V2: Cron fetchers ─────────────────────────────────
+    // ── Cron fetchers ───────────────────────────────────
 
     async fetchCronJobs() {
       try {
@@ -1364,6 +1365,7 @@ function dashboard() {
       if (!service || !this.credKey.trim()) return;
       try {
         const body = { service, key: this.credKey.trim() };
+        if (this.credService === '__custom__' && this.credTier === 'system') body.tier = 'system';
         if (this.credBaseUrl.trim()) body.base_url = this.credBaseUrl.trim();
         const resp = await fetch(`${window.__config.apiBase}/credentials`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1376,6 +1378,7 @@ function dashboard() {
           this.credCustomService = '';
           this.credKey = '';
           this.credBaseUrl = '';
+          this.credTier = 'agent';
           this.showCredForm = false;
           this.fetchSettings();
         } else {
@@ -1538,7 +1541,7 @@ function dashboard() {
         blackboard_write: 'text-cyan-400',
         health_change: 'text-red-400',
         notification: 'text-amber-300',
-        // V2 trace event types
+        // Trace event types
         chat: 'text-green-400',
         chat_response: 'text-green-300',
         message_route: 'text-teal-400',

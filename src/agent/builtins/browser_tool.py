@@ -381,8 +381,8 @@ async def _browser_snapshot_inner(*, mesh_client=None) -> dict:
     try:
         page = await _get_page(mesh_client=mesh_client)
 
-        # Modern Playwright (1.49+): aria_snapshot() returns YAML text
-        # Legacy Playwright: page.accessibility.snapshot() returns dict tree
+        # Playwright 1.49+: aria_snapshot() returns YAML text
+        # Older Playwright: page.accessibility.snapshot() returns dict tree
         flat: list[dict] = []
         try:
             yaml_text = await page.locator("body").aria_snapshot()

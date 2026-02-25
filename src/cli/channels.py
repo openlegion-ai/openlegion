@@ -45,6 +45,7 @@ class ChannelManager:
         tg_cfg = channels_cfg.get("telegram", {})
         tg_token = (
             tg_cfg.get("token")
+            or os.environ.get("OPENLEGION_SYSTEM_TELEGRAM_BOT_TOKEN", "")
             or os.environ.get("OPENLEGION_CRED_TELEGRAM_BOT_TOKEN", "")
             or os.environ.get("TELEGRAM_BOT_TOKEN", "")
         )
@@ -64,6 +65,7 @@ class ChannelManager:
         dc_cfg = channels_cfg.get("discord", {})
         dc_token = (
             dc_cfg.get("token")
+            or os.environ.get("OPENLEGION_SYSTEM_DISCORD_BOT_TOKEN", "")
             or os.environ.get("OPENLEGION_CRED_DISCORD_BOT_TOKEN", "")
             or os.environ.get("DISCORD_BOT_TOKEN", "")
         )
@@ -83,11 +85,13 @@ class ChannelManager:
         sl_cfg = channels_cfg.get("slack", {})
         sl_bot_token = (
             sl_cfg.get("bot_token")
+            or os.environ.get("OPENLEGION_SYSTEM_SLACK_BOT_TOKEN", "")
             or os.environ.get("OPENLEGION_CRED_SLACK_BOT_TOKEN", "")
             or os.environ.get("SLACK_BOT_TOKEN", "")
         )
         sl_app_token = (
             sl_cfg.get("app_token")
+            or os.environ.get("OPENLEGION_SYSTEM_SLACK_APP_TOKEN", "")
             or os.environ.get("OPENLEGION_CRED_SLACK_APP_TOKEN", "")
             or os.environ.get("SLACK_APP_TOKEN", "")
         )
@@ -107,11 +111,13 @@ class ChannelManager:
         wa_cfg = channels_cfg.get("whatsapp", {})
         wa_token = (
             wa_cfg.get("access_token")
+            or os.environ.get("OPENLEGION_SYSTEM_WHATSAPP_ACCESS_TOKEN", "")
             or os.environ.get("OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN", "")
             or os.environ.get("WHATSAPP_ACCESS_TOKEN", "")
         )
         wa_phone_id = (
             wa_cfg.get("phone_number_id")
+            or os.environ.get("OPENLEGION_SYSTEM_WHATSAPP_PHONE_NUMBER_ID", "")
             or os.environ.get("OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID", "")
             or os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
         )
@@ -119,6 +125,7 @@ class ChannelManager:
             wa_code = _ensure_pairing_code(PROJECT_ROOT / "config" / "whatsapp_paired.json")
             wa_verify = (
                 wa_cfg.get("verify_token")
+                or os.environ.get("OPENLEGION_SYSTEM_WHATSAPP_VERIFY_TOKEN", "")
                 or os.environ.get("OPENLEGION_CRED_WHATSAPP_VERIFY_TOKEN", "")
                 or secrets.token_hex(16)
             )

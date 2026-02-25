@@ -117,15 +117,6 @@ class RuntimeBackend(abc.ABC):
         for agent_id in list(self.agents.keys()):
             self.stop_agent(agent_id)
 
-    def get_container_logs(self, agent_id: str, tail: int = 40) -> str:
-        """Backward-compatible alias for get_logs."""
-        return self.get_logs(agent_id, tail=tail)
-
-    @property
-    def containers(self) -> dict[str, dict]:
-        """Backward-compatible alias used by health monitor for restart info."""
-        return self.agents
-
     @staticmethod
     def backend_name() -> str:
         return "unknown"
