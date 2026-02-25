@@ -326,6 +326,150 @@ class TestHttpTool:
         result = await http_request(url="http://192.0.2.1:1", timeout=2)
         assert "error" in result
 
+    @pytest.mark.asyncio
+    async def test_cred_handle_in_headers(self):
+        """$CRED{name} handles in headers are resolved via vault."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.agent.builtins.http_tool import http_request
+
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(return_value="secret-token-123")
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.text = '{"ok": true}'
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.is_closed = False
+
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+            result = await http_request(
+                url="https://api.github.com/user",
+                headers={"Authorization": "Bearer $CRED{github_token}"},
+                mesh_client=mock_mesh,
+            )
+
+        mock_mesh.vault_resolve.assert_called_once_with("github_token")
+        # Verify the resolved value was sent, not the handle
+        call_kwargs = mock_client.request.call_args
+        assert call_kwargs.kwargs["headers"]["Authorization"] == "Bearer secret-token-123"
+        assert result["status_code"] == 200
+
+    @pytest.mark.asyncio
+    async def test_cred_handle_missing_credential(self):
+        """Missing credentials return an error, not a crash."""
+        from unittest.mock import AsyncMock
+
+        from src.agent.builtins.http_tool import http_request
+
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(return_value=None)
+
+        result = await http_request(
+            url="https://api.example.com",
+            headers={"Authorization": "Bearer $CRED{nonexistent}"},
+            mesh_client=mock_mesh,
+        )
+        assert "error" in result
+        assert "Credential not found" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_cred_handle_no_mesh_client(self):
+        """$CRED{} handles without mesh connectivity return an error."""
+        from src.agent.builtins.http_tool import http_request
+
+        result = await http_request(
+            url="https://api.example.com",
+            headers={"Authorization": "Bearer $CRED{token}"},
+        )
+        assert "error" in result
+        assert "mesh connectivity" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_no_cred_handles_skips_resolution(self):
+        """Requests without $CRED{} handles work without mesh_client."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.agent.builtins.http_tool import http_request
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.text = "ok"
+        mock_response.headers = {}
+
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+            result = await http_request(
+                url="https://example.com",
+                headers={"Accept": "application/json"},
+            )
+        assert result["status_code"] == 200
+
+    @pytest.mark.asyncio
+    async def test_cred_handle_in_url(self):
+        """$CRED{name} handles in URL are resolved."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.agent.builtins.http_tool import http_request
+
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(return_value="my-api-key")
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.text = "ok"
+        mock_response.headers = {}
+
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+            result = await http_request(
+                url="https://api.example.com/data?key=$CRED{api_key}",
+                mesh_client=mock_mesh,
+            )
+
+        mock_mesh.vault_resolve.assert_called_once_with("api_key")
+        call_kwargs = mock_client.request.call_args
+        assert "my-api-key" in call_kwargs.kwargs["url"]
+        assert "$CRED" not in call_kwargs.kwargs["url"]
+
+    @pytest.mark.asyncio
+    async def test_cred_handle_in_body(self):
+        """$CRED{name} handles in body are resolved."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.agent.builtins.http_tool import http_request
+
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(return_value="secret-value")
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.text = "ok"
+        mock_response.headers = {}
+
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+            result = await http_request(
+                url="https://api.example.com",
+                method="POST",
+                body='{"token": "$CRED{my_token}"}',
+                mesh_client=mock_mesh,
+            )
+
+        mock_mesh.vault_resolve.assert_called_once_with("my_token")
+        call_kwargs = mock_client.request.call_args
+        assert "secret-value" in call_kwargs.kwargs["content"]
+        assert "$CRED" not in call_kwargs.kwargs["content"]
+
 
 # ── SkillRegistry discovers builtins ─────────────────────────
 
