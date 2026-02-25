@@ -635,11 +635,7 @@ select:focus-visible,
   letter-spacing: -0.01em;
 }
 
-/* ── Chat modal polish ────────────────────────────── */
-
-.chat-bubble {
-  box-shadow: 0 10px 28px -18px rgba(0, 0, 0, 0.65);
-}
+/* ── Chat slide-over panel ────────────────────────── */
 
 .chat-phase-pill {
   display: inline-flex;
@@ -942,8 +938,7 @@ select:focus-visible,
   .waterfall-bar,
   .bb-entry-row,
   .bb-chevron,
-  .bb-detail,
-  .chat-bubble {
+  .bb-detail {
     transition: none !important;
   }
 }

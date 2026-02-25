@@ -1,19 +1,27 @@
 /**
  * OpenLegion Dashboard — Alpine.js application.
  *
- * Five panels: Agents, Activity, Blackboard, Automation, System.
+ * Three panels: Agents, Activity (Traces / Events / Blackboard), System.
  * Real-time updates via WebSocket + periodic REST polling.
  */
 const _IDENTITY_TABS = [
-  { id: 'config', label: 'Config', file: null, access: 'user', desc: 'Model, role, browser backend, and daily budget. Model changes may require a restart.' },
-  { id: 'soul', label: 'Soul', file: 'SOUL.md', cap: 4000, access: 'user', desc: 'Core personality, tone, and behavioral guidelines. Defines who the agent is. Only you can edit this \u2014 the agent reads it but cannot change it.' },
-  { id: 'instructions', label: 'Instructions', file: 'AGENTS.md', cap: 8000, access: 'user', desc: 'Operating instructions injected into the agent\u2019s system prompt. Tells the agent what to do and how to work. Only you can edit this.' },
-  { id: 'preferences', label: 'Preferences', file: 'USER.md', cap: 4000, access: 'agent', desc: 'Your preferences, background, and working style. The agent can update this as it learns about you.' },
-  { id: 'heartbeat', label: 'Heartbeat', file: 'HEARTBEAT.md', cap: null, access: 'agent', desc: 'Rules the agent follows when running autonomously (heartbeat/cron triggers). The agent can update these.' },
-  { id: 'memory', label: 'Memory', file: 'MEMORY.md', cap: 16000, access: 'agent', desc: 'Long-term facts from conversations. The agent saves important info here automatically during context compaction. You can also edit directly.' },
-  { id: 'activity', label: 'Activity', file: null, access: 'auto', desc: 'Timestamped session logs from the last 3 days. Auto-generated as the agent works.' },
-  { id: 'learnings', label: 'Learnings', file: null, access: 'auto', desc: 'Errors the agent encountered and corrections you\u2019ve made. Helps avoid repeating mistakes.' },
+  { id: 'config', label: 'Config', file: null, access: 'user', desc: 'Model, role, browser backend, and daily budget.' },
+  { id: 'identity', label: 'Identity', file: null, access: 'user', desc: 'Agent personality, instructions, and user preferences.' },
+  { id: 'memory', label: 'Memory', file: null, access: 'agent', desc: 'Long-term memory and autonomous heartbeat rules.' },
+  { id: 'logs', label: 'Logs', file: null, access: 'auto', desc: 'Activity logs and learned corrections.' },
 ];
+
+const _IDENTITY_FILE_MAP = {
+  identity: [
+    { file: 'SOUL.md', label: 'Soul', cap: 4000, access: 'user', desc: 'Core personality and behavioral guidelines.' },
+    { file: 'AGENTS.md', label: 'Instructions', cap: 8000, access: 'user', desc: 'Operating instructions for the agent.' },
+    { file: 'USER.md', label: 'Preferences', cap: 4000, access: 'agent', desc: 'Your preferences and working style.' },
+  ],
+  memory: [
+    { file: 'MEMORY.md', label: 'Memory', cap: 16000, access: 'agent', desc: 'Long-term facts from conversations.' },
+    { file: 'HEARTBEAT.md', label: 'Heartbeat', cap: null, access: 'agent', desc: 'Rules for autonomous operation.' },
+  ],
+};
 
 function dashboard() {
   return {
@@ -22,8 +30,6 @@ function dashboard() {
     tabs: [
       { id: 'fleet', label: 'Agents' },
       { id: 'activity', label: 'Activity' },
-      { id: 'blackboard', label: 'Blackboard' },
-      { id: 'automation', label: 'Automation' },
       { id: 'system', label: 'System' },
     ],
     connected: false,
@@ -114,14 +120,14 @@ function dashboard() {
     // Settings
     settingsData: null,
 
-    // Multi-agent chat panels (docked bottom bar)
+    // Slide-over chat panel
     openChats: [],             // Array of agent IDs with open chat panels
     chatHistories: {},         // Preserved — keyed by agent ID
     chatLoadingAgents: {},     // { agentId: true/false }
     chatStreamingAgents: {},   // { agentId: true/false }
     _chatAborts: {},           // { agentId: AbortController }
-    chatMaxPanels: 3,          // Max simultaneous panels
-    chatMinimized: {},         // { agentId: true/false } — minimized state per panel
+    activeChatId: '',          // Currently active chat tab
+    chatPanelMinimized: false, // Whether the slide-over is minimized to pill
     chatUnread: {},            // { agentId: count } — unread notifications while minimized
 
     // Identity panel
@@ -134,6 +140,7 @@ function dashboard() {
     identityEditing: false,
     identityEditBuffer: '',
     identitySaving: false,
+    identityEditingFile: null,  // Which specific file is being edited
     configEditing: false,
     configSaving: false,
     identityLogs: null,
@@ -148,6 +155,15 @@ function dashboard() {
     broadcastStreaming: false,
     broadcastSentMessage: '',
     _broadcastAbort: null,
+
+    // Command palette (Cmd+K)
+    cmdPaletteOpen: false,
+    cmdPaletteQuery: '',
+    cmdPaletteResults: [],
+    cmdPaletteIdx: 0,
+
+    // System tab — collapsible infrastructure
+    systemInfraExpanded: false,
 
     // Credentials
     showCredForm: false,
@@ -256,6 +272,24 @@ function dashboard() {
       return text.length;
     },
 
+    fileBudgetPct(file, cap) {
+      if (!cap) return 0;
+      const text = (this.identityEditing && this.identityEditingFile === file) ? this.identityEditBuffer : (this.identityContent[file] || '');
+      return Math.min(100, (text.length / cap) * 100);
+    },
+
+    fileBudgetColor(file, cap) {
+      const pct = this.fileBudgetPct(file, cap);
+      if (pct >= 95) return 'bg-red-500';
+      if (pct >= 80) return 'bg-amber-500';
+      return 'bg-indigo-500';
+    },
+
+    fileCharCount(file) {
+      const text = (this.identityEditing && this.identityEditingFile === file) ? this.identityEditBuffer : (this.identityContent[file] || '');
+      return text.length;
+    },
+
     get filteredBbEntries() {
       if (!this.bbWriterFilter) return this.bbEntries;
       return this.bbEntries.filter(e => e.written_by === this.bbWriterFilter);
@@ -288,6 +322,26 @@ function dashboard() {
       this.fetchAgents();
       this.fetchSettings();
       this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
+
+      // Command palette: Cmd+K / Ctrl+K
+      document.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+          e.preventDefault();
+          this.cmdPaletteOpen = !this.cmdPaletteOpen;
+          if (this.cmdPaletteOpen) {
+            this.cmdPaletteQuery = '';
+            this.cmdPaletteResults = [];
+            this.cmdPaletteIdx = 0;
+            this.$nextTick(() => {
+              const el = document.getElementById('cmd-palette-input');
+              if (el) el.focus();
+            });
+          }
+        }
+        if (e.key === 'Escape' && this.cmdPaletteOpen) {
+          this.cmdPaletteOpen = false;
+        }
+      });
 
       // Pause polling when tab is hidden to save resources
       document.addEventListener('visibilitychange', () => {
@@ -336,22 +390,22 @@ function dashboard() {
         if (this.activityView === 'traces') {
           this.fetchTraces();
           this._startActivityRefresh();
+        } else if (this.activityView === 'blackboard') {
+          this.fetchBlackboard();
+          this.fetchProject();
         }
       }
-      if (tab === 'blackboard') { this.fetchBlackboard(); this.fetchProject(); }
       if (tab === 'fleet') {
         this.fetchAgents();
         this.fetchQueues();
         this.fetchSettings();
         this._queueInterval = setInterval(() => this.fetchQueues(), 5000);
       }
-      if (tab === 'automation') {
-        this.fetchCronJobs();
-        this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
-      }
       if (tab === 'system') {
         this.fetchSettings();
         this.fetchCosts();
+        this.fetchCronJobs();
+        this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
       }
     },
 
@@ -428,25 +482,24 @@ function dashboard() {
           tools: [],
         });
         if (this.openChats.includes(evt.agent)) {
-          if (this.chatMinimized[evt.agent]) {
-            // Minimized — badge instead of force-unminimizing
+          if (this.chatPanelMinimized || this.activeChatId !== evt.agent) {
             this.chatUnread = { ...this.chatUnread, [evt.agent]: (this.chatUnread[evt.agent] || 0) + 1 };
           } else {
             this.$nextTick(() => this._scrollChat(evt.agent));
           }
-        } else if (this.openChats.length < this.chatMaxPanels) {
-          // Room for a new panel — open without stealing focus
+        } else {
+          // Open a new chat tab without stealing focus
           this.openChats.push(evt.agent);
+          if (!this.activeChatId) this.activeChatId = evt.agent;
           this.$nextTick(() => this._scrollChat(evt.agent));
         }
-        // else: all panels busy — toast + history entry is enough
       }
 
       // Highlight blackboard writes
       if (evt.type === 'blackboard_write' && evt.data && evt.data.key) {
         if (!this.bbHighlights.includes(evt.data.key)) this.bbHighlights.push(evt.data.key);
         setTimeout(() => { const i = this.bbHighlights.indexOf(evt.data.key); if (i !== -1) this.bbHighlights.splice(i, 1); }, 5000);
-        if (this.activeTab === 'blackboard') this.fetchBlackboard();
+        if (this.activeTab === 'activity' && this.activityView === 'blackboard') this.fetchBlackboard();
       }
 
       // Debounced cost panel refresh on llm_call events
@@ -494,7 +547,10 @@ function dashboard() {
     setActivityView(view) {
       this.activityView = view;
       this._stopActivityRefresh();
-      if (view === 'traces') {
+      if (view === 'blackboard') {
+        this.fetchBlackboard();
+        this.fetchProject();
+      } else if (view === 'traces') {
         this.fetchTraces();
         this._startActivityRefresh();
       }
@@ -584,27 +640,29 @@ function dashboard() {
     async loadIdentityTabContent(agentId) {
       const tab = this.identityCurrentTab;
       if (tab.id === 'config') {
-        // Config tab fetches agent config, not a workspace file
         if (!this.agentConfigs[agentId]) await this.fetchAgentConfig(agentId);
         return;
       }
-      if (tab.file) {
-        if (this.identityContent[tab.file] !== undefined) return;
+      // Composite tabs — load all mapped files
+      const fileMap = _IDENTITY_FILE_MAP[tab.id];
+      if (fileMap) {
         this.identityContentLoading = true;
-        try {
-          const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${tab.file}`);
-          if (resp.ok) {
-            const data = await resp.json();
-            this.identityContent = { ...this.identityContent, [tab.file]: data.content || '' };
-          }
-        } catch (e) { console.warn('loadIdentityTabContent failed:', e); }
+        for (const entry of fileMap) {
+          if (this.identityContent[entry.file] !== undefined) continue;
+          try {
+            const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${entry.file}`);
+            if (resp.ok) {
+              const data = await resp.json();
+              this.identityContent = { ...this.identityContent, [entry.file]: data.content || '' };
+            }
+          } catch (e) { console.warn('loadIdentityTabContent failed:', e); }
+        }
         this.identityContentLoading = false;
-      } else if (tab.id === 'activity') {
-        if (this.identityLogs !== null) return; // cached
-        await this.fetchIdentityLogs(agentId);
-      } else if (tab.id === 'learnings') {
-        if (this.identityLearnings !== null) return; // cached
-        await this.fetchIdentityLearnings(agentId);
+        return;
+      }
+      if (tab.id === 'logs') {
+        if (this.identityLogs === null) await this.fetchIdentityLogs(agentId);
+        if (this.identityLearnings === null) await this.fetchIdentityLearnings(agentId);
       }
     },
 
@@ -622,34 +680,35 @@ function dashboard() {
       await this.loadIdentityTabContent(agentId);
     },
 
-    startIdentityEdit() {
-      const tab = this.identityCurrentTab;
-      if (!tab.file) return;
-      this.identityEditBuffer = this.identityContent[tab.file] || '';
+    startIdentityEdit(file) {
+      if (!file) return;
+      this.identityEditingFile = file;
+      this.identityEditBuffer = this.identityContent[file] || '';
       this.identityEditing = true;
     },
 
     cancelIdentityEdit() {
       this.identityEditing = false;
+      this.identityEditingFile = null;
       this.identityEditBuffer = '';
     },
 
-    async saveIdentityFile(agentId) {
-      const tab = this.identityCurrentTab;
-      if (!tab.file) return;
+    async saveIdentityFile(agentId, file) {
+      if (!file) file = this.identityEditingFile;
+      if (!file) return;
       this.identitySaving = true;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${tab.file}`, {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${file}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: this.identityEditBuffer }),
         });
         if (resp.ok) {
-          this.identityContent = { ...this.identityContent, [tab.file]: this.identityEditBuffer };
+          this.identityContent = { ...this.identityContent, [file]: this.identityEditBuffer };
           this.identityEditing = false;
+          this.identityEditingFile = null;
           this.identityEditBuffer = '';
-          this.showToast(`Saved ${tab.file}`);
-          // Refresh file list to update sizes/defaults
+          this.showToast(`Saved ${file}`);
           try {
             const listResp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace`);
             if (listResp.ok) this.identityFiles = (await listResp.json()).files || [];
@@ -1118,27 +1177,19 @@ function dashboard() {
     // ── Multi-agent chat panels (docked bottom bar) ─────
 
     openChat(agentId) {
+      this.chatPanelMinimized = false;
       if (this.openChats.includes(agentId)) {
-        // Already open — expand if minimized, scroll to latest and focus input
-        this.chatMinimized = { ...this.chatMinimized, [agentId]: false };
+        this.activeChatId = agentId;
         if (this.chatUnread[agentId]) this.chatUnread = { ...this.chatUnread, [agentId]: 0 };
         this.$nextTick(() => {
           this._scrollChat(agentId);
-          const input = document.querySelector(`#chat-messages-${agentId}`)
-            ?.closest('[x-data]')?.querySelector('input[type="text"]');
+          const input = document.getElementById('chat-slide-input');
           if (input) input.focus();
         });
         return;
       }
-      if (this.openChats.length >= this.chatMaxPanels) {
-        // Evict leftmost (oldest) panel
-        const evicted = this.openChats.shift();
-        if (evicted && this._chatAborts[evicted]) {
-          this._chatAborts[evicted].abort();
-          delete this._chatAborts[evicted];
-        }
-      }
       this.openChats.push(agentId);
+      this.activeChatId = agentId;
       this.$nextTick(() => this._scrollChat(agentId));
     },
 
@@ -1150,9 +1201,10 @@ function dashboard() {
       this.openChats = this.openChats.filter(id => id !== agentId);
       this.chatLoadingAgents[agentId] = false;
       this.chatStreamingAgents[agentId] = false;
-      const mins = { ...this.chatMinimized };
-      delete mins[agentId];
-      this.chatMinimized = mins;
+      // Switch to next open chat or clear
+      if (this.activeChatId === agentId) {
+        this.activeChatId = this.openChats.length > 0 ? this.openChats[this.openChats.length - 1] : '';
+      }
     },
 
     clearChat(agentId) {
@@ -1552,6 +1604,57 @@ function dashboard() {
       }
       this.broadcastStreaming = false;
       this.broadcastLoading = false;
+    },
+
+    // ── Command palette (Cmd+K) ────────────────────────────
+
+    updateCmdPaletteResults() {
+      const q = this.cmdPaletteQuery.toLowerCase().trim();
+      if (!q) { this.cmdPaletteResults = []; this.cmdPaletteIdx = 0; return; }
+      const results = [];
+      // Match agents
+      for (const agent of this.agents) {
+        const name = (agent.id || '').toLowerCase();
+        const role = (agent.role || '').toLowerCase();
+        if (name.includes(q) || role.includes(q)) {
+          results.push({ type: 'agent', label: agent.id, desc: agent.role || 'Agent', action: () => this.drillDown(agent.id) });
+        }
+      }
+      // Match tabs with keywords
+      const tabKeywords = {
+        fleet: ['agents', 'fleet', 'cards'],
+        activity: ['activity', 'traces', 'events', 'blackboard', 'logs'],
+        system: ['system', 'costs', 'cron', 'automation', 'credentials', 'infrastructure', 'pricing', 'browsers', 'pubsub'],
+      };
+      for (const [tabId, keywords] of Object.entries(tabKeywords)) {
+        const tab = this.tabs.find(t => t.id === tabId);
+        if (!tab) continue;
+        if (keywords.some(kw => kw.includes(q)) || tab.label.toLowerCase().includes(q)) {
+          results.push({ type: 'tab', label: tab.label, desc: `Switch to ${tab.label} tab`, action: () => { this.switchTab(tabId); } });
+        }
+      }
+      // Match blackboard keys
+      for (const entry of this.bbEntries || []) {
+        const key = (entry.key || '').toLowerCase();
+        if (key.includes(q)) {
+          results.push({ type: 'blackboard', label: entry.key, desc: `by ${entry.writer || 'unknown'}`, action: () => { this.switchTab('activity'); this.setActivityView('blackboard'); } });
+        }
+      }
+      this.cmdPaletteResults = results.slice(0, 10);
+      this.cmdPaletteIdx = 0;
+    },
+
+    cmdPaletteNavigate(dir) {
+      const len = this.cmdPaletteResults.length;
+      if (!len) return;
+      this.cmdPaletteIdx = (this.cmdPaletteIdx + dir + len) % len;
+    },
+
+    executeCmdPaletteResult(idx) {
+      const result = this.cmdPaletteResults[idx ?? this.cmdPaletteIdx];
+      if (!result) return;
+      this.cmdPaletteOpen = false;
+      result.action();
     },
 
     // ── Reset ────────────────────────────────────────────

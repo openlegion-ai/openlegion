@@ -62,6 +62,68 @@
       </template>
     </div>
 
+    <!-- Command palette (Cmd+K) -->
+    <div x-show="cmdPaletteOpen" x-cloak
+      class="fixed inset-0 z-[60] flex items-start justify-center pt-[15vh]"
+      @click.self="cmdPaletteOpen = false"
+      x-transition:enter="transition ease-out duration-150"
+      x-transition:enter-start="opacity-0"
+      x-transition:enter-end="opacity-100"
+      x-transition:leave="transition ease-in duration-100"
+      x-transition:leave-start="opacity-100"
+      x-transition:leave-end="opacity-0">
+      <!-- Backdrop -->
+      <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="cmdPaletteOpen = false"></div>
+      <!-- Palette -->
+      <div class="relative w-full max-w-lg bg-gray-900 border border-gray-700 rounded-xl shadow-2xl overflow-hidden"
+        @keydown.arrow-up.prevent="cmdPaletteNavigate(-1)"
+        @keydown.arrow-down.prevent="cmdPaletteNavigate(1)"
+        @keydown.enter.prevent="executeCmdPaletteResult()">
+        <!-- Search input -->
+        <div class="flex items-center gap-3 px-4 py-3 border-b border-gray-800">
+          <svg class="w-4 h-4 text-gray-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input id="cmd-palette-input" type="text"
+            x-model="cmdPaletteQuery"
+            @input="updateCmdPaletteResults()"
+            placeholder="Search agents, tabs, blackboard..."
+            class="flex-1 bg-transparent text-sm text-gray-200 placeholder-gray-600 outline-none"
+            autocomplete="off" spellcheck="false">
+          <kbd class="text-[10px] text-gray-600 bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700">ESC</kbd>
+        </div>
+        <!-- Results -->
+        <div class="max-h-72 overflow-y-auto custom-scrollbar" x-show="cmdPaletteResults.length > 0">
+          <template x-for="(result, i) in cmdPaletteResults" :key="i">
+            <button @click="executeCmdPaletteResult(i)"
+              @mouseenter="cmdPaletteIdx = i"
+              class="w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors"
+              :class="cmdPaletteIdx === i ? 'bg-gray-800' : 'hover:bg-gray-800/50'">
+              <!-- Type badge -->
+              <span class="text-[10px] font-medium px-1.5 py-0.5 rounded shrink-0"
+                :class="{
+                  'bg-indigo-900/40 text-indigo-400': result.type === 'agent',
+                  'bg-cyan-900/40 text-cyan-400': result.type === 'tab',
+                  'bg-amber-900/40 text-amber-400': result.type === 'blackboard',
+                }"
+                x-text="result.type"></span>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm text-gray-200 truncate" x-text="result.label"></div>
+                <div class="text-[10px] text-gray-500 truncate" x-text="result.desc"></div>
+              </div>
+              <svg x-show="cmdPaletteIdx === i" class="w-3 h-3 text-gray-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+            </button>
+          </template>
+        </div>
+        <!-- Empty state -->
+        <div x-show="cmdPaletteQuery && cmdPaletteResults.length === 0" class="px-4 py-6 text-center text-gray-600 text-sm">
+          No results for "<span class="text-gray-400" x-text="cmdPaletteQuery"></span>"
+        </div>
+        <!-- Hint -->
+        <div x-show="!cmdPaletteQuery" class="px-4 py-4 text-center text-gray-600 text-xs">
+          Type to search agents, tabs, or blackboard keys
+        </div>
+      </div>
+    </div>
+
     <!-- Navigation bar -->
     <nav class="nav-bar px-4 py-2.5 flex items-center justify-between shrink-0">
       <div class="flex items-center gap-5">
@@ -87,16 +149,10 @@
               <template x-if="tab.id === 'activity'">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
               </template>
-              <template x-if="tab.id === 'blackboard'">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-              </template>
-              <template x-if="tab.id === 'automation'">
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-              </template>
               <template x-if="tab.id === 'system'">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
               </template>
-              <span x-text="tab.label"></span>
+              <span x-text="tab.id === 'fleet' && agents.length ? 'Agents (' + agents.length + ')' : tab.label"></span>
               <!-- Unread event count badge -->
               <span
                 x-show="tab.id === 'activity' && unreadEvents > 0 && activeTab !== 'activity'"
@@ -125,7 +181,7 @@
     </nav>
 
     <!-- Main content -->
-    <main class="flex-1 overflow-auto p-4 lg:p-6">
+    <main class="flex-1 overflow-auto p-4 lg:p-6 transition-[margin] duration-200" :class="openChats.length > 0 && !chatPanelMinimized && 'mr-[380px]'">
 
       <!-- Fleet Overview (merged: Fleet + Agents + Queues) -->
       <div x-show="activeTab === 'fleet' && !detailAgent" x-cloak>
@@ -141,7 +197,7 @@
           </h2>
           <div class="flex items-center gap-3">
             <button @click="addAgentMode = !addAgentMode; fetchSettings()"
-              class="text-[11px] px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5"
+              class="text-xs px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5"
               :class="addAgentMode ? 'bg-indigo-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white'"
             >
               <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -154,15 +210,15 @@
         <div x-show="addAgentMode" x-cloak class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
           <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
             <div>
-              <label class="text-[11px] text-gray-500 mb-1 block">Name</label>
+              <label class="text-xs text-gray-500 mb-1 block">Name</label>
               <input type="text" x-model="addAgentForm.name" class="dash-input w-full" placeholder="my_agent">
             </div>
             <div>
-              <label class="text-[11px] text-gray-500 mb-1 block">Role</label>
+              <label class="text-xs text-gray-500 mb-1 block">Role</label>
               <input type="text" x-model="addAgentForm.role" class="dash-input w-full" placeholder="assistant">
             </div>
             <div>
-              <label class="text-[11px] text-gray-500 mb-1 block">Model</label>
+              <label class="text-xs text-gray-500 mb-1 block">Model</label>
               <select x-model="addAgentForm.model" class="dash-select w-full">
                 <option value="">Default</option>
                 <template x-for="m in availableModels" :key="m">
@@ -171,7 +227,7 @@
               </select>
             </div>
             <div>
-              <label class="text-[11px] text-gray-500 mb-1 block">Browser</label>
+              <label class="text-xs text-gray-500 mb-1 block">Browser</label>
               <select x-model="addAgentForm.browser_backend" class="dash-select w-full">
                 <option value="">Default</option>
                 <template x-for="b in (settingsData?.browser_backends || [])" :key="b.name">
@@ -189,9 +245,72 @@
             <button @click="addAgentMode = false" class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Cancel</button>
           </div>
         </div>
+        <!-- Broadcast bar -->
+        <div x-show="agents.length > 1" class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4" x-cloak>
+          <div class="text-xs text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
+            <svg class="w-3.5 h-3.5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+            Broadcast to <span class="text-gray-400" x-text="agents.length"></span> agents
+          </div>
+          <div class="flex gap-2">
+            <input type="text" x-model="broadcastMessage" @keydown.enter="if (!broadcastStreaming) sendBroadcast()"
+              :disabled="broadcastStreaming"
+              class="dash-input flex-1" :class="broadcastStreaming && 'opacity-50 cursor-not-allowed'"
+              placeholder="Message all agents...">
+            <button @click="sendBroadcast()" :disabled="broadcastLoading || broadcastStreaming"
+              class="text-xs px-4 py-2 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
+              <span x-show="!broadcastLoading">Send</span>
+              <span x-show="broadcastLoading">Sending...</span>
+            </button>
+          </div>
+          <div x-show="broadcastResults && Object.keys(broadcastResults).length > 0" class="mt-3 space-y-2 max-h-80 overflow-y-auto custom-scrollbar" x-cloak>
+            <div x-show="broadcastSentMessage" class="text-xs text-gray-500 bg-gray-800/30 rounded px-2.5 py-1.5 mb-2 flex items-start gap-2">
+              <span class="text-gray-600 shrink-0">You:</span>
+              <span class="text-gray-400" x-text="broadcastSentMessage"></span>
+            </div>
+            <div class="flex items-center justify-between mb-1">
+              <div class="flex items-center gap-2">
+                <span class="text-[10px] text-gray-600 uppercase tracking-wider">Responses</span>
+                <span x-show="broadcastStreaming" class="text-[10px] text-gray-500"
+                  x-text="Object.values(broadcastResults || {}).filter(e => !e.streaming).length + '/' + Object.keys(broadcastResults || {}).length + ' done'"></span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <button x-show="broadcastStreaming" @click="cancelBroadcast()"
+                  class="text-[10px] px-2 py-0.5 rounded bg-red-900/30 text-red-400 hover:bg-red-900/50 border border-red-800/40">Abort</button>
+                <button x-show="!broadcastStreaming && broadcastResults" @click="broadcastResults = null; broadcastSentMessage = ''"
+                  class="text-[10px] px-2 py-0.5 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-800/50 transition-colors">Clear</button>
+              </div>
+            </div>
+            <template x-for="[aid, entry] in Object.entries(broadcastResults || {})" :key="aid">
+              <div class="text-xs bg-gray-800/50 rounded p-2" x-data="{ expanded: false }">
+                <div class="flex items-start gap-2">
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <template x-if="entry.streaming">
+                      <span class="inline-block w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse"></span>
+                    </template>
+                    <template x-if="!entry.streaming && !entry.error">
+                      <span class="text-emerald-400 text-[10px]">&#10003;</span>
+                    </template>
+                    <template x-if="!entry.streaming && entry.error">
+                      <span class="text-red-400 text-[10px]">&#10007;</span>
+                    </template>
+                    <span class="text-indigo-400 font-medium" x-text="aid"></span>
+                  </div>
+                  <span class="text-gray-400 whitespace-pre-wrap break-words" :class="entry.error && 'text-red-400'"
+                    x-text="expanded ? entry.content : (entry.content || '').substring(0, 200)"></span>
+                  <span x-show="entry.streaming && !entry.content" class="text-gray-600 italic">streaming...</span>
+                </div>
+                <button x-show="(entry.content || '').length > 200" @click="expanded = !expanded"
+                  class="text-indigo-500 hover:text-indigo-400 mt-1 text-[10px]"
+                  x-text="expanded ? 'Show less' : '...show more'"></button>
+              </div>
+            </template>
+          </div>
+        </div>
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           <template x-for="agent in agents" :key="agent.id">
             <div
+              role="article"
+              :aria-label="'Agent ' + agent.id"
               class="agent-card p-4 group relative overflow-hidden"
               :class="['thinking', 'tool', 'streaming'].includes(agentStates[agent.id]) ? 'pulse-border' : ''"
             >
@@ -204,6 +323,7 @@
                   <span x-text="agentInitials(agent.id)"></span>
                   <!-- Activity indicator dot -->
                   <span class="activity-dot"
+                    :aria-label="agentStates[agent.id] || 'idle'"
                     :class="{
                       'bg-purple-400': agentStates[agent.id] === 'thinking',
                       'bg-amber-400': agentStates[agent.id] === 'tool',
@@ -214,10 +334,11 @@
                 </div>
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2">
-                    <span class="font-semibold text-white group-hover:text-indigo-300 transition-colors truncate cursor-pointer" @click="drillDown(agent.id)" x-text="agent.id"></span>
+                    <span class="font-semibold text-white group-hover:text-indigo-300 transition-colors truncate cursor-pointer" @click="drillDown(agent.id)" :title="agent.id" x-text="agent.id"></span>
                     <svg class="w-3 h-3 text-gray-600 group-hover:text-indigo-400 transition-colors shrink-0 cursor-pointer" @click="drillDown(agent.id)" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                   </div>
-                  <div class="text-[11px] text-gray-500 truncate mt-0.5" x-show="agent.role" x-text="agent.role"></div>
+                  <div class="text-xs text-gray-500 truncate mt-0.5" x-show="agent.role" :title="agent.role" x-text="agent.role"></div>
+                  <div class="text-[10px] text-gray-600 truncate mt-0.5" x-show="agent.model" :title="agent.model" x-text="(agent.model || '').split('/').pop()"></div>
                 </div>
                 <div class="flex items-center gap-1.5 shrink-0">
                   <!-- Queue depth badge -->
@@ -269,38 +390,6 @@
                   </span>
                   <span class="stat-value" x-text="agent.daily_tokens.toLocaleString()"></span>
                 </div>
-                <div class="stat-row">
-                  <span class="stat-label">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
-                    Model
-                  </span>
-                  <span class="stat-value text-gray-400" x-text="agent.model || '-'"></span>
-                </div>
-                <div class="stat-row">
-                  <span class="stat-label">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
-                    Queue
-                  </span>
-                  <span class="stat-value"
-                    :class="queueStatus[agent.id]?.busy ? 'text-amber-400' : 'text-gray-600'"
-                    x-text="queueStatus[agent.id]?.busy ? 'busy (' + queueStatus[agent.id]?.queued + ' queued)' : 'idle'"
-                  ></span>
-                </div>
-                <div class="stat-row" x-show="agent.restarts > 0">
-                  <span class="stat-label">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-                    Restarts
-                  </span>
-                  <span class="stat-value text-yellow-400" x-text="agent.restarts"></span>
-                </div>
-                <div class="stat-row" x-show="agent.vnc_url" x-cloak>
-                  <span class="stat-label">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                    Browser
-                  </span>
-                  <a :href="agent.vnc_url + '&password=' + (agent.vnc_password || '')" target="_blank" rel="noopener"
-                    class="stat-value text-indigo-400 hover:text-indigo-300 transition-colors">Open noVNC</a>
-                </div>
               </div>
 
               <!-- Agent actions: Chat, Manage, Restart, Remove -->
@@ -310,27 +399,37 @@
                   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                   <span x-text="openChats.includes(agent.id) ? 'Chatting' : 'Chat'"></span>
                 </button>
-                <button @click="drillDown(agent.id)" class="action-btn action-btn-secondary">
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
-                  Manage
-                </button>
                 <button @click="restartAgent(agent.id)" class="action-btn action-btn-warn">
                   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
                   Restart
                 </button>
                 <button @click="removeAgent(agent.id)" class="action-btn action-btn-danger">
                   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                  Remove
+                  Delete
                 </button>
               </div>
             </div>
           </template>
         </div>
         <!-- Loading state -->
-        <div x-show="agents.length === 0 && loading" class="text-center py-16" x-cloak>
-          <div class="inline-flex items-center gap-2 text-gray-500">
-            <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-            Loading agents...
+        <div x-show="agents.length === 0 && loading" x-cloak>
+          <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+            <template x-for="i in 3" :key="i">
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 animate-pulse">
+                <div class="flex items-start gap-3 mb-3">
+                  <div class="w-9 h-9 rounded-full bg-gray-800"></div>
+                  <div class="flex-1 space-y-2">
+                    <div class="h-4 bg-gray-800 rounded w-24"></div>
+                    <div class="h-3 bg-gray-800/60 rounded w-32"></div>
+                  </div>
+                </div>
+                <div class="space-y-2">
+                  <div class="h-3 bg-gray-800/40 rounded w-full"></div>
+                  <div class="h-3 bg-gray-800/40 rounded w-3/4"></div>
+                  <div class="h-3 bg-gray-800/40 rounded w-1/2"></div>
+                </div>
+              </div>
+            </template>
           </div>
         </div>
         <!-- Onboarding banner (first-run) -->
@@ -397,173 +496,136 @@
             <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
           </svg>
           <div class="text-gray-500 text-lg mb-2 font-medium">No agents yet</div>
+          <div class="text-gray-400 text-sm mb-1">Create an autonomous AI agent</div>
           <div class="text-gray-600 text-sm mb-5">Start agents with <code class="bg-gray-800 px-1.5 py-0.5 rounded text-gray-400 text-xs">openlegion start</code> or add one below</div>
-          <button @click="addAgentMode = true; fetchSettings()"
+          <button @click="addAgentMode = true; addAgentForm.name = 'assistant'; fetchSettings()"
             class="text-sm px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-2 shadow-lg shadow-indigo-900/30">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             Add Agent
           </button>
         </div>
-        <!-- Broadcast bar -->
-        <div x-show="agents.length > 1" class="mt-6 bg-gray-900 border border-gray-800 rounded-lg p-4" x-cloak>
-          <div class="text-xs text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
-            <svg class="w-3.5 h-3.5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-            Broadcast to <span class="text-gray-400" x-text="agents.length"></span> agents
-          </div>
-          <div class="flex gap-2">
-            <input type="text" x-model="broadcastMessage" @keydown.enter="if (!broadcastStreaming) sendBroadcast()"
-              :disabled="broadcastStreaming"
-              class="dash-input flex-1" :class="broadcastStreaming && 'opacity-50 cursor-not-allowed'"
-              placeholder="Message all agents...">
-            <button @click="sendBroadcast()" :disabled="broadcastLoading || broadcastStreaming"
-              class="text-xs px-4 py-2 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
-              <span x-show="!broadcastLoading">Send</span>
-              <span x-show="broadcastLoading">Sending...</span>
-            </button>
-          </div>
-          <div x-show="broadcastResults && Object.keys(broadcastResults).length > 0" class="mt-3 space-y-2 max-h-80 overflow-y-auto custom-scrollbar" x-cloak>
-            <div x-show="broadcastSentMessage" class="text-xs text-gray-500 bg-gray-800/30 rounded px-2.5 py-1.5 mb-2 flex items-start gap-2">
-              <span class="text-gray-600 shrink-0">You:</span>
-              <span class="text-gray-400" x-text="broadcastSentMessage"></span>
-            </div>
-            <div class="flex items-center justify-between mb-1">
-              <div class="flex items-center gap-2">
-                <span class="text-[10px] text-gray-600 uppercase tracking-wider">Responses</span>
-                <span x-show="broadcastStreaming" class="text-[10px] text-gray-500"
-                  x-text="Object.values(broadcastResults || {}).filter(e => !e.streaming).length + '/' + Object.keys(broadcastResults || {}).length + ' done'"></span>
-              </div>
-              <div class="flex items-center gap-1.5">
-                <button x-show="broadcastStreaming" @click="cancelBroadcast()"
-                  class="text-[10px] px-2 py-0.5 rounded bg-red-900/30 text-red-400 hover:bg-red-900/50 border border-red-800/40">Abort</button>
-                <button x-show="!broadcastStreaming && broadcastResults" @click="broadcastResults = null; broadcastSentMessage = ''"
-                  class="text-[10px] px-2 py-0.5 rounded text-gray-500 hover:text-gray-300 hover:bg-gray-800/50 transition-colors">Clear</button>
-              </div>
-            </div>
-            <template x-for="[aid, entry] in Object.entries(broadcastResults || {})" :key="aid">
-              <div class="text-xs bg-gray-800/50 rounded p-2" x-data="{ expanded: false }">
-                <div class="flex items-start gap-2">
-                  <div class="flex items-center gap-1.5 shrink-0">
-                    <template x-if="entry.streaming">
-                      <span class="inline-block w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse"></span>
-                    </template>
-                    <template x-if="!entry.streaming && !entry.error">
-                      <span class="text-emerald-400 text-[10px]">&#10003;</span>
-                    </template>
-                    <template x-if="!entry.streaming && entry.error">
-                      <span class="text-red-400 text-[10px]">&#10007;</span>
-                    </template>
-                    <span class="text-indigo-400 font-medium" x-text="aid"></span>
-                  </div>
-                  <span class="text-gray-400 whitespace-pre-wrap break-words" :class="entry.error && 'text-red-400'"
-                    x-text="expanded ? entry.content : (entry.content || '').substring(0, 200)"></span>
-                  <span x-show="entry.streaming && !entry.content" class="text-gray-600 italic">streaming...</span>
+      </div>
+
+      <!-- Slide-over chat panel -->
+      <div x-show="openChats.length > 0 && !chatPanelMinimized" x-cloak
+        x-transition:enter="transition ease-out duration-200"
+        x-transition:enter-start="translate-x-full"
+        x-transition:enter-end="translate-x-0"
+        x-transition:leave="transition ease-in duration-150"
+        x-transition:leave-start="translate-x-0"
+        x-transition:leave-end="translate-x-full"
+        class="fixed top-0 right-0 z-40 w-[380px] h-full bg-gray-900 border-l border-gray-700 shadow-2xl flex flex-col"
+        style="box-shadow: -8px 0 32px -4px rgba(0,0,0,0.5);">
+        <!-- Tab bar -->
+        <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800 shrink-0">
+          <div class="flex gap-0.5 overflow-x-auto flex-1 mr-2">
+            <template x-for="chatId in openChats" :key="chatId">
+              <button @click="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId))"
+                class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all shrink-0 relative"
+                :class="activeChatId === chatId
+                  ? 'bg-gray-700 text-white shadow-sm'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+              >
+                <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(chatId)" style="width:1.25rem;height:1.25rem;font-size:0.5rem;">
+                  <span x-text="agentInitials(chatId)"></span>
                 </div>
-                <button x-show="(entry.content || '').length > 200" @click="expanded = !expanded"
-                  class="text-indigo-500 hover:text-indigo-400 mt-1 text-[10px]"
-                  x-text="expanded ? 'Show less' : '...show more'"></button>
-              </div>
+                <span class="truncate max-w-[5rem]" x-text="chatId"></span>
+                <span x-show="chatUnread[chatId] > 0"
+                  class="flex items-center justify-center min-w-[14px] h-3.5 px-0.5 rounded-full bg-amber-500 text-[8px] font-bold text-black"
+                  x-text="chatUnread[chatId]"></span>
+                <button @click.stop="closeChat(chatId)" class="text-gray-600 hover:text-white transition-colors text-xs ml-0.5" aria-label="Close chat">&times;</button>
+              </button>
             </template>
+          </div>
+          <div class="flex items-center gap-1 shrink-0">
+            <button @click="chatPanelMinimized = true" class="text-gray-500 hover:text-white text-xs px-1 transition-colors" title="Minimize">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+            </button>
+            <button @click="openChats.slice().forEach(id => closeChat(id))" class="text-gray-500 hover:text-white transition-colors text-sm" aria-label="Close all chats">&times;</button>
+          </div>
+        </div>
+        <!-- Active agent header -->
+        <div class="flex items-center gap-2 px-3 py-2 border-b border-gray-800/50 shrink-0"
+          :class="(chatStreamingAgents[activeChatId] || chatLoadingAgents[activeChatId]) && 'border-b-indigo-500/50'">
+          <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(activeChatId)">
+            <span x-text="agentInitials(activeChatId)"></span>
+            <span class="activity-dot"
+              :aria-label="chatStreamingAgents[activeChatId] ? 'streaming' : (chatLoadingAgents[activeChatId] ? 'thinking' : 'idle')"
+              :class="chatStreamingAgents[activeChatId] ? 'bg-green-400' : (chatLoadingAgents[activeChatId] ? 'bg-purple-400' : 'bg-gray-600')"
+            ></span>
+          </div>
+          <span class="text-sm font-medium text-white truncate" x-text="activeChatId"></span>
+          <button x-show="(chatHistories[activeChatId] || []).length > 0" @click.stop="clearChat(activeChatId)"
+            class="text-[10px] text-gray-600 hover:text-gray-400 transition-colors ml-auto" title="Clear">Clear</button>
+        </div>
+        <!-- Messages area -->
+        <div role="log" aria-live="polite" class="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar" :id="'chat-messages-' + activeChatId">
+          <template x-for="(msg, i) in (chatHistories[activeChatId] || [])" :key="i">
+            <div :class="msg.role === 'user' ? 'text-right' : 'text-left'">
+              <div class="inline-block max-w-[90%] px-2.5 py-1.5 rounded-lg text-xs"
+                :class="{
+                  'bg-indigo-600 text-white': msg.role === 'user',
+                  'bg-gray-800 text-gray-200': msg.role === 'agent',
+                  'bg-red-900/40 text-red-300': msg.role === 'error',
+                  'bg-amber-900/40 text-amber-200 border border-amber-700/50': msg.role === 'notification',
+                }"
+              >
+                <template x-if="msg.tools && msg.tools.length > 0">
+                  <div class="mb-1.5 space-y-0.5">
+                    <template x-for="(tool, ti) in msg.tools" :key="ti">
+                      <div class="flex items-center gap-1 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400" :title="tool.name">
+                        <template x-if="tool.status === 'running'">
+                          <svg class="animate-spin h-2.5 w-2.5 text-indigo-400 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                        </template>
+                        <template x-if="tool.status === 'done'">
+                          <span class="text-emerald-400 shrink-0">&#10003;</span>
+                        </template>
+                        <span class="font-mono truncate" x-text="tool.name"></span>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <template x-if="msg.role === 'notification'">
+                  <div class="text-[10px] font-semibold text-amber-400/70 uppercase tracking-wide mb-0.5">Notification</div>
+                </template>
+                <div x-show="msg.role === 'user'" class="whitespace-pre-wrap break-words" x-text="msg.content"></div>
+                <div x-show="msg.role !== 'user'" class="chat-markdown break-words" x-html="renderMarkdown(msg.content)"></div>
+                <span x-show="msg.streaming" class="inline-block w-1 h-3 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
+              </div>
+            </div>
+          </template>
+          <div x-show="chatLoadingAgents[activeChatId]" class="text-center text-gray-600 text-[10px]">
+            <svg class="animate-spin h-3 w-3 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+            Thinking...
+          </div>
+          <div x-show="(chatHistories[activeChatId] || []).length === 0 && !chatLoadingAgents[activeChatId]" class="flex flex-col items-center justify-center py-12 text-center">
+            <svg class="w-8 h-8 text-gray-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <span class="text-gray-600 text-xs">Send a message to <span class="text-gray-400" x-text="activeChatId"></span></span>
+          </div>
+        </div>
+        <!-- Input area -->
+        <div class="px-3 py-2.5 border-t border-gray-800 shrink-0" x-data="{ chatInput: '' }">
+          <div class="flex gap-1.5">
+            <input type="text" x-model="chatInput" id="chat-slide-input"
+              @keydown.enter="if (chatInput.trim() && !chatStreamingAgents[activeChatId] && !chatLoadingAgents[activeChatId]) { sendChatTo(activeChatId, chatInput); chatInput = ''; }"
+              class="dash-input flex-1 text-xs py-1.5" placeholder="Message..."
+              :disabled="chatStreamingAgents[activeChatId] || chatLoadingAgents[activeChatId]">
+            <button @click="if (chatInput.trim()) { sendChatTo(activeChatId, chatInput); chatInput = ''; }"
+              :disabled="chatStreamingAgents[activeChatId] || chatLoadingAgents[activeChatId] || !chatInput.trim()"
+              class="text-[10px] px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">Send</button>
           </div>
         </div>
       </div>
 
-      <!-- Docked chat panel bar (multi-agent) -->
-      <div x-show="openChats.length > 0" x-cloak class="fixed bottom-0 right-0 z-40 flex flex-wrap-reverse items-start gap-2 p-3 pointer-events-none max-w-full">
-        <!-- Close-all button (shown when 2+ panels open) -->
-        <button x-show="openChats.length > 1" @click="openChats.slice().forEach(id => closeChat(id))"
-          class="pointer-events-auto mb-1 text-[10px] px-2 py-1 rounded-full bg-gray-800/90 text-gray-400 hover:text-white hover:bg-gray-700 border border-gray-700 transition-colors shadow-lg"
-          title="Close all chats">
-          Close all
-        </button>
-        <template x-for="chatId in openChats" :key="chatId">
-          <div class="pointer-events-auto w-72 sm:w-80 bg-gray-900 border border-gray-700 rounded-t-xl shadow-2xl flex flex-col max-h-[60vh]" x-data="{ chatInput: '' }">
-            <!-- Panel header -->
-            <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800 select-none"
-              :class="(chatStreamingAgents[chatId] || chatLoadingAgents[chatId]) && 'border-b-indigo-500/50'">
-              <div class="flex items-center gap-2 min-w-0">
-                <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(chatId)">
-                  <span x-text="agentInitials(chatId)"></span>
-                  <span class="activity-dot"
-                    :class="chatStreamingAgents[chatId] ? 'bg-green-400' : (chatLoadingAgents[chatId] ? 'bg-purple-400' : 'bg-gray-600')"
-                  ></span>
-                </div>
-                <span class="text-xs font-medium text-white truncate" x-text="chatId"></span>
-                <span x-show="chatMinimized[chatId] && chatUnread[chatId] > 0"
-                  class="flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-amber-500 text-[9px] font-bold text-black"
-                  x-text="chatUnread[chatId]"></span>
-                <button x-show="(chatHistories[chatId] || []).length > 0 && !chatMinimized[chatId]" @click.stop="clearChat(chatId)"
-                  class="text-[10px] text-gray-600 hover:text-gray-400 transition-colors" title="Clear">Clear</button>
-              </div>
-              <div class="flex items-center gap-1">
-                <button @click="chatMinimized = { ...chatMinimized, [chatId]: !chatMinimized[chatId] }; if (!chatMinimized[chatId]) { chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId)); }"
-                  class="text-gray-500 hover:text-white text-xs px-1 transition-colors"
-                  :title="chatMinimized[chatId] ? 'Expand' : 'Minimize'"
-                  :aria-expanded="!chatMinimized[chatId]">
-                  <svg x-show="!chatMinimized[chatId]" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-                  <svg x-show="chatMinimized[chatId]" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7"/></svg>
-                </button>
-                <button @click.stop="closeChat(chatId)" class="text-gray-500 hover:text-white transition-colors text-sm" aria-label="Close chat">&times;</button>
-              </div>
-            </div>
-            <!-- Messages area (hidden when minimized) -->
-            <div x-show="!chatMinimized[chatId]" class="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar min-h-[120px] max-h-[40vh]" :id="'chat-messages-' + chatId">
-              <template x-for="(msg, i) in (chatHistories[chatId] || [])" :key="i">
-                <div :class="msg.role === 'user' ? 'text-right' : 'text-left'">
-                  <div class="inline-block max-w-[90%] px-2.5 py-1.5 rounded-lg text-xs"
-                    :class="{
-                      'bg-indigo-600 text-white': msg.role === 'user',
-                      'bg-gray-800 text-gray-200': msg.role === 'agent',
-                      'bg-red-900/40 text-red-300': msg.role === 'error',
-                      'bg-amber-900/40 text-amber-200 border border-amber-700/50': msg.role === 'notification',
-                    }"
-                  >
-                    <template x-if="msg.tools && msg.tools.length > 0">
-                      <div class="mb-1.5 space-y-0.5">
-                        <template x-for="(tool, ti) in msg.tools" :key="ti">
-                          <div class="flex items-center gap-1 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400" :title="tool.name">
-                            <template x-if="tool.status === 'running'">
-                              <svg class="animate-spin h-2.5 w-2.5 text-indigo-400 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-                            </template>
-                            <template x-if="tool.status === 'done'">
-                              <span class="text-emerald-400 shrink-0">&#10003;</span>
-                            </template>
-                            <span class="font-mono truncate" x-text="tool.name"></span>
-                          </div>
-                        </template>
-                      </div>
-                    </template>
-                    <template x-if="msg.role === 'notification'">
-                      <div class="text-[9px] font-semibold text-amber-400/70 uppercase tracking-wide mb-0.5">Notification</div>
-                    </template>
-                    <div x-show="msg.role === 'user'" class="whitespace-pre-wrap break-words" x-text="msg.content"></div>
-                    <div x-show="msg.role !== 'user'" class="chat-markdown break-words" x-html="renderMarkdown(msg.content)"></div>
-                    <span x-show="msg.streaming" class="inline-block w-1 h-3 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
-                  </div>
-                </div>
-              </template>
-              <div x-show="chatLoadingAgents[chatId]" class="text-center text-gray-600 text-[10px]">
-                <svg class="animate-spin h-3 w-3 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-                Thinking...
-              </div>
-              <div x-show="(chatHistories[chatId] || []).length === 0 && !chatLoadingAgents[chatId]" class="flex flex-col items-center justify-center py-6 text-center">
-                <svg class="w-6 h-6 text-gray-700 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                <span class="text-gray-600 text-[10px]">Send a message to <span class="text-gray-500" x-text="chatId"></span></span>
-              </div>
-            </div>
-            <!-- Input area (hidden when minimized) -->
-            <div x-show="!chatMinimized[chatId]" class="px-2.5 py-2 border-t border-gray-800">
-              <div class="flex gap-1.5">
-                <input type="text" x-model="chatInput"
-                  @keydown.enter="if (chatInput.trim() && !chatStreamingAgents[chatId] && !chatLoadingAgents[chatId]) { sendChatTo(chatId, chatInput); chatInput = ''; }"
-                  class="dash-input flex-1 text-xs py-1.5" placeholder="Message..."
-                  :disabled="chatStreamingAgents[chatId] || chatLoadingAgents[chatId]">
-                <button @click="if (chatInput.trim()) { sendChatTo(chatId, chatInput); chatInput = ''; }"
-                  :disabled="chatStreamingAgents[chatId] || chatLoadingAgents[chatId] || !chatInput.trim()"
-                  class="text-[10px] px-2.5 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">Send</button>
-              </div>
-            </div>
-          </div>
-        </template>
+      <!-- Minimized chat pill -->
+      <div x-show="openChats.length > 0 && chatPanelMinimized" x-cloak
+        @click="chatPanelMinimized = false; if (activeChatId) { chatUnread = { ...chatUnread, [activeChatId]: 0 }; $nextTick(() => _scrollChat(activeChatId)); }"
+        class="fixed bottom-4 right-4 z-40 cursor-pointer bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2.5 rounded-full shadow-xl flex items-center gap-2 transition-all hover:scale-105">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        <span class="text-xs font-medium" x-text="openChats.length + ' chat' + (openChats.length !== 1 ? 's' : '')"></span>
+        <span x-show="Object.values(chatUnread).reduce((a,b) => a + (b||0), 0) > 0"
+          class="flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-amber-500 text-[10px] font-bold text-black"
+          x-text="Object.values(chatUnread).reduce((a,b) => a + (b||0), 0)"></span>
       </div>
 
       <!-- Activity Feed (Traces + Live Events) -->
@@ -579,9 +641,14 @@
               class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
               :class="activityView === 'events' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
             >Live Events</button>
+            <button @click="setActivityView('blackboard')"
+              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
+              :class="activityView === 'blackboard' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+            >Blackboard</button>
           </div>
           <span x-show="activityView === 'events'" class="text-xs text-gray-600" x-text="filteredEvents.length + ' events'"></span>
           <span x-show="activityView === 'traces'" class="text-xs text-gray-600" x-text="traces.length + ' traces'"></span>
+          <span x-show="activityView === 'blackboard'" class="text-xs text-gray-600" x-text="filteredBbEntries.length + ' entries'"></span>
         </div>
 
         <!-- Traces view -->
@@ -595,8 +662,8 @@
                 >
                   <svg class="w-3 h-3 shrink-0 text-gray-600 transition-transform duration-200" :class="expandedTraces[t.trace_id] && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                   <span class="w-2 h-2 rounded-full shrink-0" :class="eventBgColor(t.first_event_type || 'chat')"></span>
-                  <span class="text-gray-400 text-xs shrink-0 w-24 truncate" x-text="t.agents.join(', ') || '-'"></span>
-                  <span class="text-gray-300 truncate flex-1" x-text="t.trigger_preview || t.trigger_detail || t.trace_id.substring(0, 12)"></span>
+                  <span class="text-gray-400 text-xs shrink-0 w-24 truncate" :title="t.agents.join(', ')" x-text="t.agents.join(', ') || '-'"></span>
+                  <span class="text-gray-300 truncate flex-1" :title="t.trigger_preview || t.trigger_detail || t.trace_id" x-text="t.trigger_preview || t.trigger_detail || t.trace_id.substring(0, 12)"></span>
                   <span class="text-gray-600 text-[10px] font-mono shrink-0" x-text="t.event_count + ' events'"></span>
                   <span x-show="t.total_duration_ms > 0" class="text-gray-700 text-[10px] font-mono shrink-0" x-text="t.total_duration_ms + 'ms'"></span>
                   <span x-show="t.has_error" class="text-[10px] px-1.5 py-0.5 rounded-full bg-red-900/30 text-red-400 border border-red-800/40 shrink-0">ERR</span>
@@ -666,7 +733,7 @@
               <template x-for="etype in eventTypes" :key="etype">
                 <button
                   @click="toggleEventFilter(etype)"
-                  class="text-[11px] px-2 py-1 rounded-md border transition-all"
+                  class="text-xs px-2 py-1 rounded-md border transition-all"
                   :class="eventFilters.includes(etype)
                     ? 'border-indigo-500/60 bg-indigo-900/20 text-indigo-300'
                     : 'border-gray-800 text-gray-600 hover:text-gray-400 hover:border-gray-700'"
@@ -676,7 +743,7 @@
               <button
                 x-show="eventFilters.length > 0"
                 @click="eventFilters = []"
-                class="text-[11px] px-2 py-1 rounded-md text-gray-600 hover:text-gray-400"
+                class="text-xs px-2 py-1 rounded-md text-gray-600 hover:text-gray-400"
               >Clear</button>
             </div>
           </div>
@@ -686,8 +753,8 @@
                 <div @click="open = !open" class="bg-gray-900/70 border border-gray-800/60 px-3 py-2 flex items-start gap-3 text-sm hover:bg-gray-900 transition-colors cursor-pointer select-none" :class="open ? 'rounded-t-md' : 'rounded-md'">
                   <svg class="w-3 h-3 shrink-0 mt-1 text-gray-600 transition-transform duration-200" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                   <span class="event-badge shrink-0 mt-0.5" :class="eventColor(evt.type)" x-text="evt.type"></span>
-                  <span class="text-gray-500 shrink-0 w-20 truncate" x-text="evt.agent || '-'"></span>
-                  <span class="text-gray-300 truncate flex-1" x-text="eventSummary(evt)"></span>
+                  <span class="text-gray-500 shrink-0 w-20 truncate" :title="evt.agent" x-text="evt.agent || '-'"></span>
+                  <span class="text-gray-300 truncate flex-1" :title="eventSummary(evt)" x-text="eventSummary(evt)"></span>
                   <span class="text-gray-700 text-xs shrink-0 font-mono" x-text="timeAgo(evt.timestamp)"></span>
                 </div>
                 <template x-if="open">
@@ -784,11 +851,11 @@
                 <div class="flex items-center gap-2">
                   <a :href="agentDetail?.vnc_url + '&password=' + (agentDetail?.vnc_password || '')"
                     target="_blank" rel="noopener"
-                    class="text-[11px] text-gray-500 hover:text-gray-300 transition-colors"
+                    class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
                     title="Open in new tab">&#x2197; Pop out</a>
                   <button @click="showBrowserViewer = false"
                     class="text-gray-500 hover:text-gray-300 transition-colors text-sm"
-                    title="Close">&times;</button>
+                    title="Close" aria-label="Close">&times;</button>
                 </div>
               </div>
               <iframe
@@ -798,392 +865,458 @@
                 allow="clipboard-read; clipboard-write"
               ></iframe>
             </div>
-            <!-- Agent Identity Panel -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-5">
-              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Identity</div>
-              <!-- Tab bar -->
-              <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-3 overflow-x-auto">
-                <template x-for="tab in identityTabs" :key="tab.id">
-                  <button
-                    @click="switchIdentityTab(selectedAgent, tab.id)"
-                    class="px-2.5 py-1.5 rounded-md text-xs font-medium transition-all flex items-center gap-1.5"
-                    :class="identityTab === tab.id
-                      ? 'bg-gray-700 text-white shadow-sm'
-                      : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-                  >
-                    <span x-text="tab.label"></span>
-                    <!-- Access badge -->
-                    <span x-show="tab.access === 'user'"
-                      class="text-[9px] px-1 py-0 rounded-full bg-blue-900/40 text-blue-400 border border-blue-800/30 font-normal"
-                      title="Only you can edit this file"
-                    >User</span>
-                    <span x-show="tab.access === 'agent'"
-                      class="text-[9px] px-1 py-0 rounded-full bg-purple-900/40 text-purple-400 border border-purple-800/30 font-normal"
-                      title="The agent can update this file"
-                    >Agent</span>
-                    <span x-show="tab.access === 'auto'"
-                      class="text-[9px] px-1 py-0 rounded-full bg-gray-700/50 text-gray-500 border border-gray-600/30 font-normal"
-                      title="Auto-generated, read-only"
-                    >Auto</span>
-                  </button>
-                </template>
-              </div>
-              <!-- Tab description -->
-              <div class="text-xs text-gray-500 mb-3">
-                <span x-text="identityCurrentTab.desc"></span>
-                <span
-                  x-show="identityCurrentTab.file && identityFiles.find(f => f.name === identityCurrentTab.file)?.is_default"
-                  class="inline-block ml-1.5 text-[9px] px-1 py-0 rounded-full bg-gray-600/50 text-gray-400 font-normal align-middle"
-                >default</span>
-              </div>
-              <!-- Character budget bar (file tabs with a cap) -->
-              <div x-show="identityCurrentTab.cap" class="mb-3">
-                <div class="flex justify-between items-center text-[11px] text-gray-500 mb-1">
-                  <span x-text="identityCharCount.toLocaleString() + ' / ' + (identityCurrentTab.cap || 0).toLocaleString() + ' chars'"></span>
-                  <span x-text="Math.round(identityBudgetPct) + '%'"></span>
-                </div>
-                <div class="w-full bg-gray-800 rounded-full h-1">
-                  <div class="h-1 rounded-full transition-all duration-300"
-                    :class="identityBudgetColor"
-                    :style="'width:' + identityBudgetPct + '%'"
-                  ></div>
-                </div>
-              </div>
-              <!-- Char count only (file tabs without a cap, e.g. Heartbeat) -->
-              <div x-show="identityCurrentTab.file && !identityCurrentTab.cap" class="mb-3">
-                <div class="text-[11px] text-gray-500" x-text="identityCharCount.toLocaleString() + ' chars'"></div>
-              </div>
-              <!-- Loading -->
-              <div x-show="identityContentLoading || identityLoading || identityLogsLoading || identityLearningsLoading" class="py-6 text-center text-gray-600 text-sm">
-                <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-                Loading...
-              </div>
-              <!-- Empty state when workspace unavailable -->
-              <div x-show="identityFiles.length === 0 && !identityLoading && identityCurrentTab.file" class="text-gray-600 text-sm py-6 text-center">
-                No workspace available for this agent
-              </div>
-              <!-- Editable file tabs (Soul, Instructions, Preferences, Heartbeat, Memory) -->
-              <div x-show="identityCurrentTab.file && identityFiles.length > 0 && !identityContentLoading && !identityLoading">
-                <!-- Read-only view -->
-                <div x-show="!identityEditing">
-                  <div class="flex items-center justify-between mb-2">
-                    <span class="font-mono text-xs text-gray-500" x-text="identityCurrentTab.file"></span>
-                    <button @click="startIdentityEdit()"
-                      class="text-[11px] px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
-                  </div>
-                  <pre class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-72 overflow-y-auto custom-scrollbar"
-                    x-text="identityContent[identityCurrentTab.file] || '(empty)'"></pre>
-                </div>
-                <!-- Edit mode -->
-                <div x-show="identityEditing">
-                  <div class="flex items-center justify-between mb-2">
-                    <span class="font-mono text-xs text-blue-400" x-text="identityCurrentTab.file"></span>
-                    <div class="flex gap-2">
-                      <button @click="saveIdentityFile(selectedAgent)"
-                        :disabled="identitySaving"
-                        class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-50 transition-colors">
-                        <span x-text="identitySaving ? 'Saving...' : 'Save'"></span>
+            <!-- 2-column detail layout -->
+            <div class="grid grid-cols-1 lg:grid-cols-5 gap-5 mb-5">
+              <!-- Left column: Identity panel -->
+              <div class="lg:col-span-3">
+                <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                  <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Identity</div>
+                  <!-- Tab bar (4 tabs, no access badges) -->
+                  <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-3 overflow-x-auto">
+                    <template x-for="tab in identityTabs" :key="tab.id">
+                      <button
+                        @click="switchIdentityTab(selectedAgent, tab.id)"
+                        class="px-2.5 py-1.5 rounded-md text-xs font-medium transition-all"
+                        :class="identityTab === tab.id
+                          ? 'bg-gray-700 text-white shadow-sm'
+                          : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                      >
+                        <span x-text="tab.label"></span>
                       </button>
-                      <button @click="cancelIdentityEdit()"
-                        class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors">Cancel</button>
-                    </div>
+                    </template>
                   </div>
-                  <textarea x-model="identityEditBuffer"
-                    @keydown.ctrl.s.prevent="saveIdentityFile(selectedAgent)"
-                    @keydown.meta.s.prevent="saveIdentityFile(selectedAgent)"
-                    class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
-                    rows="15" spellcheck="false"></textarea>
-                </div>
-              </div>
-              <!-- Activity tab (read-only logs) -->
-              <div x-show="identityTab === 'activity' && !identityLogsLoading && !identityLoading">
-                <div class="flex items-center justify-between mb-2">
-                  <span class="text-xs text-gray-500">Daily logs (last 3 days)</span>
-                  <button @click="fetchIdentityLogs(selectedAgent)"
-                    class="text-[11px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
-                </div>
-                <div x-show="!identityLogs" class="text-gray-600 text-sm py-4 text-center">No daily logs found</div>
-                <pre x-show="identityLogs"
-                  class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-80 overflow-y-auto custom-scrollbar"
-                  x-text="identityLogs"></pre>
-              </div>
-              <!-- Learnings tab (read-only errors + corrections) -->
-              <div x-show="identityTab === 'learnings' && !identityLearningsLoading && !identityLoading">
-                <div class="flex items-center justify-between mb-3">
-                  <span class="text-xs text-gray-500">Errors and user corrections</span>
-                  <button @click="fetchIdentityLearnings(selectedAgent)"
-                    class="text-[11px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
-                </div>
-                <!-- Errors section -->
-                <div class="mb-4">
-                  <div class="text-xs font-medium text-red-400/80 mb-1.5">Errors</div>
-                  <div x-show="!identityLearnings?.errors" class="text-gray-600 text-sm py-2 text-center">No errors recorded</div>
-                  <pre x-show="identityLearnings?.errors"
-                    class="bg-red-950/20 border border-red-900/30 rounded p-3 text-xs text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar"
-                    x-text="identityLearnings?.errors"></pre>
-                </div>
-                <!-- Corrections section -->
-                <div>
-                  <div class="text-xs font-medium text-amber-400/80 mb-1.5">Corrections</div>
-                  <div x-show="!identityLearnings?.corrections" class="text-gray-600 text-sm py-2 text-center">No corrections recorded</div>
-                  <pre x-show="identityLearnings?.corrections"
-                    class="bg-amber-950/20 border border-amber-900/30 rounded p-3 text-xs text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar"
-                    x-text="identityLearnings?.corrections"></pre>
-                </div>
-              </div>
-              <!-- Loading states for activity/learnings -->
-              <div x-show="(identityTab === 'activity' && identityLogsLoading) || (identityTab === 'learnings' && identityLearningsLoading)" class="py-6 text-center text-gray-600 text-sm">
-                <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-                Loading...
-              </div>
-              <!-- Config tab -->
-              <div x-show="identityTab === 'config' && !identityLoading">
-                <!-- Loading state -->
-                <div x-show="!agentConfigs[selectedAgent]" class="py-6 text-center text-gray-600 text-sm">
-                  <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-                  Loading config...
-                </div>
-                <!-- Read-only view -->
-                <div x-show="agentConfigs[selectedAgent] && !configEditing">
-                  <div class="flex items-center justify-between mb-3">
-                    <span class="text-xs text-gray-500">Agent configuration</span>
-                    <button @click="startConfigEdit()"
-                      class="text-[11px] px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
+                  <!-- Tab description -->
+                  <div class="text-xs text-gray-500 mb-3" x-text="identityCurrentTab.desc"></div>
+                  <!-- Loading -->
+                  <div x-show="identityContentLoading || identityLoading || identityLogsLoading || identityLearningsLoading" class="py-6 text-center text-gray-600 text-sm">
+                    <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                    Loading...
                   </div>
-                  <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div class="bg-gray-800/50 rounded p-3">
-                      <div class="text-[11px] text-gray-500 mb-1">Model</div>
-                      <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.model || '-'"></div>
-                    </div>
-                    <div class="bg-gray-800/50 rounded p-3">
-                      <div class="text-[11px] text-gray-500 mb-1">Browser Backend</div>
-                      <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.browser_backend || '-'"></div>
-                    </div>
-                    <div class="bg-gray-800/50 rounded p-3">
-                      <div class="text-[11px] text-gray-500 mb-1">Role</div>
-                      <div class="text-sm text-gray-200" x-text="agentConfigs[selectedAgent]?.role || '-'"></div>
-                    </div>
-                    <div class="bg-gray-800/50 rounded p-3">
-                      <div class="text-[11px] text-gray-500 mb-1">Budget ($/day)</div>
-                      <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.budget?.daily_usd ? formatCost(agentConfigs[selectedAgent].budget.daily_usd) : '-'"></div>
-                    </div>
-                    <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
-                      <div class="text-[11px] text-gray-500 mb-1">Credential Access</div>
-                      <!-- Pattern display -->
-                      <div class="text-sm text-gray-200 font-mono mb-2">
-                        Pattern: <span x-text="(agentConfigs[selectedAgent]?.allowed_credentials || []).join(', ') || 'none'" :class="(agentConfigs[selectedAgent]?.allowed_credentials || []).length ? 'text-indigo-400' : 'text-gray-500'"></span>
-                      </div>
-                      <!-- Resolved credentials this agent can actually access -->
-                      <template x-if="(agentConfigs[selectedAgent]?.resolved_credentials || []).length > 0">
-                        <div class="mb-2">
-                          <div class="text-[11px] text-gray-500 mb-1">Accessible credentials</div>
-                          <div class="flex flex-wrap gap-1.5">
-                            <template x-for="c in agentConfigs[selectedAgent].resolved_credentials" :key="c">
-                              <span class="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded bg-green-900/30 text-green-400 border border-green-800/50">
-                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-                                <span x-text="c"></span>
-                              </span>
-                            </template>
+                  <!-- Empty state when workspace unavailable -->
+                  <div x-show="identityFiles.length === 0 && !identityLoading && (identityTab === 'identity' || identityTab === 'memory')" class="text-gray-600 text-sm py-6 text-center">
+                    No workspace available for this agent
+                  </div>
+                  <!-- ═══ Identity tab: Soul + Instructions + Preferences ═══ -->
+                  <div x-show="identityTab === 'identity' && identityFiles.length > 0 && !identityContentLoading && !identityLoading" class="space-y-4 max-h-[600px] overflow-y-auto custom-scrollbar">
+                    <template x-for="section in [
+                      { file: 'SOUL.md', label: 'Soul', cap: 4000, access: 'user', desc: 'Core personality and behavioral guidelines.' },
+                      { file: 'AGENTS.md', label: 'Instructions', cap: 8000, access: 'user', desc: 'Operating instructions for the agent.' },
+                      { file: 'USER.md', label: 'Preferences', cap: 4000, access: 'agent', desc: 'Your preferences and working style.' },
+                    ]" :key="section.file">
+                      <div class="border border-gray-800 rounded-lg p-3">
+                        <div class="flex items-center justify-between mb-2">
+                          <div class="flex items-center gap-2">
+                            <span class="text-xs font-medium text-gray-300" x-text="section.label"></span>
+                            <span class="font-mono text-[10px] text-gray-600" x-text="section.file"></span>
+                            <span x-show="section.access === 'user'"
+                              class="text-[10px] px-1 py-0 rounded-full bg-blue-900/40 text-blue-400 border border-blue-800/30"
+                              title="Only you can edit this file">User</span>
+                            <span x-show="section.access === 'agent'"
+                              class="text-[10px] px-1 py-0 rounded-full bg-purple-900/40 text-purple-400 border border-purple-800/30"
+                              title="The agent can update this file">Agent</span>
+                            <span x-show="identityFiles.find(f => f.name === section.file)?.is_default"
+                              class="text-[10px] px-1 py-0 rounded-full bg-gray-600/50 text-gray-400">default</span>
+                          </div>
+                          <button x-show="!(identityEditing && identityEditingFile === section.file)"
+                            @click="startIdentityEdit(section.file)"
+                            class="text-xs px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
+                        </div>
+                        <!-- Budget bar -->
+                        <div x-show="section.cap" class="mb-2">
+                          <div class="flex justify-between items-center text-[10px] text-gray-500 mb-1">
+                            <span x-text="fileCharCount(section.file).toLocaleString() + ' / ' + section.cap.toLocaleString() + ' chars'"></span>
+                            <span x-text="Math.round(fileBudgetPct(section.file, section.cap)) + '%'"></span>
+                          </div>
+                          <div class="w-full bg-gray-800 rounded-full h-1">
+                            <div class="h-1 rounded-full transition-all duration-300"
+                              :class="fileBudgetColor(section.file, section.cap)"
+                              :style="'width:' + fileBudgetPct(section.file, section.cap) + '%'"></div>
                           </div>
                         </div>
-                      </template>
-                      <template x-if="(agentConfigs[selectedAgent]?.resolved_credentials || []).length === 0 && (agentConfigs[selectedAgent]?.allowed_credentials || []).length > 0">
-                        <div class="text-[11px] text-gray-500 italic mb-2">No agent credentials configured in the vault yet</div>
-                      </template>
-                      <!-- System credentials (always blocked) -->
-                      <template x-if="(agentConfigs[selectedAgent]?.system_credentials || []).length > 0">
-                        <div>
-                          <div class="text-[11px] text-gray-500 mb-1">System credentials (always blocked)</div>
-                          <div class="flex flex-wrap gap-1.5">
-                            <template x-for="c in agentConfigs[selectedAgent].system_credentials" :key="c">
-                              <span class="inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded bg-red-900/20 text-red-400/70 border border-red-800/30">
-                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg>
-                                <span x-text="c"></span>
-                              </span>
-                            </template>
+                        <!-- Read-only view -->
+                        <div x-show="!(identityEditing && identityEditingFile === section.file)">
+                          <pre class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar"
+                            x-text="identityContent[section.file] || '(empty)'"></pre>
+                        </div>
+                        <!-- Edit mode -->
+                        <div x-show="identityEditing && identityEditingFile === section.file">
+                          <textarea x-model="identityEditBuffer"
+                            @keydown.ctrl.s.prevent="saveIdentityFile(selectedAgent, section.file)"
+                            @keydown.meta.s.prevent="saveIdentityFile(selectedAgent, section.file)"
+                            class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
+                            rows="12" spellcheck="false"></textarea>
+                          <div class="flex gap-2 mt-2 justify-end">
+                            <button @click="saveIdentityFile(selectedAgent, section.file)"
+                              :disabled="identitySaving"
+                              class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-50 transition-colors">
+                              <span x-text="identitySaving ? 'Saving...' : 'Save'"></span>
+                            </button>
+                            <button @click="cancelIdentityEdit()"
+                              class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors">Cancel</button>
                           </div>
                         </div>
-                      </template>
+                      </div>
+                    </template>
+                  </div>
+                  <!-- ═══ Memory tab: Memory + Heartbeat ═══ -->
+                  <div x-show="identityTab === 'memory' && identityFiles.length > 0 && !identityContentLoading && !identityLoading" class="space-y-4 max-h-[600px] overflow-y-auto custom-scrollbar">
+                    <template x-for="section in [
+                      { file: 'MEMORY.md', label: 'Memory', cap: 16000, access: 'agent', desc: 'Long-term facts from conversations.' },
+                      { file: 'HEARTBEAT.md', label: 'Heartbeat', cap: null, access: 'agent', desc: 'Rules for autonomous operation.' },
+                    ]" :key="section.file">
+                      <div class="border border-gray-800 rounded-lg p-3">
+                        <div class="flex items-center justify-between mb-2">
+                          <div class="flex items-center gap-2">
+                            <span class="text-xs font-medium text-gray-300" x-text="section.label"></span>
+                            <span class="font-mono text-[10px] text-gray-600" x-text="section.file"></span>
+                            <span class="text-[10px] px-1 py-0 rounded-full bg-purple-900/40 text-purple-400 border border-purple-800/30"
+                              title="The agent can update this file">Agent</span>
+                            <span x-show="identityFiles.find(f => f.name === section.file)?.is_default"
+                              class="text-[10px] px-1 py-0 rounded-full bg-gray-600/50 text-gray-400">default</span>
+                          </div>
+                          <button x-show="!(identityEditing && identityEditingFile === section.file)"
+                            @click="startIdentityEdit(section.file)"
+                            class="text-xs px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
+                        </div>
+                        <!-- Budget bar (for files with cap) -->
+                        <div x-show="section.cap" class="mb-2">
+                          <div class="flex justify-between items-center text-[10px] text-gray-500 mb-1">
+                            <span x-text="fileCharCount(section.file).toLocaleString() + ' / ' + section.cap.toLocaleString() + ' chars'"></span>
+                            <span x-text="Math.round(fileBudgetPct(section.file, section.cap)) + '%'"></span>
+                          </div>
+                          <div class="w-full bg-gray-800 rounded-full h-1">
+                            <div class="h-1 rounded-full transition-all duration-300"
+                              :class="fileBudgetColor(section.file, section.cap)"
+                              :style="'width:' + fileBudgetPct(section.file, section.cap) + '%'"></div>
+                          </div>
+                        </div>
+                        <!-- Char count only (files without cap) -->
+                        <div x-show="!section.cap" class="mb-2">
+                          <div class="text-[10px] text-gray-500" x-text="fileCharCount(section.file).toLocaleString() + ' chars'"></div>
+                        </div>
+                        <!-- Read-only view -->
+                        <div x-show="!(identityEditing && identityEditingFile === section.file)">
+                          <pre class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar"
+                            x-text="identityContent[section.file] || '(empty)'"></pre>
+                        </div>
+                        <!-- Edit mode -->
+                        <div x-show="identityEditing && identityEditingFile === section.file">
+                          <textarea x-model="identityEditBuffer"
+                            @keydown.ctrl.s.prevent="saveIdentityFile(selectedAgent, section.file)"
+                            @keydown.meta.s.prevent="saveIdentityFile(selectedAgent, section.file)"
+                            class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
+                            rows="12" spellcheck="false"></textarea>
+                          <div class="flex gap-2 mt-2 justify-end">
+                            <button @click="saveIdentityFile(selectedAgent, section.file)"
+                              :disabled="identitySaving"
+                              class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-50 transition-colors">
+                              <span x-text="identitySaving ? 'Saving...' : 'Save'"></span>
+                            </button>
+                            <button @click="cancelIdentityEdit()"
+                              class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors">Cancel</button>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                  <!-- ═══ Logs tab: Activity + Learnings combined ═══ -->
+                  <div x-show="identityTab === 'logs' && !identityLogsLoading && !identityLearningsLoading && !identityLoading" class="space-y-4 max-h-[600px] overflow-y-auto custom-scrollbar">
+                    <!-- Activity section -->
+                    <div class="border border-gray-800 rounded-lg p-3">
+                      <div class="flex items-center justify-between mb-2">
+                        <div class="flex items-center gap-2">
+                          <span class="text-xs font-medium text-gray-300">Activity</span>
+                          <span class="text-[10px] px-1 py-0 rounded-full bg-gray-700/50 text-gray-500 border border-gray-600/30">Auto</span>
+                        </div>
+                        <button @click="fetchIdentityLogs(selectedAgent)"
+                          class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
+                      </div>
+                      <div class="text-[10px] text-gray-600 mb-2">Daily logs (last 3 days)</div>
+                      <div x-show="!identityLogs" class="text-gray-600 text-sm py-4 text-center">No daily logs found</div>
+                      <pre x-show="identityLogs"
+                        class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-60 overflow-y-auto custom-scrollbar"
+                        x-text="identityLogs"></pre>
+                    </div>
+                    <!-- Learnings section -->
+                    <div class="border border-gray-800 rounded-lg p-3">
+                      <div class="flex items-center justify-between mb-2">
+                        <div class="flex items-center gap-2">
+                          <span class="text-xs font-medium text-gray-300">Learnings</span>
+                          <span class="text-[10px] px-1 py-0 rounded-full bg-gray-700/50 text-gray-500 border border-gray-600/30">Auto</span>
+                        </div>
+                        <button @click="fetchIdentityLearnings(selectedAgent)"
+                          class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
+                      </div>
+                      <!-- Errors -->
+                      <div class="mb-3">
+                        <div class="text-xs font-medium text-red-400/80 mb-1.5">Errors</div>
+                        <div x-show="!identityLearnings?.errors" class="text-gray-600 text-sm py-2 text-center">No errors recorded</div>
+                        <pre x-show="identityLearnings?.errors"
+                          class="bg-red-950/20 border border-red-900/30 rounded p-3 text-xs text-gray-300 font-mono whitespace-pre-wrap break-words max-h-36 overflow-y-auto custom-scrollbar"
+                          x-text="identityLearnings?.errors"></pre>
+                      </div>
+                      <!-- Corrections -->
+                      <div>
+                        <div class="text-xs font-medium text-amber-400/80 mb-1.5">Corrections</div>
+                        <div x-show="!identityLearnings?.corrections" class="text-gray-600 text-sm py-2 text-center">No corrections recorded</div>
+                        <pre x-show="identityLearnings?.corrections"
+                          class="bg-amber-950/20 border border-amber-900/30 rounded p-3 text-xs text-gray-300 font-mono whitespace-pre-wrap break-words max-h-36 overflow-y-auto custom-scrollbar"
+                          x-text="identityLearnings?.corrections"></pre>
+                      </div>
                     </div>
                   </div>
-                </div>
-                <!-- Edit mode -->
-                <div x-show="agentConfigs[selectedAgent] && configEditing">
-                  <div class="space-y-3">
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div>
-                        <label class="text-[11px] text-gray-500 mb-1 block">Model</label>
-                        <select x-model="editForm.model" class="dash-select w-full">
-                          <template x-for="m in availableModels" :key="m">
-                            <option :value="m" x-text="m"></option>
-                          </template>
-                        </select>
+                  <!-- Loading states for logs -->
+                  <div x-show="identityTab === 'logs' && (identityLogsLoading || identityLearningsLoading)" class="py-6 text-center text-gray-600 text-sm">
+                    <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                    Loading...
+                  </div>
+                  <!-- ═══ Config tab ═══ -->
+                  <div x-show="identityTab === 'config' && !identityLoading">
+                    <!-- Loading state -->
+                    <div x-show="!agentConfigs[selectedAgent]" class="py-6 text-center text-gray-600 text-sm">
+                      <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                      Loading config...
+                    </div>
+                    <!-- Read-only view -->
+                    <div x-show="agentConfigs[selectedAgent] && !configEditing">
+                      <div class="flex items-center justify-between mb-3">
+                        <span class="text-xs text-gray-500">Agent configuration</span>
+                        <button @click="startConfigEdit()"
+                          class="text-xs px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
                       </div>
-                      <div>
-                        <label class="text-[11px] text-gray-500 mb-1 block">Browser Backend</label>
-                        <select x-model="editForm.browser_backend" class="dash-select w-full">
-                          <template x-for="b in (settingsData?.browser_backends || [])" :key="b.name">
-                            <option :value="b.name" x-text="b.label"></option>
-                          </template>
-                        </select>
-                      </div>
-                      <div>
-                        <label class="text-[11px] text-gray-500 mb-1 block">Role</label>
-                        <input type="text" x-model="editForm.role" class="dash-input w-full">
-                      </div>
-                      <div>
-                        <label class="text-[11px] text-gray-500 mb-1 block">Budget ($/day)</label>
-                        <input type="number" step="0.5" min="0.1" x-model="editForm.budget_daily" class="dash-input w-full" placeholder="10.0">
-                      </div>
-                      <div class="md:col-span-2">
-                        <label class="text-[11px] text-gray-500 mb-1.5 block">Credential Access</label>
-                        <!-- Quick-select: all or none -->
-                        <div class="flex items-center gap-3 mb-2">
-                          <button type="button" @click="editForm.allowed_credentials = '*'; editForm._credMode = 'all'"
-                            class="text-[11px] px-2.5 py-1 rounded transition-colors"
-                            :class="editForm._credMode === 'all' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">
-                            All credentials
-                          </button>
-                          <button type="button" @click="editForm.allowed_credentials = ''; editForm._credMode = 'none'"
-                            class="text-[11px] px-2.5 py-1 rounded transition-colors"
-                            :class="editForm._credMode === 'none' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">
-                            No access
-                          </button>
-                          <button type="button" @click="editForm._credMode = 'custom'"
-                            class="text-[11px] px-2.5 py-1 rounded transition-colors"
-                            :class="editForm._credMode === 'custom' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">
-                            Select specific
-                          </button>
+                      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div class="bg-gray-800/50 rounded p-3">
+                          <div class="text-xs text-gray-500 mb-1">Model</div>
+                          <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.model || '-'"></div>
                         </div>
-                        <!-- Checkbox list for available agent-tier credentials -->
-                        <template x-if="editForm._credMode === 'custom'">
-                          <div>
-                            <template x-if="(agentConfigs[selectedAgent]?.available_credentials || []).length > 0">
-                              <div class="grid grid-cols-1 sm:grid-cols-2 gap-1 mb-2">
-                                <template x-for="cred in agentConfigs[selectedAgent].available_credentials" :key="cred">
-                                  <label class="flex items-center gap-2 text-sm text-gray-300 py-1 px-2 rounded hover:bg-gray-800/50 cursor-pointer">
-                                    <input type="checkbox" :value="cred"
-                                      :checked="editForm.allowed_credentials.split(',').map(s => s.trim()).includes(cred)"
-                                      @change="
-                                        let creds = editForm.allowed_credentials.split(',').map(s => s.trim()).filter(s => s && s !== '*');
-                                        if ($event.target.checked) { if (!creds.includes(cred)) creds.push(cred); }
-                                        else { creds = creds.filter(c => c !== cred); }
-                                        editForm.allowed_credentials = creds.join(', ');
-                                      "
-                                      class="rounded border-gray-600 bg-gray-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-0">
-                                    <span class="font-mono text-[12px]" x-text="cred"></span>
-                                  </label>
+                        <div class="bg-gray-800/50 rounded p-3">
+                          <div class="text-xs text-gray-500 mb-1">Browser Backend</div>
+                          <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.browser_backend || '-'"></div>
+                        </div>
+                        <div class="bg-gray-800/50 rounded p-3">
+                          <div class="text-xs text-gray-500 mb-1">Role</div>
+                          <div class="text-sm text-gray-200" x-text="agentConfigs[selectedAgent]?.role || '-'"></div>
+                        </div>
+                        <div class="bg-gray-800/50 rounded p-3">
+                          <div class="text-xs text-gray-500 mb-1">Budget ($/day)</div>
+                          <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.budget?.daily_usd ? formatCost(agentConfigs[selectedAgent].budget.daily_usd) : '-'"></div>
+                        </div>
+                        <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
+                          <div class="text-xs text-gray-500 mb-1">Credential Access</div>
+                          <div class="text-sm text-gray-200 font-mono mb-2">
+                            Pattern: <span x-text="(agentConfigs[selectedAgent]?.allowed_credentials || []).join(', ') || 'none'" :class="(agentConfigs[selectedAgent]?.allowed_credentials || []).length ? 'text-indigo-400' : 'text-gray-500'"></span>
+                          </div>
+                          <template x-if="(agentConfigs[selectedAgent]?.resolved_credentials || []).length > 0">
+                            <div class="mb-2">
+                              <div class="text-xs text-gray-500 mb-1">Accessible credentials</div>
+                              <div class="flex flex-wrap gap-1.5">
+                                <template x-for="c in agentConfigs[selectedAgent].resolved_credentials" :key="c">
+                                  <span class="inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded bg-green-900/30 text-green-400 border border-green-800/50">
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                    <span x-text="c"></span>
+                                  </span>
                                 </template>
                               </div>
-                            </template>
-                            <template x-if="(agentConfigs[selectedAgent]?.available_credentials || []).length === 0">
-                              <div class="text-[11px] text-gray-500 italic mb-2">No agent credentials in the vault. Add credentials via environment variables (OPENLEGION_CRED_*).</div>
-                            </template>
-                            <div>
-                              <label class="text-[11px] text-gray-500 mb-1 block">Or enter glob patterns (comma-separated)</label>
-                              <input type="text" x-model="editForm.allowed_credentials" class="dash-input w-full text-sm" placeholder="brightdata_*, myapp_*">
                             </div>
-                          </div>
-                        </template>
-                        <!-- System credentials note -->
-                        <template x-if="(agentConfigs[selectedAgent]?.system_credentials || []).length > 0">
-                          <div class="mt-2 text-[11px] text-gray-600">
-                            System credentials (<span x-text="agentConfigs[selectedAgent].system_credentials.join(', ')"></span>) are always blocked — agents can never access LLM provider keys.
-                          </div>
-                        </template>
+                          </template>
+                          <template x-if="(agentConfigs[selectedAgent]?.resolved_credentials || []).length === 0 && (agentConfigs[selectedAgent]?.allowed_credentials || []).length > 0">
+                            <div class="text-xs text-gray-500 italic mb-2">No agent credentials configured in the vault yet</div>
+                          </template>
+                          <template x-if="(agentConfigs[selectedAgent]?.system_credentials || []).length > 0">
+                            <div>
+                              <div class="text-xs text-gray-500 mb-1">System credentials (always blocked)</div>
+                              <div class="flex flex-wrap gap-1.5">
+                                <template x-for="c in agentConfigs[selectedAgent].system_credentials" :key="c">
+                                  <span class="inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded bg-red-900/20 text-red-400/70 border border-red-800/30">
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg>
+                                    <span x-text="c"></span>
+                                  </span>
+                                </template>
+                              </div>
+                            </div>
+                          </template>
+                        </div>
                       </div>
                     </div>
-                    <div class="flex gap-2">
-                      <button @click="saveConfigFromDetail(selectedAgent)" :disabled="configSaving"
-                        class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
-                        <span x-text="configSaving ? 'Saving...' : 'Save'"></span>
-                      </button>
-                      <button @click="cancelConfigEdit()"
-                        class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Cancel</button>
-                      <button @click="resetAgent(selectedAgent)"
-                        class="text-xs px-3 py-1.5 rounded text-gray-600 hover:text-red-400 transition-colors ml-auto">Reset Conversation</button>
+                    <!-- Edit mode -->
+                    <div x-show="agentConfigs[selectedAgent] && configEditing">
+                      <div class="space-y-3">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div>
+                            <label class="text-xs text-gray-500 mb-1 block">Model</label>
+                            <select x-model="editForm.model" class="dash-select w-full">
+                              <template x-for="m in availableModels" :key="m">
+                                <option :value="m" x-text="m"></option>
+                              </template>
+                            </select>
+                          </div>
+                          <div>
+                            <label class="text-xs text-gray-500 mb-1 block">Browser Backend</label>
+                            <select x-model="editForm.browser_backend" class="dash-select w-full">
+                              <template x-for="b in (settingsData?.browser_backends || [])" :key="b.name">
+                                <option :value="b.name" x-text="b.label"></option>
+                              </template>
+                            </select>
+                          </div>
+                          <div>
+                            <label class="text-xs text-gray-500 mb-1 block">Role</label>
+                            <input type="text" x-model="editForm.role" class="dash-input w-full">
+                          </div>
+                          <div>
+                            <label class="text-xs text-gray-500 mb-1 block">Budget ($/day)</label>
+                            <input type="number" step="0.5" min="0.1" x-model="editForm.budget_daily" class="dash-input w-full" placeholder="10.0">
+                          </div>
+                          <div class="md:col-span-2">
+                            <label class="text-xs text-gray-500 mb-1.5 block">Credential Access</label>
+                            <div class="flex items-center gap-3 mb-2">
+                              <button type="button" @click="editForm.allowed_credentials = '*'; editForm._credMode = 'all'"
+                                class="text-xs px-2.5 py-1 rounded transition-colors"
+                                :class="editForm._credMode === 'all' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">
+                                All credentials
+                              </button>
+                              <button type="button" @click="editForm.allowed_credentials = ''; editForm._credMode = 'none'"
+                                class="text-xs px-2.5 py-1 rounded transition-colors"
+                                :class="editForm._credMode === 'none' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">
+                                No access
+                              </button>
+                              <button type="button" @click="editForm._credMode = 'custom'"
+                                class="text-xs px-2.5 py-1 rounded transition-colors"
+                                :class="editForm._credMode === 'custom' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">
+                                Select specific
+                              </button>
+                            </div>
+                            <template x-if="editForm._credMode === 'custom'">
+                              <div>
+                                <template x-if="(agentConfigs[selectedAgent]?.available_credentials || []).length > 0">
+                                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-1 mb-2">
+                                    <template x-for="cred in agentConfigs[selectedAgent].available_credentials" :key="cred">
+                                      <label class="flex items-center gap-2 text-sm text-gray-300 py-1 px-2 rounded hover:bg-gray-800/50 cursor-pointer">
+                                        <input type="checkbox" :value="cred"
+                                          :checked="editForm.allowed_credentials.split(',').map(s => s.trim()).includes(cred)"
+                                          @change="
+                                            let creds = editForm.allowed_credentials.split(',').map(s => s.trim()).filter(s => s && s !== '*');
+                                            if ($event.target.checked) { if (!creds.includes(cred)) creds.push(cred); }
+                                            else { creds = creds.filter(c => c !== cred); }
+                                            editForm.allowed_credentials = creds.join(', ');
+                                          "
+                                          class="rounded border-gray-600 bg-gray-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-0">
+                                        <span class="font-mono text-[12px]" x-text="cred"></span>
+                                      </label>
+                                    </template>
+                                  </div>
+                                </template>
+                                <template x-if="(agentConfigs[selectedAgent]?.available_credentials || []).length === 0">
+                                  <div class="text-xs text-gray-500 italic mb-2">No agent credentials in the vault. Add credentials via environment variables (OPENLEGION_CRED_*).</div>
+                                </template>
+                                <div>
+                                  <label class="text-xs text-gray-500 mb-1 block">Or enter glob patterns (comma-separated)</label>
+                                  <input type="text" x-model="editForm.allowed_credentials" class="dash-input w-full text-sm" placeholder="brightdata_*, myapp_*">
+                                </div>
+                              </div>
+                            </template>
+                            <template x-if="(agentConfigs[selectedAgent]?.system_credentials || []).length > 0">
+                              <div class="mt-2 text-xs text-gray-600">
+                                System credentials (<span x-text="agentConfigs[selectedAgent].system_credentials.join(', ')"></span>) are always blocked — agents can never access LLM provider keys.
+                              </div>
+                            </template>
+                          </div>
+                        </div>
+                        <div class="flex gap-2">
+                          <button @click="saveConfigFromDetail(selectedAgent)" :disabled="configSaving"
+                            class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
+                            <span x-text="configSaving ? 'Saving...' : 'Save'"></span>
+                          </button>
+                          <button @click="cancelConfigEdit()"
+                            class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Cancel</button>
+                          <button @click="resetAgent(selectedAgent)"
+                            class="text-xs px-3 py-1.5 rounded text-gray-600 hover:text-red-400 transition-colors ml-auto">Reset Conversation</button>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
               </div>
-            </div>
-            <!-- Spend / Health summary -->
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
-              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Spend Today</div>
-                <div class="text-2xl font-bold font-mono" x-text="formatCost(agentDetail.spend_today?.total_cost || 0)"></div>
-                <div class="text-xs text-gray-500 mt-1" x-text="(agentDetail.spend_today?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
-              </div>
-              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Spend This Week</div>
-                <div class="text-2xl font-bold font-mono" x-text="formatCost(agentDetail.spend_week?.total_cost || 0)"></div>
-                <div class="text-xs text-gray-500 mt-1" x-text="(agentDetail.spend_week?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
-              </div>
-              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Health</div>
-                <div class="space-y-1.5 text-sm">
-                  <div class="flex justify-between">
-                    <span class="text-gray-500">Failures</span>
-                    <span class="font-mono" x-text="agentDetail.health?.failures || 0"></span>
-                  </div>
-                  <div class="flex justify-between">
-                    <span class="text-gray-500">Restarts</span>
-                    <span class="font-mono" x-text="agentDetail.health?.restarts || 0"></span>
-                  </div>
+              <!-- Right column: Spend + Budget + Health -->
+              <div class="lg:col-span-2 space-y-4">
+                <!-- Spend Today -->
+                <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                  <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Spend Today</div>
+                  <div class="text-2xl font-bold font-mono" x-text="formatCost(agentDetail.spend_today?.total_cost || 0)"></div>
+                  <div class="text-xs text-gray-500 mt-1" x-text="(agentDetail.spend_today?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
                 </div>
-              </div>
-            </div>
-            <!-- Budget bar -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-5">
-              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Budget</div>
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <div class="flex justify-between text-sm mb-1.5">
-                    <span class="text-gray-400">Daily</span>
-                    <span class="font-mono text-xs" x-text="formatCost(agentDetail.budget?.daily_used || 0) + ' / ' + formatCost(agentDetail.budget?.daily_limit || 0)"></span>
-                  </div>
-                  <div class="w-full bg-gray-800 rounded-full h-1.5">
-                    <div class="h-1.5 rounded-full transition-all duration-500"
-                      :class="(agentDetail.budget?.daily_used || 0) / (agentDetail.budget?.daily_limit || 1) > 0.8 ? 'bg-red-500' : 'bg-indigo-500'"
-                      :style="'width:' + Math.min(100, ((agentDetail.budget?.daily_used || 0) / (agentDetail.budget?.daily_limit || 1)) * 100) + '%'"
-                    ></div>
-                  </div>
+                <!-- Spend This Week -->
+                <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                  <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Spend This Week</div>
+                  <div class="text-2xl font-bold font-mono" x-text="formatCost(agentDetail.spend_week?.total_cost || 0)"></div>
+                  <div class="text-xs text-gray-500 mt-1" x-text="(agentDetail.spend_week?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
                 </div>
-                <div>
-                  <div class="flex justify-between text-sm mb-1.5">
-                    <span class="text-gray-400">Monthly</span>
-                    <span class="font-mono text-xs" x-text="formatCost(agentDetail.budget?.monthly_used || 0) + ' / ' + formatCost(agentDetail.budget?.monthly_limit || 0)"></span>
-                  </div>
-                  <div class="w-full bg-gray-800 rounded-full h-1.5">
-                    <div class="h-1.5 rounded-full transition-all duration-500"
-                      :class="(agentDetail.budget?.monthly_used || 0) / (agentDetail.budget?.monthly_limit || 1) > 0.8 ? 'bg-red-500' : 'bg-indigo-500'"
-                      :style="'width:' + Math.min(100, ((agentDetail.budget?.monthly_used || 0) / (agentDetail.budget?.monthly_limit || 1)) * 100) + '%'"
-                    ></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <!-- Per-model cost breakdown -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-5" x-show="agentDetail.spend_today?.by_model && Object.keys(agentDetail.spend_today.by_model).length > 0">
-              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Cost by Model (Today)</div>
-              <div class="space-y-1.5">
-                <template x-for="[model, data] in Object.entries(agentDetail.spend_today?.by_model || {})" :key="model">
-                  <div class="flex justify-between text-xs">
-                    <span class="text-gray-400 font-mono" x-text="model"></span>
-                    <div class="flex gap-4">
-                      <span class="text-gray-500" x-text="(data.total || 0).toLocaleString() + ' tok'"></span>
-                      <span class="text-gray-300 font-mono" x-text="formatCost(data.cost || 0)"></span>
+                <!-- Budget -->
+                <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                  <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Budget</div>
+                  <div class="space-y-3">
+                    <div>
+                      <div class="flex justify-between text-sm mb-1.5">
+                        <span class="text-gray-400">Daily</span>
+                        <span class="font-mono text-xs" x-text="formatCost(agentDetail.budget?.daily_used || 0) + ' / ' + formatCost(agentDetail.budget?.daily_limit || 0)"></span>
+                      </div>
+                      <div class="w-full bg-gray-800 rounded-full h-1.5">
+                        <div class="h-1.5 rounded-full transition-all duration-500"
+                          :class="(agentDetail.budget?.daily_used || 0) / (agentDetail.budget?.daily_limit || 1) > 0.8 ? 'bg-red-500' : 'bg-indigo-500'"
+                          :style="'width:' + Math.min(100, ((agentDetail.budget?.daily_used || 0) / (agentDetail.budget?.daily_limit || 1)) * 100) + '%'"
+                        ></div>
+                      </div>
+                    </div>
+                    <div>
+                      <div class="flex justify-between text-sm mb-1.5">
+                        <span class="text-gray-400">Monthly</span>
+                        <span class="font-mono text-xs" x-text="formatCost(agentDetail.budget?.monthly_used || 0) + ' / ' + formatCost(agentDetail.budget?.monthly_limit || 0)"></span>
+                      </div>
+                      <div class="w-full bg-gray-800 rounded-full h-1.5">
+                        <div class="h-1.5 rounded-full transition-all duration-500"
+                          :class="(agentDetail.budget?.monthly_used || 0) / (agentDetail.budget?.monthly_limit || 1) > 0.8 ? 'bg-red-500' : 'bg-indigo-500'"
+                          :style="'width:' + Math.min(100, ((agentDetail.budget?.monthly_used || 0) / (agentDetail.budget?.monthly_limit || 1)) * 100) + '%'"
+                        ></div>
+                      </div>
                     </div>
                   </div>
-                </template>
+                </div>
+                <!-- Health -->
+                <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                  <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Health</div>
+                  <div class="space-y-1.5 text-sm">
+                    <div class="flex justify-between">
+                      <span class="text-gray-500">Failures</span>
+                      <span class="font-mono" x-text="agentDetail.health?.failures || 0"></span>
+                    </div>
+                    <div class="flex justify-between">
+                      <span class="text-gray-500">Restarts</span>
+                      <span class="font-mono" x-text="agentDetail.health?.restarts || 0"></span>
+                    </div>
+                  </div>
+                </div>
+                <!-- Per-model cost breakdown -->
+                <div class="bg-gray-900 border border-gray-800 rounded-lg p-4" x-show="agentDetail.spend_today?.by_model && Object.keys(agentDetail.spend_today.by_model).length > 0">
+                  <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Cost by Model (Today)</div>
+                  <div class="space-y-1.5">
+                    <template x-for="[model, data] in Object.entries(agentDetail.spend_today?.by_model || {})" :key="model">
+                      <div class="flex justify-between text-xs">
+                        <span class="text-gray-400 font-mono" x-text="model"></span>
+                        <div class="flex gap-4">
+                          <span class="text-gray-500" x-text="(data.total || 0).toLocaleString() + ' tok'"></span>
+                          <span class="text-gray-300 font-mono" x-text="formatCost(data.cost || 0)"></span>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </div>
               </div>
             </div>
-            <!-- Container audit log (live) -->
+            <!-- Container audit log (live) — full width below -->
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
               <div class="flex items-center justify-between mb-3 gap-3">
                 <div>
                   <div class="text-xs text-gray-500 uppercase tracking-wider">Container Audit</div>
-                  <div class="text-[11px] text-gray-600 mt-0.5">Live event stream for this container (newest first)</div>
+                  <div class="text-xs text-gray-600 mt-0.5">Live event stream for this container (newest first)</div>
                 </div>
                 <span class="text-xs text-gray-700" x-text="agentEvents.length + ' events'"></span>
               </div>
@@ -1220,8 +1353,8 @@
         </template>
       </div>
 
-      <!-- Blackboard -->
-      <div x-show="activeTab === 'blackboard'" x-cloak>
+      <!-- Blackboard (sub-view of Activity) -->
+      <div x-show="activeTab === 'activity' && activityView === 'blackboard'" x-cloak>
         <!-- PROJECT.md editor -->
         <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
           <div class="flex items-center justify-between mb-3">
@@ -1234,11 +1367,11 @@
                 <svg class="animate-spin h-3 w-3 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
               </span>
               <button x-show="!projectEditing && !projectLoading" @click="fetchProject()"
-                class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-white transition-colors" title="Refresh">
+                class="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-white transition-colors" title="Refresh">
                 <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0114.32-3.2M20 15a8 8 0 01-14.32 3.2"/></svg>
               </button>
               <button x-show="!projectEditing && !projectLoading" @click="startProjectEdit()"
-                class="text-[11px] px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
+                class="text-xs px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
             </div>
           </div>
           <div class="text-xs text-gray-600 mb-3">Shared project context loaded into every agent's system prompt. Changes push to all running agents.</div>
@@ -1249,7 +1382,7 @@
             <pre x-show="projectContent"
               class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar"
               x-text="projectContent"></pre>
-            <div x-show="projectContent" class="text-[11px] text-gray-600 mt-1" x-text="projectContent.length.toLocaleString() + ' chars'"></div>
+            <div x-show="projectContent" class="text-xs text-gray-600 mt-1" x-text="projectContent.length.toLocaleString() + ' chars'"></div>
           </div>
           <!-- Edit mode -->
           <div x-show="projectEditing">
@@ -1259,7 +1392,7 @@
               class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
               rows="10" spellcheck="false" placeholder="# Project Context&#10;&#10;Describe your project goals, architecture, team conventions..."></textarea>
             <div class="flex items-center justify-between mt-2">
-              <span class="text-[11px] text-gray-600" x-text="projectEditBuffer.length.toLocaleString() + ' chars'"></span>
+              <span class="text-xs text-gray-600" x-text="projectEditBuffer.length.toLocaleString() + ' chars'"></span>
               <div class="flex gap-2">
                 <button @click="saveProject()" :disabled="projectSaving"
                   class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-50 transition-colors">
@@ -1286,14 +1419,14 @@
         <div class="flex gap-1.5 flex-wrap mb-3">
           <template x-for="ns in ['tasks/', 'context/', 'signals/', 'goals/', 'artifacts/', 'history/']" :key="ns">
             <button @click="bbPrefix = (bbPrefix === ns ? '' : ns); fetchBlackboard()"
-              class="text-[11px] px-2 py-1 rounded-md border transition-all"
+              class="text-xs px-2 py-1 rounded-md border transition-all"
               :class="bbPrefix === ns ? 'border-cyan-500/60 bg-cyan-900/20 text-cyan-300' : 'border-gray-800 text-gray-600 hover:text-gray-400'">
               <span x-text="ns"></span><span x-show="bbNamespaceCounts[ns] > 0" class="ml-1 opacity-60" x-text="'(' + bbNamespaceCounts[ns] + ')'"></span>
             </button>
           </template>
           <!-- Writer filter -->
           <select x-show="bbWriters.length > 0" x-model="bbWriterFilter"
-            class="text-[11px] px-2 py-1 rounded-md border border-gray-800 bg-gray-900 text-gray-400 ml-auto">
+            class="text-xs px-2 py-1 rounded-md border border-gray-800 bg-gray-900 text-gray-400 ml-auto">
             <option value="">All writers</option>
             <template x-for="w in bbWriters" :key="w">
               <option :value="w" x-text="w"></option>
@@ -1304,11 +1437,11 @@
         <div x-show="bbWriteMode" x-cloak class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
-              <label for="bb-new-key" class="text-[11px] text-gray-500 mb-1 block">Key</label>
+              <label for="bb-new-key" class="text-xs text-gray-500 mb-1 block">Key</label>
               <input id="bb-new-key" type="text" x-model="bbNewKey" placeholder="context/my_key" class="dash-input w-full">
             </div>
             <div>
-              <label for="bb-new-value" class="text-[11px] text-gray-500 mb-1 block">Value (JSON)</label>
+              <label for="bb-new-value" class="text-xs text-gray-500 mb-1 block">Value (JSON)</label>
               <textarea id="bb-new-value" x-model="bbNewValue" class="dash-textarea w-full" rows="2" placeholder='{"key": "value"}'></textarea>
             </div>
           </div>
@@ -1339,18 +1472,18 @@
                   <!-- Value summary -->
                   <span class="text-gray-500 text-xs truncate flex-1 min-w-0" x-text="valueSummary(entry.value)"></span>
                   <!-- Relative time -->
-                  <span class="text-gray-600 text-[11px] whitespace-nowrap flex-shrink-0" x-text="timeAgo(entry.updated_at)"></span>
+                  <span class="text-gray-600 text-xs whitespace-nowrap flex-shrink-0" x-text="timeAgo(entry.updated_at)"></span>
                   <!-- Delete button -->
                   <button
                     @click.stop="deleteBlackboard(entry.key)"
                     :disabled="entry.key.startsWith('history/')"
                     class="text-[10px] px-1.5 py-0.5 rounded text-gray-700 hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
-                  >Del</button>
+                  >Delete</button>
                 </div>
                 <!-- Expanded detail -->
                 <div class="bb-detail" :class="bbExpanded[entry.key] ? 'bb-detail-open' : ''">
                   <div class="px-4 pb-3 pt-1">
-                    <div class="flex items-center gap-3 mb-2 text-[11px] text-gray-500">
+                    <div class="flex items-center gap-3 mb-2 text-xs text-gray-500">
                       <span>Written by <span class="text-gray-400" x-text="entry.written_by"></span></span>
                       <span class="text-gray-700">&middot;</span>
                       <span>v<span x-text="entry.version"></span></span>
@@ -1383,129 +1516,11 @@
         </div>
       </div>
 
-      <!-- Automation (Cron with inline schedule editing) -->
-      <div x-show="activeTab === 'automation'" x-cloak>
-        <div class="flex items-center justify-between mb-4">
-          <h2 class="text-sm font-medium text-gray-400">Automation</h2>
-          <button @click="fetchCronJobs()" class="text-xs px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Refresh</button>
-        </div>
-        <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-          <div class="overflow-x-auto">
-            <table class="w-full text-sm">
-              <thead>
-                <tr class="text-gray-500 text-left text-xs uppercase tracking-wider border-b border-gray-800">
-                  <th class="py-3 px-4">ID</th>
-                  <th class="py-3 px-4">Agent</th>
-                  <th class="py-3 px-4">Schedule</th>
-                  <th class="py-3 px-4">Message</th>
-                  <th class="py-3 px-4">Type</th>
-                  <th class="py-3 px-4">Status</th>
-                  <th class="py-3 px-4">Last Run</th>
-                  <th class="py-3 px-4">Runs</th>
-                  <th class="py-3 px-4">Errors</th>
-                  <th class="py-3 px-4">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                <template x-for="job in cronJobs" :key="job.id">
-                  <tr class="border-b border-gray-800/40 hover:bg-gray-800/30">
-                    <td class="py-2.5 px-4 font-mono text-xs text-blue-400" x-text="job.id"></td>
-                    <td class="py-2.5 px-4 text-white" x-text="job.agent"></td>
-                    <td class="py-2.5 px-4">
-                      <span x-show="editingCronJob !== job.id" class="font-mono text-gray-300 text-xs cursor-pointer hover:text-indigo-300 transition-colors" @click="editCronJob(job)" x-text="job.schedule"></span>
-                      <div x-show="editingCronJob === job.id" class="space-y-1.5 min-w-[260px]">
-                        <!-- Preset chips -->
-                        <div class="flex flex-wrap gap-1">
-                          <template x-for="p in ['5m','15m','30m','1h','6h','12h','24h']" :key="p">
-                            <button @click="saveCronPreset(job.id, p)"
-                              class="text-[10px] px-1.5 py-0.5 rounded transition-colors"
-                              :class="cronEditSchedule === 'every ' + p
-                                ? 'bg-indigo-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-400'"
-                              x-text="p"></button>
-                          </template>
-                        </div>
-                        <!-- Custom interval -->
-                        <div class="flex gap-1 items-center">
-                          <span class="text-[10px] text-gray-500 w-8">Every</span>
-                          <input type="number" min="1" step="1" x-model.number="cronEditAmount"
-                            @keyup.enter="saveCronInterval(job.id)"
-                            @keyup.escape="cancelCronEdit()"
-                            class="dash-input text-xs py-0.5 px-1.5 w-14 text-center">
-                          <select x-model="cronEditUnit" class="dash-select text-xs py-0.5 px-1"
-                            @keyup.enter="saveCronInterval(job.id)"
-                            @keyup.escape="cancelCronEdit()">
-                            <option value="s">sec</option>
-                            <option value="m">min</option>
-                            <option value="h">hr</option>
-                            <option value="d">day</option>
-                          </select>
-                          <button @click="saveCronInterval(job.id)"
-                            class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Set</button>
-                        </div>
-                        <!-- Cron expression -->
-                        <div class="flex gap-1 items-center">
-                          <input type="text" x-model="cronEditCron"
-                            placeholder="0 9 * * 1-5"
-                            @keyup.enter="saveCronExpression(job.id)"
-                            @keyup.escape="cancelCronEdit()"
-                            class="dash-input text-xs py-0.5 px-1.5 w-32 font-mono">
-                          <button @click="saveCronExpression(job.id)"
-                            class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Set</button>
-                          <button @click="cancelCronEdit()"
-                            class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">X</button>
-                        </div>
-                      </div>
-                    </td>
-                    <td class="py-2.5 px-4 text-gray-400 text-xs max-w-xs truncate" x-text="job.message"></td>
-                    <td class="py-2.5 px-4">
-                      <span x-show="job.heartbeat" class="text-pink-400 heartbeat-indicator text-[11px]">heartbeat</span>
-                      <span x-show="!job.heartbeat" class="text-gray-600 text-[11px]">cron</span>
-                    </td>
-                    <td class="py-2.5 px-4">
-                      <span class="text-[11px] px-2 py-0.5 rounded-full"
-                        :class="job.enabled ? 'bg-green-900/30 text-green-400' : 'bg-gray-800/50 text-gray-500'"
-                        x-text="job.enabled ? 'active' : 'paused'"
-                      ></span>
-                    </td>
-                    <td class="py-2.5 px-4 text-gray-600 text-xs font-mono" x-text="job.last_run || 'never'"></td>
-                    <td class="py-2.5 px-4 font-mono text-gray-300" x-text="job.run_count"></td>
-                    <td class="py-2.5 px-4 font-mono" :class="job.error_count > 0 ? 'text-red-400' : 'text-gray-600'" x-text="job.error_count"></td>
-                    <td class="py-2.5 px-4 flex gap-1">
-                      <button @click="runCronJob(job.id)" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-colors">Run</button>
-                      <button
-                        x-show="job.enabled"
-                        @click="pauseCronJob(job.id)"
-                        class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-yellow-900/30 text-gray-400 hover:text-yellow-400 transition-colors"
-                      >Pause</button>
-                      <button
-                        x-show="!job.enabled"
-                        @click="resumeCronJob(job.id)"
-                        class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-green-900/30 text-gray-400 hover:text-green-400 transition-colors"
-                      >Resume</button>
-                      <button @click="deleteCronJob(job.id)"
-                        class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors"
-                      >Del</button>
-                    </td>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-          </div>
-          <div x-show="cronJobs.length === 0" class="text-center py-12">
-            <svg class="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-            </svg>
-            <div class="text-gray-500 font-medium mb-1">No automation jobs configured</div>
-            <div class="text-gray-600 text-sm">Add cron jobs in your agent config</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- System (Costs + Infrastructure) -->
+      <!-- System (Costs + Automation + Credentials + Infrastructure) -->
       <div x-show="activeTab === 'system'" x-cloak>
         <!-- Costs -->
         <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Costs</div>
-        <div>
+        <div class="mb-6">
           <div class="flex items-center justify-between mb-4">
             <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
               <template x-for="p in ['today', 'week', 'month']" :key="p">
@@ -1559,75 +1574,186 @@
           </div>
         </div>
 
-        <!-- Infrastructure -->
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 mt-6">Infrastructure</div>
-        <div>
-          <div x-show="!settingsData" class="text-center py-12 text-gray-600">Loading...</div>
-          <template x-if="settingsData">
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <!-- Credentials -->
-              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Credentials</div>
-                <div class="text-sm text-gray-400 mb-2">
-                  <span x-text="settingsData.credentials.count"></span> credential(s) configured
-                </div>
-                <div class="space-y-1 mb-3">
-                  <template x-for="name in settingsData.credentials.names" :key="name">
-                    <div class="flex items-center gap-2 text-xs group">
-                      <span class="w-2 h-2 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-500/50' : 'bg-amber-500/50'"></span>
-                      <span class="text-gray-300 font-mono flex-1" x-text="name"></span>
-                      <span class="text-[10px] px-1.5 py-0.5 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-900/40 text-green-400' : 'bg-amber-900/40 text-amber-400'" x-text="(settingsData.agent_credentials || []).includes(name) ? 'agent' : 'system'"></span>
-                      <button @click="deleteCredential(name)" class="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 transition-opacity text-base leading-none px-1" title="Remove credential">&times;</button>
-                    </div>
+        <!-- Automation -->
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Automation</div>
+        <div class="mb-6">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-gray-500 text-left text-xs uppercase tracking-wider border-b border-gray-800">
+                    <th class="py-3 px-4">ID</th>
+                    <th class="py-3 px-4">Agent</th>
+                    <th class="py-3 px-4">Schedule</th>
+                    <th class="py-3 px-4">Message</th>
+                    <th class="py-3 px-4">Type</th>
+                    <th class="py-3 px-4">Status</th>
+                    <th class="py-3 px-4">Last Run</th>
+                    <th class="py-3 px-4">Runs</th>
+                    <th class="py-3 px-4">Errors</th>
+                    <th class="py-3 px-4">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="job in cronJobs" :key="job.id">
+                    <tr class="border-b border-gray-800/40 hover:bg-gray-800/30">
+                      <td class="py-2.5 px-4 font-mono text-xs text-blue-400" x-text="job.id"></td>
+                      <td class="py-2.5 px-4 text-white" x-text="job.agent"></td>
+                      <td class="py-2.5 px-4">
+                        <span x-show="editingCronJob !== job.id" class="font-mono text-gray-300 text-xs cursor-pointer hover:text-indigo-300 transition-colors" @click="editCronJob(job)" x-text="job.schedule"></span>
+                        <div x-show="editingCronJob === job.id" class="space-y-1.5 min-w-[260px]">
+                          <div class="flex flex-wrap gap-1">
+                            <template x-for="p in ['5m','15m','30m','1h','6h','12h','24h']" :key="p">
+                              <button @click="saveCronPreset(job.id, p)"
+                                class="text-[10px] px-1.5 py-0.5 rounded transition-colors"
+                                :class="cronEditSchedule === 'every ' + p
+                                  ? 'bg-indigo-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-400'"
+                                x-text="p"></button>
+                            </template>
+                          </div>
+                          <div class="flex gap-1 items-center">
+                            <span class="text-[10px] text-gray-500 w-8">Every</span>
+                            <input type="number" min="1" step="1" x-model.number="cronEditAmount"
+                              @keyup.enter="saveCronInterval(job.id)"
+                              @keyup.escape="cancelCronEdit()"
+                              class="dash-input text-xs py-0.5 px-1.5 w-14 text-center">
+                            <select x-model="cronEditUnit" class="dash-select text-xs py-0.5 px-1"
+                              @keyup.enter="saveCronInterval(job.id)"
+                              @keyup.escape="cancelCronEdit()">
+                              <option value="s">sec</option>
+                              <option value="m">min</option>
+                              <option value="h">hr</option>
+                              <option value="d">day</option>
+                            </select>
+                            <button @click="saveCronInterval(job.id)"
+                              class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Set</button>
+                          </div>
+                          <div class="flex gap-1 items-center">
+                            <input type="text" x-model="cronEditCron"
+                              placeholder="0 9 * * 1-5"
+                              @keyup.enter="saveCronExpression(job.id)"
+                              @keyup.escape="cancelCronEdit()"
+                              class="dash-input text-xs py-0.5 px-1.5 w-32 font-mono">
+                            <button @click="saveCronExpression(job.id)"
+                              class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Set</button>
+                            <button @click="cancelCronEdit()"
+                              class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">X</button>
+                          </div>
+                        </div>
+                      </td>
+                      <td class="py-2.5 px-4 text-gray-400 text-xs max-w-xs truncate" x-text="job.message"></td>
+                      <td class="py-2.5 px-4">
+                        <span x-show="job.heartbeat" class="text-pink-400 heartbeat-indicator text-xs">heartbeat</span>
+                        <span x-show="!job.heartbeat" class="text-gray-600 text-xs">cron</span>
+                      </td>
+                      <td class="py-2.5 px-4">
+                        <span class="text-xs px-2 py-0.5 rounded-full"
+                          :class="job.enabled ? 'bg-green-900/30 text-green-400' : 'bg-gray-800/50 text-gray-500'"
+                          x-text="job.enabled ? 'active' : 'paused'"
+                        ></span>
+                      </td>
+                      <td class="py-2.5 px-4 text-gray-600 text-xs font-mono" x-text="job.last_run || 'never'"></td>
+                      <td class="py-2.5 px-4 font-mono text-gray-300" x-text="job.run_count"></td>
+                      <td class="py-2.5 px-4 font-mono" :class="job.error_count > 0 ? 'text-red-400' : 'text-gray-600'" x-text="job.error_count"></td>
+                      <td class="py-2.5 px-4 flex gap-1">
+                        <button @click="runCronJob(job.id)" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-colors">Run</button>
+                        <button x-show="job.enabled" @click="pauseCronJob(job.id)"
+                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-yellow-900/30 text-gray-400 hover:text-yellow-400 transition-colors">Pause</button>
+                        <button x-show="!job.enabled" @click="resumeCronJob(job.id)"
+                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-green-900/30 text-gray-400 hover:text-green-400 transition-colors">Resume</button>
+                        <button @click="deleteCronJob(job.id)"
+                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">Delete</button>
+                      </td>
+                    </tr>
                   </template>
+                </tbody>
+              </table>
+            </div>
+            <div x-show="cronJobs.length === 0" class="text-center py-12">
+              <svg class="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+              </svg>
+              <div class="text-gray-500 font-medium mb-1">No automation jobs configured</div>
+              <div class="text-gray-600 text-sm">Add cron jobs in your agent config</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Credentials -->
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Credentials</div>
+        <div class="mb-6" x-show="settingsData">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="text-sm text-gray-400 mb-2">
+              <span x-text="settingsData?.credentials?.count || 0"></span> credential(s) configured
+            </div>
+            <div class="space-y-1 mb-3">
+              <template x-for="name in settingsData?.credentials?.names || []" :key="name">
+                <div class="flex items-center gap-2 text-xs group">
+                  <span class="w-2 h-2 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-500/50' : 'bg-amber-500/50'"></span>
+                  <span class="text-gray-300 font-mono flex-1" x-text="name"></span>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-900/40 text-green-400' : 'bg-amber-900/40 text-amber-400'" x-text="(settingsData.agent_credentials || []).includes(name) ? 'agent' : 'system'"></span>
+                  <button @click="deleteCredential(name)" class="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 transition-opacity text-base leading-none px-1" title="Remove credential" aria-label="Remove credential">&times;</button>
                 </div>
-                <div class="border-t border-gray-800 pt-3">
-                  <button x-show="!showCredForm" @click="showCredForm = true" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Credential</button>
-                  <div x-show="showCredForm" x-transition>
-                    <div class="text-xs text-gray-500 mb-2">New credential</div>
-                    <div class="flex gap-2 mb-2">
-                      <select x-model="credService" class="dash-select text-xs w-40">
-                        <option value="">Service...</option>
-                        <optgroup label="LLM Providers (system tier)">
-                          <option value="anthropic">Anthropic</option>
-                          <option value="openai">OpenAI</option>
-                          <option value="gemini">Google Gemini</option>
-                          <option value="deepseek">DeepSeek</option>
-                          <option value="moonshot">Moonshot / Kimi</option>
-                          <option value="xai">xAI (Grok)</option>
-                          <option value="groq">Groq</option>
-                          <option value="minimax">MiniMax</option>
-                          <option value="zai">ZAI</option>
-                        </optgroup>
-                        <optgroup label="Agent tools">
-                          <option value="brave_search_api_key">Brave Search</option>
-                          <option value="apollo_api_key">Apollo</option>
-                          <option value="hunter_api_key">Hunter</option>
-                          <option value="brightdata_cdp_url">Brightdata CDP</option>
-                        </optgroup>
-                        <option value="__custom__">Custom...</option>
-                      </select>
-                      <input x-show="credService === '__custom__'" type="text" x-model="credCustomService" class="dash-input text-xs w-40" placeholder="credential_name">
-                      <select x-show="credService === '__custom__'" x-model="credTier" class="dash-select text-xs w-28">
-                        <option value="agent">Agent tier</option>
-                        <option value="system">System tier</option>
-                      </select>
-                      <input type="password" x-model="credKey" class="dash-input flex-1" placeholder="API key or value">
-                    </div>
-                    <input type="text" x-model="credBaseUrl" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
-                    <div class="flex justify-between">
-                      <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
-                      <button @click="addCredential()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save Credential</button>
-                    </div>
-                  </div>
+              </template>
+            </div>
+            <div class="border-t border-gray-800 pt-3">
+              <button x-show="!showCredForm" @click="showCredForm = true" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Credential</button>
+              <div x-show="showCredForm" x-transition>
+                <div class="text-xs text-gray-500 mb-2">New credential</div>
+                <div class="flex gap-2 mb-2">
+                  <select x-model="credService" class="dash-select text-xs w-40">
+                    <option value="">Service...</option>
+                    <optgroup label="LLM Providers (system tier)">
+                      <option value="anthropic">Anthropic</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="gemini">Google Gemini</option>
+                      <option value="deepseek">DeepSeek</option>
+                      <option value="moonshot">Moonshot / Kimi</option>
+                      <option value="xai">xAI (Grok)</option>
+                      <option value="groq">Groq</option>
+                      <option value="minimax">MiniMax</option>
+                      <option value="zai">ZAI</option>
+                    </optgroup>
+                    <optgroup label="Agent tools">
+                      <option value="brave_search_api_key">Brave Search</option>
+                      <option value="apollo_api_key">Apollo</option>
+                      <option value="hunter_api_key">Hunter</option>
+                      <option value="brightdata_cdp_url">Brightdata CDP</option>
+                    </optgroup>
+                    <option value="__custom__">Custom...</option>
+                  </select>
+                  <input x-show="credService === '__custom__'" type="text" x-model="credCustomService" class="dash-input text-xs w-40" placeholder="credential_name">
+                  <select x-show="credService === '__custom__'" x-model="credTier" class="dash-select text-xs w-28">
+                    <option value="agent">Agent tier</option>
+                    <option value="system">System tier</option>
+                  </select>
+                  <input type="password" x-model="credKey" class="dash-input flex-1" placeholder="API key or value">
+                </div>
+                <input type="text" x-model="credBaseUrl" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
+                <div class="flex justify-between">
+                  <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
+                  <button @click="addCredential()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save Credential</button>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Infrastructure (collapsible) -->
+        <div class="mb-6" x-show="settingsData">
+          <button @click="systemInfraExpanded = !systemInfraExpanded"
+            class="flex items-center gap-2 text-xs text-gray-500 uppercase tracking-wider mb-3 hover:text-gray-300 transition-colors">
+            <svg class="w-3 h-3 transition-transform duration-200" :class="systemInfraExpanded && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+            Infrastructure
+          </button>
+          <div x-show="systemInfraExpanded" x-transition>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <!-- PubSub subscriptions -->
               <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
                 <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">PubSub Subscriptions</div>
-                <div x-show="Object.keys(settingsData.pubsub_subscriptions || {}).length === 0" class="text-gray-600 text-sm">No subscriptions</div>
+                <div x-show="Object.keys(settingsData?.pubsub_subscriptions || {}).length === 0" class="text-gray-600 text-sm">No subscriptions</div>
                 <div class="space-y-2">
-                  <template x-for="[topic, agents] in Object.entries(settingsData.pubsub_subscriptions || {})" :key="topic">
+                  <template x-for="[topic, agents] in Object.entries(settingsData?.pubsub_subscriptions || {})" :key="topic">
                     <div>
                       <span class="text-xs text-cyan-400 font-mono" x-text="topic"></span>
                       <span class="text-gray-600 text-xs mx-1">&rarr;</span>
@@ -1640,7 +1766,7 @@
               <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
                 <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Model Pricing (per 1K tokens)</div>
                 <div class="space-y-1 max-h-60 overflow-y-auto custom-scrollbar">
-                  <template x-for="[model, costs] in Object.entries(settingsData.model_costs || {})" :key="model">
+                  <template x-for="[model, costs] in Object.entries(settingsData?.model_costs || {})" :key="model">
                     <div class="flex justify-between text-xs">
                       <span class="text-gray-400 font-mono" x-text="model"></span>
                       <div class="flex gap-3">
@@ -1655,7 +1781,7 @@
               <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
                 <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Browser Backends</div>
                 <div class="space-y-2">
-                  <template x-for="b in settingsData.browser_backends || []" :key="b.name">
+                  <template x-for="b in settingsData?.browser_backends || []" :key="b.name">
                     <div>
                       <span class="text-sm text-white font-medium" x-text="b.label || b.name"></span>
                       <div class="text-xs text-gray-500 mt-0.5" x-text="b.description || ''"></div>
@@ -1664,7 +1790,7 @@
                 </div>
               </div>
             </div>
-          </template>
+          </div>
         </div>
       </div>
 
