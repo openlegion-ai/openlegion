@@ -115,11 +115,33 @@ async def _launch_basic():
     return browser, context, page
 
 
+def _ensure_xvfb():
+    """Start Xvfb virtual display if not already running.
+
+    Camoufox's built-in ``headless="virtual"`` hangs in Docker containers.
+    Starting Xvfb ourselves and setting DISPLAY is the proven approach.
+    """
+    import subprocess
+    if os.environ.get("DISPLAY"):
+        return
+    try:
+        subprocess.Popen(
+            ["Xvfb", ":99", "-screen", "0", "1920x1080x16"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.environ["DISPLAY"] = ":99"
+        logger.info("Started Xvfb virtual display on :99")
+    except FileNotFoundError:
+        logger.warning("Xvfb not installed — falling back to headless mode")
+
+
 async def _launch_stealth():
     """Launch Camoufox anti-detect browser.
 
     Camoufox handles its own user-agent and fingerprint rotation,
     so we intentionally skip the custom user_agent set in _launch_basic().
+    Uses Xvfb virtual display for proper rendering and anti-detection.
     """
     global _camoufox_cm
     try:
@@ -129,7 +151,8 @@ async def _launch_stealth():
             "camoufox is not installed. The agent container must include "
             "camoufox. See Dockerfile.agent."
         )
-    _camoufox_cm = AsyncCamoufox(headless="virtual")
+    _ensure_xvfb()
+    _camoufox_cm = AsyncCamoufox(headless=True)
     browser = await _camoufox_cm.__aenter__()
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
