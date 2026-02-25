@@ -311,7 +311,11 @@ async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -
                 _page_refs.clear()
                 _credential_filled_refs.clear()
                 page = await _get_page(mesh_client=mesh_client)
-                response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                # Bright Data premium domains can take up to 2 min for
+                # CAPTCHA solving and proxy rotation; basic/stealth are fast.
+                backend = os.environ.get("BROWSER_BACKEND", "basic")
+                nav_timeout = 120_000 if backend == "advanced" else 30_000
+                response = await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout)
                 if wait_ms:
                     await page.wait_for_timeout(wait_ms)
                 text = await page.inner_text("body")
