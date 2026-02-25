@@ -1151,7 +1151,7 @@ function dashboard() {
       } catch (e) { console.warn('fetchSettings failed:', e); }
     },
 
-    // ── Multi-agent chat panels (docked bottom bar) ─────
+    // ── Chat slide-over panel ──────────────────────────
 
     openChat(agentId) {
       this.chatPanelMinimized = false;

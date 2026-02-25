@@ -55,7 +55,7 @@
 
   <div x-data="dashboard()" x-init="init()" class="flex flex-col h-screen">
 
-    <!-- Toast notifications — top-right, clear of bottom-docked chat panels -->
+    <!-- Toast notifications -->
     <div class="fixed top-16 right-4 z-50 flex flex-col gap-2" role="status" aria-live="polite">
       <template x-for="t in toastQueue" :key="t.id">
         <div class="toast text-gray-200" x-text="t.msg" x-transition></div>
@@ -113,12 +113,12 @@
             </button>
           </template>
         </div>
-        <!-- Empty state -->
-        <div x-show="cmdPaletteQuery && cmdPaletteResults.length === 0" class="px-4 py-6 text-center text-gray-600 text-sm">
+        <!-- Empty state (only show "no results" when query is long enough) -->
+        <div x-show="cmdPaletteQuery.length >= 2 && cmdPaletteResults.length === 0" class="px-4 py-6 text-center text-gray-600 text-sm">
           No results for "<span class="text-gray-400" x-text="cmdPaletteQuery"></span>"
         </div>
         <!-- Hint -->
-        <div x-show="!cmdPaletteQuery" class="px-4 py-4 text-center text-gray-600 text-xs">
+        <div x-show="cmdPaletteQuery.length < 2" class="px-4 py-4 text-center text-gray-600 text-xs">
           Type to search agents, tabs, or blackboard keys
         </div>
       </div>
@@ -792,7 +792,7 @@
       </div>
 
       <!-- Agent Detail -->
-      <div x-show="activeTab === 'fleet' && detailAgent" x-cloak @keydown.escape.window="if (detailAgent && !identityEditing && !configEditing && openChats.length === 0) detailAgent = null">
+      <div x-show="activeTab === 'fleet' && detailAgent" x-cloak @keydown.escape.window="if (detailAgent && !identityEditing && !configEditing && !cmdPaletteOpen && openChats.length === 0) detailAgent = null">
         <div class="text-sm text-gray-500 mb-4 flex items-center gap-1">
           <button @click="detailAgent = null" class="hover:text-gray-300 transition-colors flex items-center gap-1">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
@@ -1807,8 +1807,6 @@
 
   <!-- Alpine.js (deferred) -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
   <script src="/dashboard/static/js/websocket.js"></script>
   <script src="/dashboard/static/js/app.js"></script>
 </body>
