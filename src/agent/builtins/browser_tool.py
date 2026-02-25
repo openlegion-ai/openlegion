@@ -202,16 +202,17 @@ async def _launch_advanced(mesh_client):
 
 
 _STEALTH_INIT_SCRIPT = """
-// Stealth patches — runs before every page script to hide Playwright markers.
+// Stealth patches — runs before every page script to cover detection
+// vectors beyond Patchright's CDP-level patches.
+//
+// NOTE: navigator.webdriver is handled by Patchright at the CDP layer
+// (Runtime.enable avoidance), so no JS override is needed here.
 
-// 1. navigator.webdriver → undefined (the primary detection vector)
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-
-// 2. Fake chrome.runtime (real Chrome has this, Playwright doesn't)
+// 1. Fake chrome.runtime (real Chrome has this, automation browsers don't)
 if (!window.chrome) window.chrome = {};
 if (!window.chrome.runtime) window.chrome.runtime = {};
 
-// 3. Fake plugins array (Playwright Chromium reports empty plugins)
+// 2. Fake plugins array (automation Chromium reports empty plugins)
 Object.defineProperty(navigator, 'plugins', {
     get: () => {
         const plugins = [
@@ -227,7 +228,7 @@ Object.defineProperty(navigator, 'plugins', {
     },
 });
 
-// 4. Fix permissions.query to not reveal automation
+// 3. Fix permissions.query to not reveal automation
 const origQuery = window.navigator.permissions.query.bind(
     window.navigator.permissions
 );
@@ -237,16 +238,16 @@ window.navigator.permissions.query = (params) => {
     return origQuery(params);
 };
 
-// 5. Hide Playwright-injected globals
+// 4. Hide Playwright-injected globals
 delete window.__playwright;
 delete window.__pw_manual;
 
-// 6. Fix navigator.languages (Playwright sometimes only has ['en-US'])
+// 5. Fix navigator.languages (automation browsers sometimes only have ['en-US'])
 Object.defineProperty(navigator, 'languages', {
     get: () => ['en-US', 'en'],
 });
 
-// 7. Fake connection.rtt (0 in automation, ~50-100 in real browsers)
+// 6. Fake connection.rtt (0 in automation, ~50-100 in real browsers)
 if (navigator.connection) {
     Object.defineProperty(navigator.connection, 'rtt', {get: () => 50});
 }
@@ -254,22 +255,27 @@ if (navigator.connection) {
 
 
 async def _launch_persistent():
-    """Launch Playwright Chromium with a persistent profile.
+    """Launch Patchright Chromium with a persistent profile.
+
+    Patchright is a patched Playwright fork that applies 21 AST-level
+    patches to the CDP driver, including ``Runtime.enable`` avoidance
+    and ``Console.enable`` removal — CDP-level anti-detection that JS
+    init scripts cannot replicate.
 
     Uses ``launch_persistent_context`` so cookies and sessions survive
     browser restarts.  Returns ``(None, context, page)`` — persistent
     contexts have no separate Browser object.
 
-    Injects stealth patches via ``add_init_script`` to hide Playwright's
-    automation markers from sites like X.com that detect and block bots.
+    Additional JS stealth patches are injected via ``add_init_script``
+    to cover detection vectors beyond CDP (chrome.runtime, plugins, etc.).
     """
     global _pw
     try:
-        from playwright.async_api import async_playwright
+        from patchright.async_api import async_playwright
     except ImportError:
         raise RuntimeError(
-            "playwright is not installed. The agent container must include "
-            "playwright and chromium. See Dockerfile.agent."
+            "patchright is not installed. The agent container must include "
+            "patchright and chromium. See Dockerfile.agent."
         )
     _ensure_xvfb()
     _pw = await async_playwright().start()
@@ -280,12 +286,10 @@ async def _launch_persistent():
         headless=False,
         viewport={"width": 1280, "height": 720},
         args=[
-            "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
             "--no-first-run",
             "--disable-infobars",
         ],
-        ignore_default_args=["--enable-automation"],
         user_agent=(
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -293,12 +297,12 @@ async def _launch_persistent():
     )
     await context.add_init_script(_STEALTH_INIT_SCRIPT)
     page = context.pages[0] if context.pages else await context.new_page()
-    logger.info("Browser backend: persistent (Chromium + KasmVNC)")
+    logger.info("Browser backend: persistent (Patchright Chromium + KasmVNC)")
     return None, context, page
 
 
 async def _browser_cleanup_soft():
-    """Close browser/context/page/playwright but leave Xvnc and VNC alive.
+    """Close browser/context/page but leave Xvnc alive.
 
     Used by ``browser_reset`` in persistent mode to restart the browser
     while keeping the VNC session and profile directory intact.
