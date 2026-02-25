@@ -51,7 +51,7 @@ agents:
 | `resources.cpu_limit` | float | No | CPU quota, 0.5 = 50% (default: `0.5`) |
 | `budget.daily_usd` | float | No | Daily spend cap in USD |
 | `budget.monthly_usd` | float | No | Monthly spend cap in USD |
-| `browser_backend` | string | No | Browser tier: `basic` (default), `stealth` (Camoufox), or `advanced` (Bright Data CDP) |
+| `browser_backend` | string | No | Browser backend: `basic` (default), `stealth` (Camoufox), `advanced` (Bright Data CDP), or `persistent` (Chromium + persistent profile + KasmVNC viewer) |
 | `thinking` | string | No | Extended thinking/reasoning mode: `off` (default), `low`, `medium`, or `high`. Anthropic models use thinking budgets (5K/10K/25K tokens). OpenAI o-series models use `reasoning_effort`. Ignored for unsupported models |
 | `mcp_servers` | list | No | External MCP tool servers. See [MCP Integration](mcp.md) |
 
@@ -249,7 +249,8 @@ Beyond credentials, these environment variables affect runtime behavior:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENLEGION_LOG_FORMAT` | `json` | Log output format: `json` (structured) or `text` (human-readable) |
-| `BROWSER_BACKEND` | `basic` | Browser tier: `basic`, `stealth`, or `advanced` (set automatically in containers) |
+| `BROWSER_BACKEND` | `basic` | Browser backend: `basic`, `stealth`, `advanced`, or `persistent` (set automatically in containers) |
+| `VNC_PORT` | `6080` | KasmVNC web port for persistent browser backend (set automatically in containers) |
 | `MCP_SERVERS` | -- | JSON string of MCP server configs (set automatically in containers) |
 | `MESH_AUTH_TOKEN` | -- | Agent auth token (set automatically in containers) |
 | `MESH_HOST` | -- | Mesh host URL (set automatically in containers) |

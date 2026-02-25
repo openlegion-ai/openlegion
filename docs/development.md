@@ -279,8 +279,9 @@ openlegion/
 │   │       ├── memory_tool.py   # Memory search/save/recall
 │   │       ├── mesh_tool.py     # Blackboard, pub/sub, artifacts, cron
 │   │       ├── vault_tool.py    # Credential vault (blind storage)
+│   │       ├── introspect_tool.py # Live runtime state queries
 │   │       ├── skill_tool.py    # Custom skill creation + reload
-│   │       ├── subagent_tool.py # In-container subagent spawning
+│   │       ├── subagent_tool.py # In-process subagent spawning
 │   │       └── web_search_tool.py  # DuckDuckGo search
 │   ├── host/                    # Runs on the host machine
 │   │   ├── server.py            # Mesh FastAPI app
@@ -332,7 +333,7 @@ openlegion/
 │   ├── permissions.json
 │   ├── cron.json
 │   └── workflows/
-├── tests/                       # Test suite (1124 tests)
+├── tests/                       # Test suite (1276 tests)
 │   └── fixtures/                # Test fixtures (echo MCP server, etc.)
 ├── Dockerfile.agent             # Agent container image
 └── pyproject.toml               # Project metadata

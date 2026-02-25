@@ -71,6 +71,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `context.py` | Context window management with write-then-compact pattern |
 | `llm.py` | LLM client with streaming (`chat_stream()`) and non-streaming (`chat()`) — routes through mesh proxy |
 | `mesh_client.py` | HTTP client for agent-to-mesh communication |
+| `loop_detector.py` | Stuck tool-call detection with escalating intervention (warn → block → terminate) |
 | `server.py` | Agent-side FastAPI server (/task, /chat, /status) |
 
 ### Built-in Tools (`src/agent/builtins/`)
@@ -80,7 +81,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `exec_tool.py` | Shell command execution |
 | `file_tool.py` | File read/write/list scoped to /data |
 | `http_tool.py` | HTTP requests |
-| `browser_tool.py` | 3-tier browser: Playwright Chromium, Camoufox stealth, Bright Data CDP |
+| `browser_tool.py` | 4-backend browser: Playwright Chromium (basic), Camoufox stealth, Bright Data CDP (advanced), persistent (Chromium + KasmVNC) |
 | `mesh_tool.py` | Blackboard, PubSub, fleet awareness, artifacts, cron, heartbeat, spawn |
 | `memory_tool.py` | Memory search, save, recall |
 | `vault_tool.py` | Credential-blind vault operations |
@@ -99,6 +100,24 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `slack.py` | Slack adapter (Socket Mode via slack-bolt) |
 | `whatsapp.py` | WhatsApp Cloud API adapter |
 | `webhook.py` | Generic webhook-to-workflow adapter |
+
+### Dashboard (`src/dashboard/`)
+
+| Module | Purpose |
+|--------|---------|
+| `server.py` | Dashboard FastAPI router with fleet management, chat, and config APIs |
+| `events.py` | EventBus for real-time WebSocket streaming to the dashboard |
+
+### CLI (`src/cli/`)
+
+| Module | Purpose |
+|--------|---------|
+| `main.py` | Click commands and entry point |
+| `config.py` | Config loading, Docker helpers, agent management |
+| `runtime.py` | RuntimeContext — full lifecycle management |
+| `repl.py` | REPLSession — interactive command dispatch |
+| `channels.py` | ChannelManager — messaging channel lifecycle |
+| `formatting.py` | Tool display, styled output, response rendering |
 
 ### Shared (`src/shared/`)
 

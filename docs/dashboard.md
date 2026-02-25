@@ -4,37 +4,43 @@ Real-time web dashboard for fleet observability and management.
 
 ## Overview
 
-The dashboard is served at `http://localhost:8420/dashboard` (or whatever port the mesh is configured on). It provides a live view of your agent fleet across six tabs for monitoring, configuration, and debugging.
+The dashboard is served at `http://localhost:8420/dashboard` (or whatever port the mesh is configured on). It provides a live view of your agent fleet across three main tabs with a consolidated navigation bar, slide-over chat panels, and a keyboard command palette.
 
 No additional setup is required -- the dashboard starts automatically with `openlegion start`.
 
-## Panels
+## Navigation
 
-### Agents
+The dashboard uses a consolidated three-tab layout:
+
+| Tab | What It Shows |
+|-----|--------------|
+| **Fleet** | Agent cards, agent detail views, configuration editing |
+| **Activity** | Traces, live events, blackboard, costs, and automation |
+| **System** | Credentials, pub/sub, model pricing, browser backends |
+
+A command palette (**Cmd+K** / **Ctrl+K**) provides quick access to agents, actions, and navigation. The search button in the nav bar also opens it.
+
+## Fleet Tab
 
 Overview of all registered agents showing health status, activity state (idle/thinking/tool), daily cost, token usage, and restart count. Click any agent card to drill down into its detail view with cost breakdowns, budget bars, workspace file editor, and recent events. Also includes agent configuration management — view and edit each agent's model, browser backend, role, system prompt, and daily budget. Changes that require a restart (model, browser) are flagged.
 
-### Activity
+Agents with a **persistent** browser backend show an embedded KasmVNC viewer in their detail view, providing a live view of the agent's browser session.
 
-Two sub-views toggled via a tab bar at the top of the panel:
+## Activity Tab
+
+Sub-views toggled via a tab bar at the top of the panel:
 
 **Traces** (default) — Grouped request traces showing the full lifecycle of each request through the system. Each trace row shows the triggering event type, participating agents, a prompt preview (extracted from the first LLM call's user message), event count, total duration, error badge, and relative time. Click a trace to expand an inline event timeline with a vertical waterfall: each event shows its type, source, agent, duration, detail text, error message (if any), and metadata fields (model, tokens, prompt/response previews). Traces auto-refresh every 10 seconds and on relevant WebSocket events (debounced). LLM call events include prompt and response preview fields extracted from the mesh API proxy.
 
 **Live Events** — Real-time event feed streamed via WebSocket. Events include LLM calls, tool executions, text streaming deltas, messages sent/received, blackboard writes, agent state changes, and health changes. Filter by event type using the chip toggles. Events are capped at 500 in the browser; older events are dropped. Click any event row to expand an inline detail panel showing all available data fields with type-specific formatting (e.g. model, token breakdown, cost, and prompt/response previews for `llm_call`; full untruncated arguments for `tool_start`; complete message text for `message_sent`). The same expandable rows appear in the agent detail view's Recent Events section. Note: per-token `text_delta` events are delivered via the direct streaming chat endpoint (not the WebSocket event bus) to avoid flooding the event buffer.
 
-### Blackboard
+**Blackboard** — Browse, search, write, and delete shared state entries. Entries display as expandable card rows with agent avatars, color-coded namespace badges (tasks, context, signals, goals, artifacts, history), a value summary, and relative timestamps. Namespace filter buttons show per-namespace entry counts. Click any row to expand an inline detail panel with full JSON, version number, author, and exact timestamp. Filter by key prefix (e.g., `tasks/`, `context/`, `signals/`) or by writing agent. New entries are highlighted with a flash animation when written by agents in real-time. History namespace entries (`history/*`) cannot be deleted.
 
-Browse, search, write, and delete shared state entries. Entries display as expandable card rows with agent avatars, color-coded namespace badges (tasks, context, signals, goals, artifacts, history), a value summary, and relative timestamps. Namespace filter buttons show per-namespace entry counts. Click any row to expand an inline detail panel with full JSON, version number, author, and exact timestamp. Filter by key prefix (e.g., `tasks/`, `context/`, `signals/`) or by writing agent. New entries are highlighted with a flash animation when written by agents in real-time. History namespace entries (`history/*`) cannot be deleted.
+**Costs** — Per-agent LLM spend with period selector (today/week/month). Bar chart shows cost and token usage side-by-side. Budget status bars show daily spend vs. configured limits. Cost data refreshes automatically when `llm_call` events arrive.
 
-### Costs
+**Automation** — Manage scheduled jobs. View schedule, last run time, run count, error count, and heartbeat status. Actions: Run (trigger immediately), Pause, Resume, Edit schedule, Delete. Auto-refreshes every 10 seconds while the tab is active.
 
-Per-agent LLM spend with period selector (today/week/month). Bar chart shows cost and token usage side-by-side. Budget status bars show daily spend vs. configured limits. Cost data refreshes automatically when `llm_call` events arrive.
-
-### Automation
-
-Manage scheduled jobs. View schedule, last run time, run count, error count, and heartbeat status. Actions: Run (trigger immediately), Pause, Resume, Edit schedule, Delete. Auto-refreshes every 10 seconds while the tab is active.
-
-### System
+## System Tab
 
 Environment overview showing configured credentials with tier labels (system or agent, names only, never values), pub/sub subscriptions, model pricing tables, and available browser backends. Add new credentials from a dropdown of LLM providers, known agent tools (Brave Search, Apollo, Hunter, Brightdata), or custom service names.
 
@@ -90,9 +96,11 @@ The dashboard proxies workspace operations through the mesh transport layer to t
 
 ## Chat
 
-### Streaming Chat
+### Slide-Over Chat Panel
 
-Click an agent card to open the chat modal. Messages stream in real-time with token-level updates via SSE (`POST /dashboard/api/agents/{id}/chat/stream`). The response renders progressively as tokens arrive, with a pulsing cursor indicating active streaming.
+Click the chat button on an agent card to open a slide-over panel on the right side of the dashboard. Messages stream in real-time with token-level updates via SSE (`POST /dashboard/api/agents/{id}/chat/stream`). The response renders progressively as tokens arrive, with a pulsing cursor indicating active streaming.
+
+The slide-over panel can be minimized to a pill at the bottom of the screen and restored by clicking it.
 
 ### Tool Call Display
 
@@ -104,12 +112,13 @@ Tool calls appear above the text response, in the order they were executed.
 
 ### Chat History
 
-Conversation history persists per agent across modal open/close — reopening the same agent shows the full conversation. Use the **Clear** button in the chat header to reset history for that agent. History is stored in browser memory and resets on page reload.
+Conversation history persists per agent across panel open/close — reopening the same agent shows the full conversation. Use the **Clear** button in the chat header to reset history for that agent. History is stored in browser memory and resets on page reload.
 
 ### Keyboard Shortcuts
 
 - **Enter** — send message
-- **Escape** — close chat modal
+- **Escape** — close chat panel
+- **Cmd+K** / **Ctrl+K** — open command palette
 
 ### Notifications
 
@@ -117,13 +126,13 @@ When an agent calls `notify_user()`, the notification appears inline in the agen
 
 - **Panel open and visible** — notification appends to the conversation and auto-scrolls
 - **Panel minimized** — an amber unread badge appears on the minimized header showing the count; expanding the panel clears the badge
-- **Panel not open** — a new panel opens automatically if a slot is available (max 3); if all slots are occupied, the toast and history entry are sufficient — no existing panel is evicted
+- **Panel not open** — a new panel opens automatically if a slot is available; if all slots are occupied, the toast and history entry are sufficient
 
 Notifications never steal keyboard focus or force-unminimize a panel the user deliberately collapsed.
 
 ### Abort
 
-Closing the chat modal (click outside, X button, or Escape) while a response is streaming cancels the in-flight request. The partial response is preserved in history.
+Closing the chat panel while a response is streaming cancels the in-flight request. The partial response is preserved in history.
 
 ## Broadcast
 

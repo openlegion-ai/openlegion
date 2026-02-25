@@ -24,19 +24,22 @@ All file operations are scoped to `/data` inside the container. Path traversal i
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `http_request` | `url`, `method`, `headers`, `body` | Make HTTP requests (GET/POST/PUT/DELETE/PATCH) |
+| `http_request` | `url`, `method`, `headers`, `body` | Make HTTP requests (GET/POST/PUT/DELETE/PATCH). Supports `$CRED{name}` handles in URL, headers, and body for credential-blind API calls. Resolved credentials are redacted from responses. |
 
 ### Browser Automation
 
-Three-tier browser backend system controlled by `browser_backend` in `config/agents.yaml`:
+Four browser backends controlled by `browser_backend` in `config/agents.yaml`:
 
-| Tier | Stack | Anti-Detection | Cost |
-|------|-------|---------------|------|
-| **basic** (default) | Playwright + Chromium | Low | Free |
-| **stealth** | Camoufox (Firefox-based anti-detect) | Medium | Free |
+| Backend | Stack | Anti-Detection | Cost |
+|---------|-------|---------------|------|
+| **basic** (default) | Playwright + Chromium (headless) | Low | Free |
+| **stealth** | Camoufox (Firefox-based anti-detect) with Xvfb | Medium | Free |
 | **advanced** | Bright Data Scraping Browser via CDP | High (residential proxies, CAPTCHA solving) | Paid |
+| **persistent** | Playwright + Chromium with persistent profile + KasmVNC | Low | Free |
 
-The backend is selected per-agent via the `BROWSER_BACKEND` environment variable. All tiers expose the same tool interface — downstream tools work identically regardless of backend.
+The backend is selected per-agent via the `BROWSER_BACKEND` environment variable. All backends expose the same tool interface — downstream tools work identically regardless of backend.
+
+The **persistent** backend maintains a browser profile across sessions at `/data/browser_profile` and runs KasmVNC on port 6080 for live VNC viewing via the dashboard. This is ideal for agents that need to maintain login sessions or cookies across restarts.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
@@ -100,11 +103,13 @@ The backend is selected per-agent via the `BROWSER_BACKEND` environment variable
 
 ### Subagents (In-Container)
 
-Lightweight subagents that run inside the same container as the parent agent, sharing the same environment but with their own memory and workspace.
+Lightweight subagents that run inside the same process as the parent agent, sharing LLM and mesh clients but with their own memory and workspace.
+
+**Limits:** Max 3 concurrent subagents, max depth 2 (no grandchildren), default TTL 300s, max 10 iterations per subagent. Subagents cannot use `create_skill`, `reload_skills`, or `spawn_subagent` (prevents recursion). Results are written to blackboard at `subagent_results/{parent_id}/{subagent_id}`.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `spawn_subagent` | `role`, `task`, `system_prompt`, `ttl` | Spawn a lightweight subagent to handle a subtask in parallel |
+| `spawn_subagent` | `task`, `role`, `ttl_seconds` | Spawn a lightweight subagent for parallel subtask execution |
 | `list_subagents` | -- | List active subagents spawned by this agent and their status |
 
 ### Credential Vault

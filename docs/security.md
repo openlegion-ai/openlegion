@@ -71,6 +71,16 @@ Per-agent access is controlled by `allowed_credentials` glob patterns in `config
 
 Even with `allowed_credentials: ["*"]`, system credentials are **always** blocked. Agents also cannot store or overwrite system credential names via `vault_store`.
 
+### Credential Redaction
+
+Resolved credentials are automatically redacted from tool outputs to prevent accidental leakage into LLM context:
+
+- **HTTP responses** — `http_request` strips resolved `$CRED{name}` values from response headers and body before returning results to the agent
+- **Browser snapshots** — `browser_snapshot` strips common secret patterns (API keys, GitHub tokens, AWS keys, etc.) from accessibility tree text
+- **Browser evaluate** — JavaScript evaluation results are scanned for credential patterns
+
+This ensures that even if an agent interacts with an API that echoes credentials back, the actual secret values are not exposed in the conversation.
+
 ### Adding New Service Integrations
 
 New external services are added as vault handlers, not as agent-side code:

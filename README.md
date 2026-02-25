@@ -8,7 +8,7 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE.md)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 1238](https://img.shields.io/badge/tests-1238%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 1276](https://img.shields.io/badge/tests-1276%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -116,8 +116,8 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 1182 tests including full Docker E2E |
-| **Codebase size** | 430,000+ lines | ~20,000 lines — auditable in a day |
+| **Test coverage** | Minimal | 1276 tests including full Docker E2E |
+| **Codebase size** | 430,000+ lines | ~21,000 lines — auditable in a day |
 
 ---
 
@@ -131,7 +131,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**1222 tests passing** across **~20,000 lines** of application code.
+**1276 tests passing** across **~21,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
@@ -156,7 +156,7 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
 7. **Multi-channel** — connect agents to Telegram, Discord, Slack, and WhatsApp. Also accessible via CLI and API.
 
-8. **Real-time dashboard** — web-based fleet observability at `/dashboard` with grouped request traces, live event streaming, multi-agent docked chat panels (up to 3 simultaneous) with inline notifications, streaming broadcast to all agents with real-time per-agent responses, LLM prompt/response previews, agent management, agent identity editor (personality, instructions, preferences, heartbeat rules, memory, activity logs, learnings), cost charts, and cron management.
+8. **Real-time dashboard** — web-based fleet observability at `/dashboard` with consolidated navigation, slide-over chat panels, keyboard command palette, grouped request traces, live event streaming, streaming broadcast with real-time per-agent responses, LLM prompt/response previews, agent management, agent identity editor (personality, instructions, preferences, heartbeat rules, memory, activity logs, learnings), cost charts, cron management, and embedded KasmVNC viewer for persistent browser agents.
 
 9. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly budget enforcement.
 
@@ -306,11 +306,12 @@ steps:
 ### Container Manager
 
 Each agent runs in an isolated Docker container with:
-- **Image**: `openlegion-agent:latest` (Python 3.12, system tools, Playwright, Chromium, Camoufox)
+- **Image**: `openlegion-agent:latest` (Python 3.12, system tools, Playwright, Chromium, Camoufox, KasmVNC)
 - **Network**: Bridge with port mapping (macOS/Windows) or host network (Linux)
 - **Volume**: `openlegion_data_{agent_id}` mounted at `/data` (agent names with spaces/special chars are sanitized)
 - **Resources**: 512MB RAM limit, 50% CPU quota
 - **Security**: `no-new-privileges`, runs as non-root `agent` user (UID 1000)
+- **Ports**: 8400 (FastAPI), 6080 (KasmVNC for persistent browser)
 
 ---
 
@@ -720,7 +721,7 @@ agents:
     model: "openai/gpt-4.1-mini"
     skills_dir: "./skills/research"
     system_prompt: "You are a research specialist..."
-    browser_backend: "stealth"          # basic (default), stealth, or advanced
+    browser_backend: "stealth"          # basic (default), stealth, advanced, or persistent
     thinking: "medium"                   # off (default), low, medium, or high
     resources:
       memory_limit: "512m"
@@ -851,28 +852,28 @@ pytest tests/
 
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
-| Built-in Tools | 112 | exec, file, browser (incl. backend tiers, screenshots, reset/recovery), memory, mesh tools, notifications, path traversal, discovery |
-| Dashboard | 77 | Index, agents, blackboard, costs, traces, queues, cron, settings, config, streaming broadcast |
-| CLI | 65 | Agent add/list/edit/remove, chat, REPL commands, cron management, version |
-| Agent Loop | 57 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
-| Workspace | 58 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files |
-| Cron | 42 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM, concurrent mutations |
+| Built-in Tools | 133 | exec, file, browser (all 4 backends, screenshots, reset/recovery, KasmVNC), memory, mesh, vault, introspect, path traversal, discovery |
+| Dashboard | 93 | Fleet management, blackboard, costs, traces, queues, cron, settings, config, streaming broadcast, workspace proxy |
+| Workspace | 68 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files, SYSTEM.md |
+| Agent Loop | 67 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
 | Credentials | 67 | Vault, API proxy, provider detection, two-tier system, credential lifecycle |
+| CLI | 65 | Agent add/list/edit/remove, chat, REPL commands, cron management, version |
+| Channels (base) | 47 | Abstract channel, commands, per-user routing, chunking, steer, debug, addkey normalization, parallel broadcast |
+| Cron | 44 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM, concurrent mutations |
+| Mesh | 42 | Blackboard, PubSub, MessageRouter, permissions |
+| Integration | 42 | Multi-component mesh operations, notifications |
 | Sanitization | 38 | Invisible Unicode stripping, bidi overrides, tag chars, zero-width |
-| Channels (base) | 44 | Abstract channel, commands, per-user routing, chunking, steer, debug, addkey normalization, conditional help, parallel broadcast |
+| Discord Channel | 36 | Slash commands, message routing, pairing, chunking, embed formatting |
 | Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
 | Context Manager | 34 | Token estimation (tiktoken + model-aware), compaction, flushing, flush reset |
-| Mesh | 33 | Blackboard, PubSub, MessageRouter, permissions |
-| Runtime Backend | 31 | DockerBackend, SandboxBackend, browser_backend, extra_env, name sanitization, detection, selection |
-| Traces | 30 | Trace recording, grouping, summaries, prompt preview extraction |
+| Runtime Backend | 33 | DockerBackend, SandboxBackend, browser_backend, extra_env, name sanitization, detection, selection |
 | Events | 31 | Event streaming, filtering, WebSocket, notification events |
-| Integration | 28 | Multi-component mesh operations, notifications |
+| Traces | 30 | Trace recording, grouping, summaries, prompt preview extraction |
 | Orchestrator | 26 | Workflows, conditions, retries, failures |
 | Transcript | 24 | Transcript formatting, safety, round-trip fidelity |
+| WhatsApp Channel | 22 | Cloud API, webhook verification, message chunking, non-text reply |
 | Agent Server | 21 | Workspace API, heartbeat-context endpoint, content sanitization, file allowlist |
 | Slack Channel | 21 | Socket Mode, thread routing, pairing, command translation |
-| Discord Channel | 36 | Slash commands, message routing, pairing, chunking, embed formatting |
-| WhatsApp Channel | 22 | Cloud API, webhook verification, message chunking, non-text reply |
 | Skills | 20 | Discovery, execution, injection, MCP integration |
 | Setup Wizard | 20 | Quickstart, full setup, API key validation, templates, inline setup, two-tier credentials |
 | Marketplace | 20 | Install, manifest parsing, validation, path traversal, remove |
@@ -887,15 +888,15 @@ pytest tests/
 | Subagent | 11 | Spawn, depth/concurrent limits, TTL timeout, skill cloning, memory isolation |
 | MCP Client | 10 | Tool discovery, routing, conflicts, lifecycle |
 | Chat Workspace | 10 | Cross-session memory, corrections, learnings |
+| Health Monitor | 8 | Ephemeral cleanup, TTL expiry, event emission, restart with missing config, parallel health checks |
 | Types | 8 | Pydantic validation, serialization |
 | MCP E2E | 7 | Real MCP protocol with live server subprocess |
 | Webhooks | 7 | Add/remove, persistence, dispatch |
 | File Watchers | 7 | Polling, dispatch, pattern matching |
-| Health Monitor | 9 | Ephemeral cleanup, TTL expiry, event emission, restart with missing config, parallel health checks |
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **1182** | |
+| **Total** | **1276** | |
 
 ---
 
@@ -951,13 +952,14 @@ src/
 │       ├── exec_tool.py                # Shell execution
 │       ├── file_tool.py                # File I/O (read, write, list)
 │       ├── http_tool.py                # HTTP requests
-│       ├── browser_tool.py             # Playwright automation (basic/stealth/advanced)
+│       ├── browser_tool.py             # Playwright automation (basic/stealth/advanced/persistent)
 │       ├── web_search_tool.py          # Web search via DuckDuckGo
 │       ├── memory_tool.py              # Memory search, save, recall
 │       ├── mesh_tool.py                # Shared state, fleet awareness, artifacts
 │       ├── vault_tool.py               # Credential vault operations
 │       ├── skill_tool.py               # Runtime skill creation + hot-reload
-│       └── subagent_tool.py            # Spawn ephemeral sub-agents
+│       ├── introspect_tool.py          # Live runtime state queries
+│       └── subagent_tool.py            # Spawn in-process subagents
 ├── host/
 │   ├── server.py                       # Mesh FastAPI server
 │   ├── mesh.py                         # Blackboard, PubSub, MessageRouter
@@ -1015,7 +1017,7 @@ config/
 | The mesh is the only door | No agent has network access except through the mesh. No agent holds credentials. |
 | Private by default, shared by promotion | Agents keep knowledge private. Facts are explicitly promoted to the blackboard. |
 | Explicit failure handling | Every workflow step declares what happens on failure. No silent error swallowing. |
-| Small enough to audit | ~20,000 total lines. The entire codebase is auditable in a day. |
+| Small enough to audit | ~21,000 total lines. The entire codebase is auditable in a day. |
 | Skills over features | New capabilities are agent skills, not mesh or orchestrator code. |
 | SQLite for all state | Single-file databases. No external services. WAL mode for concurrent reads. |
 | Zero vendor lock-in | LiteLLM supports 100+ providers. Markdown workspace files. No proprietary formats. |
@@ -1048,7 +1050,7 @@ Looking for alternatives? OpenLegion is often compared to:
 
 OpenLegion differs from all of these in combining **fleet orchestration,
 Docker isolation, credential vaulting, and cost enforcement** in a single
-~19,000 line auditable codebase.
+~21,000 line auditable codebase.
 
 **Keywords:** autonomous AI agents, multi-agent framework, LLM agent orchestration,
 self-hosted AI agents, Docker AI agents, OpenClaw alternative, AI agent security,
