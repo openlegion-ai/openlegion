@@ -425,6 +425,11 @@ def _get_default_model() -> str:
 
 BROWSER_BACKENDS = [
     {
+        "name": "persistent",
+        "label": "Persistent (noVNC)",
+        "description": "Visible browser with noVNC. Login manually, solve CAPTCHAs. Sessions survive restarts.",
+    },
+    {
         "name": "basic",
         "label": "Basic (built-in Chromium)",
         "description": "Fast, reliable. No anti-bot evasion.",
@@ -438,11 +443,6 @@ BROWSER_BACKENDS = [
         "name": "advanced",
         "label": "Advanced (Bright Data)",
         "description": "Cloud proxy browser. Bypasses CAPTCHAs and geo-blocks. Requires Bright Data account.",
-    },
-    {
-        "name": "persistent",
-        "label": "Persistent (noVNC)",
-        "description": "Visible browser with noVNC. Login manually, solve CAPTCHAs. Sessions survive restarts.",
     },
 ]
 
@@ -465,7 +465,7 @@ def _pick_model_interactive(default_model: str, label: str = "current") -> str:
     return models[model_choice - 1]
 
 
-def _pick_browser_interactive(current: str = "basic") -> str:
+def _pick_browser_interactive(current: str = "persistent") -> str:
     """Show browser backend picker. Returns selected backend name."""
     default_idx = 1
     for i, b in enumerate(BROWSER_BACKENDS, 1):
@@ -579,7 +579,7 @@ def _edit_agent_interactive(name: str) -> str | None:
     default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
 
     current_model = agent_cfg.get("model", default_model)
-    current_browser = agent_cfg.get("browser_backend", "basic") or "basic"
+    current_browser = agent_cfg.get("browser_backend", "persistent") or "persistent"
     current_desc = agent_cfg.get("role", "")
     budget_cfg = agent_cfg.get("budget", {})
     current_budget = budget_cfg.get("daily_usd") if budget_cfg else None

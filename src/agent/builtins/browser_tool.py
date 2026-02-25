@@ -82,7 +82,7 @@ async def _get_page(*, mesh_client=None):
         if _page and not _page.is_closed():
             return _page
 
-        backend = os.environ.get("BROWSER_BACKEND", "basic")
+        backend = os.environ.get("BROWSER_BACKEND", "persistent")
 
         if backend == "stealth":
             _browser, _context, _page = await _launch_stealth()
@@ -405,7 +405,7 @@ def _is_dead_session_error(error_msg: str) -> bool:
 async def browser_reset(*, mesh_client=None) -> dict:
     """Force-close the browser session so the next call gets a fresh one."""
     async with _page_op_lock:
-        backend = os.environ.get("BROWSER_BACKEND", "basic")
+        backend = os.environ.get("BROWSER_BACKEND", "persistent")
         if backend == "persistent":
             await _browser_cleanup_soft()
             logger.info("Browser session reset (backend: persistent, profile preserved)")
@@ -491,7 +491,7 @@ async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -
                 page = await _get_page(mesh_client=mesh_client)
                 # Bright Data premium domains can take up to 2 min for
                 # CAPTCHA solving and proxy rotation; basic/stealth are fast.
-                backend = os.environ.get("BROWSER_BACKEND", "basic")
+                backend = os.environ.get("BROWSER_BACKEND", "persistent")
                 nav_timeout = 120_000 if backend == "advanced" else 30_000
                 response = await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout)
                 if wait_ms:

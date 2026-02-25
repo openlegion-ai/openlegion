@@ -1229,9 +1229,10 @@ class TestBrowserNavigateAutoRecovery:
                 return dead_page
             return fresh_page
 
-        with patch.object(bt, "_get_page", side_effect=mock_get_page), \
-             patch.object(bt, "browser_cleanup", new_callable=AsyncMock) as mock_cleanup:
-            result = await bt.browser_navigate(url="https://example.com")
+        with patch.dict(os.environ, {"BROWSER_BACKEND": "basic"}):
+            with patch.object(bt, "_get_page", side_effect=mock_get_page), \
+                 patch.object(bt, "browser_cleanup", new_callable=AsyncMock) as mock_cleanup:
+                result = await bt.browser_navigate(url="https://example.com")
 
         mock_cleanup.assert_awaited_once()
         assert result["status"] == 200
@@ -1264,9 +1265,10 @@ class TestBrowserNavigateAutoRecovery:
                 return dead_page
             return fresh_page
 
-        with patch.object(bt, "_get_page", side_effect=mock_get_page), \
-             patch.object(bt, "browser_cleanup", new_callable=AsyncMock):
-            result = await bt.browser_navigate(url="https://example.com")
+        with patch.dict(os.environ, {"BROWSER_BACKEND": "basic"}):
+            with patch.object(bt, "_get_page", side_effect=mock_get_page), \
+                 patch.object(bt, "browser_cleanup", new_callable=AsyncMock):
+                result = await bt.browser_navigate(url="https://example.com")
 
         assert result["content"] == "Works now"
 
@@ -1280,9 +1282,10 @@ class TestBrowserNavigateAutoRecovery:
             side_effect=Exception("Timeout 30000ms exceeded")
         )
 
-        with patch.object(bt, "_get_page", return_value=mock_page), \
-             patch.object(bt, "browser_cleanup", new_callable=AsyncMock) as mock_cleanup:
-            result = await bt.browser_navigate(url="https://slow-site.com")
+        with patch.dict(os.environ, {"BROWSER_BACKEND": "basic"}):
+            with patch.object(bt, "_get_page", return_value=mock_page), \
+                 patch.object(bt, "browser_cleanup", new_callable=AsyncMock) as mock_cleanup:
+                result = await bt.browser_navigate(url="https://slow-site.com")
 
         mock_cleanup.assert_not_awaited()
         assert "error" in result
@@ -1298,9 +1301,10 @@ class TestBrowserNavigateAutoRecovery:
             side_effect=Exception("Protocol error (Page.navigate): Page.navigate limit reached")
         )
 
-        with patch.object(bt, "_get_page", return_value=mock_page), \
-             patch.object(bt, "browser_cleanup", new_callable=AsyncMock):
-            result = await bt.browser_navigate(url="https://example.com")
+        with patch.dict(os.environ, {"BROWSER_BACKEND": "basic"}):
+            with patch.object(bt, "_get_page", return_value=mock_page), \
+                 patch.object(bt, "browser_cleanup", new_callable=AsyncMock):
+                result = await bt.browser_navigate(url="https://example.com")
 
         assert "error" in result
 
@@ -1600,18 +1604,18 @@ class TestMemorySave:
 
 class TestBrowserBackendSelection:
     @pytest.mark.asyncio
-    async def test_default_is_basic(self):
-        """Without BROWSER_BACKEND, _get_page() launches basic Chromium."""
+    async def test_default_is_persistent(self):
+        """Without BROWSER_BACKEND, _get_page() launches persistent browser."""
         import src.agent.builtins.browser_tool as bt
         bt._browser = bt._context = bt._page = None
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("BROWSER_BACKEND", None)
-            with patch.object(bt, "_launch_basic", new_callable=AsyncMock) as mock_basic:
+            with patch.object(bt, "_launch_persistent", new_callable=AsyncMock) as mock_persistent:
                 mock_page = AsyncMock()
                 mock_page.is_closed.return_value = False
-                mock_basic.return_value = (MagicMock(), MagicMock(), mock_page)
+                mock_persistent.return_value = (None, MagicMock(), mock_page)
                 await bt._get_page()
-                mock_basic.assert_called_once()
+                mock_persistent.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_stealth_dispatches_to_camoufox(self):

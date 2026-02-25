@@ -52,7 +52,7 @@ class TestAgentAdd:
             assert "mybot" in agents_cfg["agents"]
             assert agents_cfg["agents"]["mybot"]["role"] == "Code review specialist"
             assert "openai/" in agents_cfg["agents"]["mybot"]["model"]
-            assert agents_cfg["agents"]["mybot"].get("browser_backend", "basic") in ("basic", "")
+            assert agents_cfg["agents"]["mybot"].get("browser_backend", "persistent") in ("persistent", "")
 
             perms = json.loads(perms_file.read_text())
             assert "mybot" in perms["permissions"]
