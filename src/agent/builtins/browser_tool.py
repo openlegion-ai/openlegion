@@ -201,12 +201,67 @@ async def _launch_advanced(mesh_client):
     return browser, context, page
 
 
+_STEALTH_INIT_SCRIPT = """
+// Stealth patches — runs before every page script to hide Playwright markers.
+
+// 1. navigator.webdriver → undefined (the primary detection vector)
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+
+// 2. Fake chrome.runtime (real Chrome has this, Playwright doesn't)
+if (!window.chrome) window.chrome = {};
+if (!window.chrome.runtime) window.chrome.runtime = {};
+
+// 3. Fake plugins array (Playwright Chromium reports empty plugins)
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        const plugins = [
+            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer',
+             description: 'Portable Document Format', length: 1},
+            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+             description: '', length: 1},
+            {name: 'Native Client', filename: 'internal-nacl-plugin',
+             description: '', length: 2},
+        ];
+        plugins.refresh = () => {};
+        return plugins;
+    },
+});
+
+// 4. Fix permissions.query to not reveal automation
+const origQuery = window.navigator.permissions.query.bind(
+    window.navigator.permissions
+);
+window.navigator.permissions.query = (params) => {
+    if (params.name === 'notifications')
+        return Promise.resolve({state: Notification.permission});
+    return origQuery(params);
+};
+
+// 5. Hide Playwright-injected globals
+delete window.__playwright;
+delete window.__pw_manual;
+
+// 6. Fix navigator.languages (Playwright sometimes only has ['en-US'])
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['en-US', 'en'],
+});
+
+// 7. Fake connection.rtt (0 in automation, ~50-100 in real browsers)
+if (navigator.connection) {
+    Object.defineProperty(navigator.connection, 'rtt', {get: () => 50});
+}
+"""
+
+
 async def _launch_persistent():
     """Launch Playwright Chromium with a persistent profile.
 
     Uses ``launch_persistent_context`` so cookies and sessions survive
     browser restarts.  Returns ``(None, context, page)`` — persistent
     contexts have no separate Browser object.
+
+    Injects stealth patches via ``add_init_script`` to hide Playwright's
+    automation markers from sites like X.com that detect and block bots.
     """
     global _pw
     try:
@@ -236,6 +291,7 @@ async def _launch_persistent():
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         ),
     )
+    await context.add_init_script(_STEALTH_INIT_SCRIPT)
     page = context.pages[0] if context.pages else await context.new_page()
     logger.info("Browser backend: persistent (Chromium + KasmVNC)")
     return None, context, page
