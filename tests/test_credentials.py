@@ -22,13 +22,13 @@ def vault():
 
 
 def test_load_credentials_from_env(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-test-123")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-test-123")
     monkeypatch.setenv("OPENLEGION_CRED_BRAVE_SEARCH_API_KEY", "bsk-456")
     v = CredentialVault()
-    # Provider keys are auto-promoted to system tier
+    # System-prefix keys go to system tier
     assert v.system_credentials.get("anthropic_api_key") == "sk-test-123"
     assert "anthropic_api_key" not in v.credentials
-    # Non-provider keys stay in agent tier
+    # Agent-prefix keys stay in agent tier
     assert v.credentials.get("brave_search_api_key") == "bsk-456"
 
 
@@ -915,14 +915,14 @@ def test_is_system_credential_non_system():
 
 def test_list_agent_credential_names(monkeypatch):
     """list_agent_credential_names excludes system credentials."""
-    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")  # auto-promoted
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
     monkeypatch.setenv("OPENLEGION_CRED_BRIGHTDATA_CDP_URL", "wss://...")
     monkeypatch.setenv("OPENLEGION_CRED_MYAPP_PASSWORD", "secret")
     v = CredentialVault()
     agent_creds = v.list_agent_credential_names()
     assert "brightdata_cdp_url" in agent_creds
     assert "myapp_password" in agent_creds
-    # Provider key was auto-promoted to system tier during loading
+    # System-prefix key stays in system tier
     assert "anthropic_api_key" not in agent_creds
 
 
@@ -972,46 +972,38 @@ def test_system_prefix_loads_to_system_credentials(monkeypatch):
     assert "gemini_api_key" not in v.credentials
 
 
-def test_old_style_provider_keys_auto_promoted_with_warning(monkeypatch):
-    """Old-style OPENLEGION_CRED_ provider keys auto-promote to system tier."""
+def test_cred_prefix_provider_keys_stay_in_agent_tier(monkeypatch):
+    """OPENLEGION_CRED_ provider keys are NOT auto-promoted — they stay agent-tier."""
     monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-legacy")
-    import warnings
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        v = CredentialVault()
-        # Should have a deprecation warning
-        deprecation_msgs = [x for x in w if issubclass(x.category, DeprecationWarning)]
-        assert len(deprecation_msgs) >= 1
-        assert "OPENLEGION_SYSTEM_" in str(deprecation_msgs[0].message)
-    # Key is in system tier, not agent tier
-    assert v.system_credentials.get("openai_api_key") == "sk-legacy"
-    assert "openai_api_key" not in v.credentials
+    v = CredentialVault()
+    # Key stays in agent tier, not promoted
+    assert "openai_api_key" in v.credentials
+    assert "openai_api_key" not in v.system_credentials
 
 
-def test_system_prefix_takes_precedence(monkeypatch):
-    """OPENLEGION_SYSTEM_ takes precedence over OPENLEGION_CRED_ for same name."""
+def test_both_prefixes_land_in_respective_tiers(monkeypatch):
+    """OPENLEGION_SYSTEM_ and OPENLEGION_CRED_ for same name go to their own tiers."""
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-system")
-    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-legacy")
+    monkeypatch.setenv("OPENLEGION_CRED_OPENAI_API_KEY", "sk-agent")
     v = CredentialVault()
     assert v.system_credentials["openai_api_key"] == "sk-system"
-    # Old key should not overwrite system tier
-    assert "openai_api_key" not in v.credentials
-
-
-def test_get_api_key_prefers_system_tier(monkeypatch):
-    """_get_api_key_for_model checks system_credentials first."""
-    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-system")
-    v = CredentialVault()
-    # Also place a copy in agent tier (simulating mixed state)
-    v.credentials["openai_api_key"] = "sk-agent"
+    assert v.credentials["openai_api_key"] == "sk-agent"
+    # Proxy only uses system tier
     assert v._get_api_key_for_model("openai/gpt-4o-mini") == "sk-system"
 
 
-def test_get_api_key_falls_back_to_agent_tier(monkeypatch):
-    """_get_api_key_for_model falls back to credentials if not in system tier."""
+def test_get_api_key_only_uses_system_tier(monkeypatch):
+    """_get_api_key_for_model only checks system_credentials."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-system")
+    v = CredentialVault()
+    assert v._get_api_key_for_model("openai/gpt-4o-mini") == "sk-system"
+
+
+def test_get_api_key_ignores_agent_tier(monkeypatch):
+    """_get_api_key_for_model does NOT fall back to agent-tier credentials."""
     v = CredentialVault()
     v.credentials["openai_api_key"] = "sk-agent-only"
-    assert v._get_api_key_for_model("openai/gpt-4o-mini") == "sk-agent-only"
+    assert v._get_api_key_for_model("openai/gpt-4o-mini") is None
 
 
 def test_add_credential_system_true():

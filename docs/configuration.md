@@ -214,7 +214,7 @@ OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
 
 All credentials are loaded by the credential vault (`src/host/credentials.py`). Agents never see values directly -- they make API calls through the mesh proxy, which injects credentials server-side.
 
-**Backwards compatibility:** Old-style `OPENLEGION_CRED_` provider keys (e.g. `OPENLEGION_CRED_OPENAI_API_KEY`) are auto-promoted to the system tier with a deprecation warning. Prefer `OPENLEGION_SYSTEM_` for new configurations.
+**Important:** LLM provider keys **must** use the `OPENLEGION_SYSTEM_` prefix. The mesh proxy only looks for provider keys in the system tier. A provider key stored with `OPENLEGION_CRED_` will be treated as an agent-tier credential and will not be used for LLM calls.
 
 ## `config/cron.json`
 

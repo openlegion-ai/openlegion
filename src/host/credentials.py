@@ -9,10 +9,6 @@ Two-tier credential system:
                               Never resolvable by agents.
   OPENLEGION_CRED_<NAME>    — Agent-tier. Accessible based on
                               ``allowed_credentials`` permission patterns.
-
-Backwards compat: old-style ``OPENLEGION_CRED_`` provider keys (e.g.
-``OPENLEGION_CRED_ANTHROPIC_API_KEY``) are auto-promoted to system tier
-with a deprecation warning.
 """
 
 from __future__ import annotations
@@ -20,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import warnings
 from collections.abc import Callable
 
 import httpx
@@ -110,9 +105,9 @@ def _remove_from_env(env_key: str, env_file: str = "") -> None:
 SYSTEM_PREFIX = "OPENLEGION_SYSTEM_"
 AGENT_PREFIX = "OPENLEGION_CRED_"
 
-# System credential patterns — used as a backwards-compat fallback to
-# auto-promote old-style OPENLEGION_CRED_ provider keys to system tier.
-# Derived from _PROVIDER_KEY_MAP providers.
+# System credential patterns — used by is_system_credential() for
+# defense-in-depth permission checks and by CLI/dashboard for
+# auto-detecting LLM provider keys.  Derived from _PROVIDER_KEY_MAP.
 SYSTEM_CREDENTIAL_PROVIDERS = frozenset({
     "anthropic", "openai", "gemini", "deepseek", "moonshot",
     "minimax", "xai", "groq", "zai",
@@ -176,12 +171,11 @@ class CredentialVault:
         """Load credentials from environment variables (two-phase).
 
         Phase 1: Scan ``OPENLEGION_SYSTEM_*`` → ``system_credentials`` / ``api_bases``.
-        Phase 2: Scan ``OPENLEGION_CRED_*`` → if ``is_system_credential(name)``
-                 AND not already in system tier, auto-promote with deprecation
-                 warning.  Otherwise → ``credentials`` (agent tier).
+        Phase 2: Scan ``OPENLEGION_CRED_*`` → ``credentials`` (agent tier) /
+                 ``api_bases`` (if not already set by system prefix).
 
-        ``OPENLEGION_SYSTEM_`` takes precedence when both prefixes exist
-        for the same credential name.
+        No auto-promotion: ``OPENLEGION_CRED_`` provider keys are treated as
+        agent-tier.  Use ``OPENLEGION_SYSTEM_`` for LLM provider keys.
         """
         # Phase 1: explicit system-tier credentials
         for key, value in os.environ.items():
@@ -192,7 +186,7 @@ class CredentialVault:
                 else:
                     self.system_credentials[cred_name] = value
 
-        # Phase 2: agent-tier credentials (with auto-promotion for legacy keys)
+        # Phase 2: agent-tier credentials
         for key, value in os.environ.items():
             if key.startswith(AGENT_PREFIX):
                 cred_name = key[len(AGENT_PREFIX):].lower()
@@ -200,18 +194,6 @@ class CredentialVault:
                     # Only store if not already set by SYSTEM_ prefix
                     if cred_name not in self.api_bases:
                         self.api_bases[cred_name] = value
-                elif is_system_credential(cred_name):
-                    # Auto-promote old-style provider keys to system tier
-                    if cred_name not in self.system_credentials:
-                        self.system_credentials[cred_name] = value
-                        warnings.warn(
-                            f"Credential '{key}' is a provider key. "
-                            f"Rename to '{SYSTEM_PREFIX}{cred_name.upper()}' "
-                            f"for explicit system-tier classification. "
-                            f"Auto-promoted to system tier.",
-                            DeprecationWarning,
-                            stacklevel=2,
-                        )
                 else:
                     self.credentials[cred_name] = value
 
@@ -401,16 +383,13 @@ class CredentialVault:
     def _get_api_key_for_model(self, model: str) -> str | None:
         """Resolve the API key for a model based on its provider prefix.
 
-        Checks system_credentials first, then falls back to credentials
-        (agent tier) for backwards compatibility.
+        Only checks system_credentials — LLM provider keys must use the
+        ``OPENLEGION_SYSTEM_`` prefix.
         """
         for prefix, provider in self._PROVIDER_KEY_MAP.items():
             if model.startswith(prefix):
                 key_name = f"{provider}_api_key"
-                return (
-                    self.system_credentials.get(key_name)
-                    or self.credentials.get(key_name)
-                )
+                return self.system_credentials.get(key_name)
         return None
 
     def _get_api_base_for_model(self, model: str) -> str | None:
@@ -674,10 +653,7 @@ class CredentialVault:
 
     async def _handle_anthropic(self, request: APIProxyRequest) -> APIProxyResponse:
         """Handle Anthropic API calls (LLM completions, embeddings) via LiteLLM."""
-        api_key = (
-            self.system_credentials.get("anthropic_api_key")
-            or self.credentials.get("anthropic_api_key")
-        )
+        api_key = self.system_credentials.get("anthropic_api_key")
         if not api_key:
             return APIProxyResponse(success=False, error="Anthropic API key not configured")
 
@@ -735,10 +711,7 @@ class CredentialVault:
 
     async def _handle_openai(self, request: APIProxyRequest) -> APIProxyResponse:
         """Handle OpenAI API calls (embeddings)."""
-        api_key = (
-            self.system_credentials.get("openai_api_key")
-            or self.credentials.get("openai_api_key")
-        )
+        api_key = self.system_credentials.get("openai_api_key")
         if not api_key:
             return APIProxyResponse(success=False, error="OpenAI API key not configured")
 
