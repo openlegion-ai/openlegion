@@ -270,13 +270,25 @@ def create_dashboard_router(
     async def api_agent_config(agent_id: str) -> dict:
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
+        from fnmatch import fnmatch
+
         from src.cli.config import _load_config
         cfg = _load_config()
         agent_cfg = cfg.get("agents", {}).get(agent_id, {})
         default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-        allowed_creds = []
+        allowed_creds: list[str] = []
         if permissions is not None:
             allowed_creds = permissions.get_allowed_credentials(agent_id)
+
+        # Compute credential visibility for the dashboard UI
+        all_names = credential_vault.list_credential_names() if credential_vault else []
+        agent_cred_names = credential_vault.list_agent_credential_names() if credential_vault else []
+        system_cred_names = sorted(n for n in all_names if n not in set(agent_cred_names))
+        resolved = sorted(
+            c for c in agent_cred_names
+            if any(fnmatch(c, p) for p in allowed_creds)
+        ) if allowed_creds else []
+
         return {
             "id": agent_id,
             "model": agent_cfg.get("model", default_model),
@@ -284,6 +296,9 @@ def create_dashboard_router(
             "budget": agent_cfg.get("budget", {}),
             "browser_backend": agent_cfg.get("browser_backend", "basic") or "basic",
             "allowed_credentials": allowed_creds,
+            "available_credentials": sorted(agent_cred_names),
+            "system_credentials": system_cred_names,
+            "resolved_credentials": resolved,
         }
 
     @api_router.put("/api/agents/{agent_id}/config")

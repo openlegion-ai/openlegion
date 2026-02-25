@@ -775,12 +775,18 @@ function dashboard() {
     startConfigEdit() {
       const cfg = this.agentConfigs[this.selectedAgent];
       if (!cfg) return;
+      const creds = cfg.allowed_credentials || [];
+      const credsStr = creds.join(', ');
+      let credMode = 'none';
+      if (creds.length === 1 && creds[0] === '*') credMode = 'all';
+      else if (creds.length > 0) credMode = 'custom';
       this.editForm = {
         model: cfg.model || '',
         browser_backend: cfg.browser_backend || 'basic',
         role: cfg.role || '',
         budget_daily: cfg.budget?.daily_usd || '',
-        allowed_credentials: (cfg.allowed_credentials || []).join(', '),
+        allowed_credentials: credsStr,
+        _credMode: credMode,
       };
       this.configEditing = true;
     },
