@@ -27,7 +27,7 @@ _launch_lock = asyncio.Lock()
 _page_refs: dict[str, object] = {}
 _credential_filled_refs: set[str] = set()  # refs that had $CRED{} typed into them
 _page_op_lock = asyncio.Lock()  # serializes all page operations (Playwright pages aren't concurrent-safe)
-_vnc_proc = None  # x11vnc subprocess (persistent backend)
+_vnc_proc = None  # Xvnc (TigerVNC) subprocess (persistent backend)
 _novnc_proc = None  # websockify/noVNC subprocess (persistent backend)
 
 _ACTIONABLE_ROLES = frozenset({
@@ -267,8 +267,9 @@ async def start_persistent_browser():
     """Start persistent browser + VNC stack at container boot.
 
     Called from ``__main__.py`` lifespan when ``BROWSER_BACKEND=persistent``.
-    Launches the browser (which calls ``_ensure_xvfb`` internally), then
-    starts x11vnc and noVNC so the user can interact via a web viewer.
+    Uses TigerVNC's Xvnc which is both an X server and VNC server in one
+    process — no screen scraping overhead like x11vnc.  Then launches the
+    browser and websockify/noVNC for the web viewer.
 
     The websockify listen port defaults to 6080 but can be overridden via
     the ``VNC_PORT`` env var (used in host-network mode to avoid collisions
@@ -276,42 +277,47 @@ async def start_persistent_browser():
     """
     global _vnc_proc, _novnc_proc
     import subprocess
-    import tempfile
     import time as _time
-
-    # _launch_persistent() (via _get_page) already calls _ensure_xvfb()
-    await _get_page()
 
     vnc_password = os.environ.get("VNC_PASSWORD", "openlegion")
 
-    # Write VNC password file
-    passwd_file = tempfile.NamedTemporaryFile(
-        prefix="vnc_", suffix=".passwd", delete=False,
+    # Write TigerVNC password file
+    passwd_dir = Path("/tmp/.vnc")
+    passwd_dir.mkdir(parents=True, exist_ok=True)
+    passwd_path = str(passwd_dir / "passwd")
+    proc = subprocess.run(
+        ["vncpasswd", "-f"],
+        input=vnc_password.encode(),
+        capture_output=True,
     )
-    passwd_path = passwd_file.name
-    passwd_file.close()
-    subprocess.run(
-        ["x11vnc", "-storepasswd", vnc_password, passwd_path],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    Path(passwd_path).write_bytes(proc.stdout)
 
-    # Start x11vnc
-    display = os.environ.get("DISPLAY", ":99")
+    # Start Xvnc (TigerVNC) — combined X server + VNC server.
+    # Renders and encodes VNC frames in one process, no screen scraping.
     _vnc_proc = subprocess.Popen(
         [
-            "x11vnc", "-display", display,
-            "-rfbauth", passwd_path,
+            "Xvnc", ":99",
+            "-geometry", "1280x720",
+            "-depth", "24",
             "-rfbport", "5900",
-            "-shared", "-forever", "-noxdamage",
+            "-rfbauth", passwd_path,
+            "-AlwaysShared",
+            "-AcceptKeyEvents",
+            "-AcceptPointerEvents",
+            "-SecurityTypes", "VncAuth",
         ],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    _time.sleep(0.3)
+    _time.sleep(0.5)
     if _vnc_proc.poll() is not None:
         raise RuntimeError(
-            f"x11vnc exited immediately (code {_vnc_proc.returncode})"
+            f"Xvnc exited immediately (code {_vnc_proc.returncode})"
         )
-    logger.info("Started x11vnc on :5900")
+    os.environ["DISPLAY"] = ":99"
+    logger.info("Started Xvnc (TigerVNC) on :99, VNC on :5900")
+
+    # Launch browser (DISPLAY is now set, _launch_persistent skips Xvfb)
+    await _get_page()
 
     # Start websockify / noVNC
     # VNC_PORT is set by DockerBackend in host-network mode so each agent
@@ -361,7 +367,7 @@ async def browser_cleanup():
             await _pw.stop()
     except Exception as e:
         logger.debug("Error stopping playwright: %s", e)
-    for proc_name, proc in [("x11vnc", _vnc_proc), ("noVNC", _novnc_proc)]:
+    for proc_name, proc in [("Xvnc", _vnc_proc), ("noVNC", _novnc_proc)]:
         if proc:
             try:
                 proc.terminate()
