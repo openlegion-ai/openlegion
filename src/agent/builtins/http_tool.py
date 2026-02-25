@@ -28,18 +28,32 @@ async def _get_client() -> httpx.AsyncClient:
     return _client
 
 
-async def _resolve_creds(text: str, mesh_client) -> str:
-    """Replace all $CRED{name} handles in *text* with resolved values."""
+async def _resolve_creds(text: str, mesh_client) -> tuple[str, list[str]]:
+    """Replace all $CRED{name} handles in *text* with resolved values.
+
+    Returns ``(resolved_text, list_of_resolved_secret_values)`` so callers
+    can redact those values from output.
+    """
     matches = _CRED_HANDLE_RE.findall(text)
     if not matches:
-        return text
+        return text, []
     if not mesh_client:
         raise ValueError("$CRED{} handles require mesh connectivity")
-    for cred_name in matches:
+    secrets: list[str] = []
+    for cred_name in set(matches):  # dedupe to avoid redundant vault calls
         value = await mesh_client.vault_resolve(cred_name)
         if value is None:
             raise ValueError(f"Credential not found: {cred_name}")
         text = text.replace(f"$CRED{{{cred_name}}}", value)
+        secrets.append(value)
+    return text, secrets
+
+
+def _redact(text: str, secrets: list[str]) -> str:
+    """Replace any occurrence of secret values with [REDACTED]."""
+    for s in secrets:
+        if s and s in text:
+            text = text.replace(s, "[REDACTED]")
     return text
 
 
@@ -62,7 +76,8 @@ async def _resolve_creds(text: str, mesh_client) -> str:
             "type": "object",
             "description": (
                 "HTTP headers as key-value pairs. "
-                "Use $CRED{name} for secrets, e.g. {\"Authorization\": \"Bearer $CRED{github_token}\"}"
+                "Use $CRED{name} for secrets, e.g. "
+                "{\"Authorization\": \"Bearer $CRED{github_token}\"}"
             ),
             "default": {},
         },
@@ -88,13 +103,24 @@ async def http_request(
     mesh_client=None,
 ) -> dict:
     """Make an HTTP request and return status, headers, and body."""
+    # Collect all resolved secret values for redaction
+    all_secrets: list[str] = []
+
     try:
         # Resolve $CRED{name} handles in url, headers, and body
-        resolved_url = await _resolve_creds(url, mesh_client)
+        resolved_url, url_secrets = await _resolve_creds(url, mesh_client)
+        all_secrets.extend(url_secrets)
+
         resolved_headers = {}
         for k, v in (headers or {}).items():
-            resolved_headers[k] = await _resolve_creds(str(v), mesh_client)
-        resolved_body = await _resolve_creds(body, mesh_client) if body else ""
+            resolved_v, hdr_secrets = await _resolve_creds(str(v), mesh_client)
+            resolved_headers[k] = resolved_v
+            all_secrets.extend(hdr_secrets)
+
+        resolved_body = ""
+        if body:
+            resolved_body, body_secrets = await _resolve_creds(body, mesh_client)
+            all_secrets.extend(body_secrets)
 
         client = await _get_client()
         response = await client.request(
@@ -106,16 +132,27 @@ async def http_request(
         )
         resp_body = response.text[:_MAX_BODY]
         truncated = len(response.text) > _MAX_BODY
+
+        # Redact any credential values that appear in the response
+        if all_secrets:
+            resp_body = _redact(resp_body, all_secrets)
+            resp_headers = {
+                k: _redact(v, all_secrets) for k, v in response.headers.items()
+            }
+        else:
+            resp_headers = dict(response.headers)
+
         return {
             "status_code": response.status_code,
-            "headers": dict(response.headers),
+            "headers": resp_headers,
             "body": resp_body,
             "truncated": truncated,
         }
     except ValueError as e:
-        # Credential resolution errors
+        # Credential resolution errors (no secrets resolved yet, safe to pass through)
         return {"error": str(e), "status_code": 0}
     except httpx.TimeoutException:
         return {"error": f"Request timed out after {timeout}s", "status_code": 0}
     except Exception as e:
-        return {"error": str(e), "status_code": 0}
+        error_msg = _redact(str(e), all_secrets) if all_secrets else str(e)
+        return {"error": error_msg, "status_code": 0}

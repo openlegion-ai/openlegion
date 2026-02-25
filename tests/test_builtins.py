@@ -429,7 +429,7 @@ class TestHttpTool:
         mock_client.request = AsyncMock(return_value=mock_response)
 
         with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
-            result = await http_request(
+            await http_request(
                 url="https://api.example.com/data?key=$CRED{api_key}",
                 mesh_client=mock_mesh,
             )
@@ -458,7 +458,7 @@ class TestHttpTool:
         mock_client.request = AsyncMock(return_value=mock_response)
 
         with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
-            result = await http_request(
+            await http_request(
                 url="https://api.example.com",
                 method="POST",
                 body='{"token": "$CRED{my_token}"}',
@@ -469,6 +469,114 @@ class TestHttpTool:
         call_kwargs = mock_client.request.call_args
         assert "secret-value" in call_kwargs.kwargs["content"]
         assert "$CRED" not in call_kwargs.kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_response_body_redacted(self):
+        """Secret values echoed in response body are redacted."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.agent.builtins.http_tool import http_request
+
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(return_value="secret-token-123")
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        # API echoes back the token in its response
+        mock_response.text = '{"token": "secret-token-123", "user": "alice"}'
+        mock_response.headers = {"content-type": "application/json"}
+
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+            result = await http_request(
+                url="https://api.example.com",
+                headers={"Authorization": "Bearer $CRED{token}"},
+                mesh_client=mock_mesh,
+            )
+
+        assert result["status_code"] == 200
+        assert "secret-token-123" not in result["body"]
+        assert "[REDACTED]" in result["body"]
+        assert "alice" in result["body"]  # non-secret data preserved
+
+    @pytest.mark.asyncio
+    async def test_response_headers_redacted(self):
+        """Secret values in response headers are redacted."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.agent.builtins.http_tool import http_request
+
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(return_value="secret-key-abc")
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.text = "ok"
+        # Server echoes the credential in a response header
+        mock_response.headers = {
+            "content-type": "application/json",
+            "x-api-key": "secret-key-abc",
+        }
+
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+            result = await http_request(
+                url="https://api.example.com?key=$CRED{api_key}",
+                mesh_client=mock_mesh,
+            )
+
+        assert "secret-key-abc" not in result["headers"]["x-api-key"]
+        assert "[REDACTED]" in result["headers"]["x-api-key"]
+
+    @pytest.mark.asyncio
+    async def test_error_message_redacted(self):
+        """Secret values in error messages are redacted."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.agent.builtins.http_tool import http_request
+
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(return_value="super-secret-key")
+
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(
+            side_effect=Exception("Connection failed to https://api.example.com?key=super-secret-key")
+        )
+
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+            result = await http_request(
+                url="https://api.example.com?key=$CRED{key}",
+                mesh_client=mock_mesh,
+            )
+
+        assert "error" in result
+        assert "super-secret-key" not in result["error"]
+        assert "[REDACTED]" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_no_redaction_without_credentials(self):
+        """Responses without credential resolution are returned as-is."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.agent.builtins.http_tool import http_request
+
+        mock_response = AsyncMock()
+        mock_response.status_code = 200
+        mock_response.text = '{"data": "normal response"}'
+        mock_response.headers = {"content-type": "application/json"}
+
+        mock_client = AsyncMock()
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+            result = await http_request(url="https://example.com")
+
+        assert result["body"] == '{"data": "normal response"}'
+        assert result["headers"] == {"content-type": "application/json"}
 
 
 # ── SkillRegistry discovers builtins ─────────────────────────
