@@ -52,6 +52,7 @@ function dashboard() {
     selectedAgent: null,
     agentDetail: null,
     agentEvents: [],
+    showBrowserViewer: false,
 
     // Agent config
     agentConfigs: {},
@@ -1638,6 +1639,7 @@ function dashboard() {
     drillDown(agentId) {
       this.selectedAgent = agentId;
       this.detailAgent = agentId;
+      this.showBrowserViewer = false;
       this.agentEvents = this.events.filter(e => e.agent === agentId).slice(0, 100);
       this.identityTab = 'config';
       this.identityFiles = [];
