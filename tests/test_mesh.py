@@ -385,3 +385,203 @@ def test_can_manage_vault_orchestrator_always_allowed(permissions):
     """Orchestrator and mesh always have vault access."""
     assert permissions.can_manage_vault("orchestrator") is True
     assert permissions.can_manage_vault("mesh") is True
+
+
+# === Credential Scoping Tests ===
+
+
+def test_can_access_credential_system_always_denied(tmp_path):
+    """System credentials are never resolvable by agents, even with wildcard."""
+    config = {
+        "permissions": {
+            "agent": {
+                "can_message": ["*"],
+                "blackboard_read": ["*"],
+                "blackboard_write": ["*"],
+                "allowed_apis": ["llm"],
+                "allowed_credentials": ["*"],
+            },
+        }
+    }
+    config_path = tmp_path / "permissions.json"
+    config_path.write_text(json.dumps(config))
+    pm = PermissionMatrix(config_path=str(config_path))
+
+    assert pm.can_access_credential("agent", "anthropic_api_key") is False
+    assert pm.can_access_credential("agent", "openai_api_key") is False
+    assert pm.can_access_credential("agent", "openai_api_base") is False
+
+
+def test_can_access_credential_wildcard(tmp_path):
+    """Agent with allowed_credentials: ['*'] can access any non-system credential."""
+    config = {
+        "permissions": {
+            "agent": {
+                "can_message": [],
+                "blackboard_read": [],
+                "blackboard_write": [],
+                "allowed_apis": [],
+                "allowed_credentials": ["*"],
+            },
+        }
+    }
+    config_path = tmp_path / "permissions.json"
+    config_path.write_text(json.dumps(config))
+    pm = PermissionMatrix(config_path=str(config_path))
+
+    assert pm.can_access_credential("agent", "brightdata_cdp_url") is True
+    assert pm.can_access_credential("agent", "myapp_password") is True
+
+
+def test_can_access_credential_glob_pattern(tmp_path):
+    """Agent with specific glob patterns can only access matching credentials."""
+    config = {
+        "permissions": {
+            "agent": {
+                "can_message": [],
+                "blackboard_read": [],
+                "blackboard_write": [],
+                "allowed_apis": [],
+                "allowed_credentials": ["brightdata_*"],
+            },
+        }
+    }
+    config_path = tmp_path / "permissions.json"
+    config_path.write_text(json.dumps(config))
+    pm = PermissionMatrix(config_path=str(config_path))
+
+    assert pm.can_access_credential("agent", "brightdata_cdp_url") is True
+    assert pm.can_access_credential("agent", "myapp_password") is False
+
+
+def test_can_access_credential_empty_denied(tmp_path):
+    """Agent with empty allowed_credentials cannot access any credentials."""
+    config = {
+        "permissions": {
+            "agent": {
+                "can_message": [],
+                "blackboard_read": [],
+                "blackboard_write": [],
+                "allowed_apis": [],
+                "allowed_credentials": [],
+            },
+        }
+    }
+    config_path = tmp_path / "permissions.json"
+    config_path.write_text(json.dumps(config))
+    pm = PermissionMatrix(config_path=str(config_path))
+
+    assert pm.can_access_credential("agent", "brightdata_cdp_url") is False
+    assert pm.can_access_credential("agent", "myapp_password") is False
+
+
+def test_can_access_credential_orchestrator_always_allowed(tmp_path):
+    """Orchestrator and mesh bypass credential scoping."""
+    config = {"permissions": {}}
+    config_path = tmp_path / "permissions.json"
+    config_path.write_text(json.dumps(config))
+    pm = PermissionMatrix(config_path=str(config_path))
+
+    assert pm.can_access_credential("orchestrator", "anthropic_api_key") is True
+    assert pm.can_access_credential("mesh", "openai_api_key") is True
+
+
+def test_backwards_compat_can_manage_vault_to_allowed_credentials(tmp_path):
+    """Existing config with can_manage_vault: true auto-converts to allowed_credentials: ['*']."""
+    config = {
+        "permissions": {
+            "old_agent": {
+                "can_message": ["orchestrator"],
+                "blackboard_read": ["*"],
+                "blackboard_write": [],
+                "allowed_apis": ["llm"],
+                "can_manage_vault": True,
+            },
+            "restricted_agent": {
+                "can_message": ["orchestrator"],
+                "blackboard_read": [],
+                "blackboard_write": [],
+                "allowed_apis": [],
+                "can_manage_vault": False,
+            },
+        }
+    }
+    config_path = tmp_path / "permissions.json"
+    config_path.write_text(json.dumps(config))
+    pm = PermissionMatrix(config_path=str(config_path))
+
+    # old_agent should be auto-converted to ["*"]
+    assert pm.can_manage_vault("old_agent") is True
+    assert pm.can_access_credential("old_agent", "brightdata_cdp_url") is True
+
+    # restricted_agent should remain denied
+    assert pm.can_manage_vault("restricted_agent") is False
+    assert pm.can_access_credential("restricted_agent", "brightdata_cdp_url") is False
+
+
+def test_get_allowed_credentials(tmp_path):
+    """get_allowed_credentials returns the patterns list."""
+    config = {
+        "permissions": {
+            "agent": {
+                "can_message": [],
+                "blackboard_read": [],
+                "blackboard_write": [],
+                "allowed_apis": [],
+                "allowed_credentials": ["brightdata_*", "myapp_*"],
+            },
+        }
+    }
+    config_path = tmp_path / "permissions.json"
+    config_path.write_text(json.dumps(config))
+    pm = PermissionMatrix(config_path=str(config_path))
+
+    assert pm.get_allowed_credentials("agent") == ["brightdata_*", "myapp_*"]
+    assert pm.get_allowed_credentials("unknown") == []
+
+
+def test_can_access_credential_multiple_glob_patterns(tmp_path):
+    """Agent with multiple glob patterns can access matching credentials from any pattern."""
+    config = {
+        "permissions": {
+            "agent": {
+                "can_message": [],
+                "blackboard_read": [],
+                "blackboard_write": [],
+                "allowed_apis": [],
+                "allowed_credentials": ["brightdata_*", "myapp_*"],
+            },
+        }
+    }
+    config_path = tmp_path / "permissions.json"
+    config_path.write_text(json.dumps(config))
+    pm = PermissionMatrix(config_path=str(config_path))
+
+    assert pm.can_access_credential("agent", "brightdata_cdp_url") is True
+    assert pm.can_access_credential("agent", "myapp_password") is True
+    assert pm.can_access_credential("agent", "other_service_key") is False
+    # System credentials still blocked even if pattern would match
+    assert pm.can_access_credential("agent", "anthropic_api_key") is False
+
+
+def test_can_access_credential_case_insensitive_patterns(tmp_path):
+    """Patterns are matched case-insensitively since credential names are always lowercase."""
+    config = {
+        "permissions": {
+            "agent": {
+                "can_message": [],
+                "blackboard_read": [],
+                "blackboard_write": [],
+                "allowed_apis": [],
+                "allowed_credentials": ["BrightData_*", "MyApp_*"],
+            },
+        }
+    }
+    config_path = tmp_path / "permissions.json"
+    config_path.write_text(json.dumps(config))
+    pm = PermissionMatrix(config_path=str(config_path))
+
+    # Credential names are always stored lowercase — patterns should match regardless of case
+    assert pm.can_access_credential("agent", "brightdata_cdp_url") is True
+    assert pm.can_access_credential("agent", "myapp_password") is True
+    assert pm.can_access_credential("agent", "other_key") is False

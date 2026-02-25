@@ -780,6 +780,7 @@ function dashboard() {
         browser_backend: cfg.browser_backend || 'basic',
         role: cfg.role || '',
         budget_daily: cfg.budget?.daily_usd || '',
+        allowed_credentials: (cfg.allowed_credentials || []).join(', '),
       };
       this.configEditing = true;
     },
@@ -806,23 +807,48 @@ function dashboard() {
       if (this.editForm.budget_daily && parseFloat(this.editForm.budget_daily) > 0) {
         body.budget = { daily_usd: parseFloat(this.editForm.budget_daily) };
       }
-      if (Object.keys(body).length === 0) {
+      // Handle allowed_credentials via the permissions endpoint
+      const newCreds = (this.editForm.allowed_credentials || '').split(',').map(s => s.trim()).filter(Boolean);
+      const oldCreds = cfg.allowed_credentials || [];
+      const credsChanged = JSON.stringify(newCreds) !== JSON.stringify(oldCreds);
+      if (Object.keys(body).length === 0 && !credsChanged) {
         this.cancelConfigEdit();
         return;
       }
       if (!await this._ensureBrightDataKey(body.browser_backend)) return;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/config`, {
-          method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
-        });
-        if (resp.ok) {
-          const result = await resp.json();
-          this.showToast(`Updated: ${result.updated.join(', ')}${result.restart_required ? ' (restart required)' : ''}`);
-          await this.fetchAgentConfig(agentId);
-        } else {
-          const err = await resp.json();
-          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+        const allUpdated = [];
+        if (Object.keys(body).length > 0) {
+          const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/config`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+          });
+          if (resp.ok) {
+            const result = await resp.json();
+            allUpdated.push(...result.updated);
+            if (result.restart_required) allUpdated.push('(restart required)');
+          } else {
+            const err = await resp.json();
+            this.showToast(`Error: ${err.detail || 'Update failed'}`);
+            this.cancelConfigEdit();
+            return;
+          }
         }
+        if (credsChanged) {
+          const permResp = await fetch(`${window.__config.apiBase}/agents/${agentId}/permissions`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ allowed_credentials: newCreds }),
+          });
+          if (permResp.ok) {
+            allUpdated.push('allowed_credentials');
+          } else {
+            const err = await permResp.json();
+            this.showToast(`Error updating permissions: ${err.detail || 'Update failed'}`);
+          }
+        }
+        if (allUpdated.length > 0) {
+          this.showToast(`Updated: ${allUpdated.join(', ')}`);
+        }
+        await this.fetchAgentConfig(agentId);
       } catch (e) { this.showToast(`Error: ${e.message}`); }
       this.cancelConfigEdit();
     },

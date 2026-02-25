@@ -98,6 +98,30 @@ def _remove_from_env(env_key: str, env_file: str = "") -> None:
     os.environ.pop(env_key, None)
 
 
+# System credential patterns — these are never resolvable by agents.
+# Derived from _PROVIDER_KEY_MAP providers.
+SYSTEM_CREDENTIAL_PROVIDERS = frozenset({
+    "anthropic", "openai", "gemini", "deepseek", "moonshot",
+    "minimax", "xai", "groq", "zai",
+})
+SYSTEM_CREDENTIAL_SUFFIXES = ("_api_key", "_api_base")
+
+
+def is_system_credential(name: str) -> bool:
+    """Check if a credential name is a system-level credential.
+
+    System credentials are provider API keys and base URLs that should
+    only be used internally by the mesh proxy — never resolvable by agents.
+    """
+    lower = name.lower()
+    for suffix in SYSTEM_CREDENTIAL_SUFFIXES:
+        if lower.endswith(suffix):
+            prefix = lower[: -len(suffix)]
+            if prefix in SYSTEM_CREDENTIAL_PROVIDERS:
+                return True
+    return False
+
+
 class CredentialVault:
     """Stores API credentials and executes proxied API calls."""
 
@@ -177,6 +201,10 @@ class CredentialVault:
     def list_credential_names(self) -> list[str]:
         """Return a list of credential names (never values)."""
         return list(self.credentials.keys())
+
+    def list_agent_credential_names(self) -> list[str]:
+        """Return only non-system credential names (available for agent access)."""
+        return [n for n in self.credentials if not is_system_credential(n)]
 
     def remove_credential(self, name: str) -> bool:
         """Remove a credential from memory, .env, and os.environ. Returns True if it existed."""
