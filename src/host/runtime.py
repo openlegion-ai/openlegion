@@ -282,7 +282,7 @@ class DockerBackend(RuntimeBackend):
             "thinking": thinking,
         }
         if vnc_port is not None:
-            vnc_url = f"http://127.0.0.1:{vnc_port}/index.html"
+            vnc_url = f"http://127.0.0.1:{vnc_port}/index.html?autoconnect=true&path=&resize=remote"
             agent_info["vnc_port"] = vnc_port
             agent_info["vnc_url"] = vnc_url
         self.agents[agent_id] = agent_info

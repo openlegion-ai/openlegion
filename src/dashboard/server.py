@@ -84,7 +84,7 @@ def create_dashboard_router(
         if not vnc_port:
             return None
         host = request.headers.get("host", "127.0.0.1:8420").split(":")[0]
-        return f"http://{host}:{vnc_port}/index.html"
+        return f"http://{host}:{vnc_port}/index.html?autoconnect=true&path=&resize=remote"
 
     # ── Fleet overview ───────────────────────────────────────
 
