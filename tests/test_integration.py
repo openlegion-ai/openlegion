@@ -235,7 +235,7 @@ def vault_components(tmp_path):
             blackboard_read=["context/*"],
             blackboard_write=[],
             allowed_apis=["llm"],
-            can_manage_vault=True,
+            allowed_credentials=["*"],
         ),
         "untrusted": AgentPermissions(
             agent_id="untrusted",
@@ -243,7 +243,15 @@ def vault_components(tmp_path):
             blackboard_read=[],
             blackboard_write=[],
             allowed_apis=[],
-            can_manage_vault=False,
+            allowed_credentials=[],
+        ),
+        "scoped": AgentPermissions(
+            agent_id="scoped",
+            can_message=["orchestrator"],
+            blackboard_read=[],
+            blackboard_write=[],
+            allowed_apis=[],
+            allowed_credentials=["brightdata_*"],
         ),
     }
 
@@ -281,6 +289,17 @@ def test_vault_store_permission_denied(vault_components):
         json={"agent_id": "untrusted", "name": "key", "value": "secret"},
     )
     assert response.status_code == 403
+
+
+def test_vault_store_blocks_system_credential(vault_components):
+    """Agents cannot store/overwrite system credentials like anthropic_api_key."""
+    client = vault_components["client"]
+    response = client.post(
+        "/mesh/vault/store",
+        json={"agent_id": "trusted", "name": "anthropic_api_key", "value": "malicious"},
+    )
+    assert response.status_code == 403
+    assert "system credential" in response.json()["detail"].lower()
 
 
 def test_vault_list_endpoint(vault_components):
@@ -423,6 +442,100 @@ def test_auth_mesh_agent_id_bypasses(authed_components):
     )
     # Should not get 401 — mesh identity bypasses auth
     assert response.status_code != 401
+
+
+# ── Vault credential scoping tests ────────────────────────────
+
+
+def test_vault_resolve_system_credential_blocked(vault_components):
+    """System credentials (e.g. anthropic_api_key) are never resolvable by agents."""
+    client = vault_components["client"]
+    vault = vault_components["vault"]
+    vault.credentials["anthropic_api_key"] = "sk-system-secret"
+
+    response = client.post(
+        "/mesh/vault/resolve",
+        json={"agent_id": "trusted", "name": "anthropic_api_key"},
+    )
+    assert response.status_code == 403
+
+
+def test_vault_resolve_scoped_agent_allowed(vault_components):
+    """Agent with allowed_credentials: ['brightdata_*'] can resolve matching creds."""
+    client = vault_components["client"]
+    vault = vault_components["vault"]
+    vault.credentials["brightdata_cdp_url"] = "wss://test"
+
+    response = client.post(
+        "/mesh/vault/resolve",
+        json={"agent_id": "scoped", "name": "brightdata_cdp_url"},
+    )
+    assert response.status_code == 200
+    assert response.json()["value"] == "wss://test"
+
+
+def test_vault_resolve_scoped_agent_denied(vault_components):
+    """Agent with allowed_credentials: ['brightdata_*'] cannot resolve non-matching creds."""
+    client = vault_components["client"]
+    vault = vault_components["vault"]
+    vault.credentials["myapp_password"] = "secret"
+
+    response = client.post(
+        "/mesh/vault/resolve",
+        json={"agent_id": "scoped", "name": "myapp_password"},
+    )
+    assert response.status_code == 403
+
+
+def test_vault_list_filters_by_scoping(vault_components):
+    """vault_list returns only credentials the agent can access."""
+    client = vault_components["client"]
+    vault = vault_components["vault"]
+    vault.credentials["anthropic_api_key"] = "sk-system"
+    vault.credentials["brightdata_cdp_url"] = "wss://test"
+    vault.credentials["myapp_password"] = "secret"
+
+    # Scoped agent should only see brightdata_*
+    response = client.get("/mesh/vault/list", params={"agent_id": "scoped"})
+    assert response.status_code == 200
+    data = response.json()
+    assert "brightdata_cdp_url" in data["credentials"]
+    assert "anthropic_api_key" not in data["credentials"]
+    assert "myapp_password" not in data["credentials"]
+
+
+def test_vault_list_wildcard_excludes_system(vault_components):
+    """Even with allowed_credentials: ['*'], system creds are excluded from list."""
+    client = vault_components["client"]
+    vault = vault_components["vault"]
+    vault.credentials["anthropic_api_key"] = "sk-system"
+    vault.credentials["brightdata_cdp_url"] = "wss://test"
+
+    response = client.get("/mesh/vault/list", params={"agent_id": "trusted"})
+    assert response.status_code == 200
+    data = response.json()
+    assert "brightdata_cdp_url" in data["credentials"]
+    assert "anthropic_api_key" not in data["credentials"]
+
+
+def test_vault_status_scoped_agent(vault_components):
+    """vault_status checks can_access_credential for the specific name."""
+    client = vault_components["client"]
+    vault = vault_components["vault"]
+    vault.credentials["brightdata_cdp_url"] = "wss://test"
+
+    # Scoped agent can check brightdata_*
+    response = client.get(
+        "/mesh/vault/status/brightdata_cdp_url", params={"agent_id": "scoped"},
+    )
+    assert response.status_code == 200
+    assert response.json()["exists"] is True
+
+    # Scoped agent cannot check system credentials
+    response = client.get(
+        "/mesh/vault/status/anthropic_api_key", params={"agent_id": "scoped"},
+    )
+    assert response.status_code == 403
 
 
 # ── Vault rate limiting tests ─────────────────────────────────

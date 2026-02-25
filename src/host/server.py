@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
+from src.host.credentials import is_system_credential
 from src.shared.types import AgentMessage, APIProxyRequest, APIProxyResponse, MeshEvent, NotifyRequest
 from src.shared.utils import setup_logging
 
@@ -396,26 +397,30 @@ def create_mesh_app(
         value = data.get("value", "")
         if not name or not value:
             raise HTTPException(400, "name and value are required")
+        if is_system_credential(name):
+            raise HTTPException(403, f"Cannot store system credential: {name}")
         handle = credential_vault.add_credential(name, value)
         return {"stored": True, "handle": handle}
 
     @app.get("/mesh/vault/list")
     async def vault_list(agent_id: str, request: Request) -> dict:
-        """List credential names (never values)."""
+        """List credential names the agent can access (never values)."""
         _verify_auth(agent_id, request)
         if not permissions.can_manage_vault(agent_id):
             raise HTTPException(403, f"Agent {agent_id} cannot manage vault")
         if credential_vault is None:
             raise HTTPException(503, "No credential vault configured")
-        names = credential_vault.list_credential_names()
+        # Filter: exclude system credentials, apply agent's allowed_credentials globs
+        all_names = credential_vault.list_credential_names()
+        names = [n for n in all_names if permissions.can_access_credential(agent_id, n)]
         return {"credentials": names, "count": len(names)}
 
     @app.get("/mesh/vault/status/{name}")
     async def vault_status(name: str, agent_id: str, request: Request) -> dict:
         """Check if a credential exists by name."""
         _verify_auth(agent_id, request)
-        if not permissions.can_manage_vault(agent_id):
-            raise HTTPException(403, f"Agent {agent_id} cannot manage vault")
+        if not permissions.can_access_credential(agent_id, name):
+            raise HTTPException(403, f"Agent {agent_id} cannot access credential {name}")
         if credential_vault is None:
             raise HTTPException(503, "No credential vault configured")
         return {"name": name, "exists": credential_vault.has_credential(name)}
@@ -425,13 +430,13 @@ def create_mesh_app(
         """Resolve a credential handle to its value. Internal use only (browser tool)."""
         agent_id = data.get("agent_id", "")
         _verify_auth(agent_id, request)
-        if not permissions.can_manage_vault(agent_id):
-            raise HTTPException(403, f"Agent {agent_id} cannot manage vault")
-        if credential_vault is None:
-            raise HTTPException(503, "No credential vault configured")
         name = data.get("name", "")
         if not name:
             raise HTTPException(400, "name is required")
+        if not permissions.can_access_credential(agent_id, name):
+            raise HTTPException(403, f"Agent {agent_id} cannot access credential {name}")
+        if credential_vault is None:
+            raise HTTPException(503, "No credential vault configured")
 
         await _check_rate_limit("vault_resolve", agent_id)
 

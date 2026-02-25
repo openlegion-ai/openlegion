@@ -4,7 +4,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.host.credentials import CredentialVault, _extract_content
+from src.host.credentials import (
+    SYSTEM_CREDENTIAL_PROVIDERS,
+    CredentialVault,
+    _extract_content,
+    is_system_credential,
+)
 from src.shared.types import APIProxyRequest
 
 
@@ -858,3 +863,83 @@ async def test_reasoning_content_not_duplicated(monkeypatch):
     assert result.data["content"] == "42."
     # Should use the one from _extract_content, not duplicate
     assert result.data["thinking_content"] == "Deep thought."
+
+
+# ── System credential detection tests ────────────────────────────
+
+
+def test_is_system_credential_api_keys():
+    """Provider API keys are system credentials."""
+    assert is_system_credential("anthropic_api_key") is True
+    assert is_system_credential("openai_api_key") is True
+    assert is_system_credential("gemini_api_key") is True
+    assert is_system_credential("deepseek_api_key") is True
+    assert is_system_credential("moonshot_api_key") is True
+    assert is_system_credential("minimax_api_key") is True
+    assert is_system_credential("xai_api_key") is True
+    assert is_system_credential("groq_api_key") is True
+    assert is_system_credential("zai_api_key") is True
+
+
+def test_is_system_credential_api_bases():
+    """Provider API base URLs are system credentials."""
+    assert is_system_credential("anthropic_api_base") is True
+    assert is_system_credential("openai_api_base") is True
+
+
+def test_is_system_credential_case_insensitive():
+    """Detection is case-insensitive."""
+    assert is_system_credential("ANTHROPIC_API_KEY") is True
+    assert is_system_credential("OpenAI_API_Base") is True
+
+
+def test_is_system_credential_non_system():
+    """Non-provider credentials are not system credentials."""
+    assert is_system_credential("brightdata_cdp_url") is False
+    assert is_system_credential("myapp_password") is False
+    assert is_system_credential("custom_api_key") is False
+    assert is_system_credential("brave_search_api_key") is False
+    assert is_system_credential("apollo_api_key") is False
+    assert is_system_credential("hunter_api_key") is False
+
+
+def test_list_agent_credential_names(monkeypatch):
+    """list_agent_credential_names excludes system credentials."""
+    monkeypatch.setenv("OPENLEGION_CRED_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.setenv("OPENLEGION_CRED_BRIGHTDATA_CDP_URL", "wss://...")
+    monkeypatch.setenv("OPENLEGION_CRED_MYAPP_PASSWORD", "secret")
+    v = CredentialVault()
+    agent_creds = v.list_agent_credential_names()
+    assert "brightdata_cdp_url" in agent_creds
+    assert "myapp_password" in agent_creds
+    assert "anthropic_api_key" not in agent_creds
+
+
+def test_list_agent_credential_names_empty():
+    """list_agent_credential_names returns empty when only system creds exist."""
+    v = CredentialVault()
+    # Only add system creds
+    import src.host.credentials as cred_mod
+    original = cred_mod._persist_to_env
+    cred_mod._persist_to_env = lambda *a, **kw: None
+    try:
+        v.add_credential("anthropic_api_key", "sk-test")
+        agent_creds = v.list_agent_credential_names()
+        assert "anthropic_api_key" not in agent_creds
+    finally:
+        cred_mod._persist_to_env = original
+
+
+def test_system_credential_providers_matches_provider_key_map():
+    """SYSTEM_CREDENTIAL_PROVIDERS must stay in sync with _PROVIDER_KEY_MAP values.
+
+    If a new provider is added to _PROVIDER_KEY_MAP but not to
+    SYSTEM_CREDENTIAL_PROVIDERS, that provider's API key would become
+    agent-accessible — a silent security regression.
+    """
+    map_providers = frozenset(CredentialVault._PROVIDER_KEY_MAP.values())
+    assert SYSTEM_CREDENTIAL_PROVIDERS == map_providers, (
+        f"SYSTEM_CREDENTIAL_PROVIDERS is out of sync with _PROVIDER_KEY_MAP. "
+        f"Missing from SYSTEM_CREDENTIAL_PROVIDERS: {map_providers - SYSTEM_CREDENTIAL_PROVIDERS}. "
+        f"Extra in SYSTEM_CREDENTIAL_PROVIDERS: {SYSTEM_CREDENTIAL_PROVIDERS - map_providers}."
+    )

@@ -109,14 +109,14 @@ Lightweight subagents that run inside the same container as the parent agent, sh
 
 ### Credential Vault
 
-Agents never see credential values. All operations return opaque `$CRED{name}` handles.
+Agents never see credential values. All operations return opaque `$CRED{name}` handles. Agents can only access credentials allowed by their `allowed_credentials` patterns in `config/permissions.json`. System credentials (LLM provider API keys) are never accessible to agents.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `vault_generate_secret` | `name`, `length`, `charset` | Generate a random secret and store it (returns handle only) |
 | `vault_capture_from_page` | `name`, `selector` or `ref` | Read text from a browser element and store as credential |
-| `vault_list` | -- | List credential names stored in the vault (names only) |
-| `vault_status` | `name` | Check if a credential exists in the vault |
+| `vault_list` | -- | List credential names the agent can access (names only, filtered by permissions) |
+| `vault_status` | `name` | Check if an accessible credential exists in the vault |
 
 ### Agent History
 

@@ -1047,7 +1047,7 @@ class TestEnsureAllAgentPermissions:
         perms = json.loads(perms_file.read_text())
         assert "alice" in perms["permissions"]
         assert "bob" in perms["permissions"]
-        assert perms["permissions"]["bob"]["can_manage_vault"] is True
+        assert perms["permissions"]["bob"]["allowed_credentials"] == ["*"]
 
 
 class TestAddAgentToConfigInitialInstructions:

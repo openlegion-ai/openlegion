@@ -44,9 +44,11 @@ Environment overview showing configured credentials (names only, never values), 
 
 1. Switch to the **Agents** tab
 2. Click **Edit** on an agent card
-3. Modify model, browser backend, role, system prompt, or daily budget
+3. Modify model, browser backend, role, daily budget, or credential access patterns
 4. Click **Save** -- a toast confirms which fields were updated
 5. If the change requires a restart (model or browser), click **Restart**
+
+Credential access uses comma-separated glob patterns (e.g. `*`, `brightdata_*`, `myapp_*`). An empty field revokes all vault access. System credentials (LLM provider API keys) are always blocked regardless of patterns.
 
 ### Restart Agent
 
@@ -164,6 +166,8 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `POST` | `/dashboard/api/agents/{id}/reset` | Reset agent conversation history |
 | `POST` | `/dashboard/api/agents/{id}/restart` | Restart an agent |
 | `PUT` | `/dashboard/api/agents/{id}/budget` | Update agent budget |
+| `GET` | `/dashboard/api/agents/{id}/permissions` | Agent credential and API permissions |
+| `PUT` | `/dashboard/api/agents/{id}/permissions` | Update credential access patterns |
 | `GET` | `/dashboard/api/agents/{id}/workspace` | List agent workspace files (with cap, is_default) |
 | `GET` | `/dashboard/api/agents/{id}/workspace/{file}` | Read workspace file content |
 | `PUT` | `/dashboard/api/agents/{id}/workspace/{file}` | Write workspace file content |
