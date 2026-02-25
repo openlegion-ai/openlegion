@@ -558,6 +558,33 @@ class TestHttpTool:
         assert "[REDACTED]" in result["error"]
 
     @pytest.mark.asyncio
+    async def test_partial_resolution_no_leak(self):
+        """When one credential resolves but a later one fails, the first secret must not leak."""
+        from unittest.mock import AsyncMock
+
+        from src.agent.builtins.http_tool import http_request
+
+        mock_mesh = AsyncMock()
+        # First credential resolves, second returns None
+        mock_mesh.vault_resolve = AsyncMock(
+            side_effect=["resolved-secret-value", None]
+        )
+
+        result = await http_request(
+            url="https://api.example.com",
+            headers={
+                "X-First": "$CRED{good_token}",
+                "X-Second": "$CRED{bad_token}",
+            },
+            mesh_client=mock_mesh,
+        )
+
+        assert "error" in result
+        assert "Credential not found" in result["error"]
+        # The resolved secret from the first credential must not appear anywhere
+        assert "resolved-secret-value" not in str(result)
+
+    @pytest.mark.asyncio
     async def test_no_redaction_without_credentials(self):
         """Responses without credential resolution are returned as-is."""
         from unittest.mock import AsyncMock, patch

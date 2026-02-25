@@ -826,14 +826,14 @@ function dashboard() {
       if (!await this._ensureBrightDataKey(body.browser_backend)) return;
       try {
         const allUpdated = [];
+        let configResult = null;
         if (Object.keys(body).length > 0) {
           const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/config`, {
             method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
           });
           if (resp.ok) {
-            const result = await resp.json();
-            allUpdated.push(...result.updated);
-            if (result.restart_required) allUpdated.push('(restart required)');
+            configResult = await resp.json();
+            allUpdated.push(...configResult.updated);
           } else {
             const err = await resp.json();
             this.showToast(`Error: ${err.detail || 'Update failed'}`);
@@ -853,7 +853,17 @@ function dashboard() {
             this.showToast(`Error updating permissions: ${err.detail || 'Update failed'}`);
           }
         }
-        if (allUpdated.length > 0) {
+        if (configResult && configResult.restart_required) {
+          this.showToast(`Updated: ${allUpdated.join(', ')} — restarting ${agentId}...`);
+          const restartResp = await fetch(`${window.__config.apiBase}/agents/${agentId}/restart`, { method: 'POST' });
+          if (restartResp.ok) {
+            const data = await restartResp.json();
+            this.showToast(data.ready ? `${agentId} restarted and ready` : `${agentId} restarted (warming up)`);
+            this.fetchAgents();
+          } else {
+            this.showToast(`Config updated but restart failed — restart manually`);
+          }
+        } else if (allUpdated.length > 0) {
           this.showToast(`Updated: ${allUpdated.join(', ')}`);
         }
         await this.fetchAgentConfig(agentId);

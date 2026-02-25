@@ -368,12 +368,16 @@ def create_dashboard_router(
             agent_cfg = cfg.get("agents", {}).get(agent_id, {})
             default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
             runtime.stop_agent(agent_id)
+            skills_dir = agent_cfg.get("skills_dir", "")
+            if skills_dir:
+                skills_dir = str(Path(skills_dir).resolve())
             url = runtime.start_agent(
                 agent_id=agent_id,
                 role=agent_cfg.get("role", "assistant"),
-                skills_dir=agent_cfg.get("skills_dir", ""),
+                skills_dir=skills_dir,
                 system_prompt=agent_cfg.get("system_prompt", ""),
                 model=agent_cfg.get("model", default_model),
+                mcp_servers=agent_cfg.get("mcp_servers") or None,
                 browser_backend=agent_cfg.get("browser_backend", ""),
                 thinking=agent_cfg.get("thinking", ""),
             )

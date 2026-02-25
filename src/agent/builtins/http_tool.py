@@ -149,8 +149,9 @@ async def http_request(
             "truncated": truncated,
         }
     except ValueError as e:
-        # Credential resolution errors (no secrets resolved yet, safe to pass through)
-        return {"error": str(e), "status_code": 0}
+        # Credential resolution errors — redact in case earlier creds already resolved
+        error_msg = _redact(str(e), all_secrets) if all_secrets else str(e)
+        return {"error": error_msg, "status_code": 0}
     except httpx.TimeoutException:
         return {"error": f"Request timed out after {timeout}s", "status_code": 0}
     except Exception as e:
