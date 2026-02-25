@@ -1,7 +1,7 @@
 /**
  * OpenLegion Dashboard — Alpine.js application.
  *
- * Three panels: Agents, Activity (Traces / Events / Blackboard), System.
+ * Three panels: Agents, Activity (Traces / Events), System (Costs / Blackboard / Automation / Credentials).
  * Real-time updates via WebSocket + periodic REST polling.
  */
 const _IDENTITY_TABS = [
@@ -132,7 +132,7 @@ function dashboard() {
 
     // Identity panel
     identityTabs: _IDENTITY_TABS,
-    identityTab: 'config',
+    identityTab: 'identity',
     identityFiles: [],
     identityLoading: false,
     identityContent: {},
@@ -164,6 +164,12 @@ function dashboard() {
 
     // System tab — collapsible infrastructure
     systemInfraExpanded: false,
+
+    // PROJECT.md banner on Agents tab
+    projectBannerExpanded: false,
+
+    // Container audit in agent detail
+    containerAuditExpanded: false,
 
     // Credentials
     showCredForm: false,
@@ -237,6 +243,18 @@ function dashboard() {
       return this.agents.reduce((sum, a) => sum + (a.daily_tokens || 0), 0);
     },
 
+    get fleetHealthCounts() {
+      const counts = { healthy: 0, unhealthy: 0, failed: 0, unknown: 0 };
+      for (const a of this.agents) {
+        const s = a.health_status || 'unknown';
+        if (s === 'healthy') counts.healthy++;
+        else if (s === 'unhealthy' || s === 'restarting') counts.unhealthy++;
+        else if (s === 'failed') counts.failed++;
+        else counts.unknown++;
+      }
+      return counts;
+    },
+
     get costTotal() {
       return (this.costData.agents || []).reduce((sum, a) => sum + (a.cost || 0), 0);
     },
@@ -294,9 +312,10 @@ function dashboard() {
 
       this.fetchAgents();
       this.fetchSettings();
+      this.fetchProject();
       this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
 
-      // Command palette: Cmd+K / Ctrl+K
+      // Command palette: Cmd+K / Ctrl+K + tab shortcuts 1/2/3
       this._cmdPaletteHandler = (e) => {
         if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
           e.preventDefault();
@@ -315,6 +334,16 @@ function dashboard() {
           e.stopPropagation();
           e.preventDefault();
           this.cmdPaletteOpen = false;
+        }
+        // Tab switching: 1/2/3 when no input focused and no modal open
+        if (!e.metaKey && !e.ctrlKey && !e.altKey && ['1', '2', '3'].includes(e.key)) {
+          const active = document.activeElement;
+          const tag = active ? active.tagName.toLowerCase() : '';
+          if (tag === 'input' || tag === 'textarea' || tag === 'select' || active?.isContentEditable) return;
+          if (this.cmdPaletteOpen || this.detailAgent) return;
+          e.preventDefault();
+          const tabMap = { '1': 'fleet', '2': 'activity', '3': 'system' };
+          this.switchTab(tabMap[e.key]);
         }
       };
       document.addEventListener('keydown', this._cmdPaletteHandler);
@@ -367,20 +396,19 @@ function dashboard() {
         if (this.activityView === 'traces') {
           this.fetchTraces();
           this._startActivityRefresh();
-        } else if (this.activityView === 'blackboard') {
-          this.fetchBlackboard();
-          this.fetchProject();
         }
       }
       if (tab === 'fleet') {
         this.fetchAgents();
         this.fetchQueues();
         this.fetchSettings();
+        this.fetchProject();
         this._queueInterval = setInterval(() => this.fetchQueues(), 5000);
       }
       if (tab === 'system') {
         this.fetchSettings();
         this.fetchCosts();
+        this.fetchBlackboard();
         this.fetchCronJobs();
         this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
       }
@@ -476,7 +504,7 @@ function dashboard() {
       if (evt.type === 'blackboard_write' && evt.data && evt.data.key) {
         if (!this.bbHighlights.includes(evt.data.key)) this.bbHighlights.push(evt.data.key);
         setTimeout(() => { const i = this.bbHighlights.indexOf(evt.data.key); if (i !== -1) this.bbHighlights.splice(i, 1); }, 5000);
-        if (this.activeTab === 'activity' && this.activityView === 'blackboard') this.fetchBlackboard();
+        if (this.activeTab === 'system') this.fetchBlackboard();
       }
 
       // Debounced cost panel refresh on llm_call events
@@ -524,10 +552,7 @@ function dashboard() {
     setActivityView(view) {
       this.activityView = view;
       this._stopActivityRefresh();
-      if (view === 'blackboard') {
-        this.fetchBlackboard();
-        this.fetchProject();
-      } else if (view === 'traces') {
+      if (view === 'traces') {
         this.fetchTraces();
         this._startActivityRefresh();
       }
@@ -1599,9 +1624,9 @@ function dashboard() {
       }
       // Match tabs with keywords
       const tabKeywords = {
-        fleet: ['agents', 'fleet', 'cards'],
-        activity: ['activity', 'traces', 'events', 'blackboard', 'logs'],
-        system: ['system', 'costs', 'cron', 'automation', 'credentials', 'infrastructure', 'pricing', 'browsers', 'pubsub'],
+        fleet: ['agents', 'fleet', 'cards', 'project'],
+        activity: ['activity', 'traces', 'events', 'logs'],
+        system: ['system', 'costs', 'cron', 'automation', 'credentials', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard'],
       };
       for (const [tabId, keywords] of Object.entries(tabKeywords)) {
         const tab = this.tabs.find(t => t.id === tabId);
@@ -1610,11 +1635,31 @@ function dashboard() {
           results.push({ type: 'tab', label: tab.label, desc: `Switch to ${tab.label} tab`, action: () => { this.switchTab(tabId); } });
         }
       }
+      // Quick actions
+      const actions = [
+        { label: 'Add Agent', desc: 'Open add agent form', keywords: ['add', 'agent', 'new', 'create'], action: () => { this.switchTab('fleet'); this.addAgentMode = true; this.fetchSettings(); } },
+        { label: 'Broadcast', desc: 'Send message to all agents', keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); this.$nextTick(() => { const el = document.querySelector('[x-model="broadcastMessage"]'); if (el) el.focus(); }); } },
+        { label: 'Edit PROJECT.md', desc: 'Edit fleet-wide project context', keywords: ['project', 'edit', 'context'], action: () => { this.switchTab('fleet'); this.projectBannerExpanded = true; this.startProjectEdit(); } },
+      ];
+      for (const act of actions) {
+        if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
+          results.push({ type: 'action', label: act.label, desc: act.desc, action: act.action });
+        }
+      }
+      // Match cron jobs
+      for (const job of this.cronJobs || []) {
+        const id = (job.id || '').toLowerCase();
+        const agent = (job.agent || '').toLowerCase();
+        const message = (job.message || '').toLowerCase();
+        if (id.includes(q) || agent.includes(q) || message.includes(q)) {
+          results.push({ type: 'cron', label: job.id, desc: `${job.agent} · ${job.schedule}`, action: () => { this.switchTab('system'); } });
+        }
+      }
       // Match blackboard keys
       for (const entry of this.bbEntries || []) {
         const key = (entry.key || '').toLowerCase();
         if (key.includes(q)) {
-          results.push({ type: 'blackboard', label: entry.key, desc: `by ${entry.written_by || 'unknown'}`, action: () => { this.switchTab('activity'); this.setActivityView('blackboard'); } });
+          results.push({ type: 'blackboard', label: entry.key, desc: `by ${entry.written_by || 'unknown'}`, action: () => { this.switchTab('system'); } });
         }
       }
       this.cmdPaletteResults = results.slice(0, 10);
@@ -1719,8 +1764,9 @@ function dashboard() {
       this.selectedAgent = agentId;
       this.detailAgent = agentId;
       this.showBrowserViewer = false;
+      this.containerAuditExpanded = false;
       this.agentEvents = this.events.filter(e => e.agent === agentId).slice(0, 100);
-      this.identityTab = 'config';
+      this.identityTab = 'identity';
       this.identityFiles = [];
       this.identityContent = {};
       this.identityEditing = false;
