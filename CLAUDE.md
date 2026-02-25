@@ -58,6 +58,13 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `src/cli/channels.py` | ChannelManager — messaging channel lifecycle |
 | `src/cli/formatting.py` | Tool display, styled output, response rendering |
 
+## Git Workflow
+
+- **Always use worktrees.** Multiple agents work on this codebase concurrently. To avoid conflicts, always work in an isolated git worktree. Use Claude Code's built-in worktree support (`isolation: "worktree"` for subagents, or the `EnterWorktree` tool for interactive sessions) so each agent gets its own branch and working directory. Never make changes directly on `main`.
+- **Never merge directly to main.** Always create a PR via `gh pr create` and merge through GitHub. Branch protection is enforced.
+- **Branch naming:** use prefixes like `feat/`, `fix/`, `refactor/`, `docs/`, etc.
+- **Commit style:** descriptive subject line, body explains "why". Do not add Co-Authored-By trailers.
+
 ## Non-Negotiable Rules
 
 ### Security boundaries — never violate these
