@@ -131,7 +131,7 @@ def _ensure_xvfb():
         return
     try:
         subprocess.Popen(
-            ["Xvfb", ":99", "-screen", "0", "1920x1080x16"],
+            ["Xvfb", ":99", "-screen", "0", "1280x720x24"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -295,14 +295,23 @@ async def start_persistent_browser():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
 
-    # Start x11vnc
+    # Start x11vnc with performance tuning:
+    # -usepw via -rfbauth: password auth
+    # -shared -forever: allow reconnects, don't exit on disconnect
+    # -threads: multi-threaded encoding (significant speedup)
+    # -ncache 10: client-side pixel caching (reduces bandwidth)
+    # -wait 20: poll interval in ms (lower = more responsive, 20ms ≈ 50fps)
+    # No -noxdamage: use X DAMAGE extension for efficient change detection
     display = os.environ.get("DISPLAY", ":99")
     _vnc_proc = subprocess.Popen(
         [
             "x11vnc", "-display", display,
             "-rfbauth", passwd_path,
             "-rfbport", "5900",
-            "-shared", "-forever", "-noxdamage",
+            "-shared", "-forever",
+            "-threads",
+            "-ncache", "10",
+            "-wait", "20",
         ],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
