@@ -890,7 +890,7 @@
                       x-text="agentDetail.health?.status || 'unknown'"
                     ></span>
                   </div>
-                  <span class="text-xs text-gray-600 font-mono" x-text="agentDetail.url"></span>
+                  <span class="text-xs text-gray-500" x-text="agentConfigs[selectedAgent]?.role || agentConfigs[selectedAgent]?.model || ''"></span>
                 </div>
               </div>
               <div class="flex items-center gap-2">
@@ -902,6 +902,11 @@
                 <button @click="restartAgent(selectedAgent)" class="action-btn action-btn-warn px-3 py-1.5">
                   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
                   Restart
+                </button>
+                <button @click="resetAgent(selectedAgent)" class="action-btn action-btn-danger px-3 py-1.5"
+                  title="Clear conversation history">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+                  Reset
                 </button>
                 <button x-show="agentDetail?.vnc_url"
                   @click="showBrowserViewer = !showBrowserViewer"
@@ -966,13 +971,10 @@
                   <div x-show="identityFiles.length === 0 && !identityLoading && (identityTab === 'identity' || identityTab === 'memory')" class="text-gray-600 text-sm py-6 text-center">
                     No workspace available for this agent
                   </div>
-                  <!-- ═══ Identity tab: Soul + Instructions + Preferences ═══ -->
-                  <div x-show="identityTab === 'identity' && identityFiles.length > 0 && !identityContentLoading && !identityLoading" class="space-y-4 max-h-[600px] overflow-y-auto custom-scrollbar">
-                    <template x-for="section in [
-                      { file: 'SOUL.md', label: 'Soul', cap: 4000, access: 'user', desc: 'Core personality and behavioral guidelines.' },
-                      { file: 'AGENTS.md', label: 'Instructions', cap: 8000, access: 'user', desc: 'Operating instructions for the agent.' },
-                      { file: 'USER.md', label: 'Preferences', cap: 4000, access: 'agent', desc: 'Your preferences and working style.' },
-                    ]" :key="section.file">
+                  <!-- ═══ Identity / Memory file cards (shared template) ═══ -->
+                  <div x-show="(identityTab === 'identity' || identityTab === 'memory') && identityFiles.length > 0 && !identityContentLoading && !identityLoading"
+                    class="space-y-4">
+                    <template x-for="section in (_IDENTITY_FILE_MAP[identityTab] || [])" :key="section.file">
                       <div class="border border-gray-800 rounded-lg p-3">
                         <div class="flex items-center justify-between mb-2">
                           <div class="flex items-center gap-2">
@@ -984,65 +986,6 @@
                             <span x-show="section.access === 'agent'"
                               class="text-[10px] px-1 py-0 rounded-full bg-purple-900/40 text-purple-400 border border-purple-800/30"
                               title="The agent can update this file">Agent</span>
-                            <span x-show="identityFiles.find(f => f.name === section.file)?.is_default"
-                              class="text-[10px] px-1 py-0 rounded-full bg-gray-600/50 text-gray-400">default</span>
-                          </div>
-                          <button x-show="!(identityEditing && identityEditingFile === section.file)"
-                            @click="startIdentityEdit(section.file)"
-                            class="text-xs px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
-                        </div>
-                        <!-- Budget bar -->
-                        <div x-show="section.cap" class="mb-2">
-                          <div class="flex justify-between items-center text-[10px] text-gray-500 mb-1">
-                            <span x-text="fileCharCount(section.file).toLocaleString() + ' / ' + section.cap.toLocaleString() + ' chars'"></span>
-                            <span x-text="Math.round(fileBudgetPct(section.file, section.cap)) + '%'"></span>
-                          </div>
-                          <div class="w-full bg-gray-800 rounded-full h-1">
-                            <div class="h-1 rounded-full transition-all duration-300"
-                              :class="fileBudgetColor(section.file, section.cap)"
-                              :style="'width:' + fileBudgetPct(section.file, section.cap) + '%'"></div>
-                          </div>
-                        </div>
-                        <!-- Read-only view -->
-                        <div x-show="!(identityEditing && identityEditingFile === section.file)">
-                          <pre class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar"
-                            x-text="identityContent[section.file] || '(empty)'"></pre>
-                        </div>
-                        <!-- Edit mode -->
-                        <div x-show="identityEditing && identityEditingFile === section.file">
-                          <textarea x-model="identityEditBuffer"
-                            @keydown.ctrl.s.prevent="saveIdentityFile(selectedAgent, section.file)"
-                            @keydown.meta.s.prevent="saveIdentityFile(selectedAgent, section.file)"
-                            class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
-                            rows="12" spellcheck="false"></textarea>
-                          <div class="flex gap-2 mt-2 justify-end">
-                            <button @click="saveIdentityFile(selectedAgent, section.file)"
-                              :disabled="identitySaving"
-                              class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-50 transition-colors">
-                              <span x-text="identitySaving ? 'Saving...' : 'Save'"></span>
-                            </button>
-                            <button @click="cancelIdentityEdit()"
-                              class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors">Cancel</button>
-                          </div>
-                        </div>
-                      </div>
-                    </template>
-                  </div>
-                  <!-- ═══ Memory tab: Memory + Heartbeat ═══ -->
-                  <div x-show="identityTab === 'memory' && identityFiles.length > 0 && !identityContentLoading && !identityLoading" class="space-y-4 max-h-[600px] overflow-y-auto custom-scrollbar">
-                    <template x-for="section in [
-                      { file: 'MEMORY.md', label: 'Memory', cap: 16000, access: 'agent', desc: 'Long-term facts from conversations.' },
-                      { file: 'HEARTBEAT.md', label: 'Heartbeat', cap: null, access: 'agent', desc: 'Rules for autonomous operation.' },
-                    ]" :key="section.file">
-                      <div class="border border-gray-800 rounded-lg p-3">
-                        <div class="flex items-center justify-between mb-2">
-                          <div class="flex items-center gap-2">
-                            <span class="text-xs font-medium text-gray-300" x-text="section.label"></span>
-                            <span class="font-mono text-[10px] text-gray-600" x-text="section.file"></span>
-                            <span class="text-[10px] px-1 py-0 rounded-full bg-purple-900/40 text-purple-400 border border-purple-800/30"
-                              title="The agent can update this file">Agent</span>
-                            <span x-show="identityFiles.find(f => f.name === section.file)?.is_default"
-                              class="text-[10px] px-1 py-0 rounded-full bg-gray-600/50 text-gray-400">default</span>
                           </div>
                           <button x-show="!(identityEditing && identityEditingFile === section.file)"
                             @click="startIdentityEdit(section.file)"
@@ -1060,7 +1003,7 @@
                               :style="'width:' + fileBudgetPct(section.file, section.cap) + '%'"></div>
                           </div>
                         </div>
-                        <!-- Char count only (files without cap) -->
+                        <!-- Char count only (files without cap, e.g. HEARTBEAT.md) -->
                         <div x-show="!section.cap" class="mb-2">
                           <div class="text-[10px] text-gray-500" x-text="fileCharCount(section.file).toLocaleString() + ' chars'"></div>
                         </div>
@@ -1090,7 +1033,7 @@
                     </template>
                   </div>
                   <!-- ═══ Logs tab: Activity + Learnings combined ═══ -->
-                  <div x-show="identityTab === 'logs' && !identityLogsLoading && !identityLearningsLoading && !identityLoading" class="space-y-4 max-h-[600px] overflow-y-auto custom-scrollbar">
+                  <div x-show="identityTab === 'logs' && !identityLogsLoading && !identityLearningsLoading && !identityLoading" class="space-y-4">
                     <!-- Activity section -->
                     <div class="border border-gray-800 rounded-lg p-3">
                       <div class="flex items-center justify-between mb-2">
@@ -1298,8 +1241,6 @@
                           </button>
                           <button @click="cancelConfigEdit()"
                             class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Cancel</button>
-                          <button @click="resetAgent(selectedAgent)"
-                            class="text-xs px-3 py-1.5 rounded text-gray-600 hover:text-red-400 transition-colors ml-auto">Reset Conversation</button>
                         </div>
                       </div>
                     </div>
@@ -1308,17 +1249,26 @@
               </div>
               <!-- Right column: Spend + Budget + Health -->
               <div class="lg:col-span-2 space-y-4">
-                <!-- Spend Today -->
+                <!-- Spend (Today + This Week combined) -->
                 <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                  <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Spend Today</div>
-                  <div class="text-2xl font-bold font-mono" x-text="formatCost(agentDetail.spend_today?.total_cost || 0)"></div>
-                  <div class="text-xs text-gray-500 mt-1" x-text="(agentDetail.spend_today?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
-                </div>
-                <!-- Spend This Week -->
-                <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                  <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Spend This Week</div>
-                  <div class="text-2xl font-bold font-mono" x-text="formatCost(agentDetail.spend_week?.total_cost || 0)"></div>
-                  <div class="text-xs text-gray-500 mt-1" x-text="(agentDetail.spend_week?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
+                  <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Spend</div>
+                  <div class="space-y-3">
+                    <div class="flex justify-between items-baseline">
+                      <span class="text-sm text-gray-400">Today</span>
+                      <div class="text-right">
+                        <span class="text-xl font-bold font-mono" x-text="formatCost(agentDetail.spend_today?.total_cost || 0)"></span>
+                        <div class="text-[10px] text-gray-600" x-text="(agentDetail.spend_today?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
+                      </div>
+                    </div>
+                    <div class="border-t border-gray-800"></div>
+                    <div class="flex justify-between items-baseline">
+                      <span class="text-sm text-gray-400">This Week</span>
+                      <div class="text-right">
+                        <span class="text-xl font-bold font-mono" x-text="formatCost(agentDetail.spend_week?.total_cost || 0)"></span>
+                        <div class="text-[10px] text-gray-600" x-text="(agentDetail.spend_week?.total_tokens || 0).toLocaleString() + ' tokens'"></div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
                 <!-- Budget -->
                 <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -1350,7 +1300,7 @@
                     </div>
                   </div>
                 </div>
-                <!-- Health -->
+                <!-- Health + Cost by Model (merged) -->
                 <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
                   <div class="text-xs text-gray-500 uppercase tracking-wider mb-2">Health</div>
                   <div class="space-y-1.5 text-sm">
@@ -1363,62 +1313,23 @@
                       <span class="font-mono" x-text="agentDetail.health?.restarts || 0"></span>
                     </div>
                   </div>
-                </div>
-                <!-- Per-model cost breakdown -->
-                <div class="bg-gray-900 border border-gray-800 rounded-lg p-4" x-show="agentDetail.spend_today?.by_model && Object.keys(agentDetail.spend_today.by_model).length > 0">
-                  <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Cost by Model (Today)</div>
-                  <div class="space-y-1.5">
-                    <template x-for="[model, data] in Object.entries(agentDetail.spend_today?.by_model || {})" :key="model">
-                      <div class="flex justify-between text-xs">
-                        <span class="text-gray-400 font-mono" x-text="model"></span>
-                        <div class="flex gap-4">
-                          <span class="text-gray-500" x-text="(data.total || 0).toLocaleString() + ' tok'"></span>
-                          <span class="text-gray-300 font-mono" x-text="formatCost(data.cost || 0)"></span>
-                        </div>
-                      </div>
-                    </template>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <!-- Container audit log (live, collapsed by default) — full width below -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg">
-              <div class="flex items-center justify-between px-4 py-3 cursor-pointer select-none" @click="containerAuditExpanded = !containerAuditExpanded">
-                <div class="flex items-center gap-2">
-                  <svg class="w-3 h-3 text-gray-600 transition-transform duration-200" :class="containerAuditExpanded && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-                  <span class="text-xs text-gray-500 uppercase tracking-wider">Container Audit</span>
-                  <span class="text-xs text-gray-700" x-text="agentEvents.length + ' events'"></span>
-                </div>
-              </div>
-              <div x-show="containerAuditExpanded" x-transition class="px-4 pb-4">
-                <div class="text-xs text-gray-600 mb-2">Live event stream for this container (newest first)</div>
-                <div class="detail-audit-list max-h-80 overflow-y-auto custom-scrollbar">
-                <template x-for="(evt, i) in agentEvents" :key="i">
-                  <div x-data="{ open: false }">
-                    <div @click="open = !open" class="detail-audit-row">
-                      <div class="detail-audit-meta">
-                        <div class="detail-audit-clock" x-text="eventClock(evt.timestamp) || '--:--:--'"></div>
-                        <div class="text-[10px] text-gray-700 font-mono" x-text="timeAgo(evt.timestamp)"></div>
-                      </div>
-                      <span class="event-badge detail-audit-type" :class="eventColor(evt.type)" x-text="eventTypeLabel(evt.type)"></span>
-                      <span class="text-gray-300 truncate flex-1" x-text="eventSummary(evt)"></span>
-                      <svg class="w-3 h-3 shrink-0 text-gray-700 transition-transform duration-200 detail-audit-chevron" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-                    </div>
-                    <template x-if="open">
-                      <div class="detail-audit-expand">
-                        <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-                          <template x-for="(field, fi) in eventDetail(evt)" :key="fi">
-                            <div class="contents">
-                              <span class="text-gray-600 whitespace-nowrap" x-text="field.label"></span>
-                              <span class="text-gray-300 font-mono whitespace-pre-wrap break-all max-h-36 overflow-y-auto" x-text="field.value"></span>
+                  <!-- Per-model cost breakdown (inline) -->
+                  <template x-if="agentDetail.spend_today?.by_model && Object.keys(agentDetail.spend_today.by_model).length > 0">
+                    <div class="mt-3 pt-3 border-t border-gray-800">
+                      <div class="text-[10px] text-gray-600 uppercase tracking-wider mb-2">Cost by Model (Today)</div>
+                      <div class="space-y-1.5">
+                        <template x-for="[model, data] in Object.entries(agentDetail.spend_today?.by_model || {})" :key="model">
+                          <div class="flex justify-between text-xs">
+                            <span class="text-gray-400 font-mono" x-text="model"></span>
+                            <div class="flex gap-4">
+                              <span class="text-gray-500" x-text="(data.total || 0).toLocaleString() + ' tok'"></span>
+                              <span class="text-gray-300 font-mono" x-text="formatCost(data.cost || 0)"></span>
                             </div>
-                          </template>
-                        </div>
+                          </div>
+                        </template>
                       </div>
-                    </template>
-                  </div>
-                </template>
-                  <div x-show="agentEvents.length === 0" class="text-gray-600 text-sm py-4 text-center">No recent events for this agent</div>
+                    </div>
+                  </template>
                 </div>
               </div>
             </div>

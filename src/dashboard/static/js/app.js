@@ -57,7 +57,6 @@ function dashboard() {
     detailAgent: null,
     selectedAgent: null,
     agentDetail: null,
-    agentEvents: [],
     showBrowserViewer: false,
 
     // Agent config
@@ -167,9 +166,6 @@ function dashboard() {
 
     // PROJECT.md banner on Agents tab
     projectBannerExpanded: false,
-
-    // Container audit in agent detail
-    containerAuditExpanded: false,
 
     // Credentials
     showCredForm: false,
@@ -498,10 +494,25 @@ function dashboard() {
           if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
           this._stopActivityRefresh();
         } else {
+          // Resume polling — restore intervals without navigating (switchTab clears detailAgent)
           this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
           this.fetchAgents();
-          // Re-establish tab-specific intervals
-          this.switchTab(this.activeTab);
+          if (this.activeTab === 'fleet') {
+            this.fetchQueues();
+            this._queueInterval = setInterval(() => this.fetchQueues(), 5000);
+          }
+          if (this.activeTab === 'activity' && this.activityView === 'traces') {
+            this.fetchTraces();
+            this._startActivityRefresh();
+          }
+          if (this.activeTab === 'system') {
+            this.fetchCronJobs();
+            this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
+          }
+          // Refresh agent detail if we're viewing one
+          if (this.detailAgent) {
+            this.fetchAgentDetail(this.detailAgent);
+          }
         }
       });
     },
@@ -607,12 +618,6 @@ function dashboard() {
       const agent = evt.agent;
       if (agent) {
         this._updateAgentState(agent, evt.type);
-
-        // Feed agent-detail events
-        if (this.selectedAgent === agent) {
-          this.agentEvents.unshift(evt);
-          if (this.agentEvents.length > 100) this.agentEvents.splice(100);
-        }
       }
 
       // Live-update fleet on llm_call/health changes (debounced)
@@ -1911,8 +1916,6 @@ function dashboard() {
       this.selectedAgent = agentId;
       this.detailAgent = agentId;
       this.showBrowserViewer = false;
-      this.containerAuditExpanded = false;
-      this.agentEvents = this.events.filter(e => e.agent === agentId).slice(0, 100);
       this.identityTab = 'identity';
       this.identityFiles = [];
       this.identityContent = {};
