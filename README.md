@@ -8,7 +8,7 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE.md)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 1222](https://img.shields.io/badge/tests-1222%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 1238](https://img.shields.io/badge/tests-1238%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -252,9 +252,10 @@ SQLite-backed key-value store with versioning, TTL, and garbage collection.
 ### Credential Vault (API Proxy)
 
 Agents never hold API keys. All external API calls route through the mesh.
-The vault loads credentials from `OPENLEGION_CRED_*` environment variables
-and supports multiple providers. Budget limits are enforced before dispatching
-LLM calls and token usage is recorded after each response.
+The vault uses a two-tier prefix system: `OPENLEGION_SYSTEM_*` for LLM
+provider keys (never agent-accessible) and `OPENLEGION_CRED_*` for agent-tier
+tool/service keys. Budget limits are enforced before dispatching LLM calls
+and token usage is recorded after each response.
 
 ### Model Failover
 
@@ -654,6 +655,7 @@ openlegion [--version]
 /cron [list|del|pause|resume|run]    Manage cron jobs
 /debug [trace]                       Show recent request traces
 /addkey <svc> [key]                  Add an API credential to the vault
+/removekey [name]                    Remove a credential from the vault
 /reset                               Clear conversation with active agent
 /quit                                Exit and stop runtime
 
@@ -740,13 +742,18 @@ retry policies, and failure handlers.
 
 ### `.env` — API Keys
 
-Managed automatically by `openlegion start` and `openlegion channels add`. You can also edit directly:
+Managed automatically by `openlegion start` and `openlegion channels add`. You can also edit directly. Uses a two-tier prefix system:
 
 ```bash
-OPENLEGION_CRED_ANTHROPIC_API_KEY=sk-ant-...
-OPENLEGION_CRED_MOONSHOT_API_KEY=sk-...
-OPENLEGION_CRED_OPENAI_API_KEY=sk-...
+# System tier — LLM provider keys (never accessible by agents)
+OPENLEGION_SYSTEM_ANTHROPIC_API_KEY=sk-ant-...
+OPENLEGION_SYSTEM_OPENAI_API_KEY=sk-...
+OPENLEGION_SYSTEM_MOONSHOT_API_KEY=sk-...
+
+# Agent tier — tool/service keys (access controlled per-agent)
 OPENLEGION_CRED_BRAVE_SEARCH_API_KEY=BSA...
+
+# Channel tokens
 OPENLEGION_CRED_TELEGRAM_BOT_TOKEN=123456:ABC...
 OPENLEGION_CRED_DISCORD_BOT_TOKEN=MTIz...
 OPENLEGION_CRED_SLACK_BOT_TOKEN=xoxb-...
@@ -850,7 +857,7 @@ pytest tests/
 | Agent Loop | 57 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
 | Workspace | 58 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files |
 | Cron | 42 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM, concurrent mutations |
-| Credentials | 44 | Vault, API proxy, provider detection, credential lifecycle |
+| Credentials | 67 | Vault, API proxy, provider detection, two-tier system, credential lifecycle |
 | Sanitization | 38 | Invisible Unicode stripping, bidi overrides, tag chars, zero-width |
 | Channels (base) | 44 | Abstract channel, commands, per-user routing, chunking, steer, debug, addkey normalization, conditional help, parallel broadcast |
 | Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
@@ -867,7 +874,7 @@ pytest tests/
 | Discord Channel | 36 | Slash commands, message routing, pairing, chunking, embed formatting |
 | WhatsApp Channel | 22 | Cloud API, webhook verification, message chunking, non-text reply |
 | Skills | 20 | Discovery, execution, injection, MCP integration |
-| Setup Wizard | 19 | Quickstart, full setup, API key validation, templates, inline setup |
+| Setup Wizard | 20 | Quickstart, full setup, API key validation, templates, inline setup, two-tier credentials |
 | Marketplace | 20 | Install, manifest parsing, validation, path traversal, remove |
 | Transport | 18 | HttpTransport, SandboxTransport, resolve_url |
 | Dashboard Workspace | 17 | Workspace proxy endpoints, filename validation, transport forwarding, sanitization |

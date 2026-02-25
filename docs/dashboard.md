@@ -36,7 +36,7 @@ Manage scheduled jobs. View schedule, last run time, run count, error count, and
 
 ### System
 
-Environment overview showing configured credentials (names only, never values), pub/sub subscriptions, model pricing tables, and available browser backends.
+Environment overview showing configured credentials with tier labels (system or agent, names only, never values), pub/sub subscriptions, model pricing tables, and available browser backends. Add new credentials from a dropdown of LLM providers, known agent tools (Brave Search, Apollo, Hunter, Brightdata), or custom service names.
 
 ## Agent Management
 
@@ -177,6 +177,7 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `PUT` | `/dashboard/api/blackboard/{key}` | Write blackboard entry |
 | `DELETE` | `/dashboard/api/blackboard/{key}` | Delete blackboard entry |
 | `POST` | `/dashboard/api/credentials` | Add a credential to the vault |
+| `DELETE` | `/dashboard/api/credentials/{name}` | Remove a credential |
 | `GET` | `/dashboard/api/costs/{agent_id}` | Cost data for a specific agent |
 | `GET` | `/dashboard/api/costs` | Cost data with optional period |
 | `GET` | `/dashboard/api/project` | Read PROJECT.md content |
