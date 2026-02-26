@@ -349,10 +349,7 @@ function dashboard() {
 
     get filteredAgents() {
       if (!this.activeProject) return this.agents;
-      const proj = this.projects.find(p => p.name === this.activeProject);
-      if (!proj) return this.agents;
-      const members = new Set(proj.members || []);
-      return this.agents.filter(a => members.has(a.id));
+      return this.agents.filter(a => a.project === this.activeProject);
     },
 
     get filteredFleetCost() {
@@ -364,8 +361,9 @@ function dashboard() {
     },
 
     get fleetHealthCounts() {
+      const source = this.activeProject ? this.filteredAgents : this.agents;
       const counts = { healthy: 0, unhealthy: 0, failed: 0, unknown: 0 };
-      for (const a of this.agents) {
+      for (const a of source) {
         const s = a.health_status || 'unknown';
         if (s === 'healthy') counts.healthy++;
         else if (s === 'unhealthy' || s === 'restarting') counts.unhealthy++;
@@ -949,7 +947,8 @@ function dashboard() {
           this.projectEditBuffer = '';
           const pushed = Object.values(data.pushed || {}).filter(Boolean).length;
           const total = Object.keys(data.pushed || {}).length;
-          this.showToast(`PROJECT.md saved${total > 0 ? ` (pushed to ${pushed}/${total} agents)` : ''}`);
+          const scope = this.activeProject ? `${this.activeProject} ` : '';
+          this.showToast(`${scope}PROJECT.md saved${total > 0 ? ` (pushed to ${pushed}/${total} agents)` : ''}`);
         } else {
           try {
             const err = await resp.json();
@@ -982,9 +981,12 @@ function dashboard() {
     },
 
     switchProject(name) {
+      if (this.activeProject === name) return;
       this.activeProject = name;
       this.projectEditing = false;
       this.projectEditBuffer = '';
+      this.broadcastResults = null;
+      this.broadcastSentMessage = '';
       this.fetchProject();
     },
 
@@ -1837,11 +1839,23 @@ function dashboard() {
       const actions = [
         { label: 'Add Agent', desc: 'Open add agent form', keywords: ['add', 'agent', 'new', 'create'], action: () => { this.switchTab('fleet'); this.addAgentMode = true; this.fetchSettings(); } },
         { label: 'Broadcast', desc: 'Send message to all agents', keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); this.$nextTick(() => { const el = document.querySelector('[x-model="broadcastMessage"]'); if (el) el.focus(); }); } },
-        { label: 'Edit PROJECT.md', desc: this.activeProject ? `Edit ${this.activeProject} project context` : 'Edit fleet-wide project context', keywords: ['project', 'edit', 'context'], action: () => { this.switchTab('fleet'); this.projectBannerExpanded = true; this.startProjectEdit(); } },
+        { label: 'Edit PROJECT.md', desc: 'Edit project context' + (this.activeProject ? ` (${this.activeProject})` : ' (fleet-wide)'), keywords: ['project', 'edit', 'context'], action: () => { this.switchTab('fleet'); this.projectBannerExpanded = true; this.startProjectEdit(); } },
       ];
       for (const act of actions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
           results.push({ type: 'action', label: act.label, desc: act.desc, action: act.action });
+        }
+      }
+      // Match projects
+      if (this.projects.length > 0) {
+        if ('all agents'.includes(q) || 'all'.includes(q)) {
+          results.push({ type: 'action', label: 'All agents', desc: 'Clear project filter', action: () => { this.switchTab('fleet'); this.switchProject(null); } });
+        }
+        for (const proj of this.projects) {
+          const pname = (proj.name || '').toLowerCase();
+          if (pname.includes(q) || 'project'.includes(q)) {
+            results.push({ type: 'action', label: proj.name, desc: `Switch to project (${(proj.members || []).length} members)`, action: () => { this.switchTab('fleet'); this.switchProject(proj.name); } });
+          }
         }
       }
       // Match cron jobs
