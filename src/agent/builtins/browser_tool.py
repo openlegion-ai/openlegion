@@ -1,12 +1,13 @@
-"""Browser automation via Playwright / Patchright.
+"""Browser automation via Playwright / Camoufox.
 
-Provides Chromium access for web scraping, testing, and interaction.
+Provides browser access for web scraping, testing, and interaction.
 A single browser instance is lazily initialized per agent process and reused.
 Supports four backends via BROWSER_BACKEND env var:
 basic, stealth, advanced, persistent.
 
-The persistent backend uses Patchright (a Playwright fork with CDP-level
-anti-detection patches).  The other backends use standard Playwright.
+The persistent backend uses Camoufox — a patched Firefox build with C++ level
+anti-detection (fingerprint spoofing, automation hiding, etc.).  The other
+backends use standard Playwright Chromium or Camoufox depending on stealth needs.
 """
 
 from __future__ import annotations
@@ -204,72 +205,20 @@ async def _launch_advanced(mesh_client):
     return browser, context, page
 
 
-_STEALTH_INIT_SCRIPT = """
-// Stealth patches — runs before every page script to cover detection
-// vectors beyond Patchright's CDP-level patches.
-//
-// NOTE: navigator.webdriver is handled by Patchright at the CDP layer
-// (Runtime.enable avoidance), so no JS override is needed here.
-
-// 1. Fake chrome.runtime (real Chrome has this, automation browsers don't)
-if (!window.chrome) window.chrome = {};
-if (!window.chrome.runtime) window.chrome.runtime = {};
-
-// 2. Fake plugins array (automation Chromium reports empty plugins)
-Object.defineProperty(navigator, 'plugins', {
-    get: () => {
-        const plugins = [
-            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer',
-             description: 'Portable Document Format', length: 1},
-            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
-             description: '', length: 1},
-            {name: 'Native Client', filename: 'internal-nacl-plugin',
-             description: '', length: 2},
-        ];
-        plugins.refresh = () => {};
-        return plugins;
-    },
-});
-
-// 3. Fix permissions.query to not reveal automation
-const origQuery = window.navigator.permissions.query.bind(
-    window.navigator.permissions
-);
-window.navigator.permissions.query = (params) => {
-    if (params.name === 'notifications')
-        return Promise.resolve({state: Notification.permission});
-    return origQuery(params);
-};
-
-// 4. Hide automation-injected globals
-delete window.__playwright;
-delete window.__pw_manual;
-
-// 5. Fix navigator.languages (automation browsers sometimes only have ['en-US'])
-Object.defineProperty(navigator, 'languages', {
-    get: () => ['en-US', 'en'],
-});
-
-// 6. Fake connection.rtt (0 in automation, ~50-100 in real browsers)
-if (navigator.connection) {
-    Object.defineProperty(navigator.connection, 'rtt', {get: () => 50});
-}
-"""
-
 
 def _cleanup_stale_profile():
-    """Kill orphaned Chrome processes and remove stale lock files.
+    """Kill orphaned browser processes and remove stale lock files.
 
     After a crash, Chrome leaves SingletonLock/SingletonSocket/SingletonCookie
-    in the profile directory.  A new Chrome instance refuses to start with
-    "The profile appears to be in use by another Chromium process".
+    and Firefox leaves lock/.parentlock in the profile directory.  A new browser
+    instance refuses to start if these exist.
     This helper cleans up before each launch.
     """
     profile_dir = Path("/data/browser_profile")
     if not profile_dir.exists():
         return
 
-    # Kill any orphaned Chrome processes using this profile
+    # Kill any orphaned browser processes using this profile
     try:
         subprocess.run(
             ["pkill", "-f", "browser_profile"],
@@ -278,8 +227,12 @@ def _cleanup_stale_profile():
     except Exception:
         pass  # pkill may not exist or no matching processes
 
-    # Remove stale lock files
-    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+    # Remove stale lock files (Chrome + Firefox)
+    lock_names = (
+        "SingletonLock", "SingletonSocket", "SingletonCookie",  # Chrome
+        "lock", ".parentlock",  # Firefox
+    )
+    for name in lock_names:
         lock_path = profile_dir / name
         if lock_path.exists() or lock_path.is_symlink():
             try:
@@ -290,51 +243,37 @@ def _cleanup_stale_profile():
 
 
 async def _launch_persistent():
-    """Launch Patchright Chromium with a persistent profile.
+    """Launch Camoufox Firefox with a persistent profile.
 
-    Patchright is a patched Playwright fork that applies 21 AST-level
-    patches to the CDP driver, including ``Runtime.enable`` avoidance
-    and ``Console.enable`` removal — CDP-level anti-detection that JS
-    init scripts cannot replicate.
+    Camoufox is a patched Firefox build with C++ level anti-detection:
+    fingerprint spoofing, automation hiding, WebGL/Canvas noise, and
+    isolated Playwright internals.  Unlike JS init scripts, these patches
+    cannot be detected via CDP/Juggler protocol inspection.
 
-    Uses ``launch_persistent_context`` so cookies and sessions survive
+    Uses ``persistent_context=True`` so cookies and sessions survive
     browser restarts.  Returns ``(None, context, page)`` — persistent
     contexts have no separate Browser object.
-
-    Additional JS stealth patches are injected via ``add_init_script``
-    to cover detection vectors beyond CDP (chrome.runtime, plugins, etc.).
     """
-    global _pw
-    # Use standard Playwright for the persistent backend.  Patchright's CDP
-    # patches break Chrome's navigation (ERR_NAME_NOT_RESOLVED for all URLs
-    # including IPs) when Chrome is launched within an asyncio event loop
-    # like uvicorn's.  Standard Playwright + the JS stealth init script
-    # below provides adequate anti-detection for most sites.
+    global _camoufox_cm
     try:
-        from playwright.async_api import async_playwright
+        from camoufox.async_api import AsyncCamoufox
     except ImportError:
         raise RuntimeError(
-            "playwright is not installed. The agent container must include "
-            "playwright and chromium. See Dockerfile.agent."
+            "camoufox is not installed. The agent container must include "
+            "camoufox. See Dockerfile.agent."
         )
     _ensure_xvfb()
     _cleanup_stale_profile()
-    _pw = await async_playwright().start()
     profile_dir = "/data/browser_profile"
     Path(profile_dir).mkdir(parents=True, exist_ok=True)
-    context = await _pw.chromium.launch_persistent_context(
+    _camoufox_cm = AsyncCamoufox(
+        persistent_context=True,
         user_data_dir=profile_dir,
         headless=False,
-        no_viewport=True,  # let browser use Xvnc's native resolution
-        args=[
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--disable-infobars",
-        ],
     )
-    await context.add_init_script(_STEALTH_INIT_SCRIPT)
+    context = await _camoufox_cm.__aenter__()
     page = context.pages[0] if context.pages else await context.new_page()
-    logger.info("Browser backend: persistent (Patchright Chromium + KasmVNC)")
+    logger.info("Browser backend: persistent (Camoufox Firefox + KasmVNC)")
     return None, context, page
 
 
@@ -344,7 +283,7 @@ async def _browser_cleanup_soft():
     Used by ``browser_reset`` in persistent mode to restart the browser
     while keeping the VNC session and profile directory intact.
     """
-    global _pw, _browser, _context, _page
+    global _pw, _camoufox_cm, _browser, _context, _page
     try:
         if _page and not _page.is_closed():
             await _page.close()
@@ -361,11 +300,16 @@ async def _browser_cleanup_soft():
     except Exception as e:
         logger.debug("Error closing browser (soft): %s", e)
     try:
+        if _camoufox_cm:
+            await _camoufox_cm.__aexit__(None, None, None)
+    except Exception as e:
+        logger.debug("Error closing camoufox (soft): %s", e)
+    try:
         if _pw:
             await _pw.stop()
     except Exception as e:
         logger.debug("Error stopping playwright (soft): %s", e)
-    _pw = _browser = _context = _page = None
+    _pw = _camoufox_cm = _browser = _context = _page = None
     _page_refs.clear()
     _credential_filled_refs.clear()
     _cleanup_stale_profile()
@@ -547,7 +491,7 @@ def _flatten_tree(node: dict) -> list[dict]:
 @skill(
     name="browser_navigate",
     description=(
-        "Navigate your Chromium browser to a URL and return the page text. "
+        "Navigate your browser to a URL and return the page text. "
         "Use this to visit any website: sign-up pages, dashboards, search engines, "
         "web apps. You can then use browser_snapshot to get element refs, "
         "then browser_click and browser_type with refs to interact."
