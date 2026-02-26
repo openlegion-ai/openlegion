@@ -148,7 +148,15 @@ class ChannelManager:
         """Stop all active messaging channels."""
         for ch in self.active:
             try:
-                asyncio.run(ch.stop())
+                loop = getattr(ch, "_channel_loop", None)
+                if loop and loop.is_running():
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(ch.stop(), loop)
+                        future.result(timeout=10)
+                    finally:
+                        loop.call_soon_threadsafe(loop.stop)
+                else:
+                    asyncio.run(ch.stop())
             except Exception as e:
                 logger.debug("Error stopping channel %s: %s", type(ch).__name__, e)
 
@@ -157,6 +165,7 @@ class ChannelManager:
         def _run():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            channel._channel_loop = loop
             loop.run_until_complete(channel.start())
             loop.run_forever()
 
