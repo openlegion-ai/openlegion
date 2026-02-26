@@ -160,6 +160,7 @@ function dashboard() {
     identityLearningsLoading: false,
 
     // Broadcast
+    broadcastMode: false,
     broadcastMessage: '',
     broadcastLoading: false,
     broadcastResults: null,
@@ -465,7 +466,7 @@ function dashboard() {
           const active = document.activeElement;
           const tag = active ? active.tagName.toLowerCase() : '';
           if (tag === 'input' || tag === 'textarea' || tag === 'select' || active?.isContentEditable) return;
-          if (this.cmdPaletteOpen || this.detailAgent) return;
+          if (this.cmdPaletteOpen || this.detailAgent || this.addAgentMode || this.broadcastMode) return;
           e.preventDefault();
           const tabMap = { '1': 'fleet', '2': 'activity', '3': 'system' };
           this.switchTab(tabMap[e.key]);
@@ -1293,6 +1294,33 @@ function dashboard() {
       this.addAgentLoading = false;
     },
 
+    openAddAgentModal(defaultName = '') {
+      this.addAgentMode = true;
+      if (defaultName) this.addAgentForm.name = defaultName;
+      this.fetchSettings();
+      this.$nextTick(() => {
+        const el = document.getElementById('add-agent-name-input');
+        if (el) el.focus();
+      });
+    },
+
+    closeAddAgentModal() {
+      if (this.addAgentLoading) return;
+      this.addAgentMode = false;
+    },
+
+    openBroadcastModal() {
+      this.broadcastMode = true;
+      this.$nextTick(() => {
+        const el = document.getElementById('broadcast-message-input');
+        if (el) el.focus();
+      });
+    },
+
+    closeBroadcastModal() {
+      this.broadcastMode = false;
+    },
+
     async removeAgent(agentId) {
       if (!confirm(`Remove agent "${agentId}"? This will stop the container and remove its config.`)) return;
       try {
@@ -1835,6 +1863,7 @@ function dashboard() {
       this.broadcastResults = {};  // Show results area immediately
       this.broadcastSentMessage = msg;
       this.broadcastMessage = '';
+      this.closeBroadcastModal();
 
       const controller = new AbortController();
       this._broadcastAbort = controller;
@@ -1945,8 +1974,8 @@ function dashboard() {
       }
       // Quick actions
       const actions = [
-        { label: 'Add Agent', desc: 'Open add agent form', keywords: ['add', 'agent', 'new', 'create'], action: () => { this.switchTab('fleet'); this.addAgentMode = true; this.fetchSettings(); } },
-        { label: 'Broadcast', desc: this.activeProject ? `Broadcast to ${this.activeProject} agents` : 'Send message to all agents', keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); this.$nextTick(() => { const el = document.querySelector('[x-model="broadcastMessage"]'); if (el) el.focus(); }); } },
+        { label: 'Add Agent', desc: 'Open add agent form', keywords: ['add', 'agent', 'new', 'create'], action: () => { this.switchTab('fleet'); this.openAddAgentModal(); } },
+        { label: 'Broadcast', desc: this.activeProject ? `Broadcast to ${this.activeProject} agents` : 'Send message to all agents', keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); this.openBroadcastModal(); } },
         ...(this.activeProject ? [{ label: 'Edit PROJECT.md', desc: `Edit ${this.activeProject} project context`, keywords: ['project', 'edit', 'context'], action: () => { this.switchTab('fleet'); this.projectBannerExpanded = true; this.startProjectEdit(); } }] : []),
       ];
       for (const act of actions) {
