@@ -245,7 +245,6 @@ class DockerBackend(RuntimeBackend):
             "mem_limit": mem_limit,
             "cpu_quota": cpu_quota,
             "security_opt": ["no-new-privileges"],
-            "init": True,
         }
 
         if self.use_host_network:
