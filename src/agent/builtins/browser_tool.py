@@ -5,9 +5,9 @@ A single browser instance is lazily initialized per agent process and reused.
 Supports four backends via BROWSER_BACKEND env var:
 basic, stealth, advanced, persistent.
 
-The persistent backend uses Camoufox — a patched Firefox build with C++ level
-anti-detection (fingerprint spoofing, automation hiding, etc.).  The other
-backends use standard Playwright Chromium or Camoufox depending on stealth needs.
+The persistent backend uses Playwright Chromium with stealth patches
+(--disable-blink-features=AutomationControlled, ignore --enable-automation,
+JS init script).  The stealth backend uses Camoufox (patched Firefox).
 """
 
 from __future__ import annotations
@@ -205,6 +205,65 @@ async def _launch_advanced(mesh_client):
     return browser, context, page
 
 
+_STEALTH_INIT_SCRIPT = """
+// Hide navigator.webdriver — backup for --disable-blink-features flag.
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined, configurable: true,
+});
+
+// Fake chrome.runtime (real Chrome has this, Playwright doesn't)
+if (!window.chrome) window.chrome = {};
+if (!window.chrome.runtime) {
+    window.chrome.runtime = {
+        connect: () => {},
+        sendMessage: () => {},
+        onMessage: {addListener: () => {}, removeListener: () => {}},
+        onConnect: {addListener: () => {}, removeListener: () => {}},
+    };
+}
+
+// Fake plugins array (automation Chromium reports empty)
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        const p = [
+            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer',
+             description: 'Portable Document Format', length: 1},
+            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+             description: '', length: 1},
+            {name: 'Native Client', filename: 'internal-nacl-plugin',
+             description: '', length: 2},
+        ];
+        p.refresh = () => {};
+        return p;
+    },
+});
+
+// Fix permissions.query
+const origQuery = window.navigator.permissions.query.bind(
+    window.navigator.permissions
+);
+window.navigator.permissions.query = (params) => {
+    if (params.name === 'notifications')
+        return Promise.resolve({state: Notification.permission});
+    return origQuery(params);
+};
+
+// Clean up automation globals
+delete window.__playwright;
+delete window.__pw_manual;
+for (const key of Object.keys(window)) {
+    if (key.startsWith('cdc_')) delete window[key];
+}
+
+// Fix navigator.languages
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+
+// Fake connection.rtt (0 in automation, ~50 in real browsers)
+if (navigator.connection) {
+    Object.defineProperty(navigator.connection, 'rtt', {get: () => 50});
+}
+"""
+
 
 def _cleanup_stale_profile():
     """Kill orphaned browser processes and remove stale lock files.
@@ -243,37 +302,49 @@ def _cleanup_stale_profile():
 
 
 async def _launch_persistent():
-    """Launch Camoufox Firefox with a persistent profile.
+    """Launch Playwright Chromium with a persistent profile.
 
-    Camoufox is a patched Firefox build with C++ level anti-detection:
-    fingerprint spoofing, automation hiding, WebGL/Canvas noise, and
-    isolated Playwright internals.  Unlike JS init scripts, these patches
-    cannot be detected via CDP/Juggler protocol inspection.
-
-    Uses ``persistent_context=True`` so cookies and sessions survive
+    Uses ``launch_persistent_context`` so cookies and sessions survive
     browser restarts.  Returns ``(None, context, page)`` — persistent
     contexts have no separate Browser object.
+
+    Stealth flags (``--disable-blink-features=AutomationControlled``,
+    ``ignore_default_args=["--enable-automation"]``) hide the most common
+    automation fingerprints.  This is sufficient for most sites; heavily
+    protected sites (X/Twitter) may still detect Playwright via CDP-level
+    fingerprinting (``Runtime.enable``).
     """
-    global _camoufox_cm
+    global _pw
     try:
-        from camoufox.async_api import AsyncCamoufox
+        from playwright.async_api import async_playwright
     except ImportError:
         raise RuntimeError(
-            "camoufox is not installed. The agent container must include "
-            "camoufox. See Dockerfile.agent."
+            "playwright is not installed. The agent container must include "
+            "playwright and chromium. See Dockerfile.agent."
         )
     _ensure_xvfb()
     _cleanup_stale_profile()
+    _pw = await async_playwright().start()
     profile_dir = "/data/browser_profile"
     Path(profile_dir).mkdir(parents=True, exist_ok=True)
-    _camoufox_cm = AsyncCamoufox(
-        persistent_context=True,
+    context = await _pw.chromium.launch_persistent_context(
         user_data_dir=profile_dir,
         headless=False,
+        no_viewport=True,  # let browser use Xvnc's native resolution
+        args=[
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--disable-infobars",
+            "--disable-blink-features=AutomationControlled",
+        ],
+        # Strip --enable-automation: it sets navigator.webdriver=true and
+        # shows the "Chrome is being controlled" infobar, both of which
+        # are primary detection vectors for anti-bot services.
+        ignore_default_args=["--enable-automation"],
     )
-    context = await _camoufox_cm.__aenter__()
+    await context.add_init_script(_STEALTH_INIT_SCRIPT)
     page = context.pages[0] if context.pages else await context.new_page()
-    logger.info("Browser backend: persistent (Camoufox Firefox + KasmVNC)")
+    logger.info("Browser backend: persistent (Playwright Chromium + KasmVNC)")
     return None, context, page
 
 
@@ -283,7 +354,7 @@ async def _browser_cleanup_soft():
     Used by ``browser_reset`` in persistent mode to restart the browser
     while keeping the VNC session and profile directory intact.
     """
-    global _pw, _camoufox_cm, _browser, _context, _page
+    global _pw, _browser, _context, _page
     try:
         if _page and not _page.is_closed():
             await _page.close()
@@ -300,16 +371,11 @@ async def _browser_cleanup_soft():
     except Exception as e:
         logger.debug("Error closing browser (soft): %s", e)
     try:
-        if _camoufox_cm:
-            await _camoufox_cm.__aexit__(None, None, None)
-    except Exception as e:
-        logger.debug("Error closing camoufox (soft): %s", e)
-    try:
         if _pw:
             await _pw.stop()
     except Exception as e:
         logger.debug("Error stopping playwright (soft): %s", e)
-    _pw = _camoufox_cm = _browser = _context = _page = None
+    _pw = _browser = _context = _page = None
     _page_refs.clear()
     _credential_filled_refs.clear()
     _cleanup_stale_profile()
