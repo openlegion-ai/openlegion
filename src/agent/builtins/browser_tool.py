@@ -326,6 +326,7 @@ async def _launch_persistent():
             "--disable-dev-shm-usage",
             "--no-first-run",
             "--disable-infobars",
+            "--disable-features=AsyncDns",  # use system DNS (getaddrinfo) in Docker
         ],
         # Do NOT set custom user_agent — Patchright docs warn against it.
         # A mismatched UA is a detection vector.  The browser's real UA
