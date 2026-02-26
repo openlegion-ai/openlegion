@@ -5,9 +5,9 @@ A single browser instance is lazily initialized per agent process and reused.
 Supports four backends via BROWSER_BACKEND env var:
 basic, stealth, advanced, persistent.
 
-The persistent backend uses rebrowser-playwright (Playwright with CDP leak
-patches) and Chromium with stealth flags + JS init script.  The stealth
-backend uses Camoufox (patched Firefox).
+The persistent backend uses Playwright Chromium with stealth flags and a
+JS init script for anti-detection.  The stealth backend uses Camoufox
+(patched Firefox).
 """
 
 from __future__ import annotations
@@ -313,27 +313,20 @@ def _cleanup_stale_profile():
 
 
 async def _launch_persistent():
-    """Launch Chromium with a persistent profile and anti-detection patches.
+    """Launch Playwright Chromium with a persistent profile.
 
     Uses ``launch_persistent_context`` so cookies and sessions survive
     browser restarts.  Returns ``(None, context, page)`` — persistent
     contexts have no separate Browser object.
-
-    Prefers ``rebrowser-playwright`` (patches CDP leaks like sourceURL
-    patterns and __pwInitScripts) over vanilla ``playwright``.
     """
     global _pw
     try:
-        from rebrowser_playwright.async_api import async_playwright
+        from playwright.async_api import async_playwright
     except ImportError:
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError:
-            raise RuntimeError(
-                "Neither rebrowser-playwright nor playwright is installed. "
-                "The agent container must include one. See Dockerfile.agent."
-            )
-        logger.info("rebrowser-playwright not available, falling back to playwright")
+        raise RuntimeError(
+            "playwright is not installed. The agent container must include "
+            "playwright and chromium. See Dockerfile.agent."
+        )
     _ensure_xvfb()
     _cleanup_stale_profile()
     _pw = await async_playwright().start()

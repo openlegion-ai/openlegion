@@ -23,11 +23,8 @@ WORKDIR /app
 # (litellm, pyyaml, click, docker are host-only — not needed here)
 # sqlite-vec requires amd64 (ARM wheels have broken 32-bit .so files)
 COPY pyproject.toml .
-# rebrowser-playwright: drop-in Playwright replacement that patches CDP leaks
-# (sourceURL, __pwInitScripts, Runtime.enable) for anti-bot evasion.
-# Standard playwright is still needed for the CLI (browser installation).
 RUN pip install --no-cache-dir \
-    fastapi uvicorn httpx pydantic playwright rebrowser-playwright patchright sqlite-vec mcp camoufox Pillow
+    fastapi uvicorn httpx pydantic playwright patchright sqlite-vec mcp camoufox Pillow
 
 # Install browsers — must run as root before USER agent.
 # Playwright Chromium goes to /opt/pw-browsers; Patchright reuses the same path.
