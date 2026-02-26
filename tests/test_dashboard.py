@@ -179,7 +179,7 @@ class TestDashboardAgentsAPI:
         expected_fields = {
             "id", "url", "health_status", "failures", "restarts",
             "last_check", "last_healthy", "daily_cost", "daily_tokens",
-            "role", "model",
+            "role", "model", "project",
         }
         assert expected_fields.issubset(agent.keys())
 
@@ -1494,6 +1494,18 @@ class TestDashboardAgentProjectField:
         for agent in data["agents"]:
             assert agent["project"] is None
 
+    def test_agents_project_field_when_agent_projects_key_missing(self):
+        """When _agent_projects key is absent from config, project is None."""
+        with patch("src.cli.config._load_config", return_value={
+            "agents": {"alpha": {}, "beta": {}},
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+        }):
+            resp = self.client.get("/dashboard/api/agents")
+        assert resp.status_code == 200
+        data = resp.json()
+        for agent in data["agents"]:
+            assert agent["project"] is None
+
 
 class TestDashboardBroadcastProjectScoping:
     """Tests for project-scoped broadcast endpoints."""
@@ -1573,3 +1585,97 @@ class TestDashboardBroadcastProjectScoping:
         assert "beta" in data["responses"]
         assert "alpha" not in data["responses"]
         assert "gamma" not in data["responses"]
+
+    def test_broadcast_non_stream_without_project_sends_to_all(self):
+        """Non-streaming broadcast without project sends to all agents."""
+        async def _mock_request(aid, method, path, **kwargs):
+            return {"response": f"Reply from {aid}"}
+
+        self.components["transport"].request = AsyncMock(side_effect=_mock_request)
+
+        resp = self.client.post(
+            "/dashboard/api/broadcast",
+            json={"message": "Hello all"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert set(data["responses"].keys()) == {"alpha", "beta", "gamma"}
+
+    def test_broadcast_stream_project_no_matching_agents(self):
+        """Streaming broadcast with project that has no running members."""
+        with patch("src.cli.config._load_projects", return_value={
+            "empty_proj": {"members": ["nonexistent"]},
+        }):
+            resp = self.client.post(
+                "/dashboard/api/broadcast/stream",
+                json={"message": "Hello", "project": "empty_proj"},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["responses"] == {}
+        assert "No agents" in data.get("message", "")
+
+    def test_broadcast_non_stream_project_no_matching_agents(self):
+        """Non-streaming broadcast with project that has no running members."""
+        with patch("src.cli.config._load_projects", return_value={
+            "empty_proj": {"members": ["nonexistent"]},
+        }):
+            resp = self.client.post(
+                "/dashboard/api/broadcast",
+                json={"message": "Hello", "project": "empty_proj"},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["responses"] == {}
+        assert "No matching agents" in data.get("message", "")
+
+    def test_broadcast_empty_string_project_sends_to_all(self):
+        """Empty string project is treated as no project filter."""
+        async def _mock_stream(aid, method, path, **kwargs):
+            yield {"type": "text_delta", "content": "ok"}
+
+        self.components["transport"].stream_request = _mock_stream
+
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": "Hello", "project": ""},
+        )
+        assert resp.status_code == 200
+        events = _parse_sse(resp.text)
+        agent_starts = [e["agent"] for e in events if e["type"] == "agent_start"]
+        assert set(agent_starts) == {"alpha", "beta", "gamma"}
+
+    def test_broadcast_stream_all_agents_are_members(self):
+        """Streaming broadcast where all running agents are project members."""
+        async def _mock_stream(aid, method, path, **kwargs):
+            yield {"type": "text_delta", "content": f"ok from {aid}"}
+
+        self.components["transport"].stream_request = _mock_stream
+
+        with patch("src.cli.config._load_projects", return_value={
+            "full_proj": {"members": ["alpha", "beta", "gamma"]},
+        }):
+            resp = self.client.post(
+                "/dashboard/api/broadcast/stream",
+                json={"message": "Hello", "project": "full_proj"},
+            )
+        assert resp.status_code == 200
+        events = _parse_sse(resp.text)
+        agent_starts = [e["agent"] for e in events if e["type"] == "agent_start"]
+        assert set(agent_starts) == {"alpha", "beta", "gamma"}
+
+    def test_broadcast_project_type_validation(self):
+        """Non-string project value returns 400."""
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": "Hello", "project": 123},
+        )
+        assert resp.status_code == 400
+        assert "string" in resp.json()["detail"]
+
+        resp = self.client.post(
+            "/dashboard/api/broadcast",
+            json={"message": "Hello", "project": ["bad"]},
+        )
+        assert resp.status_code == 400
+        assert "string" in resp.json()["detail"]

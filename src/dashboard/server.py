@@ -582,16 +582,19 @@ def create_dashboard_router(
         message = body.get("message", "").strip()
         if not message:
             raise HTTPException(status_code=400, detail="Message is required")
-        from src.shared.utils import sanitize_for_prompt
         message = sanitize_for_prompt(message)
         import asyncio
 
         targets = list(agent_registry.keys())
-        project = body.get("project", "")
+        project = body.get("project") or ""
+        if not isinstance(project, str):
+            raise HTTPException(status_code=400, detail="project must be a string")
         if project:
             from src.cli.config import _load_projects
             members = set(_load_projects().get(project, {}).get("members", []))
             targets = [a for a in targets if a in members]
+        if not targets:
+            return {"responses": {}, "message": "No matching agents"}
 
         results = {}
         async def _send(aid: str) -> tuple[str, str]:
@@ -623,7 +626,9 @@ def create_dashboard_router(
         import json as _json
 
         agents = list(agent_registry.keys())
-        project = body.get("project", "")
+        project = body.get("project") or ""
+        if not isinstance(project, str):
+            raise HTTPException(status_code=400, detail="project must be a string")
         if project:
             from src.cli.config import _load_projects
             members = set(_load_projects().get(project, {}).get("members", []))

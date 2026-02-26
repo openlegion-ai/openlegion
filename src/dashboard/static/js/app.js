@@ -975,9 +975,9 @@ function dashboard() {
         if (resp.ok) {
           const data = await resp.json();
           this.projects = data.projects || [];
+          this.projectsLoaded = true;
         }
       } catch (e) { console.warn('fetchProjects failed:', e); }
-      this.projectsLoaded = true;
     },
 
     switchProject(name) {
@@ -1848,12 +1848,12 @@ function dashboard() {
       }
       // Match projects
       if (this.projects.length > 0) {
-        if ('all agents'.includes(q) || 'all'.includes(q)) {
+        if ('all agents'.startsWith(q) || 'all'.startsWith(q)) {
           results.push({ type: 'action', label: 'All agents', desc: 'Clear project filter', action: () => { this.switchTab('fleet'); this.switchProject(null); } });
         }
         for (const proj of this.projects) {
           const pname = (proj.name || '').toLowerCase();
-          if (pname.includes(q) || 'project'.includes(q)) {
+          if (pname.includes(q) || 'project'.startsWith(q)) {
             results.push({ type: 'action', label: proj.name, desc: `Switch to project (${(proj.members || []).length} members)`, action: () => { this.switchTab('fleet'); this.switchProject(proj.name); } });
           }
         }

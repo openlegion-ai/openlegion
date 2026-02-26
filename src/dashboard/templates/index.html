@@ -197,7 +197,7 @@
       <!-- Fleet Overview (merged: Fleet + Agents + Queues) -->
       <div x-show="activeTab === 'fleet' && !detailAgent" x-cloak>
         <!-- Fleet summary bar -->
-        <div class="flex items-center justify-between mb-4" x-show="agents.length > 0">
+        <div class="flex items-center justify-between mb-4" x-show="filteredAgents.length > 0" x-cloak>
           <h2 class="text-sm font-medium text-gray-400 flex items-center gap-1.5">
             <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
             <span x-text="filteredAgents.length"></span> agent<span x-show="filteredAgents.length !== 1">s</span>
@@ -218,7 +218,7 @@
           </div>
         </div>
         <!-- Fleet health summary strip -->
-        <div x-show="agents.length > 0" class="flex items-center gap-3 text-xs text-gray-500 mb-3" x-cloak>
+        <div x-show="filteredAgents.length > 0" class="flex items-center gap-3 text-xs text-gray-500 mb-3" x-cloak>
           <template x-if="fleetHealthCounts.healthy > 0">
             <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-400 inline-block"></span><span x-text="fleetHealthCounts.healthy + ' healthy'"></span></span>
           </template>
@@ -261,7 +261,8 @@
               <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/30"
                 x-text="activeProject || 'fleet-wide'"></span>
               <span x-show="projectExists" class="text-[10px] text-gray-600" x-text="projectContent.length.toLocaleString() + ' chars'"></span>
-              <span x-show="!projectExists && !projectLoading" class="text-[10px] text-gray-700 italic">not created</span>
+              <span x-show="!projectExists && !projectLoading" class="text-[10px] text-gray-700 italic"
+                x-text="activeProject ? activeProject + '/project.md not created' : 'not created'"></span>
             </div>
             <div class="flex items-center gap-2" @click.stop>
               <span x-show="projectLoading" class="text-gray-600 text-xs">
