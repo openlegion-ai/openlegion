@@ -13,6 +13,7 @@ JS init script for anti-detection.  The stealth backend uses Camoufox
 from __future__ import annotations
 
 import asyncio
+import glob
 import os
 import re
 import subprocess
@@ -315,31 +316,55 @@ def _cleanup_stale_profile():
                 logger.debug("Failed to remove %s: %s", lock_path, e)
 
 
+def _find_playwright_chromium() -> str | None:
+    """Find Playwright's Chromium executable (installed via playwright install).
+
+    Patchright installs a different Chromium revision whose built-in DNS
+    client breaks in Docker.  We want Patchright's CDP patches but
+    Playwright's Chromium binary.
+    """
+    bins = sorted(glob.glob("/opt/pw-browsers/chromium-*/chrome-linux/chrome"))
+    return bins[0] if bins else None
+
+
 async def _launch_persistent():
-    """Launch Playwright Chromium with a persistent profile.
+    """Launch Chromium with Patchright CDP patches and a persistent profile.
+
+    Patchright patches Runtime.enable and Console.enable CDP leaks, which
+    makes login buttons and captchas work on anti-bot protected sites.
+    But Patchright's own Chromium revision has DNS issues in Docker, so
+    we force it to use Playwright's Chromium binary via executable_path.
 
     Uses ``launch_persistent_context`` so cookies and sessions survive
     browser restarts.  Returns ``(None, context, page)`` — persistent
     contexts have no separate Browser object.
     """
     global _pw
+    # Prefer Patchright (patches CDP leaks) with Playwright's Chromium binary
+    # (working DNS).  Fall back to vanilla Playwright if patchright unavailable.
+    use_patchright = False
     try:
-        from playwright.async_api import async_playwright
+        from patchright.async_api import async_playwright
+        use_patchright = True
     except ImportError:
-        raise RuntimeError(
-            "playwright is not installed. The agent container must include "
-            "playwright and chromium. See Dockerfile.agent."
-        )
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            raise RuntimeError(
+                "Neither patchright nor playwright is installed. "
+                "See Dockerfile.agent."
+            )
     _ensure_xvfb()
     _cleanup_stale_profile()
     _pw = await async_playwright().start()
     profile_dir = "/data/browser_profile"
     Path(profile_dir).mkdir(parents=True, exist_ok=True)
-    context = await _pw.chromium.launch_persistent_context(
-        user_data_dir=profile_dir,
-        headless=False,
-        no_viewport=True,
-        args=[
+
+    launch_kwargs: dict = {
+        "user_data_dir": profile_dir,
+        "headless": False,
+        "no_viewport": True,
+        "args": [
             "--disable-dev-shm-usage",
             "--no-first-run",
             "--disable-infobars",
@@ -352,16 +377,26 @@ async def _launch_persistent():
             "--window-size=1280,720",
             "--window-position=0,0",
         ],
-        ignore_default_args=[
+        "ignore_default_args": [
             "--enable-automation",
             "--disable-popup-blocking",
             "--disable-component-update",
             "--disable-default-apps",
         ],
-    )
+    }
+
+    # When using Patchright, force Playwright's Chromium binary (DNS works).
+    if use_patchright:
+        pw_chromium = _find_playwright_chromium()
+        if pw_chromium:
+            launch_kwargs["executable_path"] = pw_chromium
+            logger.info("Using Playwright Chromium binary: %s", pw_chromium)
+
+    context = await _pw.chromium.launch_persistent_context(**launch_kwargs)
     await context.add_init_script(_STEALTH_INIT_SCRIPT)
     page = context.pages[0] if context.pages else await context.new_page()
-    logger.info("Browser backend: persistent (Playwright Chromium + KasmVNC)")
+    backend = "Patchright CDP patches + Playwright Chromium" if use_patchright else "Playwright Chromium"
+    logger.info("Browser backend: persistent (%s + KasmVNC)", backend)
     return None, context, page
 
 
