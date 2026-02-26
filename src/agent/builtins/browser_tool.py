@@ -5,9 +5,9 @@ A single browser instance is lazily initialized per agent process and reused.
 Supports four backends via BROWSER_BACKEND env var:
 basic, stealth, advanced, persistent.
 
-The persistent backend uses Playwright Chromium with stealth patches
-(--disable-blink-features=AutomationControlled, ignore --enable-automation,
-JS init script).  The stealth backend uses Camoufox (patched Firefox).
+The persistent backend uses rebrowser-playwright (Playwright with CDP leak
+patches) and Chromium with stealth flags + JS init script.  The stealth
+backend uses Camoufox (patched Firefox).
 """
 
 from __future__ import annotations
@@ -251,8 +251,9 @@ window.navigator.permissions.query = (params) => {
 // Clean up automation globals
 delete window.__playwright;
 delete window.__pw_manual;
+delete window.__pwInitScripts;
 for (const key of Object.keys(window)) {
-    if (key.startsWith('cdc_')) delete window[key];
+    if (key.startsWith('cdc_') || key.startsWith('__pw')) delete window[key];
 }
 
 // Fix navigator.languages
@@ -261,6 +262,16 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 // Fake connection.rtt (0 in automation, ~50 in real browsers)
 if (navigator.connection) {
     Object.defineProperty(navigator.connection, 'rtt', {get: () => 50});
+}
+
+// Spoof navigator.userActivation (X checks hasBeenActive)
+if (navigator.userActivation) {
+    Object.defineProperty(navigator.userActivation, 'hasBeenActive', {
+        get: () => true,
+    });
+    Object.defineProperty(navigator.userActivation, 'isActive', {
+        get: () => false,
+    });
 }
 """
 
@@ -302,26 +313,27 @@ def _cleanup_stale_profile():
 
 
 async def _launch_persistent():
-    """Launch Playwright Chromium with a persistent profile.
+    """Launch Chromium with a persistent profile and anti-detection patches.
 
     Uses ``launch_persistent_context`` so cookies and sessions survive
     browser restarts.  Returns ``(None, context, page)`` — persistent
     contexts have no separate Browser object.
 
-    Stealth flags (``--disable-blink-features=AutomationControlled``,
-    ``ignore_default_args=["--enable-automation"]``) hide the most common
-    automation fingerprints.  This is sufficient for most sites; heavily
-    protected sites (X/Twitter) may still detect Playwright via CDP-level
-    fingerprinting (``Runtime.enable``).
+    Prefers ``rebrowser-playwright`` (patches CDP leaks like sourceURL
+    patterns and __pwInitScripts) over vanilla ``playwright``.
     """
     global _pw
     try:
-        from playwright.async_api import async_playwright
+        from rebrowser_playwright.async_api import async_playwright
     except ImportError:
-        raise RuntimeError(
-            "playwright is not installed. The agent container must include "
-            "playwright and chromium. See Dockerfile.agent."
-        )
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            raise RuntimeError(
+                "Neither rebrowser-playwright nor playwright is installed. "
+                "The agent container must include one. See Dockerfile.agent."
+            )
+        logger.info("rebrowser-playwright not available, falling back to playwright")
     _ensure_xvfb()
     _cleanup_stale_profile()
     _pw = await async_playwright().start()
@@ -337,10 +349,17 @@ async def _launch_persistent():
             "--disable-infobars",
             "--disable-blink-features=AutomationControlled",
         ],
-        # Strip --enable-automation: it sets navigator.webdriver=true and
-        # shows the "Chrome is being controlled" infobar, both of which
-        # are primary detection vectors for anti-bot services.
-        ignore_default_args=["--enable-automation"],
+        # Strip Playwright defaults that are detection vectors:
+        # --enable-automation: sets navigator.webdriver=true + shows infobar
+        # --disable-popup-blocking: real browsers block popups
+        # --disable-component-update: stealth driver indicator
+        # --disable-default-apps: real browsers load default apps
+        ignore_default_args=[
+            "--enable-automation",
+            "--disable-popup-blocking",
+            "--disable-component-update",
+            "--disable-default-apps",
+        ],
     )
     await context.add_init_script(_STEALTH_INIT_SCRIPT)
     page = context.pages[0] if context.pages else await context.new_page()
