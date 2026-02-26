@@ -40,6 +40,19 @@ COPY src/agent/ /app/src/agent/
 COPY src/shared/ /app/src/shared/
 COPY src/__init__.py /app/src/__init__.py
 
+# Disable Chrome's built-in async DNS resolver via enterprise policy.
+# Chrome's internal DNS stack fails in Docker's network namespace even when
+# system DNS (getaddrinfo) works fine.  This policy forces Chrome to use the
+# system resolver, which respects /etc/resolv.conf and Docker's --dns config.
+# Must use --disable-features flag approach won't work because Patchright
+# already sets --disable-features for anti-detection and Chromium uses
+# last-one-wins semantics for duplicate flags.
+RUN mkdir -p /etc/chromium/policies/managed /etc/opt/chrome/policies/managed \
+    && echo '{"BuiltInDnsClientEnabled": false}' \
+       | tee /etc/chromium/policies/managed/dns_policy.json \
+             /etc/opt/chrome/policies/managed/dns_policy.json \
+       > /dev/null
+
 # X11 socket directory — Xvnc cannot create this as non-root
 RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 
