@@ -26,11 +26,25 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir \
     fastapi uvicorn httpx pydantic playwright patchright sqlite-vec mcp camoufox Pillow
 
-# Install browsers — must run as root before USER agent.
-# Playwright 1.58+ installs Chrome for Testing (real Chrome, not Chromium)
-# which has authentic TLS fingerprints, chrome.runtime, sec-ch-ua brands.
-# Camoufox fetches its own Firefox binary for the stealth backend.
-# All need o+rx so the non-root agent user can execute them.
+# Install Google Chrome stable — real browser with authentic TLS fingerprints,
+# Widevine DRM, proprietary codecs, and genuine sec-ch-ua brands that pass
+# anti-bot checks on sites like Reddit and X.
+RUN curl -fSL -o /tmp/chrome.deb \
+       https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && apt-get update && apt-get install -y /tmp/chrome.deb \
+    && rm /tmp/chrome.deb \
+    && rm -rf /var/lib/apt/lists/*
+
+# Force Chrome to use the system DNS resolver (glibc getaddrinfo).
+# Chrome's built-in async DNS client bypasses Docker Desktop's DNS forwarder
+# (192.168.65.7), causing ERR_NAME_NOT_RESOLVED in containers.
+# DnsOverHttpsMode=off is also required — newer Chrome falls back to the
+# built-in client for DoH even when BuiltInDnsClientEnabled is false.
+RUN mkdir -p /etc/opt/chrome/policies/managed \
+    && printf '{"BuiltInDnsClientEnabled": false, "DnsOverHttpsMode": "off"}\n' \
+       > /etc/opt/chrome/policies/managed/dns_policy.json
+
+# Install Playwright browsers (fallback for basic backend) + Camoufox.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN playwright install chromium --with-deps \
     && playwright install-deps firefox \

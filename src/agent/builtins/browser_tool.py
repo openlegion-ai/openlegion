@@ -5,11 +5,12 @@ A single browser instance is lazily initialized per agent process and reused.
 Supports four backends via BROWSER_BACKEND env var:
 basic, stealth, advanced, persistent.
 
-The persistent backend uses Playwright's Chrome for Testing (real Chrome,
-not Chromium) with a minimal init script that only cleans up automation
-globals.  Chrome for Testing already has authentic chrome.runtime, plugins,
-sec-ch-ua brands, and TLS fingerprints — JS-level fakes are unnecessary
-and counterproductive (anti-bot systems can detect them).
+The persistent backend uses Google Chrome (via channel="chrome") with a
+minimal init script that only cleans up automation globals.  Real Chrome
+has authentic chrome.runtime, plugins, sec-ch-ua brands, TLS fingerprints,
+and proprietary codecs — JS-level fakes are counterproductive.
+Chrome's built-in DNS client is disabled via enterprise policy so DNS
+works in Docker containers.
 The stealth backend uses Camoufox (patched Firefox).
 """
 
@@ -262,11 +263,14 @@ def _cleanup_stale_profile():
 
 
 async def _launch_persistent():
-    """Launch Chrome for Testing with a persistent profile.
+    """Launch Google Chrome with a persistent profile.
 
-    Playwright 1.58+ ships Chrome for Testing (real Chrome, not Chromium).
-    It has authentic chrome.runtime, plugins, sec-ch-ua brands, and TLS
-    fingerprints — no CDP patches or JS fakes needed.
+    Uses the system-installed Google Chrome (``channel="chrome"``) for
+    authentic TLS fingerprints, Widevine DRM, proprietary codecs, and
+    genuine sec-ch-ua brands that pass anti-bot checks.  Chrome's built-in
+    async DNS client is disabled via enterprise policy in the Dockerfile
+    (BuiltInDnsClientEnabled=false + DnsOverHttpsMode=off) so DNS works
+    in Docker containers.
 
     Uses ``launch_persistent_context`` so cookies and sessions survive
     browser restarts.  Returns ``(None, context, page)`` — persistent
@@ -287,6 +291,7 @@ async def _launch_persistent():
     Path(profile_dir).mkdir(parents=True, exist_ok=True)
     context = await _pw.chromium.launch_persistent_context(
         user_data_dir=profile_dir,
+        channel="chrome",
         headless=False,
         no_viewport=True,
         args=[
@@ -325,7 +330,7 @@ async def _launch_persistent():
     except Exception as e:
         logger.debug("Could not set window bounds via CDP: %s", e)
 
-    logger.info("Browser backend: persistent (Chrome for Testing + KasmVNC)")
+    logger.info("Browser backend: persistent (Google Chrome + KasmVNC)")
     return None, context, page
 
 
@@ -454,6 +459,7 @@ async def browser_cleanup():
 _CDP_DEAD_SESSION_PATTERNS = (
     "Page.navigate limit reached",
     "ERR_TUNNEL_CONNECTION_FAILED",
+    "ERR_NAME_NOT_RESOLVED",
     "Target closed",
     "Session closed",
     "Browser has been closed",
