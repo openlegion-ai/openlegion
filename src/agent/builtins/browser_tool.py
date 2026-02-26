@@ -417,22 +417,6 @@ async def _launch_persistent():
     )
     context = browser.contexts[0]
     page = context.pages[0] if context.pages else await context.new_page()
-
-    # Override Playwright's Target.setAutoAttach — by default Playwright sets
-    # waitForDebuggerOnStart:true which freezes every new target (including
-    # popup windows from window.open()).  Reddit's login flow opens a popup
-    # that hangs indefinitely because it's waiting for the debugger to resume.
-    try:
-        cdp = await context.new_cdp_session(page)
-        await cdp.send("Target.setAutoAttach", {
-            "autoAttach": True,
-            "waitForDebuggerOnStart": False,
-            "flatten": True,
-        })
-        await cdp.detach()
-    except Exception as e:
-        logger.debug("Could not override Target.setAutoAttach: %s", e)
-
     logger.info("Playwright connected to Chrome via CDP (agent control)")
     return browser, context, page
 
@@ -486,6 +470,41 @@ async def _browser_cleanup_soft():
             logger.debug("Could not relaunch Chrome subprocess (not in container?)")
 
 
+async def _disconnect_cdp():
+    """Disconnect Playwright CDP without killing Chrome.
+
+    Removes all CDP instrumentation (Runtime.enable, Target.setAutoAttach,
+    addScriptToEvaluateOnNewDocument) so Chrome runs clean on the X display
+    for VNC interaction.  Called after each browser tool operation completes.
+
+    On a ``connect_over_cdp`` connection, ``browser.close()`` just closes
+    the WebSocket — it does NOT terminate the Chrome process.  The next
+    ``_get_page()`` call will reconnect via ``connect_over_cdp`` on demand.
+
+    This is critical for sites like Reddit whose login uses in-page modals
+    that rely on JavaScript event handlers.  Playwright's CDP sets
+    ``Target.setAutoAttach(waitForDebuggerOnStart=true)`` which can freeze
+    new targets and interfere with normal JS execution.
+    """
+    if os.environ.get("BROWSER_BACKEND", "persistent") != "persistent":
+        return
+    global _pw, _browser, _context, _page
+    try:
+        if _browser:
+            await _browser.close()
+    except Exception as e:
+        logger.debug("Error closing CDP connection: %s", e)
+    try:
+        if _pw:
+            await _pw.stop()
+    except Exception as e:
+        logger.debug("Error stopping Playwright process: %s", e)
+    _pw = _browser = _context = _page = None
+    _page_refs.clear()
+    _credential_filled_refs.clear()
+    logger.debug("Disconnected Playwright CDP — Chrome running clean")
+
+
 async def start_persistent_browser():
     """Start persistent browser + KasmVNC at container boot.
 
@@ -528,8 +547,36 @@ async def start_persistent_browser():
     os.environ["DISPLAY"] = ":99"
     logger.info("Started KasmVNC Xvnc on :99, web on :%s", listen_port)
 
-    # Start a lightweight window manager so popup windows (e.g. Reddit login)
-    # can be stacked, focused, and managed properly in the VNC session.
+    # Start a lightweight window manager for proper window stacking in VNC.
+    # Override the Dockerfile's openbox config to NOT maximize popup/dialog
+    # windows — sites like Reddit open login modals that should stay at their
+    # natural size, not be force-maximized over the main Chrome window.
+    _openbox_config = Path("/home/agent/.config/openbox/rc.xml")
+    try:
+        _openbox_config.parent.mkdir(parents=True, exist_ok=True)
+        _openbox_config.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<openbox_config xmlns="http://openbox.org/3.4/rc">\n'
+            "  <desktops><number>1</number></desktops>\n"
+            "  <applications>\n"
+            '    <application class="*">\n'
+            "      <decor>no</decor>\n"
+            "      <maximized>true</maximized>\n"
+            "    </application>\n"
+            "    <!-- Don't maximize popup/dialog windows -->\n"
+            '    <application role="pop-up">\n'
+            "      <maximized>no</maximized>\n"
+            "      <decor>yes</decor>\n"
+            "    </application>\n"
+            '    <application type="dialog">\n'
+            "      <maximized>no</maximized>\n"
+            "      <decor>yes</decor>\n"
+            "    </application>\n"
+            "  </applications>\n"
+            "</openbox_config>\n"
+        )
+    except OSError as e:
+        logger.debug("Could not write openbox config: %s", e)
     subprocess.Popen(
         ["openbox"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -700,6 +747,9 @@ async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -
 
     If the CDP session is dead (navigation limit, tunnel failure), automatically
     resets the browser and retries once with a fresh session.
+
+    In persistent mode, disconnects Playwright CDP after extracting content so
+    Chrome runs clean for VNC interaction (modals, popups, user clicks).
     """
     async with _page_op_lock:
         backend = os.environ.get("BROWSER_BACKEND", "persistent")
@@ -715,12 +765,15 @@ async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -
                 if wait_ms:
                     await page.wait_for_timeout(wait_ms)
                 text = await page.inner_text("body")
-                return {
+                result = {
                     "url": page.url,
                     "title": await page.title(),
                     "status": response.status if response else 0,
                     "content": _redact_credentials(text[:50000]),
                 }
+                # Disconnect CDP so Chrome runs clean for VNC interaction.
+                await _disconnect_cdp()
+                return result
             except Exception as e:
                 error_msg = str(e)
                 if attempt == 0 and _is_dead_session_error(error_msg):
@@ -733,7 +786,9 @@ async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -
                     else:
                         await browser_cleanup()
                     continue
+                await _disconnect_cdp()
                 return {"error": error_msg, "url": url}
+        await _disconnect_cdp()
         return {"error": "Navigation failed after session reset", "url": url}
 
 
@@ -965,8 +1020,10 @@ async def browser_screenshot(
                 # Update file size after drawing labels
                 result["size"] = save_path.stat().st_size
 
+            await _disconnect_cdp()
             return result
         except Exception as e:
+            await _disconnect_cdp()
             return {"error": str(e)}
 
 
@@ -990,7 +1047,11 @@ async def browser_screenshot(
     },
 )
 async def browser_click(selector: str = "", ref: str = "", *, mesh_client=None) -> dict:
-    """Click an element by ref or CSS selector."""
+    """Click an element by ref or CSS selector.
+
+    In persistent mode, disconnects CDP after clicking so any modals or
+    popups triggered by the click can render without CDP interference.
+    """
     if not selector and not ref:
         return {"error": "Provide either 'ref' (from browser_snapshot) or 'selector' (CSS)"}
     async with _page_op_lock:
@@ -1002,12 +1063,17 @@ async def browser_click(selector: str = "", ref: str = "", *, mesh_client=None) 
                     return {"error": f"Unknown ref '{ref}'. Call browser_snapshot first to get current refs."}
                 await locator.click(timeout=10000)
                 await page.wait_for_timeout(500)
-                return {"clicked": ref, "url": page.url}
+                result = {"clicked": ref, "url": page.url}
             else:
                 await page.click(selector, timeout=10000)
                 await page.wait_for_timeout(500)
-                return {"clicked": selector, "url": page.url}
+                result = {"clicked": selector, "url": page.url}
+            # Disconnect CDP so modals/popups triggered by the click
+            # can render without Playwright's CDP interference.
+            await _disconnect_cdp()
+            return result
         except Exception as e:
+            await _disconnect_cdp()
             return {"error": str(e), "selector": selector, "ref": ref}
 
 
@@ -1085,8 +1151,10 @@ async def browser_type(
                 result["ref"] = ref
             else:
                 result["selector"] = selector
+            await _disconnect_cdp()
             return result
         except Exception as e:
+            await _disconnect_cdp()
             return {"error": str(e), "selector": selector, "ref": ref}
 
 
@@ -1120,6 +1188,8 @@ async def browser_evaluate(script: str, *, mesh_client=None) -> dict:
                     _redact_credentials(item) if isinstance(item, str) else item
                     for item in result
                 ]
+            await _disconnect_cdp()
             return {"result": result}
         except Exception as e:
+            await _disconnect_cdp()
             return {"error": str(e)}
