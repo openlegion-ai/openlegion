@@ -5,13 +5,9 @@ A single browser instance is lazily initialized per agent process and reused.
 Supports four backends via BROWSER_BACKEND env var:
 basic, stealth, advanced, persistent.
 
-The persistent backend uses Google Chrome (via channel="chrome") with a
-minimal init script that only cleans up automation globals.  Real Chrome
-has authentic chrome.runtime, plugins, sec-ch-ua brands, TLS fingerprints,
-and proprietary codecs — JS-level fakes are counterproductive.
-Chrome's built-in DNS client is disabled via enterprise policy so DNS
-works in Docker containers.
-The stealth backend uses Camoufox (patched Firefox).
+The persistent backend uses Playwright Chromium with stealth flags and a
+JS init script for anti-detection.  The stealth backend uses Camoufox
+(patched Firefox).
 """
 
 from __future__ import annotations
@@ -209,19 +205,73 @@ async def _launch_advanced(mesh_client):
     return browser, context, page
 
 
-# Init script for Chrome for Testing — only cleans automation globals.
-# Chrome for Testing already has authentic browser properties.
 _STEALTH_INIT_SCRIPT = """
-// Clean up Playwright automation globals that anti-bot scripts scan for.
-// Chrome for Testing (v145+) already has authentic chrome.runtime, plugins,
-// sec-ch-ua brands, and navigator properties — JS-level fakes are
-// counterproductive because anti-bot systems detect the imperfect fakes
-// (wrong prototypes, missing methods) more easily than the real values.
+// Hide navigator.webdriver — backup for --disable-blink-features flag.
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined, configurable: true,
+});
+
+// Fake chrome.runtime (real Chrome has this, Playwright doesn't)
+if (!window.chrome) window.chrome = {};
+if (!window.chrome.runtime) {
+    window.chrome.runtime = {
+        connect: () => {},
+        sendMessage: () => {},
+        onMessage: {addListener: () => {}, removeListener: () => {}},
+        onConnect: {addListener: () => {}, removeListener: () => {}},
+    };
+}
+
+// Fake plugins array (automation Chromium reports empty)
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        const p = [
+            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer',
+             description: 'Portable Document Format', length: 1},
+            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+             description: '', length: 1},
+            {name: 'Native Client', filename: 'internal-nacl-plugin',
+             description: '', length: 2},
+        ];
+        p.refresh = () => {};
+        return p;
+    },
+});
+
+// Fix permissions.query
+const origQuery = window.navigator.permissions.query.bind(
+    window.navigator.permissions
+);
+window.navigator.permissions.query = (params) => {
+    if (params.name === 'notifications')
+        return Promise.resolve({state: Notification.permission});
+    return origQuery(params);
+};
+
+// Clean up automation globals
 delete window.__playwright;
 delete window.__pw_manual;
 delete window.__pwInitScripts;
 for (const key of Object.keys(window)) {
     if (key.startsWith('cdc_') || key.startsWith('__pw')) delete window[key];
+}
+
+// Fix navigator.languages
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+
+// Fake connection.rtt (0 in automation, ~50 in real browsers)
+if (navigator.connection) {
+    Object.defineProperty(navigator.connection, 'rtt', {get: () => 50});
+}
+
+// Spoof navigator.userActivation (X checks hasBeenActive)
+if (navigator.userActivation) {
+    Object.defineProperty(navigator.userActivation, 'hasBeenActive', {
+        get: () => true,
+    });
+    Object.defineProperty(navigator.userActivation, 'isActive', {
+        get: () => false,
+    });
 }
 """
 
@@ -263,14 +313,7 @@ def _cleanup_stale_profile():
 
 
 async def _launch_persistent():
-    """Launch Google Chrome with a persistent profile.
-
-    Uses the system-installed Google Chrome (``channel="chrome"``) for
-    authentic TLS fingerprints, Widevine DRM, proprietary codecs, and
-    genuine sec-ch-ua brands that pass anti-bot checks.  Chrome's built-in
-    async DNS client is disabled via enterprise policy in the Dockerfile
-    (BuiltInDnsClientEnabled=false + DnsOverHttpsMode=off) so DNS works
-    in Docker containers.
+    """Launch Playwright Chromium with a persistent profile.
 
     Uses ``launch_persistent_context`` so cookies and sessions survive
     browser restarts.  Returns ``(None, context, page)`` — persistent
@@ -291,22 +334,19 @@ async def _launch_persistent():
     Path(profile_dir).mkdir(parents=True, exist_ok=True)
     context = await _pw.chromium.launch_persistent_context(
         user_data_dir=profile_dir,
-        channel="chrome",
         headless=False,
-        no_viewport=True,
+        no_viewport=True,  # let browser use Xvnc's native resolution
         args=[
             "--disable-dev-shm-usage",
             "--no-first-run",
             "--disable-infobars",
             "--disable-blink-features=AutomationControlled",
-            # Match KasmVNC geometry — without a window manager, Chrome
-            # has no notion of "maximized" and may open at an arbitrary
-            # size.  Arkose Labs calculates challenge stage dimensions
-            # from window.innerWidth/innerHeight; mismatched or zero
-            # values crash it with "INVALID STAGE MAX > MIN".
-            "--window-size=1280,720",
-            "--window-position=0,0",
         ],
+        # Strip Playwright defaults that are detection vectors:
+        # --enable-automation: sets navigator.webdriver=true + shows infobar
+        # --disable-popup-blocking: real browsers block popups
+        # --disable-component-update: stealth driver indicator
+        # --disable-default-apps: real browsers load default apps
         ignore_default_args=[
             "--enable-automation",
             "--disable-popup-blocking",
@@ -316,21 +356,7 @@ async def _launch_persistent():
     )
     await context.add_init_script(_STEALTH_INIT_SCRIPT)
     page = context.pages[0] if context.pages else await context.new_page()
-
-    # Force Chrome window to fill the VNC display — without a window
-    # manager, --window-size/--window-position hints may not be respected.
-    try:
-        cdp = await context.new_cdp_session(page)
-        result = await cdp.send("Browser.getWindowForTarget")
-        await cdp.send("Browser.setWindowBounds", {
-            "windowId": result["windowId"],
-            "bounds": {"left": 0, "top": 0, "width": 1280, "height": 720},
-        })
-        await cdp.detach()
-    except Exception as e:
-        logger.debug("Could not set window bounds via CDP: %s", e)
-
-    logger.info("Browser backend: persistent (Google Chrome + KasmVNC)")
+    logger.info("Browser backend: persistent (Playwright Chromium + KasmVNC)")
     return None, context, page
 
 
