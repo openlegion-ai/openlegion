@@ -454,12 +454,11 @@ class TestDockerBackendVNCPort:
         env = run_call.kwargs.get("environment", {})
         assert "VNC_PORT" not in env
 
-    def test_containers_run_with_init(self):
-        """Containers must use init=True so tini reaps zombie children.
+    def test_containers_no_docker_init(self):
+        """Docker init=True must NOT be set — Dockerfile ENTRYPOINT tini handles it.
 
-        Without an init process, Chrome's subprocesses (network service,
-        GPU, renderer) become zombies under Python-as-PID-1, killing
-        Chrome's navigation layer.
+        Using both causes tini to run as a non-PID-1 child of docker-init,
+        where it cannot reap zombies.
         """
         import docker as _docker
 
@@ -477,5 +476,5 @@ class TestDockerBackendVNCPort:
         )
 
         run_call = mock_client.containers.run.call_args
-        assert run_call.kwargs.get("init") is True
+        assert "init" not in run_call.kwargs
 
