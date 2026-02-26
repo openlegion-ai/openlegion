@@ -1817,7 +1817,7 @@ class TestDashboardBroadcastProjectScoping:
             )
         assert resp.status_code == 200
         lines = resp.text.strip().split("\n")
-        agent_starts = [l for l in lines if "agent_start" in l]
+        agent_starts = [line for line in lines if "agent_start" in line]
         # Only gamma is unassigned
         assert len(agent_starts) == 1
         assert "gamma" in agent_starts[0]
