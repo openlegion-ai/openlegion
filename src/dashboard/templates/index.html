@@ -197,14 +197,14 @@
       <!-- Fleet Overview (merged: Fleet + Agents + Queues) -->
       <div x-show="activeTab === 'fleet' && !detailAgent" x-cloak>
         <!-- Fleet summary bar -->
-        <div class="flex items-center justify-between mb-4" x-show="agents.length > 0">
+        <div class="flex items-center justify-between mb-4" x-show="filteredAgents.length > 0" x-cloak>
           <h2 class="text-sm font-medium text-gray-400 flex items-center gap-1.5">
             <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-            <span x-text="agents.length"></span> agent<span x-show="agents.length !== 1">s</span>
+            <span x-text="filteredAgents.length"></span> agent<span x-show="filteredAgents.length !== 1">s</span>
             <span class="text-gray-600 mx-0.5">&middot;</span>
-            <span x-text="formatCost(fleetTotalCost)"></span> today
+            <span x-text="formatCost(filteredFleetCost)"></span> today
             <span class="text-gray-600 mx-0.5">&middot;</span>
-            <span x-text="fleetTotalTokens.toLocaleString()"></span> tokens
+            <span x-text="filteredFleetTokens.toLocaleString()"></span> tokens
           </h2>
           <div class="flex items-center gap-3">
             <button @click="addAgentMode = !addAgentMode; fetchSettings()"
@@ -218,7 +218,7 @@
           </div>
         </div>
         <!-- Fleet health summary strip -->
-        <div x-show="agents.length > 0" class="flex items-center gap-3 text-xs text-gray-500 mb-3" x-cloak>
+        <div x-show="filteredAgents.length > 0" class="flex items-center gap-3 text-xs text-gray-500 mb-3" x-cloak>
           <template x-if="fleetHealthCounts.healthy > 0">
             <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-400 inline-block"></span><span x-text="fleetHealthCounts.healthy + ' healthy'"></span></span>
           </template>
@@ -232,15 +232,37 @@
             <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-gray-600 inline-block"></span><span x-text="fleetHealthCounts.unknown + ' unknown'"></span></span>
           </template>
         </div>
+        <!-- Project scope switcher -->
+        <div x-show="agents.length > 0 && projects.length > 0" class="flex gap-0.5 bg-gray-800/40 rounded-lg p-0.5 mb-3 w-fit" x-cloak>
+          <button @click="switchProject(null)"
+            class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+            :class="!activeProject
+              ? 'bg-gray-700 text-white shadow-sm'
+              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
+            All
+          </button>
+          <template x-for="proj in projects" :key="proj.name">
+            <button @click="switchProject(proj.name)"
+              class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+              :class="activeProject === proj.name
+                ? 'bg-gray-700 text-white shadow-sm'
+                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+              :title="(proj.members || []).length + ' member' + ((proj.members || []).length !== 1 ? 's' : '')">
+              <span x-text="proj.name"></span>
+            </button>
+          </template>
+        </div>
         <!-- PROJECT.md collapsible banner -->
         <div x-show="agents.length > 0" class="bg-gray-900 border border-gray-800 rounded-lg mb-4" x-cloak>
           <div class="flex items-center justify-between px-4 py-2.5 cursor-pointer select-none" @click="projectBannerExpanded = !projectBannerExpanded">
             <div class="flex items-center gap-2">
               <svg class="w-3 h-3 text-gray-600 transition-transform duration-200" :class="projectBannerExpanded && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
               <span class="text-xs font-medium text-gray-400">PROJECT.md</span>
-              <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/30">fleet-wide</span>
+              <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/30"
+                x-text="activeProject || 'fleet-wide'"></span>
               <span x-show="projectExists" class="text-[10px] text-gray-600" x-text="projectContent.length.toLocaleString() + ' chars'"></span>
-              <span x-show="!projectExists && !projectLoading" class="text-[10px] text-gray-700 italic">not created</span>
+              <span x-show="!projectExists && !projectLoading" class="text-[10px] text-gray-700 italic"
+                x-text="activeProject ? activeProject + '/project.md not created' : 'not created'"></span>
             </div>
             <div class="flex items-center gap-2" @click.stop>
               <span x-show="projectLoading" class="text-gray-600 text-xs">
@@ -251,7 +273,9 @@
             </div>
           </div>
           <div x-show="projectBannerExpanded" x-transition class="px-4 pb-4">
-            <div class="text-xs text-gray-600 mb-2">Shared project context loaded into every agent's system prompt. Changes push to all running agents.</div>
+            <div class="text-xs text-gray-600 mb-2" x-text="activeProject
+              ? 'Project context for ' + activeProject + ' members. Changes push to project members only.'
+              : 'Shared project context loaded into every agent\'s system prompt. Changes push to all running agents.'"></div>
             <!-- Read-only view -->
             <div x-show="!projectEditing && !projectLoading">
               <div x-show="!projectContent && !projectExists" class="text-gray-600 text-sm py-3 text-center">No PROJECT.md found. Click Edit to create one.</div>
@@ -321,10 +345,12 @@
           </div>
         </div>
         <!-- Broadcast bar -->
-        <div x-show="agents.length > 1" class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4" x-cloak>
+        <div x-show="activeProject ? filteredAgents.length >= 1 : agents.length > 1" class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4" x-cloak>
           <div class="text-xs text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
             <svg class="w-3.5 h-3.5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-            Broadcast to <span class="text-gray-400" x-text="agents.length"></span> agents
+            <span x-text="activeProject
+              ? 'Broadcast to ' + filteredAgents.length + ' ' + activeProject + ' agent' + (filteredAgents.length !== 1 ? 's' : '')
+              : 'Broadcast to ' + agents.length + ' agents'"></span>
           </div>
           <div class="flex gap-2">
             <input type="text" x-model="broadcastMessage" @keydown.enter="if (!broadcastStreaming) sendBroadcast()"
@@ -382,7 +408,7 @@
           </div>
         </div>
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          <template x-for="agent in agents" :key="agent.id">
+          <template x-for="agent in filteredAgents" :key="agent.id">
             <div
               role="article"
               :aria-label="'Agent ' + agent.id"
@@ -414,6 +440,10 @@
                   </div>
                   <div class="text-xs text-gray-500 truncate mt-0.5" x-show="agent.role" :title="agent.role" x-text="agent.role"></div>
                   <div class="text-[10px] text-gray-600 truncate mt-0.5" x-show="agent.model" :title="agent.model" x-text="(agent.model || '').split('/').pop()"></div>
+                  <div x-show="agent.project && !activeProject" class="mt-0.5">
+                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800/80 text-gray-500 border border-gray-700/40"
+                      x-text="agent.project"></span>
+                  </div>
                 </div>
                 <div class="flex items-center gap-1.5 shrink-0">
                   <!-- Queue depth badge -->
@@ -485,6 +515,14 @@
               </div>
             </div>
           </template>
+        </div>
+        <!-- Empty state for project filter with no matching agents -->
+        <div x-show="activeProject && filteredAgents.length === 0 && agents.length > 0 && !loading" class="text-center py-12" x-cloak>
+          <div class="text-gray-500 text-sm mb-1">No running agents in <span class="text-gray-300 font-medium" x-text="activeProject"></span></div>
+          <div class="text-gray-600 text-xs">Project members may not be started yet</div>
+          <button @click="switchProject(null)" class="mt-3 text-xs px-3 py-1.5 rounded-md bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">
+            Show all agents
+          </button>
         </div>
         <!-- Loading state -->
         <div x-show="agents.length === 0 && loading" x-cloak>

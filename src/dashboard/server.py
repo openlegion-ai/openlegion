@@ -100,6 +100,8 @@ def create_dashboard_router(
         cost_list = cost_tracker.get_all_agents_spend("today")
         cost_map = {c["agent"]: c for c in cost_list}
 
+        agent_projects = cfg.get("_agent_projects", {})
+
         agents = []
         for agent_id, url in agent_registry.items():
             h = health_map.get(agent_id, {})
@@ -117,6 +119,7 @@ def create_dashboard_router(
                 "daily_tokens": c.get("tokens", 0),
                 "role": acfg.get("role", ""),
                 "model": acfg.get("model", default_model),
+                "project": agent_projects.get(agent_id),
             }
             if runtime:
                 agent_info = runtime.agents.get(agent_id, {})
@@ -579,9 +582,20 @@ def create_dashboard_router(
         message = body.get("message", "").strip()
         if not message:
             raise HTTPException(status_code=400, detail="Message is required")
-        from src.shared.utils import sanitize_for_prompt
         message = sanitize_for_prompt(message)
         import asyncio
+
+        targets = list(agent_registry.keys())
+        project = body.get("project") or ""
+        if not isinstance(project, str):
+            raise HTTPException(status_code=400, detail="project must be a string")
+        if project:
+            from src.cli.config import _load_projects
+            members = set(_load_projects().get(project, {}).get("members", []))
+            targets = [a for a in targets if a in members]
+        if not targets:
+            return {"responses": {}, "message": "No matching agents"}
+
         results = {}
         async def _send(aid: str) -> tuple[str, str]:
             try:
@@ -591,7 +605,7 @@ def create_dashboard_router(
                 return aid, data.get("response", "(no response)")
             except Exception as e:
                 return aid, f"Error: {e}"
-        tasks = [_send(aid) for aid in agent_registry]
+        tasks = [_send(aid) for aid in targets]
         for coro in asyncio.as_completed(tasks):
             aid, resp = await coro
             results[aid] = resp
@@ -612,6 +626,13 @@ def create_dashboard_router(
         import json as _json
 
         agents = list(agent_registry.keys())
+        project = body.get("project") or ""
+        if not isinstance(project, str):
+            raise HTTPException(status_code=400, detail="project must be a string")
+        if project:
+            from src.cli.config import _load_projects
+            members = set(_load_projects().get(project, {}).get("members", []))
+            agents = [a for a in agents if a in members]
         if not agents:
             return {"responses": {}, "message": "No agents registered"}
 
