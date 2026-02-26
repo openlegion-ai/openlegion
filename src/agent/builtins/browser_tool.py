@@ -206,73 +206,18 @@ async def _launch_advanced(mesh_client):
     return browser, context, page
 
 
+# Minimal init script for Patchright + real Chrome.
+# Real Chrome already has genuine navigator.plugins, chrome.runtime,
+# navigator.webdriver=undefined, etc.  Overriding these with shallow fakes
+# is counterproductive — anti-bot deep inspection detects the inconsistency.
+# Only clean up automation globals that Patchright/Playwright may inject.
 _STEALTH_INIT_SCRIPT = """
-// Hide navigator.webdriver — backup for --disable-blink-features flag.
-Object.defineProperty(navigator, 'webdriver', {
-    get: () => undefined, configurable: true,
-});
-
-// Fake chrome.runtime (real Chrome has this, Playwright doesn't)
-if (!window.chrome) window.chrome = {};
-if (!window.chrome.runtime) {
-    window.chrome.runtime = {
-        connect: () => {},
-        sendMessage: () => {},
-        onMessage: {addListener: () => {}, removeListener: () => {}},
-        onConnect: {addListener: () => {}, removeListener: () => {}},
-    };
-}
-
-// Fake plugins array (automation Chromium reports empty)
-Object.defineProperty(navigator, 'plugins', {
-    get: () => {
-        const p = [
-            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer',
-             description: 'Portable Document Format', length: 1},
-            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
-             description: '', length: 1},
-            {name: 'Native Client', filename: 'internal-nacl-plugin',
-             description: '', length: 2},
-        ];
-        p.refresh = () => {};
-        return p;
-    },
-});
-
-// Fix permissions.query
-const origQuery = window.navigator.permissions.query.bind(
-    window.navigator.permissions
-);
-window.navigator.permissions.query = (params) => {
-    if (params.name === 'notifications')
-        return Promise.resolve({state: Notification.permission});
-    return origQuery(params);
-};
-
-// Clean up automation globals
+// Clean up automation globals that Patchright/Playwright inject
 delete window.__playwright;
 delete window.__pw_manual;
 delete window.__pwInitScripts;
 for (const key of Object.keys(window)) {
     if (key.startsWith('cdc_') || key.startsWith('__pw')) delete window[key];
-}
-
-// Fix navigator.languages
-Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-
-// Fake connection.rtt (0 in automation, ~50 in real browsers)
-if (navigator.connection) {
-    Object.defineProperty(navigator.connection, 'rtt', {get: () => 50});
-}
-
-// Spoof navigator.userActivation (X checks hasBeenActive)
-if (navigator.userActivation) {
-    Object.defineProperty(navigator.userActivation, 'hasBeenActive', {
-        get: () => true,
-    });
-    Object.defineProperty(navigator.userActivation, 'isActive', {
-        get: () => false,
-    });
 }
 """
 
