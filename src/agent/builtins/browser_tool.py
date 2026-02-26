@@ -305,12 +305,17 @@ async def _launch_persistent():
     to cover detection vectors beyond CDP (chrome.runtime, plugins, etc.).
     """
     global _pw
+    # Use standard Playwright for the persistent backend.  Patchright's CDP
+    # patches break Chrome's navigation (ERR_NAME_NOT_RESOLVED for all URLs
+    # including IPs) when Chrome is launched within an asyncio event loop
+    # like uvicorn's.  Standard Playwright + the JS stealth init script
+    # below provides adequate anti-detection for most sites.
     try:
-        from patchright.async_api import async_playwright
+        from playwright.async_api import async_playwright
     except ImportError:
         raise RuntimeError(
-            "patchright is not installed. The agent container must include "
-            "patchright and chromium. See Dockerfile.agent."
+            "playwright is not installed. The agent container must include "
+            "playwright and chromium. See Dockerfile.agent."
         )
     _ensure_xvfb()
     _cleanup_stale_profile()
@@ -326,9 +331,6 @@ async def _launch_persistent():
             "--no-first-run",
             "--disable-infobars",
         ],
-        # Do NOT set custom user_agent — Patchright docs warn against it.
-        # A mismatched UA is a detection vector.  The browser's real UA
-        # matches its actual version and capabilities.
     )
     await context.add_init_script(_STEALTH_INIT_SCRIPT)
     page = context.pages[0] if context.pages else await context.new_page()
@@ -465,6 +467,7 @@ _CDP_DEAD_SESSION_PATTERNS = (
     "Session closed",
     "Browser has been closed",
     "Connection refused",
+    "Connection closed",
 )
 
 

@@ -454,3 +454,28 @@ class TestDockerBackendVNCPort:
         env = run_call.kwargs.get("environment", {})
         assert "VNC_PORT" not in env
 
+    def test_containers_run_with_init(self):
+        """Containers must use init=True so tini reaps zombie children.
+
+        Without an init process, Chrome's subprocesses (network service,
+        GPU, renderer) become zombies under Python-as-PID-1, killing
+        Chrome's navigation layer.
+        """
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        backend.start_agent(
+            agent_id="test-init",
+            role="test",
+            skills_dir="",
+        )
+
+        run_call = mock_client.containers.run.call_args
+        assert run_call.kwargs.get("init") is True
+

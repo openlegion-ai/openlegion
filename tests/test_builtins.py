@@ -1369,6 +1369,11 @@ class TestIsDeadSessionError:
 
         assert _is_dead_session_error("Connection refused")
 
+    def test_detects_connection_closed(self):
+        from src.agent.builtins.browser_tool import _is_dead_session_error
+
+        assert _is_dead_session_error("Connection closed while reading from the driver")
+
     def test_ignores_timeout(self):
         from src.agent.builtins.browser_tool import _is_dead_session_error
 
