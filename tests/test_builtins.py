@@ -2268,17 +2268,20 @@ class TestPersistentBrowserBackend:
             return m
 
         with patch.dict(os.environ, {"BROWSER_BACKEND": "persistent"}):
-            with patch.object(bt, "_get_page", new_callable=AsyncMock) as mock_get, \
+            with patch.object(bt, "_find_chromium_binary", return_value="/usr/bin/chromium"), \
                  patch("subprocess.Popen", side_effect=mock_popen), \
-                 patch("asyncio.sleep", new_callable=AsyncMock):
+                 patch("asyncio.sleep", new_callable=AsyncMock), \
+                 patch("pathlib.Path.mkdir"):
                 await bt.start_persistent_browser()
 
-            mock_get.assert_awaited_once()
-            # Two Popen calls: KasmVNC Xvnc + openbox window manager
-            assert len(popen_calls) == 2
+            # Three Popen calls: KasmVNC Xvnc + openbox + Chrome subprocess
+            assert len(popen_calls) == 3
             xvnc_cmd = popen_calls[0]
             assert "Xvnc" in xvnc_cmd[0]
             assert popen_calls[1] == ["openbox"]
+            chrome_cmd = popen_calls[2]
+            assert "/usr/bin/chromium" in chrome_cmd[0]
+            assert "--remote-debugging-port=9222" in chrome_cmd
             # Default web port 6080 passed via -websocketPort
             assert "-websocketPort" in xvnc_cmd
             assert "6080" in xvnc_cmd
@@ -2307,9 +2310,10 @@ class TestPersistentBrowserBackend:
 
         env = {"BROWSER_BACKEND": "persistent", "VNC_PORT": "9999"}
         with patch.dict(os.environ, env):
-            with patch.object(bt, "_get_page", new_callable=AsyncMock), \
+            with patch.object(bt, "_find_chromium_binary", return_value="/usr/bin/chromium"), \
                  patch("subprocess.Popen", side_effect=mock_popen), \
-                 patch("asyncio.sleep", new_callable=AsyncMock):
+                 patch("asyncio.sleep", new_callable=AsyncMock), \
+                 patch("pathlib.Path.mkdir"):
                 await bt.start_persistent_browser()
 
             # KasmVNC should use port 9999

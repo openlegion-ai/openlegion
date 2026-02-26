@@ -33,6 +33,7 @@ _page_refs: dict[str, object] = {}
 _credential_filled_refs: set[str] = set()  # refs that had $CRED{} typed into them
 _page_op_lock = asyncio.Lock()  # serializes all page operations (Playwright pages aren't concurrent-safe)
 _vnc_proc = None  # Xvnc (KasmVNC) subprocess (persistent backend)
+_chrome_proc = None  # Chrome subprocess (persistent backend, launched without Playwright)
 
 _ACTIONABLE_ROLES = frozenset({
     "button", "link", "textbox", "checkbox", "radio", "combobox",
@@ -312,12 +313,71 @@ def _cleanup_stale_profile():
                 logger.debug("Failed to remove %s: %s", lock_path, e)
 
 
-async def _launch_persistent():
-    """Launch Playwright Chromium with a persistent profile.
+def _find_chromium_binary() -> str:
+    """Find the Chromium binary installed by Playwright."""
+    import glob as globmod
 
-    Uses ``launch_persistent_context`` so cookies and sessions survive
-    browser restarts.  Returns ``(None, context, page)`` — persistent
-    contexts have no separate Browser object.
+    for pattern in [
+        "/opt/pw-browsers/chromium-*/chrome-linux/chrome",
+        "/opt/pw-browsers/chrome-*/chrome-linux/chrome",
+    ]:
+        matches = sorted(globmod.glob(pattern))
+        if matches:
+            return matches[-1]
+    # Fallback to system-installed browsers
+    for name in ["chromium-browser", "chromium", "google-chrome"]:
+        try:
+            result = subprocess.run(
+                ["which", name], capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+    raise RuntimeError("No Chrome/Chromium binary found in container")
+
+
+def _launch_chrome_subprocess():
+    """Launch Chrome directly as a subprocess — no Playwright, no CDP.
+
+    The browser runs clean on the X display for VNC interaction.  Playwright
+    connects later via ``--remote-debugging-port`` only when the agent needs
+    programmatic access (screenshots, navigation, etc.).
+
+    This separation is critical: Playwright's CDP instrumentation
+    (Runtime.enable, Target.setAutoAttach with waitForDebuggerOnStart)
+    causes popup freezes and anti-bot detection on sites like Reddit.
+    """
+    global _chrome_proc
+
+    chrome_bin = _find_chromium_binary()
+    profile_dir = "/data/browser_profile"
+    Path(profile_dir).mkdir(parents=True, exist_ok=True)
+
+    _chrome_proc = subprocess.Popen(
+        [
+            chrome_bin,
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-infobars",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-popup-blocking",
+            "--window-size=1280,720",
+            "--window-position=0,0",
+            "--remote-debugging-port=9222",
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    logger.info("Launched Chrome (PID %d) for VNC — no CDP attached", _chrome_proc.pid)
+
+
+async def _launch_persistent():
+    """Connect Playwright to the already-running Chrome via CDP.
+
+    Chrome was launched directly by ``_launch_chrome_subprocess()`` during
+    ``start_persistent_browser()``.  This function connects Playwright
+    on-demand when the agent needs programmatic browser control.
     """
     global _pw
     try:
@@ -327,37 +387,14 @@ async def _launch_persistent():
             "playwright is not installed. The agent container must include "
             "playwright and chromium. See Dockerfile.agent."
         )
-    _ensure_xvfb()
-    _cleanup_stale_profile()
     _pw = await async_playwright().start()
-    profile_dir = "/data/browser_profile"
-    Path(profile_dir).mkdir(parents=True, exist_ok=True)
-    context = await _pw.chromium.launch_persistent_context(
-        user_data_dir=profile_dir,
-        headless=False,
-        no_viewport=True,  # let browser use Xvnc's native resolution
-        args=[
-            "--no-first-run",
-            "--disable-infobars",
-            "--disable-blink-features=AutomationControlled",
-        ],
-        # Strip Playwright defaults that are detection vectors:
-        # --enable-automation: sets navigator.webdriver=true + shows infobar
-        # --disable-component-update: stealth driver indicator
-        # --disable-default-apps: real browsers load default apps
-        # NOTE: --disable-popup-blocking is kept (Playwright default) because
-        # Reddit's login flow uses window.open() — blocking popups silently
-        # prevents the login modal from appearing.
-        ignore_default_args=[
-            "--enable-automation",
-            "--disable-component-update",
-            "--disable-default-apps",
-        ],
+    browser = await _pw.chromium.connect_over_cdp(
+        "http://localhost:9222", timeout=10000,
     )
-    await context.add_init_script(_STEALTH_INIT_SCRIPT)
+    context = browser.contexts[0]
     page = context.pages[0] if context.pages else await context.new_page()
-    logger.info("Browser backend: persistent (Playwright Chromium + KasmVNC)")
-    return None, context, page
+    logger.info("Playwright connected to Chrome via CDP (agent control)")
+    return browser, context, page
 
 
 async def _browser_cleanup_soft():
@@ -366,7 +403,8 @@ async def _browser_cleanup_soft():
     Used by ``browser_reset`` in persistent mode to restart the browser
     while keeping the VNC session and profile directory intact.
     """
-    global _pw, _browser, _context, _page
+    global _pw, _browser, _context, _page, _chrome_proc
+    # Disconnect Playwright CDP session
     try:
         if _page and not _page.is_closed():
             await _page.close()
@@ -387,10 +425,25 @@ async def _browser_cleanup_soft():
             await _pw.stop()
     except Exception as e:
         logger.debug("Error stopping playwright (soft): %s", e)
+    # Kill Chrome subprocess
+    if _chrome_proc:
+        try:
+            _chrome_proc.terminate()
+            _chrome_proc.wait(timeout=5)
+        except Exception as e:
+            logger.debug("Error stopping Chrome subprocess: %s", e)
+        _chrome_proc = None
     _pw = _browser = _context = _page = None
     _page_refs.clear()
     _credential_filled_refs.clear()
     _cleanup_stale_profile()
+    # Relaunch Chrome clean (no Playwright) for VNC — only in persistent mode
+    if os.environ.get("BROWSER_BACKEND") == "persistent":
+        try:
+            _launch_chrome_subprocess()
+            await asyncio.sleep(1)
+        except RuntimeError:
+            logger.debug("Could not relaunch Chrome subprocess (not in container?)")
 
 
 async def start_persistent_browser():
@@ -437,20 +490,23 @@ async def start_persistent_browser():
 
     # Start a lightweight window manager so popup windows (e.g. Reddit login)
     # can be stacked, focused, and managed properly in the VNC session.
-    # Without a WM, popup windows hide behind the main browser window and
-    # subsequent window.open() calls reuse the hidden window silently.
     subprocess.Popen(
         ["openbox"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
 
-    # Launch browser (DISPLAY is now set, _launch_persistent skips Xvfb)
-    await _get_page()
+    # Launch Chrome directly — no Playwright, no CDP instrumentation.
+    # The browser runs clean for VNC interaction.  Playwright connects
+    # later (via _get_page → _launch_persistent → connect_over_cdp)
+    # only when the agent needs programmatic control.
+    _cleanup_stale_profile()
+    _launch_chrome_subprocess()
+    await asyncio.sleep(1)  # let Chrome initialize before agent actions
 
 
 async def browser_cleanup():
     """Release browser resources. Called on agent shutdown."""
-    global _pw, _camoufox_cm, _browser, _context, _page, _vnc_proc
+    global _pw, _camoufox_cm, _browser, _context, _page, _vnc_proc, _chrome_proc
     try:
         if _page and not _page.is_closed():
             await _page.close()
@@ -476,6 +532,12 @@ async def browser_cleanup():
             await _pw.stop()
     except Exception as e:
         logger.debug("Error stopping playwright: %s", e)
+    if _chrome_proc:
+        try:
+            _chrome_proc.terminate()
+            _chrome_proc.wait(timeout=5)
+        except Exception as e:
+            logger.debug("Error stopping Chrome: %s", e)
     if _vnc_proc:
         try:
             _vnc_proc.terminate()
@@ -483,7 +545,7 @@ async def browser_cleanup():
         except Exception as e:
             logger.debug("Error stopping Xvnc: %s", e)
     _pw = _camoufox_cm = _browser = _context = _page = None
-    _vnc_proc = None
+    _vnc_proc = _chrome_proc = None
     _page_refs.clear()
     _credential_filled_refs.clear()
 
