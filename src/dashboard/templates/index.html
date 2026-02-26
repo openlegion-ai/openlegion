@@ -259,10 +259,12 @@
             title="Create project">+</button>
         </div>
         <!-- Create project form -->
-        <div x-show="showProjectForm" x-cloak class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
+        <div x-show="showProjectForm" x-cloak class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4"
+          @keydown.escape.window="showProjectForm = false">
           <div class="text-xs font-medium text-gray-300 mb-3">Create Project</div>
           <div class="flex flex-col gap-2">
-            <input type="text" x-model="newProjectName" class="dash-input text-sm" placeholder="Project name" @keydown.enter="createProject()">
+            <input type="text" x-model="newProjectName" class="dash-input text-sm" placeholder="Project name (letters, numbers, hyphens)"
+              @keydown.enter="createProject()" pattern="[a-zA-Z0-9_-]+">
             <input type="text" x-model="newProjectDesc" class="dash-input text-sm" placeholder="Description (optional)" @keydown.enter="createProject()">
             <div class="flex gap-2 justify-end mt-1">
               <button @click="showProjectForm = false; newProjectName = ''; newProjectDesc = ''"

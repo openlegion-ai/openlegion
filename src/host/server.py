@@ -560,11 +560,26 @@ def create_mesh_app(
             result["budget"] = cost_tracker.check_budget(agent_id)
 
         if section in ("fleet", "all"):
-            result["fleet"] = [
-                {"id": aid, "role": router.agent_roles.get(aid, "")}
-                for aid in router.agent_registry
-                if permissions.can_message(agent_id, aid) or aid == agent_id
-            ]
+            # Scope fleet list by project: project agents see only peers,
+            # standalone agents see only themselves.
+            from src.cli.config import _load_projects
+            _projects = _load_projects()
+            _agent_project_members: set[str] | None = None
+            for _pdata in _projects.values():
+                if agent_id in _pdata.get("members", []):
+                    _agent_project_members = set(_pdata["members"])
+                    break
+
+            if _agent_project_members is not None:
+                result["fleet"] = [
+                    {"id": aid, "role": router.agent_roles.get(aid, "")}
+                    for aid in router.agent_registry
+                    if aid in _agent_project_members
+                ]
+            else:
+                result["fleet"] = [
+                    {"id": agent_id, "role": router.agent_roles.get(agent_id, "")}
+                ]
 
         if section in ("cron", "all") and cron_scheduler:
             result["cron"] = [

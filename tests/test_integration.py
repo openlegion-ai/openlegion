@@ -787,8 +787,10 @@ def test_introspect_returns_permissions(tmp_path):
     bb.close()
 
 
-def test_introspect_returns_fleet(tmp_path):
-    """GET /mesh/introspect section=fleet lists visible agents (self + messageable)."""
+def test_introspect_returns_fleet_standalone(tmp_path):
+    """GET /mesh/introspect section=fleet for standalone agent shows only self."""
+    from unittest.mock import patch
+
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
     perms = PermissionMatrix.__new__(PermissionMatrix)
@@ -798,21 +800,59 @@ def test_introspect_returns_fleet(tmp_path):
     router = MessageRouter(permissions=perms, agent_registry={})
     router.register_agent("alice", "http://localhost:8401")
     router.register_agent("bob", "http://localhost:8402")
+
+    app = create_mesh_app(bb, pubsub, router, perms)
+    client = TestClient(app)
+
+    # alice is standalone (not in any project) — sees only herself
+    with patch("src.cli.config._load_projects", return_value={}):
+        response = client.get(
+            "/mesh/introspect",
+            params={"section": "fleet"},
+            headers={"X-Agent-ID": "alice"},
+        )
+    assert response.status_code == 200
+    data = response.json()
+    ids = [a["id"] for a in data["fleet"]]
+    assert ids == ["alice"]
+
+    bb.close()
+
+
+def test_introspect_returns_fleet_project_scoped(tmp_path):
+    """GET /mesh/introspect section=fleet for project agent shows project peers."""
+    from unittest.mock import patch
+
+    import yaml
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+    router.register_agent("alice", "http://localhost:8401")
+    router.register_agent("bob", "http://localhost:8402")
     router.register_agent("carol", "http://localhost:8403")
 
     app = create_mesh_app(bb, pubsub, router, perms)
     client = TestClient(app)
 
-    response = client.get(
-        "/mesh/introspect",
-        params={"section": "fleet"},
-        headers={"X-Agent-ID": "alice"},
+    projects_dir = tmp_path / "projects"
+    proj_dir = projects_dir / "teamX"
+    proj_dir.mkdir(parents=True)
+    (proj_dir / "metadata.yaml").write_text(
+        yaml.dump({"name": "teamX", "members": ["alice", "bob"]})
     )
+
+    with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        response = client.get(
+            "/mesh/introspect",
+            params={"section": "fleet"},
+            headers={"X-Agent-ID": "alice"},
+        )
     assert response.status_code == 200
     data = response.json()
-    assert "fleet" in data
     ids = [a["id"] for a in data["fleet"]]
-    # alice sees herself and bob (can_message), but NOT carol
     assert "alice" in ids
     assert "bob" in ids
     assert "carol" not in ids

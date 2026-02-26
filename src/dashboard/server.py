@@ -915,7 +915,7 @@ def create_dashboard_router(
                     )
                     return aid, True
                 except Exception as e:
-                    logger.warning(f"Failed to push PROJECT.md to {aid}: {e}")
+                    logger.warning("Failed to push PROJECT.md to %s: %s", aid, e)
                     return aid, False
 
             tasks = [_push(aid) for aid in push_targets]

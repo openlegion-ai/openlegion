@@ -995,6 +995,7 @@ function dashboard() {
       this.activeProject = name;
       this.projectEditing = false;
       this.projectEditBuffer = '';
+      this.projectBannerExpanded = false;
       this.broadcastResults = null;
       this.broadcastSentMessage = '';
       this.showProjectForm = false;
@@ -1004,6 +1005,10 @@ function dashboard() {
     async createProject() {
       const name = this.newProjectName.trim();
       if (!name) return;
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) {
+        this.showToast('Project name must start with a letter or number and contain only letters, numbers, hyphens, underscores');
+        return;
+      }
       this.projectFormLoading = true;
       try {
         const resp = await fetch(`${window.__config.apiBase}/projects`, {
@@ -1033,6 +1038,8 @@ function dashboard() {
           method: 'DELETE',
         });
         if (resp.ok) {
+          this.projectEditing = false;
+          this.projectEditBuffer = '';
           await this.fetchProjects();
           if (this.activeProject === name) this.switchProject(null);
           this.showToast(`Project "${name}" deleted`);
@@ -1939,8 +1946,8 @@ function dashboard() {
       // Quick actions
       const actions = [
         { label: 'Add Agent', desc: 'Open add agent form', keywords: ['add', 'agent', 'new', 'create'], action: () => { this.switchTab('fleet'); this.addAgentMode = true; this.fetchSettings(); } },
-        { label: 'Broadcast', desc: 'Send message to all agents', keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); this.$nextTick(() => { const el = document.querySelector('[x-model="broadcastMessage"]'); if (el) el.focus(); }); } },
-        { label: 'Edit PROJECT.md', desc: 'Edit project context' + (this.activeProject ? ` (${this.activeProject})` : ' (fleet-wide)'), keywords: ['project', 'edit', 'context'], action: () => { this.switchTab('fleet'); this.projectBannerExpanded = true; this.startProjectEdit(); } },
+        { label: 'Broadcast', desc: this.activeProject ? `Broadcast to ${this.activeProject} agents` : 'Send message to all agents', keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); this.$nextTick(() => { const el = document.querySelector('[x-model="broadcastMessage"]'); if (el) el.focus(); }); } },
+        ...(this.activeProject ? [{ label: 'Edit PROJECT.md', desc: `Edit ${this.activeProject} project context`, keywords: ['project', 'edit', 'context'], action: () => { this.switchTab('fleet'); this.projectBannerExpanded = true; this.startProjectEdit(); } }] : []),
       ];
       for (const act of actions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {

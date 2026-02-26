@@ -1574,6 +1574,8 @@ class TestDashboardProjectCRUD:
         data = resp.json()
         assert data["added"] is True
         assert data["agent"] == "alpha"
+        assert "restarted" in data
+        assert isinstance(data["restarted"], bool)
 
     def test_add_member_missing_agent(self):
         """POST /api/projects/{name}/members without agent returns 400."""
@@ -1596,6 +1598,8 @@ class TestDashboardProjectCRUD:
         assert resp.status_code == 200
         data = resp.json()
         assert data["removed"] is True
+        assert "restarted" in data
+        assert isinstance(data["restarted"], bool)
 
     def test_remove_member_not_found(self):
         """DELETE /api/projects/{name}/members/{agent} for nonexistent project returns 400."""
