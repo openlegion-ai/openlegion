@@ -245,6 +245,11 @@ class DockerBackend(RuntimeBackend):
             "mem_limit": mem_limit,
             "cpu_quota": cpu_quota,
             "security_opt": ["no-new-privileges"],
+            # Use public DNS servers so Chrome can resolve external domains.
+            # Docker Desktop's internal forwarder (192.168.65.7) is unreliable
+            # with Chrome's built-in async DNS client.  Container-name
+            # resolution still works via Docker's embedded DNS at 127.0.0.11.
+            "dns": ["8.8.8.8", "1.1.1.1"],
         }
 
         if self.use_host_network:
