@@ -381,7 +381,10 @@ def _launch_chrome_subprocess():
             "--disable-features=AsyncDns",
             "--no-first-run",
             "--no-default-browser-check",
-            "--disable-infobars",
+            # --test-type suppresses the "unsupported command-line flag" infobar.
+            # --disable-infobars was deprecated and ironically triggers its own
+            # warning banner in newer Chrome, which shifts page content down.
+            "--test-type",
             "--disable-blink-features=AutomationControlled",
             "--disable-popup-blocking",
             "--window-size=1280,720",
@@ -414,6 +417,22 @@ async def _launch_persistent():
     )
     context = browser.contexts[0]
     page = context.pages[0] if context.pages else await context.new_page()
+
+    # Override Playwright's Target.setAutoAttach — by default Playwright sets
+    # waitForDebuggerOnStart:true which freezes every new target (including
+    # popup windows from window.open()).  Reddit's login flow opens a popup
+    # that hangs indefinitely because it's waiting for the debugger to resume.
+    try:
+        cdp = await context.new_cdp_session(page)
+        await cdp.send("Target.setAutoAttach", {
+            "autoAttach": True,
+            "waitForDebuggerOnStart": False,
+            "flatten": True,
+        })
+        await cdp.detach()
+    except Exception as e:
+        logger.debug("Could not override Target.setAutoAttach: %s", e)
+
     logger.info("Playwright connected to Chrome via CDP (agent control)")
     return browser, context, page
 
