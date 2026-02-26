@@ -16,9 +16,7 @@ from src.cli.config import (
     _edit_agent_interactive,
     _get_default_model,
     _load_config,
-    _pick_browser_interactive,
     _pick_model_interactive,
-    _prompt_brightdata_key,
 )
 from src.cli.formatting import (
     agent_prompt,
@@ -254,18 +252,13 @@ class REPLSession:
         )
         default_model = _get_default_model()
         model = _pick_model_interactive(default_model, label="default")
-        browser = _pick_browser_interactive()
 
-        if browser == "advanced":
-            _prompt_brightdata_key()
-
-        _create_agent(new_name, new_desc, model, browser_backend=browser)
+        _create_agent(new_name, new_desc, model)
         # Reload permissions so the mesh grants the new agent API access
         self.ctx.permissions.reload()
         agent_cfg_data = _load_config().get("agents", {}).get(new_name, {})
         skills_dir = os.path.abspath(agent_cfg_data.get("skills_dir", ""))
         add_mcp_servers = agent_cfg_data.get("mcp_servers") or None
-        add_browser_backend = agent_cfg_data.get("browser_backend", "")
         add_thinking = agent_cfg_data.get("thinking", "")
         url = self.ctx.runtime.start_agent(
             agent_id=new_name,
@@ -274,7 +267,6 @@ class REPLSession:
             system_prompt=agent_cfg_data.get("system_prompt", ""),
             model=agent_cfg_data.get("model", model),
             mcp_servers=add_mcp_servers,
-            browser_backend=add_browser_backend,
             thinking=add_thinking,
         )
         self.ctx.router.register_agent(new_name, url, role=new_desc)
@@ -370,14 +362,13 @@ class REPLSession:
         for name in self.ctx.agents:
             agent_cfg = agents_cfg.get(name, {})
             model = agent_cfg.get("model", default_model)
-            browser = agent_cfg.get("browser_backend", "basic") or "basic"
             project = agent_projects.get(name, "")
             proj_label = f"  [{project}]" if project else ""
             try:
                 data = self.ctx.transport.request_sync(name, "GET", "/status", timeout=3)
                 state = data.get("state", "unknown")
                 tasks = data.get("tasks_completed", 0)
-                line = f"  {name:<20} {state:<12} {tasks} tasks    model: {model:<20} browser: {browser}"
+                line = f"  {name:<20} {state:<12} {tasks} tasks    model: {model}"
                 click.echo(line + proj_label)
             except Exception:
                 click.echo(f"  {name:<20} unreachable{proj_label}")
@@ -764,7 +755,7 @@ class REPLSession:
     def _cmd_addkey(self, arg: str) -> None:
         if not arg.strip():
             click.echo("  Known services: anthropic, openai, gemini, deepseek, moonshot, minimax, xai, groq, zai")
-            click.echo("  Other keys: brave_search, brightdata_cdp_url, or any custom name")
+            click.echo("  Other keys: brave_search, or any custom name")
             service = click.prompt("Service name")
         else:
             service = arg.split()[0]
@@ -859,7 +850,7 @@ class REPLSession:
                 )
             click.echo("Applied.")
         else:
-            # Model, browser, description, system prompt — restart the container.
+            # Model, description, system prompt — restart the container.
             self._restart_agent(name)
 
     def _restart_agent(self, name: str) -> None:
@@ -881,7 +872,6 @@ class REPLSession:
         skills_dir = os.path.abspath(agent_cfg.get("skills_dir", ""))
         agent_model = agent_cfg.get("model", default_model)
         agent_mcp_servers = agent_cfg.get("mcp_servers") or None
-        agent_browser_backend = agent_cfg.get("browser_backend", "")
         agent_thinking = agent_cfg.get("thinking", "")
 
         # Start new container
@@ -892,7 +882,6 @@ class REPLSession:
             system_prompt=agent_cfg.get("system_prompt", ""),
             model=agent_model,
             mcp_servers=agent_mcp_servers,
-            browser_backend=agent_browser_backend,
             thinking=agent_thinking,
         )
 

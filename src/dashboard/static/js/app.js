@@ -5,7 +5,7 @@
  * Real-time updates via WebSocket + periodic REST polling.
  */
 const _IDENTITY_TABS = [
-  { id: 'config', label: 'Config', file: null, access: 'user', desc: 'Model, role, browser backend, and daily budget.' },
+  { id: 'config', label: 'Config', file: null, access: 'user', desc: 'Model, role, and daily budget.' },
   { id: 'identity', label: 'Identity', file: null, access: 'user', desc: 'Agent personality and instructions.' },
   { id: 'memory', label: 'Memory', file: null, access: 'agent', desc: 'Long-term memory and autonomous heartbeat rules.' },
   { id: 'logs', label: 'Logs', file: null, access: 'auto', desc: 'Activity logs and learned corrections.' },
@@ -63,11 +63,10 @@ function dashboard() {
     agentConfigs: {},
     editForm: {},
     availableModels: [],
-    availableBrowsers: [],
 
     // Add agent
     addAgentMode: false,
-    addAgentForm: { name: '', role: '', model: '', browser_backend: '' },
+    addAgentForm: { name: '', role: '', model: '' },
     addAgentLoading: false,
 
     // Blackboard
@@ -301,34 +300,6 @@ function dashboard() {
       this.detailAgent = null;
       this.selectedAgent = null;
       this._pushUrl(false);
-    },
-
-    // ── Helpers ────────────────────────────────────────────
-
-    async _ensureBrightDataKey(browserBackend) {
-      if (browserBackend !== 'advanced') return true;
-      if (this.settingsData && (this.settingsData?.credentials?.names || []).includes('brightdata_cdp_url')) return true;
-      const url = prompt(
-        'Bright Data CDP URL required for Advanced browsing.\n\n' +
-        'Sign up at https://brightdata.com/products/scraping-browser and paste your wss:// URL below.\n' +
-        'Leave empty to skip (agent will fall back to basic browser).'
-      );
-      if (url === null) return false; // Cancel pressed
-      if (!url.trim()) return true;   // Empty = skip
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/credentials`, {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ service: 'brightdata_cdp_url', key: url.trim() }),
-        });
-        if (resp.ok) {
-          this.showToast('Bright Data credential saved');
-          await this.fetchSettings();
-        } else {
-          const err = await resp.json();
-          this.showToast(`Error saving credential: ${err.detail || 'unknown'}`);
-        }
-      } catch (e) { this.showToast(`Error: ${e.message}`); }
-      return true;
     },
 
     // ── Computed ───────────────────────────────────────────
@@ -1153,7 +1124,6 @@ function dashboard() {
       else if (creds.length > 0) credMode = 'custom';
       this.editForm = {
         model: cfg.model || '',
-        browser_backend: cfg.browser_backend || 'basic',
         role: cfg.role || '',
         budget_daily: cfg.budget?.daily_usd || '',
         allowed_credentials: credsStr,
@@ -1179,7 +1149,6 @@ function dashboard() {
       const body = {};
       const cfg = this.agentConfigs[agentId] || {};
       if (this.editForm.model && this.editForm.model !== cfg.model) body.model = this.editForm.model;
-      if (this.editForm.browser_backend && this.editForm.browser_backend !== cfg.browser_backend) body.browser_backend = this.editForm.browser_backend;
       if (this.editForm.role !== undefined && this.editForm.role !== cfg.role) body.role = this.editForm.role;
       if (this.editForm.budget_daily && parseFloat(this.editForm.budget_daily) > 0) {
         body.budget = { daily_usd: parseFloat(this.editForm.budget_daily) };
@@ -1192,7 +1161,6 @@ function dashboard() {
         this.cancelConfigEdit();
         return;
       }
-      if (!await this._ensureBrightDataKey(body.browser_backend)) return;
       try {
         const allUpdated = [];
         let configResult = null;
@@ -1270,7 +1238,6 @@ function dashboard() {
     async addAgent() {
       const f = this.addAgentForm;
       if (!f.name.trim()) { this.showToast('Name is required'); return; }
-      if (!await this._ensureBrightDataKey(f.browser_backend)) return;
       this.addAgentLoading = true;
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents`, {
@@ -1279,14 +1246,13 @@ function dashboard() {
             name: f.name.trim(),
             role: f.role.trim(),
             model: f.model,
-            browser_backend: f.browser_backend,
           }),
         });
         if (resp.ok) {
           const data = await resp.json();
           this.showToast(data.ready ? `${data.agent} added and ready` : `${data.agent} added (starting)`);
           this.addAgentMode = false;
-          this.addAgentForm = { name: '', role: '', model: '', browser_backend: '' };
+          this.addAgentForm = { name: '', role: '', model: '' };
           this.fetchAgents();
         } else {
           const err = await resp.json();
@@ -1501,12 +1467,9 @@ function dashboard() {
         const resp = await fetch(`${window.__config.apiBase}/settings`);
         if (resp.ok) {
           this.settingsData = await resp.json();
-          // Extract models and browsers for agent edit forms
+          // Extract models for agent edit forms
           if (this.settingsData.provider_models) {
             this.availableModels = Object.values(this.settingsData.provider_models).flat();
-          }
-          if (this.settingsData.browser_backends) {
-            this.availableBrowsers = this.settingsData.browser_backends.map(b => b.name);
           }
         }
       } catch (e) { console.warn('fetchSettings failed:', e); }

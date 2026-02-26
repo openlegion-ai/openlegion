@@ -31,7 +31,6 @@ agents:
     budget:
       daily_usd: 5.00
       monthly_usd: 100.00
-    browser_backend: stealth
     thinking: medium
     mcp_servers:
       - name: filesystem
@@ -51,7 +50,6 @@ agents:
 | `resources.cpu_limit` | float | No | CPU quota, 0.5 = 50% (default: `0.5`) |
 | `budget.daily_usd` | float | No | Daily spend cap in USD |
 | `budget.monthly_usd` | float | No | Monthly spend cap in USD |
-| `browser_backend` | string | No | Browser backend: `persistent` (default, Chromium + persistent profile + KasmVNC viewer), `basic` (headless Chromium), `stealth` (Camoufox), or `advanced` (Bright Data CDP) |
 | `initial_instructions` | string | No | Seeds `AGENTS.md` on first boot. Distinct from `system_prompt` — this sets the agent's operating instructions file |
 | `thinking` | string | No | Extended thinking/reasoning mode: `off` (default), `low`, `medium`, or `high`. Anthropic models use thinking budgets (5K/10K/25K tokens). OpenAI o-series models use `reasoning_effort`. Ignored for unsupported models |
 | `mcp_servers` | list | No | External MCP tool servers. See [MCP Integration](mcp.md) |
@@ -152,7 +150,7 @@ Per-agent access control lists. Default policy is **deny** -- if not listed, it'
       "blackboard_read": ["tasks/*", "context/*"],
       "blackboard_write": ["context/prospect_*"],
       "allowed_apis": ["llm", "brave_search"],
-      "allowed_credentials": ["brightdata_*"]
+      "allowed_credentials": ["myservice_*"]
     },
     "writer": {
       "can_message": ["*"],
@@ -202,8 +200,6 @@ OPENLEGION_SYSTEM_OPENAI_API_KEY=sk-...
 # ── Agent-tier credentials (tools / services) ────────────────
 # OPENLEGION_CRED_BRAVE_SEARCH_API_KEY=BSA...
 # OPENLEGION_CRED_APOLLO_API_KEY=...
-# OPENLEGION_CRED_BRIGHTDATA_CDP_URL=wss://...
-
 # Channel Bot Tokens (optional)
 OPENLEGION_CRED_TELEGRAM_BOT_TOKEN=123456:ABC-...
 OPENLEGION_CRED_DISCORD_BOT_TOKEN=MTIz...
@@ -250,8 +246,7 @@ Beyond credentials, these environment variables affect runtime behavior:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENLEGION_LOG_FORMAT` | `json` | Log output format: `json` (structured) or `text` (human-readable) |
-| `BROWSER_BACKEND` | `persistent` | Browser backend: `persistent`, `basic`, `stealth`, or `advanced` (set automatically in containers) |
-| `VNC_PORT` | `6080` | KasmVNC web port for persistent browser backend (set automatically in containers) |
+| `VNC_PORT` | `6080` | KasmVNC web port for browser viewing (set automatically in containers) |
 | `MCP_SERVERS` | -- | JSON string of MCP server configs (set automatically in containers) |
 | `MESH_AUTH_TOKEN` | -- | Agent auth token (set automatically in containers) |
 | `MESH_HOST` | -- | Mesh host URL (set automatically in containers) |

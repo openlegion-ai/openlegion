@@ -722,11 +722,7 @@ agents:
     model: "openai/gpt-4.1-mini"
     skills_dir: "./skills/research"
     instructions: "You are a research specialist..."
-    browser_backend: "stealth"          # persistent (default), basic, stealth, or advanced
     thinking: "medium"                   # off (default), low, medium, or high
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 5.00
       monthly_usd: 100.00
@@ -853,7 +849,7 @@ pytest tests/
 
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
-| Built-in Tools | 145 | exec, file, browser (all 4 backends, screenshots, reset/recovery, KasmVNC), memory, mesh, vault, introspect, path traversal, discovery |
+| Built-in Tools | 145 | exec, file, browser (Chrome + KasmVNC, screenshots, reset/recovery), memory, mesh, vault, introspect, path traversal, discovery |
 | Dashboard | 104 | Fleet management, blackboard, costs, traces, queues, cron, settings, config, streaming broadcast, workspace proxy |
 | Workspace | 68 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files, SYSTEM.md |
 | Agent Loop | 67 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
@@ -867,7 +863,7 @@ pytest tests/
 | Discord Channel | 36 | Slash commands, message routing, pairing, chunking, embed formatting |
 | Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
 | Context Manager | 34 | Token estimation (tiktoken + model-aware), compaction, flushing, flush reset |
-| Runtime Backend | 34 | DockerBackend, SandboxBackend, browser_backend, extra_env, name sanitization, detection, selection |
+| Runtime Backend | 34 | DockerBackend, SandboxBackend, extra_env, name sanitization, detection, VNC allocation |
 | Projects | 30 | Multi-project CRUD, config, agent membership |
 | Events | 31 | Event streaming, filtering, WebSocket, notification events |
 | Traces | 30 | Trace recording, grouping, summaries, prompt preview extraction |
@@ -916,8 +912,7 @@ pytest tests/
 | click | CLI framework |
 | docker | Docker API client |
 | python-dotenv | `.env` file loading |
-| playwright | Browser automation — basic tier (in container only) |
-| camoufox | Anti-detect browser — stealth tier (in container only) |
+| playwright | Browser automation via CDP (in container only) |
 | mcp | MCP tool server client (in container only, optional) |
 | slack-bolt | Slack channel adapter (optional) |
 
@@ -954,7 +949,7 @@ src/
 │       ├── exec_tool.py                # Shell execution
 │       ├── file_tool.py                # File I/O (read, write, list)
 │       ├── http_tool.py                # HTTP requests
-│       ├── browser_tool.py             # Playwright automation (basic/stealth/advanced/persistent)
+│       ├── browser_tool.py             # Playwright automation (Chrome + KasmVNC with on-demand CDP)
 │       ├── web_search_tool.py          # Web search via DuckDuckGo
 │       ├── memory_tool.py              # Memory search, save, recall
 │       ├── mesh_tool.py                # Shared state, fleet awareness, artifacts

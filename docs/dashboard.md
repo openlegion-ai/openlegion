@@ -16,15 +16,15 @@ The dashboard uses a consolidated three-tab layout:
 |-----|--------------|
 | **Fleet** | Agent cards, agent detail views, configuration editing |
 | **Activity** | Traces, live events, blackboard, costs, and automation |
-| **System** | Credentials, pub/sub, model pricing, browser backends |
+| **System** | Credentials, pub/sub, model pricing |
 
 A command palette (**Cmd+K** / **Ctrl+K**) provides quick access to agents, actions, and navigation. The search button in the nav bar also opens it.
 
 ## Fleet Tab
 
-Overview of all registered agents showing health status, activity state (idle/thinking/tool), daily cost, token usage, and restart count. Click any agent card to drill down into its detail view with cost breakdowns, budget bars, workspace file editor, and recent events. Also includes agent configuration management — view and edit each agent's model, browser backend, role, system prompt, and daily budget. Changes that require a restart (model, browser) are flagged.
+Overview of all registered agents showing health status, activity state (idle/thinking/tool), daily cost, token usage, and restart count. Click any agent card to drill down into its detail view with cost breakdowns, budget bars, workspace file editor, and recent events. Also includes agent configuration management -- view and edit each agent's model, role, system prompt, and daily budget. Changes that require a restart (model) are flagged.
 
-Agents with a **persistent** browser backend show an embedded KasmVNC viewer in their detail view, providing a live view of the agent's browser session.
+All agents show an embedded KasmVNC viewer in their detail view, providing a live view of the agent's browser session.
 
 ## Activity Tab
 
@@ -42,7 +42,7 @@ Sub-views toggled via a tab bar at the top of the panel:
 
 ## System Tab
 
-Environment overview showing configured credentials with tier labels (system or agent, names only, never values), pub/sub subscriptions, model pricing tables, and available browser backends. Add new credentials from a dropdown of LLM providers, known agent tools (Brave Search, Apollo, Hunter, Brightdata), or custom service names.
+Environment overview showing configured credentials with tier labels (system or agent, names only, never values), pub/sub subscriptions, and model pricing tables. Add new credentials from a dropdown of LLM providers, known agent tools (Brave Search, Apollo, Hunter), or custom service names.
 
 ## Agent Management
 
@@ -50,11 +50,11 @@ Environment overview showing configured credentials with tier labels (system or 
 
 1. Switch to the **Fleet** tab
 2. Click **Edit** on an agent card
-3. Modify model, browser backend, role, daily budget, or credential access patterns
+3. Modify model, role, daily budget, or credential access patterns
 4. Click **Save** -- a toast confirms which fields were updated
-5. If the change requires a restart (model or browser), click **Restart**
+5. If the change requires a restart (model), click **Restart**
 
-Credential access uses comma-separated glob patterns (e.g. `*`, `brightdata_*`, `myapp_*`). An empty field revokes all vault access. System credentials (LLM provider API keys) are always blocked regardless of patterns.
+Credential access uses comma-separated glob patterns (e.g. `*`, `brave_search_*`, `myapp_*`). An empty field revokes all vault access. System credentials (LLM provider API keys) are always blocked regardless of patterns.
 
 ### Restart Agent
 

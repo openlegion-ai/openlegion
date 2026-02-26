@@ -286,7 +286,6 @@ def _build_docker_image() -> None:
 
 def _add_agent_to_config(
     name: str, role: str, model: str,
-    browser_backend: str = "",
     initial_instructions: str = "",
 ) -> None:
     """Add an agent entry to agents.yaml."""
@@ -301,10 +300,7 @@ def _add_agent_to_config(
         "role": role,
         "model": model,
         "skills_dir": f"./skills/{name}",
-        "resources": {"memory_limit": "512m", "cpu_limit": 0.5},
     }
-    if browser_backend:
-        entry["browser_backend"] = browser_backend
     if initial_instructions:
         entry["initial_instructions"] = initial_instructions
     agents_cfg["agents"][name] = entry
@@ -384,11 +380,11 @@ def _validate_agent_name(name: str) -> str:
 
 
 def _create_agent(
-    name: str, description: str, model: str, browser_backend: str = "",
+    name: str, description: str, model: str,
 ) -> None:
     """Create an agent: config, permissions, skills directory."""
     name = _validate_agent_name(name)
-    _add_agent_to_config(name, description, model, browser_backend=browser_backend)
+    _add_agent_to_config(name, description, model)
     _add_agent_permissions(name)
     skills_dir = PROJECT_ROOT / "skills" / name
     skills_dir.mkdir(parents=True, exist_ok=True)
@@ -629,32 +625,6 @@ def _remove_agent(name: str) -> None:
     _save_permissions(perms)
 
 
-# ── Browser backend data ────────────────────────────────────
-
-BROWSER_BACKENDS = [
-    {
-        "name": "persistent",
-        "label": "Persistent (KasmVNC)",
-        "description": "Visible browser with KasmVNC. Login manually, solve CAPTCHAs. Sessions survive restarts.",
-    },
-    {
-        "name": "basic",
-        "label": "Basic (built-in Chromium)",
-        "description": "Fast, reliable. No anti-bot evasion.",
-    },
-    {
-        "name": "stealth",
-        "label": "Stealth (Camoufox)",
-        "description": "Anti-fingerprint browser. Bypasses basic bot detection.",
-    },
-    {
-        "name": "advanced",
-        "label": "Advanced (Bright Data)",
-        "description": "Cloud proxy browser. Bypasses CAPTCHAs and geo-blocks. Requires Bright Data account.",
-    },
-]
-
-
 def _pick_model_interactive(default_model: str, label: str = "current") -> str:
     """Show model picker for the default model's provider. Returns selected model."""
     provider = default_model.split("/")[0] if "/" in default_model else "anthropic"
@@ -671,23 +641,6 @@ def _pick_model_interactive(default_model: str, label: str = "current") -> str:
         default=default_idx,
     )
     return models[model_choice - 1]
-
-
-def _pick_browser_interactive(current: str = "persistent") -> str:
-    """Show browser backend picker. Returns selected backend name."""
-    default_idx = 1
-    for i, b in enumerate(BROWSER_BACKENDS, 1):
-        marker = " (current)" if b["name"] == current else ""
-        click.echo(f"  {i}. {b['label']}{marker}")
-        click.echo(f"     {b['description']}")
-        if b["name"] == current:
-            default_idx = i
-    choice = click.prompt(
-        "Browser",
-        type=click.IntRange(1, len(BROWSER_BACKENDS)),
-        default=default_idx,
-    )
-    return BROWSER_BACKENDS[choice - 1]["name"]
 
 
 def _load_templates() -> dict[str, dict]:
@@ -754,31 +707,11 @@ def _update_agent_field(name: str, field: str, value) -> None:
             yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
 
 
-def _prompt_brightdata_key() -> None:
-    """Prompt for Bright Data CDP URL if not already set."""
-    import os
-
-    existing = os.environ.get("OPENLEGION_CRED_BRIGHTDATA_CDP_URL", "")
-    if existing:
-        click.echo("  Bright Data CDP URL already configured.")
-        return
-    click.echo(
-        "\n  Advanced browser requires a Bright Data Scraping Browser CDP URL.\n"
-        "  Get one at: https://brightdata.com/products/scraping-browser\n"
-    )
-    cdp_url = click.prompt("  Bright Data CDP URL (wss://...)", default="", show_default=False)
-    if cdp_url.strip():
-        _set_env_key("brightdata_cdp_url", cdp_url.strip())
-        click.echo("  Saved.\n")
-    else:
-        click.echo("  Skipped. Set OPENLEGION_CRED_BRIGHTDATA_CDP_URL in .env later.\n")
-
-
 def _edit_agent_interactive(name: str) -> str | None:
     """Interactive property editor for an agent. Reads fresh config.
 
-    Returns the field name that was changed (``"model"``, ``"browser"``,
-    ``"role"``, ``"budget"``), or ``None`` if nothing changed.  Callers
+    Returns the field name that was changed (``"model"``, ``"role"``,
+    ``"budget"``), or ``None`` if nothing changed.  Callers
     decide how to apply the change (restart hint, live restart,
     cost-tracker update, etc.).
     """
@@ -787,14 +720,12 @@ def _edit_agent_interactive(name: str) -> str | None:
     default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
 
     current_model = agent_cfg.get("model", default_model)
-    current_browser = agent_cfg.get("browser_backend", "persistent") or "persistent"
     current_desc = agent_cfg.get("role", "")
     budget_cfg = agent_cfg.get("budget", {})
     current_budget = budget_cfg.get("daily_usd") if budget_cfg else None
 
     click.echo(f"\n  {name}")
     click.echo(f"  Model:       {current_model}")
-    click.echo(f"  Browser:     {current_browser}")
     click.echo(f"  Description: {current_desc or '(none)'}")
     if current_budget is not None:
         click.echo(f"  Budget:      ${current_budget:.2f}/day")
@@ -802,7 +733,6 @@ def _edit_agent_interactive(name: str) -> str | None:
 
     options = [
         ("model", current_model),
-        ("browser", current_browser),
         ("description", _truncate(current_desc, 50) or "(none)"),
         ("budget", f"${current_budget:.2f}/day" if current_budget is not None else "(none)"),
     ]
@@ -825,18 +755,7 @@ def _edit_agent_interactive(name: str) -> str | None:
         click.echo(f"Agent '{name}' model: {current_model} -> {new_model}")
         return "model"
 
-    elif choice == 2:  # browser
-        new_browser = _pick_browser_interactive(current_browser)
-        if new_browser == current_browser:
-            click.echo(f"Agent '{name}' already uses {current_browser} browser.")
-            return None
-        if new_browser == "advanced":
-            _prompt_brightdata_key()
-        _update_agent_field(name, "browser_backend", new_browser)
-        click.echo(f"Agent '{name}' browser: {current_browser} -> {new_browser}")
-        return "browser"
-
-    elif choice == 3:  # description
+    elif choice == 2:  # description
         new_desc = click.prompt("  Description", default=current_desc)
         if new_desc != current_desc:
             _update_agent_field(name, "role", new_desc)
@@ -845,7 +764,7 @@ def _edit_agent_interactive(name: str) -> str | None:
         click.echo("No change.")
         return None
 
-    elif choice == 4:  # budget
+    elif choice == 3:  # budget
         default_budget = str(current_budget) if current_budget is not None else ""
         new_budget_str = click.prompt("  Daily budget (USD)", default=default_budget)
         if not new_budget_str.strip():
@@ -877,10 +796,6 @@ def _setup_agent_wizard(model: str) -> str:
         "  What should this agent do?",
         default=_default_description(agent_name),
     )
-    click.echo()
-    browser = _pick_browser_interactive()
-    if browser == "advanced":
-        _prompt_brightdata_key()
-    _create_agent(agent_name, description, model, browser_backend=browser)
+    _create_agent(agent_name, description, model)
     click.echo(f"  Created agent '{agent_name}'.")
     return agent_name

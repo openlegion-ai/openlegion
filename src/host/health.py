@@ -216,7 +216,6 @@ class HealthMonitor:
                 system_prompt="",
                 model=info.get("model", ""),
                 mcp_servers=info.get("mcp_servers"),
-                browser_backend=info.get("browser_backend", ""),
                 thinking=info.get("thinking", ""),
             )
 

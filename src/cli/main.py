@@ -32,7 +32,6 @@ from src.cli.config import (
     _default_description,
     _get_default_model,
     _load_config,
-    _prompt_brightdata_key,
     _remove_agent,
     _set_env_key,
     _suppress_host_logs,
@@ -81,20 +80,16 @@ def agent(ctx):
 @agent.command("add")
 @click.argument("name", required=False, default=None)
 @click.option("--model", "model_override", default=None, help="LLM model")
-@click.option("--browser", "browser_override", default=None,
-              type=click.Choice(["basic", "stealth", "advanced"]),
-              help="Browser backend")
-def agent_add(name: str | None, model_override: str | None, browser_override: str | None):
-    """Add a new agent with model and browser selection.
+def agent_add(name: str | None, model_override: str | None):
+    """Add a new agent.
 
     \b
     Examples:
       openlegion agent add researcher
       openlegion agent add coder --model anthropic/claude-sonnet-4-6
-      openlegion agent add scraper --browser stealth
       openlegion agent add              # interactive
     """
-    from src.cli.config import _pick_browser_interactive, _pick_model_interactive
+    from src.cli.config import _pick_model_interactive
 
     cfg = _load_config()
 
@@ -113,31 +108,21 @@ def agent_add(name: str | None, model_override: str | None, browser_override: st
     default_model = _get_default_model()
     model = model_override or _pick_model_interactive(default_model, label="default")
 
-    browser = browser_override or _pick_browser_interactive()
-
-    if browser == "advanced":
-        _prompt_brightdata_key()
-
-    _create_agent(name, description, model, browser_backend=browser)
+    _create_agent(name, description, model)
 
     click.echo(f"\nAgent '{name}' created.")
-    click.echo(f"  Model:   {model}")
-    click.echo(f"  Browser: {browser}")
+    click.echo(f"  Model: {model}")
     click.echo("\nStart chatting: openlegion start")
 
 
 @agent.command("edit")
 @click.argument("name", required=False, default=None)
 @click.option("--model", "model_override", default=None, help="Set LLM model")
-@click.option("--browser", "browser_override", default=None,
-              type=click.Choice(["basic", "stealth", "advanced"]),
-              help="Set browser backend")
 @click.option("--description", "desc_override", default=None, help="Set role/description")
 @click.option("--budget", "budget_override", default=None, type=float, help="Set daily budget (USD)")
 def agent_edit(
     name: str | None,
     model_override: str | None,
-    browser_override: str | None,
     desc_override: str | None,
     budget_override: float | None,
 ):
@@ -146,7 +131,6 @@ def agent_edit(
     \b
     Examples:
       openlegion agent edit mybot --model anthropic/claude-sonnet-4-6
-      openlegion agent edit mybot --browser stealth
       openlegion agent edit mybot --description "Web research specialist"
       openlegion agent edit mybot --budget 10.0
       openlegion agent edit mybot           # interactive property picker
@@ -161,7 +145,7 @@ def agent_edit(
 
     # Direct flag mode: apply each provided flag
     has_flags = any(v is not None for v in [
-        model_override, browser_override, desc_override,
+        model_override, desc_override,
         budget_override,
     ])
     if has_flags:
@@ -176,17 +160,6 @@ def agent_edit(
             else:
                 _update_agent_field(name, "model", model_override)
                 click.echo(f"Agent '{name}' model: {old} -> {model_override}")
-                changed = True
-
-        if browser_override is not None:
-            old = agent_cfg.get("browser_backend", "basic") or "basic"
-            if browser_override == old:
-                click.echo(f"Agent '{name}' already uses {browser_override} browser.")
-            else:
-                if browser_override == "advanced":
-                    _prompt_brightdata_key()
-                _update_agent_field(name, "browser_backend", browser_override)
-                click.echo(f"Agent '{name}' browser: {old} -> {browser_override}")
                 changed = True
 
         if desc_override is not None:
@@ -252,13 +225,12 @@ def agent_list():
         pass
 
     default_model = _get_default_model()
-    click.echo(f"{'Name':<16} {'Model':<40} {'Browser':<10} {'Status':<10}")
-    click.echo("-" * 79)
+    click.echo(f"{'Name':<16} {'Model':<40} {'Status':<10}")
+    click.echo("-" * 69)
     for name, info in agents.items():
         status = "running" if name in running else "stopped"
         model = info.get("model", default_model)
-        browser = info.get("browser_backend", "basic") or "basic"
-        click.echo(f"{name:<16} {model:<40} {browser:<10} {status:<10}")
+        click.echo(f"{name:<16} {model:<40} {status:<10}")
 
 
 @agent.command("remove")

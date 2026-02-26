@@ -57,10 +57,9 @@ def create_dashboard_router(
         autoescape=True,
     )
 
-    # Build flat valid-models list and browser backend names for validation
-    from src.cli.config import _PROVIDER_MODELS, BROWSER_BACKENDS
+    # Build flat valid-models list for validation
+    from src.cli.config import _PROVIDER_MODELS
     _valid_models = [m for models in _PROVIDER_MODELS.values() for m in models]
-    _valid_browsers = [b["name"] for b in BROWSER_BACKENDS]
 
     # ── SPA entry point ──────────────────────────────────────
 
@@ -137,7 +136,6 @@ def create_dashboard_router(
         name = body.get("name", "").strip()
         role = body.get("role", "").strip()
         model = body.get("model", "").strip()
-        browser_backend = body.get("browser_backend", "").strip()
 
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
@@ -148,8 +146,6 @@ def create_dashboard_router(
 
         if model and model not in _valid_models:
             raise HTTPException(status_code=400, detail=f"Invalid model: {model}")
-        if browser_backend and browser_backend not in _valid_browsers:
-            raise HTTPException(status_code=400, detail=f"Invalid browser: {browser_backend}")
 
         if not model:
             from src.cli.config import _load_config
@@ -162,7 +158,7 @@ def create_dashboard_router(
 
         try:
             from src.cli.config import _create_agent, _load_config
-            _create_agent(name, role, model, browser_backend=browser_backend)
+            _create_agent(name, role, model)
             if permissions is not None:
                 permissions.reload()
 
@@ -176,7 +172,6 @@ def create_dashboard_router(
                 skills_dir=skills_dir,
                 system_prompt="",
                 model=acfg.get("model", model),
-                browser_backend=acfg.get("browser_backend", ""),
                 thinking=acfg.get("thinking", ""),
             )
             if router is not None:
@@ -285,7 +280,7 @@ def create_dashboard_router(
             "spend_week": spend_week,
             "budget": budget,
         }
-        # Include VNC info for persistent browser agents
+        # Include VNC info if available
         if runtime:
             agent_info = runtime.agents.get(agent_id, {})
             vnc_url = _vnc_url_for_request(request, agent_info)
@@ -324,7 +319,6 @@ def create_dashboard_router(
             "model": agent_cfg.get("model", default_model),
             "role": agent_cfg.get("role", ""),
             "budget": agent_cfg.get("budget", {}),
-            "browser_backend": agent_cfg.get("browser_backend", "persistent") or "persistent",
             "allowed_credentials": allowed_creds,
             "available_credentials": sorted(agent_cred_names),
             "system_credentials": system_cred_names,
@@ -358,16 +352,6 @@ def create_dashboard_router(
             if new_model != old_model:
                 _update_agent_field(agent_id, "model", new_model)
                 updated.append("model")
-                restart_required = True
-
-        if "browser_backend" in body:
-            new_browser = body["browser_backend"]
-            if new_browser not in _valid_browsers:
-                raise HTTPException(status_code=400, detail=f"Invalid browser: {new_browser}")
-            old_browser = agent_cfg.get("browser_backend", "basic") or "basic"
-            if new_browser != old_browser:
-                _update_agent_field(agent_id, "browser_backend", new_browser)
-                updated.append("browser_backend")
                 restart_required = True
 
         if "role" in body:
@@ -413,7 +397,6 @@ def create_dashboard_router(
                 system_prompt=agent_cfg.get("system_prompt", ""),
                 model=agent_cfg.get("model", default_model),
                 mcp_servers=agent_cfg.get("mcp_servers") or None,
-                browser_backend=agent_cfg.get("browser_backend", ""),
                 thinking=agent_cfg.get("thinking", ""),
             )
             if router is not None:
@@ -1077,7 +1060,6 @@ def create_dashboard_router(
             "pubsub_subscriptions": pubsub_subs,
             "model_costs": {k: {"input_per_1k": v[0], "output_per_1k": v[1]} for k, v in MODEL_COSTS.items()},
             "provider_models": _PROVIDER_MODELS,
-            "browser_backends": BROWSER_BACKENDS,
         }
 
     # ── Messages log ─────────────────────────────────────────
