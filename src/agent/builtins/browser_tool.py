@@ -1,13 +1,13 @@
-"""Browser automation via Patchright / Playwright / Camoufox.
+"""Browser automation via Playwright / Camoufox.
 
 Provides browser access for web scraping, testing, and interaction.
 A single browser instance is lazily initialized per agent process and reused.
 Supports four backends via BROWSER_BACKEND env var:
 basic, stealth, advanced, persistent.
 
-The persistent backend uses Patchright (Playwright fork that patches CDP
-leaks like Runtime.enable) with Chromium and stealth init scripts.
-The stealth backend uses Camoufox (patched Firefox).
+The persistent backend uses Playwright Chromium with stealth flags and a
+JS init script for anti-detection.  The stealth backend uses Camoufox
+(patched Firefox).
 """
 
 from __future__ import annotations
@@ -205,9 +205,8 @@ async def _launch_advanced(mesh_client):
     return browser, context, page
 
 
-# Stealth init script for Patchright + Chromium.
-# Patchright patches CDP-level leaks (Runtime.enable, Console.enable).
-# This script handles JS-level fingerprint gaps that Chromium has vs
+# Stealth init script for Playwright Chromium.
+# Handles JS-level fingerprint gaps that automation Chromium has vs
 # a real user's Chrome (empty plugins, missing chrome.runtime, etc.).
 _STEALTH_INIT_SCRIPT = """
 // Hide navigator.webdriver — backup for --disable-blink-features flag.
@@ -267,6 +266,16 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 if (navigator.connection) {
     Object.defineProperty(navigator.connection, 'rtt', {get: () => 50});
 }
+
+// Spoof navigator.userActivation (X checks hasBeenActive)
+if (navigator.userActivation) {
+    Object.defineProperty(navigator.userActivation, 'hasBeenActive', {
+        get: () => true,
+    });
+    Object.defineProperty(navigator.userActivation, 'isActive', {
+        get: () => false,
+    });
+}
 """
 
 
@@ -307,12 +316,7 @@ def _cleanup_stale_profile():
 
 
 async def _launch_persistent():
-    """Launch Patchright Chromium with a persistent profile.
-
-    Patchright is a drop-in Playwright fork that patches CDP detection
-    leaks (Runtime.enable, Console.enable) at the protocol level.
-    Combined with stealth init scripts that fill in Chromium's JS-level
-    gaps, this passes most anti-bot checks.
+    """Launch Playwright Chromium with a persistent profile.
 
     Uses ``launch_persistent_context`` so cookies and sessions survive
     browser restarts.  Returns ``(None, context, page)`` — persistent
@@ -320,16 +324,12 @@ async def _launch_persistent():
     """
     global _pw
     try:
-        from patchright.async_api import async_playwright
+        from playwright.async_api import async_playwright
     except ImportError:
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError:
-            raise RuntimeError(
-                "Neither patchright nor playwright is installed. "
-                "The agent container must include patchright. See Dockerfile.agent."
-            )
-        logger.warning("patchright not available, falling back to playwright (CDP leaks not patched)")
+        raise RuntimeError(
+            "playwright is not installed. The agent container must include "
+            "playwright and chromium. See Dockerfile.agent."
+        )
     _ensure_xvfb()
     _cleanup_stale_profile()
     _pw = await async_playwright().start()
@@ -361,7 +361,7 @@ async def _launch_persistent():
     )
     await context.add_init_script(_STEALTH_INIT_SCRIPT)
     page = context.pages[0] if context.pages else await context.new_page()
-    logger.info("Browser backend: persistent (Patchright + Chromium + KasmVNC)")
+    logger.info("Browser backend: persistent (Playwright Chromium + KasmVNC)")
     return None, context, page
 
 
