@@ -344,12 +344,13 @@ async def _launch_persistent():
         ],
         # Strip Playwright defaults that are detection vectors:
         # --enable-automation: sets navigator.webdriver=true + shows infobar
-        # --disable-popup-blocking: real browsers block popups
         # --disable-component-update: stealth driver indicator
         # --disable-default-apps: real browsers load default apps
+        # NOTE: --disable-popup-blocking is kept (Playwright default) because
+        # Reddit's login flow uses window.open() — blocking popups silently
+        # prevents the login modal from appearing.
         ignore_default_args=[
             "--enable-automation",
-            "--disable-popup-blocking",
             "--disable-component-update",
             "--disable-default-apps",
         ],
