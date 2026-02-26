@@ -6,9 +6,8 @@ Supports four backends via BROWSER_BACKEND env var:
 basic, stealth, advanced, persistent.
 
 The persistent backend uses Patchright (Playwright fork that patches CDP
-leaks like Runtime.enable) with real Google Chrome (not Chromium) for
-authentic TLS fingerprints.  The stealth backend uses Camoufox (patched
-Firefox).
+leaks like Runtime.enable) with Chromium and stealth init scripts.
+The stealth backend uses Camoufox (patched Firefox).
 """
 
 from __future__ import annotations
@@ -206,18 +205,67 @@ async def _launch_advanced(mesh_client):
     return browser, context, page
 
 
-# Minimal init script for Patchright + real Chrome.
-# Real Chrome already has genuine navigator.plugins, chrome.runtime,
-# navigator.webdriver=undefined, etc.  Overriding these with shallow fakes
-# is counterproductive — anti-bot deep inspection detects the inconsistency.
-# Only clean up automation globals that Patchright/Playwright may inject.
+# Stealth init script for Patchright + Chromium.
+# Patchright patches CDP-level leaks (Runtime.enable, Console.enable).
+# This script handles JS-level fingerprint gaps that Chromium has vs
+# a real user's Chrome (empty plugins, missing chrome.runtime, etc.).
 _STEALTH_INIT_SCRIPT = """
-// Clean up automation globals that Patchright/Playwright inject
+// Hide navigator.webdriver — backup for --disable-blink-features flag.
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined, configurable: true,
+});
+
+// Fake chrome.runtime (real Chrome has this, Chromium doesn't)
+if (!window.chrome) window.chrome = {};
+if (!window.chrome.runtime) {
+    window.chrome.runtime = {
+        connect: () => {},
+        sendMessage: () => {},
+        onMessage: {addListener: () => {}, removeListener: () => {}},
+        onConnect: {addListener: () => {}, removeListener: () => {}},
+    };
+}
+
+// Fake plugins array (automation Chromium reports empty)
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        const p = [
+            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer',
+             description: 'Portable Document Format', length: 1},
+            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+             description: '', length: 1},
+            {name: 'Native Client', filename: 'internal-nacl-plugin',
+             description: '', length: 2},
+        ];
+        p.refresh = () => {};
+        return p;
+    },
+});
+
+// Fix permissions.query
+const origQuery = window.navigator.permissions.query.bind(
+    window.navigator.permissions
+);
+window.navigator.permissions.query = (params) => {
+    if (params.name === 'notifications')
+        return Promise.resolve({state: Notification.permission});
+    return origQuery(params);
+};
+
+// Clean up automation globals
 delete window.__playwright;
 delete window.__pw_manual;
 delete window.__pwInitScripts;
 for (const key of Object.keys(window)) {
     if (key.startsWith('cdc_') || key.startsWith('__pw')) delete window[key];
+}
+
+// Fix navigator.languages
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+
+// Fake connection.rtt (0 in automation, ~50 in real browsers)
+if (navigator.connection) {
+    Object.defineProperty(navigator.connection, 'rtt', {get: () => 50});
 }
 """
 
@@ -259,13 +307,12 @@ def _cleanup_stale_profile():
 
 
 async def _launch_persistent():
-    """Launch real Google Chrome via Patchright with a persistent profile.
+    """Launch Patchright Chromium with a persistent profile.
 
     Patchright is a drop-in Playwright fork that patches CDP detection
     leaks (Runtime.enable, Console.enable) at the protocol level.
-    Combined with ``channel="chrome"`` (real Google Chrome, not Chromium),
-    this produces authentic TLS fingerprints and passes anti-bot checks
-    that detect bundled Chromium and CDP artifacts.
+    Combined with stealth init scripts that fill in Chromium's JS-level
+    gaps, this passes most anti-bot checks.
 
     Uses ``launch_persistent_context`` so cookies and sessions survive
     browser restarts.  Returns ``(None, context, page)`` — persistent
@@ -290,15 +337,14 @@ async def _launch_persistent():
     Path(profile_dir).mkdir(parents=True, exist_ok=True)
     context = await _pw.chromium.launch_persistent_context(
         user_data_dir=profile_dir,
-        channel="chrome",
         headless=False,
-        no_viewport=True,  # don't override via CDP (detectable)
+        no_viewport=True,
         args=[
             "--disable-dev-shm-usage",
             "--no-first-run",
             "--disable-infobars",
             "--disable-blink-features=AutomationControlled",
-            # Match KasmVNC geometry — without a window manager, Chrome
+            # Match KasmVNC geometry — without a window manager, Chromium
             # has no notion of "maximized" and may open at an arbitrary
             # size.  Arkose Labs calculates challenge stage dimensions
             # from window.innerWidth/innerHeight; mismatched or zero
@@ -306,8 +352,6 @@ async def _launch_persistent():
             "--window-size=1280,720",
             "--window-position=0,0",
         ],
-        # Strip defaults that are detection vectors (Patchright handles some
-        # of these automatically, but explicit is defense-in-depth):
         ignore_default_args=[
             "--enable-automation",
             "--disable-popup-blocking",
@@ -317,7 +361,7 @@ async def _launch_persistent():
     )
     await context.add_init_script(_STEALTH_INIT_SCRIPT)
     page = context.pages[0] if context.pages else await context.new_page()
-    logger.info("Browser backend: persistent (Patchright + Google Chrome + KasmVNC)")
+    logger.info("Browser backend: persistent (Patchright + Chromium + KasmVNC)")
     return None, context, page
 
 
