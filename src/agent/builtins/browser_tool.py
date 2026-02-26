@@ -358,6 +358,11 @@ def _launch_chrome_subprocess():
         [
             chrome_bin,
             f"--user-data-dir={profile_dir}",
+            # Required for Docker — Chrome's sandbox needs kernel capabilities
+            # that aren't available in containers with no-new-privileges.
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-gpu",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-infobars",
