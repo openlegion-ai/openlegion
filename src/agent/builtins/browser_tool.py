@@ -1,13 +1,14 @@
-"""Browser automation via Playwright / Camoufox.
+"""Browser automation via Patchright / Playwright / Camoufox.
 
 Provides browser access for web scraping, testing, and interaction.
 A single browser instance is lazily initialized per agent process and reused.
 Supports four backends via BROWSER_BACKEND env var:
 basic, stealth, advanced, persistent.
 
-The persistent backend uses Playwright Chromium with stealth flags and a
-JS init script for anti-detection.  The stealth backend uses Camoufox
-(patched Firefox).
+The persistent backend uses Patchright (Playwright fork that patches CDP
+leaks like Runtime.enable) with real Google Chrome (not Chromium) for
+authentic TLS fingerprints.  The stealth backend uses Camoufox (patched
+Firefox).
 """
 
 from __future__ import annotations
@@ -313,7 +314,13 @@ def _cleanup_stale_profile():
 
 
 async def _launch_persistent():
-    """Launch Playwright Chromium with a persistent profile.
+    """Launch real Google Chrome via Patchright with a persistent profile.
+
+    Patchright is a drop-in Playwright fork that patches CDP detection
+    leaks (Runtime.enable, Console.enable) at the protocol level.
+    Combined with ``channel="chrome"`` (real Google Chrome, not Chromium),
+    this produces authentic TLS fingerprints and passes anti-bot checks
+    that detect bundled Chromium and CDP artifacts.
 
     Uses ``launch_persistent_context`` so cookies and sessions survive
     browser restarts.  Returns ``(None, context, page)`` — persistent
@@ -321,12 +328,16 @@ async def _launch_persistent():
     """
     global _pw
     try:
-        from playwright.async_api import async_playwright
+        from patchright.async_api import async_playwright
     except ImportError:
-        raise RuntimeError(
-            "playwright is not installed. The agent container must include "
-            "playwright and chromium. See Dockerfile.agent."
-        )
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            raise RuntimeError(
+                "Neither patchright nor playwright is installed. "
+                "The agent container must include patchright. See Dockerfile.agent."
+            )
+        logger.warning("patchright not available, falling back to playwright (CDP leaks not patched)")
     _ensure_xvfb()
     _cleanup_stale_profile()
     _pw = await async_playwright().start()
@@ -334,6 +345,7 @@ async def _launch_persistent():
     Path(profile_dir).mkdir(parents=True, exist_ok=True)
     context = await _pw.chromium.launch_persistent_context(
         user_data_dir=profile_dir,
+        channel="chrome",
         headless=False,
         no_viewport=True,  # let browser use Xvnc's native resolution
         args=[
@@ -342,11 +354,8 @@ async def _launch_persistent():
             "--disable-infobars",
             "--disable-blink-features=AutomationControlled",
         ],
-        # Strip Playwright defaults that are detection vectors:
-        # --enable-automation: sets navigator.webdriver=true + shows infobar
-        # --disable-popup-blocking: real browsers block popups
-        # --disable-component-update: stealth driver indicator
-        # --disable-default-apps: real browsers load default apps
+        # Strip defaults that are detection vectors (Patchright handles some
+        # of these automatically, but explicit is defense-in-depth):
         ignore_default_args=[
             "--enable-automation",
             "--disable-popup-blocking",
@@ -356,7 +365,7 @@ async def _launch_persistent():
     )
     await context.add_init_script(_STEALTH_INIT_SCRIPT)
     page = context.pages[0] if context.pages else await context.new_page()
-    logger.info("Browser backend: persistent (Playwright Chromium + KasmVNC)")
+    logger.info("Browser backend: persistent (Patchright + Google Chrome + KasmVNC)")
     return None, context, page
 
 

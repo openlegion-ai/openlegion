@@ -27,9 +27,16 @@ RUN pip install --no-cache-dir \
     fastapi uvicorn httpx pydantic playwright patchright sqlite-vec mcp camoufox Pillow
 
 # Install browsers — must run as root before USER agent.
-# Playwright Chromium goes to /opt/pw-browsers; Patchright reuses the same path.
-# Camoufox fetches its own Firefox binary.
+# Google Chrome stable: real browser with authentic TLS fingerprint, Widevine,
+# and H.264 codecs.  Patchright uses it via channel="chrome".
+# Playwright Chromium stays as fallback for basic/stealth backends.
+# Camoufox fetches its own Firefox binary for the stealth backend.
 # All need o+rx so the non-root agent user can execute them.
+RUN curl -fSL -o /tmp/chrome.deb \
+       https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && apt-get update && apt-get install -y /tmp/chrome.deb \
+    && rm /tmp/chrome.deb \
+    && rm -rf /var/lib/apt/lists/*
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN playwright install chromium --with-deps \
     && patchright install chromium \
