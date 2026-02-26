@@ -50,6 +50,17 @@ RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 RUN mkdir -p /data && chown agent:agent /data
 VOLUME /data
 
+# Openbox config: single desktop, no scroll-to-switch, no decorations.
+# Without this, openbox defaults to 4 virtual desktops and scroll on the
+# root window switches between them — causing a black screen in VNC.
+RUN mkdir -p /home/agent/.config/openbox \
+    && printf '<?xml version="1.0" encoding="UTF-8"?>\n\
+<openbox_config xmlns="http://openbox.org/3.4/rc">\n\
+  <desktops><number>1</number></desktops>\n\
+  <applications><application class="*"><decor>no</decor><maximized>true</maximized></application></applications>\n\
+</openbox_config>\n' > /home/agent/.config/openbox/rc.xml \
+    && chown -R agent:agent /home/agent/.config
+
 RUN chown -R agent:agent /app
 
 USER agent
