@@ -1229,10 +1229,9 @@ class TestBrowserNavigateAutoRecovery:
                 return dead_page
             return fresh_page
 
-        with patch.dict(os.environ, {"BROWSER_BACKEND": "basic"}):
-            with patch.object(bt, "_get_page", side_effect=mock_get_page), \
-                 patch.object(bt, "browser_cleanup", new_callable=AsyncMock) as mock_cleanup:
-                result = await bt.browser_navigate(url="https://example.com")
+        with patch.object(bt, "_get_page", side_effect=mock_get_page), \
+             patch.object(bt, "_browser_cleanup_soft", new_callable=AsyncMock) as mock_cleanup:
+            result = await bt.browser_navigate(url="https://example.com")
 
         mock_cleanup.assert_awaited_once()
         assert result["status"] == 200
@@ -1265,10 +1264,9 @@ class TestBrowserNavigateAutoRecovery:
                 return dead_page
             return fresh_page
 
-        with patch.dict(os.environ, {"BROWSER_BACKEND": "basic"}):
-            with patch.object(bt, "_get_page", side_effect=mock_get_page), \
-                 patch.object(bt, "browser_cleanup", new_callable=AsyncMock):
-                result = await bt.browser_navigate(url="https://example.com")
+        with patch.object(bt, "_get_page", side_effect=mock_get_page), \
+             patch.object(bt, "_browser_cleanup_soft", new_callable=AsyncMock):
+            result = await bt.browser_navigate(url="https://example.com")
 
         assert result["content"] == "Works now"
 
@@ -1282,10 +1280,9 @@ class TestBrowserNavigateAutoRecovery:
             side_effect=Exception("Timeout 30000ms exceeded")
         )
 
-        with patch.dict(os.environ, {"BROWSER_BACKEND": "basic"}):
-            with patch.object(bt, "_get_page", return_value=mock_page), \
-                 patch.object(bt, "browser_cleanup", new_callable=AsyncMock) as mock_cleanup:
-                result = await bt.browser_navigate(url="https://slow-site.com")
+        with patch.object(bt, "_get_page", return_value=mock_page), \
+             patch.object(bt, "_browser_cleanup_soft", new_callable=AsyncMock) as mock_cleanup:
+            result = await bt.browser_navigate(url="https://slow-site.com")
 
         mock_cleanup.assert_not_awaited()
         assert "error" in result
@@ -1301,51 +1298,11 @@ class TestBrowserNavigateAutoRecovery:
             side_effect=Exception("Protocol error (Page.navigate): Page.navigate limit reached")
         )
 
-        with patch.dict(os.environ, {"BROWSER_BACKEND": "basic"}):
-            with patch.object(bt, "_get_page", return_value=mock_page), \
-                 patch.object(bt, "browser_cleanup", new_callable=AsyncMock):
-                result = await bt.browser_navigate(url="https://example.com")
+        with patch.object(bt, "_get_page", return_value=mock_page), \
+             patch.object(bt, "_browser_cleanup_soft", new_callable=AsyncMock):
+            result = await bt.browser_navigate(url="https://example.com")
 
         assert "error" in result
-
-
-class TestBrowserNavigatePersistentRecovery:
-    @pytest.mark.asyncio
-    async def test_navigate_uses_soft_cleanup_for_persistent_backend(self):
-        """In persistent mode, auto-recovery uses _browser_cleanup_soft (preserves VNC)."""
-        import src.agent.builtins.browser_tool as bt
-
-        dead_page = AsyncMock()
-        dead_page.goto = AsyncMock(
-            side_effect=Exception("Target closed")
-        )
-
-        fresh_page = AsyncMock()
-        fresh_page.url = "https://example.com"
-        fresh_page.title = AsyncMock(return_value="Example")
-        fresh_response = AsyncMock()
-        fresh_response.status = 200
-        fresh_page.goto = AsyncMock(return_value=fresh_response)
-        fresh_page.inner_text = AsyncMock(return_value="OK")
-
-        call_count = 0
-
-        async def mock_get_page(*, mesh_client=None):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return dead_page
-            return fresh_page
-
-        with patch.dict(os.environ, {"BROWSER_BACKEND": "persistent"}):
-            with patch.object(bt, "_get_page", side_effect=mock_get_page), \
-                 patch.object(bt, "_browser_cleanup_soft", new_callable=AsyncMock) as mock_soft, \
-                 patch.object(bt, "browser_cleanup", new_callable=AsyncMock) as mock_full:
-                result = await bt.browser_navigate(url="https://example.com")
-
-        mock_soft.assert_awaited_once()
-        mock_full.assert_not_awaited()
-        assert result["status"] == 200
 
 
 class TestIsDeadSessionError:
@@ -1676,85 +1633,6 @@ class TestMemorySave:
         assert result["count"] >= 1
         assert any("New_York" in r["value"] for r in result["results"])
         store.close()
-
-
-# ── browser backend selection ─────────────────────────────────
-
-
-class TestBrowserBackendSelection:
-    @pytest.mark.asyncio
-    async def test_default_is_persistent(self):
-        """Without BROWSER_BACKEND, _get_page() launches persistent browser."""
-        import src.agent.builtins.browser_tool as bt
-        bt._browser = bt._context = bt._page = None
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("BROWSER_BACKEND", None)
-            with patch.object(bt, "_launch_persistent", new_callable=AsyncMock) as mock_persistent:
-                mock_page = AsyncMock()
-                mock_page.is_closed.return_value = False
-                mock_persistent.return_value = (None, MagicMock(), mock_page)
-                await bt._get_page()
-                mock_persistent.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_stealth_dispatches_to_camoufox(self):
-        """BROWSER_BACKEND=stealth calls _launch_stealth()."""
-        import src.agent.builtins.browser_tool as bt
-        bt._browser = bt._context = bt._page = None
-        with patch.dict(os.environ, {"BROWSER_BACKEND": "stealth"}):
-            with patch.object(bt, "_launch_stealth", new_callable=AsyncMock) as mock_stealth:
-                mock_page = AsyncMock()
-                mock_page.is_closed.return_value = False
-                mock_stealth.return_value = (MagicMock(), MagicMock(), mock_page)
-                await bt._get_page()
-                mock_stealth.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_advanced_dispatches_to_brightdata(self):
-        """BROWSER_BACKEND=advanced calls _launch_advanced(mesh_client)."""
-        import src.agent.builtins.browser_tool as bt
-        bt._browser = bt._context = bt._page = None
-        mock_mesh = MagicMock()
-        with patch.dict(os.environ, {"BROWSER_BACKEND": "advanced"}):
-            with patch.object(bt, "_launch_advanced", new_callable=AsyncMock) as mock_adv:
-                mock_page = AsyncMock()
-                mock_page.is_closed.return_value = False
-                mock_adv.return_value = (MagicMock(), MagicMock(), mock_page)
-                await bt._get_page(mesh_client=mock_mesh)
-                mock_adv.assert_called_once_with(mock_mesh)
-
-    @pytest.mark.asyncio
-    async def test_advanced_requires_mesh_client(self):
-        """_launch_advanced() raises without mesh_client."""
-        import src.agent.builtins.browser_tool as bt
-        with pytest.raises(RuntimeError, match="mesh connectivity"):
-            await bt._launch_advanced(None)
-
-    @pytest.mark.asyncio
-    async def test_advanced_requires_vault_credential(self):
-        """_launch_advanced() raises when credential not found."""
-        import src.agent.builtins.browser_tool as bt
-        mock_mesh = AsyncMock()
-        mock_mesh.vault_resolve = AsyncMock(return_value=None)
-        with pytest.raises(RuntimeError, match="brightdata_cdp_url"):
-            await bt._launch_advanced(mock_mesh)
-
-    @pytest.mark.asyncio
-    async def test_advanced_vault_403_gives_clear_error(self):
-        """_launch_advanced() wraps vault 403 into a clear error message."""
-        import src.agent.builtins.browser_tool as bt
-        mock_mesh = AsyncMock()
-        mock_mesh.vault_resolve = AsyncMock(side_effect=Exception("403 Forbidden"))
-        with pytest.raises(RuntimeError, match="permissions"):
-            await bt._launch_advanced(mock_mesh)
-
-    @pytest.mark.asyncio
-    async def test_stealth_import_error(self):
-        """_launch_stealth() gives helpful error when camoufox not installed."""
-        import src.agent.builtins.browser_tool as bt
-        with patch.dict("sys.modules", {"camoufox": None, "camoufox.async_api": None}):
-            with pytest.raises(RuntimeError, match="camoufox is not installed"):
-                await bt._launch_stealth()
 
 
 # ── labeled screenshots ──────────────────────────────────────
@@ -2207,26 +2085,25 @@ class TestIntrospectTool:
         assert "connection refused" in result["error"]
 
 
-# ── persistent browser backend ───────────────────────────────
+# ── browser lifecycle ─────────────────────────────────────────
 
 
-class TestPersistentBrowserBackend:
+class TestBrowserLifecycle:
     @pytest.mark.asyncio
-    async def test_persistent_dispatches_to_launch_persistent(self):
-        """BROWSER_BACKEND=persistent calls _launch_persistent()."""
+    async def test_get_page_calls_launch_persistent(self):
+        """_get_page() connects to Chrome via _launch_persistent()."""
         import src.agent.builtins.browser_tool as bt
         bt._browser = bt._context = bt._page = None
-        with patch.dict(os.environ, {"BROWSER_BACKEND": "persistent"}):
-            with patch.object(bt, "_launch_persistent", new_callable=AsyncMock) as mock_persistent:
-                mock_page = AsyncMock()
-                mock_page.is_closed.return_value = False
-                mock_persistent.return_value = (None, MagicMock(), mock_page)
-                await bt._get_page()
-                mock_persistent.assert_called_once()
+        with patch.object(bt, "_launch_persistent", new_callable=AsyncMock) as mock_persistent:
+            mock_page = AsyncMock()
+            mock_page.is_closed.return_value = False
+            mock_persistent.return_value = (None, MagicMock(), mock_page)
+            await bt._get_page()
+            mock_persistent.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_browser_reset_preserves_profile_in_persistent_mode(self):
-        """browser_reset in persistent mode calls _browser_cleanup_soft, not browser_cleanup."""
+    async def test_browser_reset_uses_soft_cleanup(self):
+        """browser_reset uses _browser_cleanup_soft (preserves VNC + profile)."""
         import src.agent.builtins.browser_tool as bt
 
         bt._page_refs["e1"] = MagicMock()
@@ -2235,22 +2112,18 @@ class TestPersistentBrowserBackend:
         bt._page.close = AsyncMock()
         bt._context = MagicMock()
         bt._context.close = AsyncMock()
-        bt._browser = None  # persistent context has no Browser object
+        bt._browser = None
 
-        with patch.dict(os.environ, {"BROWSER_BACKEND": "persistent"}):
-            with patch.object(bt, "_browser_cleanup_soft", new_callable=AsyncMock) as mock_soft, \
-                 patch.object(bt, "browser_cleanup", new_callable=AsyncMock) as mock_full:
-                result = await bt.browser_reset()
+        with patch.object(bt, "_browser_cleanup_soft", new_callable=AsyncMock) as mock_soft:
+            result = await bt.browser_reset()
 
-            mock_soft.assert_awaited_once()
-            mock_full.assert_not_awaited()
-            assert result["status"] == "reset"
-            assert result["backend"] == "persistent"
-            assert "preserved" in result["message"].lower()
+        mock_soft.assert_awaited_once()
+        assert result["status"] == "reset"
+        assert "preserved" in result["message"].lower()
 
     @pytest.mark.asyncio
-    async def test_start_persistent_browser_launches_stack(self):
-        """start_persistent_browser starts KasmVNC Xvnc and browser."""
+    async def test_start_browser_launches_stack(self):
+        """start_browser starts KasmVNC Xvnc and browser."""
         import src.agent.builtins.browser_tool as bt
 
         bt._page = None
@@ -2267,30 +2140,29 @@ class TestPersistentBrowserBackend:
             m.poll.return_value = None  # process still running
             return m
 
-        with patch.dict(os.environ, {"BROWSER_BACKEND": "persistent"}):
-            with patch.object(bt, "_find_chromium_binary", return_value="/usr/bin/chromium"), \
-                 patch("subprocess.Popen", side_effect=mock_popen), \
-                 patch("asyncio.sleep", new_callable=AsyncMock), \
-                 patch("pathlib.Path.mkdir"):
-                await bt.start_persistent_browser()
+        with patch.object(bt, "_find_chromium_binary", return_value="/usr/bin/chromium"), \
+             patch("subprocess.Popen", side_effect=mock_popen), \
+             patch("asyncio.sleep", new_callable=AsyncMock), \
+             patch("pathlib.Path.mkdir"):
+            await bt.start_browser()
 
-            # Three Popen calls: KasmVNC Xvnc + openbox + Chrome subprocess
-            assert len(popen_calls) == 3
-            xvnc_cmd = popen_calls[0]
-            assert "Xvnc" in xvnc_cmd[0]
-            assert popen_calls[1] == ["openbox"]
-            chrome_cmd = popen_calls[2]
-            assert "/usr/bin/chromium" in chrome_cmd[0]
-            assert "--remote-debugging-port=9222" in chrome_cmd
-            # Default web port 6080 passed via -websocketPort
-            assert "-websocketPort" in xvnc_cmd
-            assert "6080" in xvnc_cmd
-            # Auth must be fully disabled (both VNC and BasicAuth layers)
-            assert "-SecurityTypes" in xvnc_cmd
-            assert "-disableBasicAuth" in xvnc_cmd
+        # Three Popen calls: KasmVNC Xvnc + openbox + Chrome subprocess
+        assert len(popen_calls) == 3
+        xvnc_cmd = popen_calls[0]
+        assert "Xvnc" in xvnc_cmd[0]
+        assert popen_calls[1] == ["openbox"]
+        chrome_cmd = popen_calls[2]
+        assert "/usr/bin/chromium" in chrome_cmd[0]
+        assert "--remote-debugging-port=9222" in chrome_cmd
+        # Default web port 6080 passed via -websocketPort
+        assert "-websocketPort" in xvnc_cmd
+        assert "6080" in xvnc_cmd
+        # Auth must be fully disabled (both VNC and BasicAuth layers)
+        assert "-SecurityTypes" in xvnc_cmd
+        assert "-disableBasicAuth" in xvnc_cmd
 
     @pytest.mark.asyncio
-    async def test_start_persistent_browser_uses_vnc_port_env(self):
+    async def test_start_browser_uses_vnc_port_env(self):
         """VNC_PORT env var overrides the default KasmVNC web port."""
         import src.agent.builtins.browser_tool as bt
 
@@ -2308,20 +2180,19 @@ class TestPersistentBrowserBackend:
             m.poll.return_value = None
             return m
 
-        env = {"BROWSER_BACKEND": "persistent", "VNC_PORT": "9999"}
-        with patch.dict(os.environ, env):
+        with patch.dict(os.environ, {"VNC_PORT": "9999"}):
             with patch.object(bt, "_find_chromium_binary", return_value="/usr/bin/chromium"), \
                  patch("subprocess.Popen", side_effect=mock_popen), \
                  patch("asyncio.sleep", new_callable=AsyncMock), \
                  patch("pathlib.Path.mkdir"):
-                await bt.start_persistent_browser()
+                await bt.start_browser()
 
-            # KasmVNC should use port 9999
-            assert "9999" in popen_calls[0]
+        # KasmVNC should use port 9999
+        assert "9999" in popen_calls[0]
 
     @pytest.mark.asyncio
-    async def test_start_persistent_browser_raises_on_vnc_crash(self):
-        """start_persistent_browser raises if KasmVNC Xvnc exits immediately."""
+    async def test_start_browser_raises_on_vnc_crash(self):
+        """start_browser raises if KasmVNC Xvnc exits immediately."""
         import src.agent.builtins.browser_tool as bt
 
         bt._page = None
@@ -2336,12 +2207,11 @@ class TestPersistentBrowserBackend:
             m.returncode = 1
             return m
 
-        with patch.dict(os.environ, {"BROWSER_BACKEND": "persistent"}):
-            with patch.object(bt, "_get_page", new_callable=AsyncMock), \
-                 patch("subprocess.Popen", side_effect=mock_popen), \
-                 patch("asyncio.sleep", new_callable=AsyncMock):
-                with pytest.raises(RuntimeError, match="KasmVNC"):
-                    await bt.start_persistent_browser()
+        with patch.object(bt, "_get_page", new_callable=AsyncMock), \
+             patch("subprocess.Popen", side_effect=mock_popen), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(RuntimeError, match="KasmVNC"):
+                await bt.start_browser()
 
 
 class TestListAgentsProjectScope:

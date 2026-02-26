@@ -58,7 +58,6 @@ class RuntimeBackend(abc.ABC):
         system_prompt: str = "",
         model: str = "",
         mcp_servers: list[dict] | None = None,
-        browser_backend: str = "",
         thinking: str = "",
     ) -> str:
         """Start an agent. Returns a URL or identifier for reaching it."""
@@ -87,7 +86,6 @@ class RuntimeBackend(abc.ABC):
         model: str = "",
         ttl: int = 3600,
         mcp_servers: list[dict] | None = None,
-        browser_backend: str = "",
         thinking: str = "",
     ) -> str:
         """Spawn an ephemeral agent with a TTL for auto-cleanup."""
@@ -95,7 +93,6 @@ class RuntimeBackend(abc.ABC):
             agent_id=agent_id, role=role, skills_dir="",
             system_prompt=system_prompt, model=model,
             mcp_servers=mcp_servers,
-            browser_backend=browser_backend,
             thinking=thinking,
         )
         self.agents[agent_id]["ephemeral"] = True
@@ -167,7 +164,6 @@ class DockerBackend(RuntimeBackend):
         system_prompt: str = "",
         model: str = "",
         mcp_servers: list[dict] | None = None,
-        browser_backend: str = "",
         thinking: str = "",
     ) -> str:
         import docker as _docker
@@ -175,11 +171,9 @@ class DockerBackend(RuntimeBackend):
         with self._port_lock:
             port = self._next_port
             self._next_port += 1
-            # Allocate an additional port for VNC when using persistent browser
-            vnc_port = None
-            if browser_backend == "persistent":
-                vnc_port = self._next_port
-                self._next_port += 1
+            # Every agent gets a VNC port for browser access
+            vnc_port = self._next_port
+            self._next_port += 1
 
         # Generate per-agent auth token for mesh request verification
         auth_token = secrets.token_urlsafe(32)
@@ -198,11 +192,8 @@ class DockerBackend(RuntimeBackend):
             environment["LLM_MODEL"] = model
         if mcp_servers:
             environment["MCP_SERVERS"] = json.dumps(mcp_servers)
-        if browser_backend:
-            environment["BROWSER_BACKEND"] = browser_backend
-            if browser_backend == "persistent" and vnc_port is not None:
-                if self.use_host_network:
-                    environment["VNC_PORT"] = str(vnc_port)
+        if self.use_host_network:
+            environment["VNC_PORT"] = str(vnc_port)
         if thinking:
             environment["THINKING"] = thinking
         environment.update(self.extra_env)
@@ -235,35 +226,24 @@ class DockerBackend(RuntimeBackend):
                 mp_path = marketplace_dir.as_posix()
             volumes[mp_path] = {"bind": "/app/marketplace_skills", "mode": "ro"}
 
-        # Persistent browser (visible Chromium + VNC stack) needs more resources:
-        # Chrome spawns multiple processes (browser, renderer, GPU, network)
-        # that all need CPU time.  1 core is not enough for JS-heavy sites.
-        is_persistent = browser_backend == "persistent"
-        mem_limit = "2g" if is_persistent else "512m"
-        cpu_quota = 200000 if is_persistent else 50000
-
+        # Every agent gets Chrome + VNC.  1GB / 1 CPU / 256MB shm is a
+        # middle ground — enough for JS-heavy sites without being excessive
+        # in multi-agent setups.
         run_kwargs: dict[str, Any] = {
             "detach": True,
             "name": f"openlegion_{safe_name}",
             "environment": environment,
             "volumes": volumes,
-            "mem_limit": mem_limit,
-            "cpu_quota": cpu_quota,
+            "mem_limit": "1g",
+            "cpu_quota": 100000,
+            "shm_size": "256m",
             "security_opt": ["no-new-privileges"],
         }
-
-        # Chrome uses /dev/shm for rendering compositing.  Docker's default
-        # is 64 MB — not enough for a full browser page, causing rendering
-        # stalls and extreme UI latency.  Give persistent browsers 256 MB.
-        if is_persistent:
-            run_kwargs["shm_size"] = "256m"
 
         if self.use_host_network:
             run_kwargs["network_mode"] = "host"
         else:
-            ports = {"8400/tcp": port}
-            if vnc_port is not None:
-                ports["6080/tcp"] = vnc_port
+            ports = {"8400/tcp": port, "6080/tcp": vnc_port}
             run_kwargs["ports"] = ports
             # On Linux Docker Engine, host.docker.internal isn't automatic
             if platform.system() == "Linux":
@@ -280,6 +260,7 @@ class DockerBackend(RuntimeBackend):
 
         container = self.client.containers.run(self.BASE_IMAGE, **run_kwargs)
         url = f"http://127.0.0.1:{port}"
+        vnc_url = f"http://127.0.0.1:{vnc_port}/index.html?autoconnect=true&path=&resize=scale"
         agent_info: dict[str, Any] = {
             "container": container,
             "url": url,
@@ -289,13 +270,10 @@ class DockerBackend(RuntimeBackend):
             "system_prompt": system_prompt,
             "model": model,
             "mcp_servers": mcp_servers,
-            "browser_backend": browser_backend,
             "thinking": thinking,
+            "vnc_port": vnc_port,
+            "vnc_url": vnc_url,
         }
-        if vnc_port is not None:
-            vnc_url = f"http://127.0.0.1:{vnc_port}/index.html?autoconnect=true&path=&resize=scale"
-            agent_info["vnc_port"] = vnc_port
-            agent_info["vnc_url"] = vnc_url
         self.agents[agent_id] = agent_info
         logger.info(f"Started agent '{agent_id}' (role={role}) at {url}")
         return url
@@ -424,7 +402,6 @@ class SandboxBackend(RuntimeBackend):
         system_prompt: str,
         model: str,
         mcp_servers: list[dict] | None = None,
-        browser_backend: str = "",
         thinking: str = "",
     ) -> Path:
         """Create the per-agent host directory that will sync into the sandbox."""
@@ -476,8 +453,6 @@ class SandboxBackend(RuntimeBackend):
             env_cfg["LLM_MODEL"] = model
         if mcp_servers:
             env_cfg["MCP_SERVERS"] = json.dumps(mcp_servers)
-        if browser_backend:
-            env_cfg["BROWSER_BACKEND"] = browser_backend
         if thinking:
             env_cfg["THINKING"] = thinking
         env_cfg.update(self.extra_env)
@@ -496,13 +471,12 @@ class SandboxBackend(RuntimeBackend):
         system_prompt: str = "",
         model: str = "",
         mcp_servers: list[dict] | None = None,
-        browser_backend: str = "",
         thinking: str = "",
     ) -> str:
         sandbox_name = f"openlegion_{_docker_safe_name(agent_id)}"
         ws = self._prepare_workspace(
             agent_id, role, skills_dir, system_prompt, model,
-            mcp_servers=mcp_servers, browser_backend=browser_backend, thinking=thinking,
+            mcp_servers=mcp_servers, thinking=thinking,
         )
 
         # Create sandbox with the shell agent type and workspace
@@ -549,7 +523,6 @@ class SandboxBackend(RuntimeBackend):
             "system_prompt": system_prompt,
             "model": model,
             "mcp_servers": mcp_servers,
-            "browser_backend": browser_backend,
             "thinking": thinking,
         }
         logger.info(f"Started agent '{agent_id}' in sandbox '{sandbox_name}'")

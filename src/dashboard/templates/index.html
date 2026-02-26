@@ -1169,10 +1169,6 @@
                           <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.model || '-'"></div>
                         </div>
                         <div class="bg-gray-800/50 rounded p-3">
-                          <div class="text-xs text-gray-500 mb-1">Browser Backend</div>
-                          <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.browser_backend || '-'"></div>
-                        </div>
-                        <div class="bg-gray-800/50 rounded p-3">
                           <div class="text-xs text-gray-500 mb-1">Role</div>
                           <div class="text-sm text-gray-200" x-text="agentConfigs[selectedAgent]?.role || '-'"></div>
                         </div>
@@ -1226,14 +1222,6 @@
                             <select x-model="editForm.model" class="dash-select w-full">
                               <template x-for="m in availableModels" :key="m">
                                 <option :value="m" x-text="m"></option>
-                              </template>
-                            </select>
-                          </div>
-                          <div>
-                            <label class="text-xs text-gray-500 mb-1 block">Browser Backend</label>
-                            <select x-model="editForm.browser_backend" class="dash-select w-full">
-                              <template x-for="b in (settingsData?.browser_backends || [])" :key="b.name">
-                                <option :value="b.name" x-text="b.label"></option>
                               </template>
                             </select>
                           </div>
@@ -1779,18 +1767,6 @@
                   </template>
                 </div>
               </div>
-              <!-- Browser backends -->
-              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Browser Backends</div>
-                <div class="space-y-2">
-                  <template x-for="b in settingsData?.browser_backends || []" :key="b.name">
-                    <div>
-                      <span class="text-sm text-white font-medium" x-text="b.label || b.name"></span>
-                      <div class="text-xs text-gray-500 mt-0.5" x-text="b.description || ''"></div>
-                    </div>
-                  </template>
-                </div>
-              </div>
             </div>
           </div>
         </div>
@@ -1828,15 +1804,6 @@
                 <option value="">Default</option>
                 <template x-for="m in availableModels" :key="m">
                   <option :value="m" x-text="m"></option>
-                </template>
-              </select>
-            </div>
-            <div>
-              <label class="text-xs text-gray-500 mb-1 block">Browser</label>
-              <select x-model="addAgentForm.browser_backend" class="dash-select w-full">
-                <option value="">Default</option>
-                <template x-for="b in (settingsData?.browser_backends || [])" :key="b.name">
-                  <option :value="b.name" x-text="b.label"></option>
                 </template>
               </select>
             </div>

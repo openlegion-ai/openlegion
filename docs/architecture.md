@@ -81,7 +81,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `exec_tool.py` | Shell command execution |
 | `file_tool.py` | File read/write/list scoped to /data |
 | `http_tool.py` | HTTP requests |
-| `browser_tool.py` | 4-backend browser: Playwright Chromium (basic), Camoufox stealth, Bright Data CDP (advanced), persistent (Chromium + KasmVNC) |
+| `browser_tool.py` | Browser automation: Chrome + KasmVNC with Playwright connecting via CDP on-demand |
 | `mesh_tool.py` | Blackboard, PubSub, fleet awareness, artifacts, cron, heartbeat, spawn |
 | `memory_tool.py` | Memory search, save, recall |
 | `vault_tool.py` | Credential-blind vault operations |

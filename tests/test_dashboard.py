@@ -226,7 +226,7 @@ class TestDashboardAgentCRUD:
             "agents": {
                 "new_agent": {
                     "role": "tester",
-                    "skills_dir": "", "model": "openai/gpt-4o-mini", "browser_backend": "",
+                    "skills_dir": "", "model": "openai/gpt-4o-mini",
                 },
             },
         }
@@ -254,7 +254,7 @@ class TestDashboardAgentCRUD:
             "agents": {
                 "new_agent": {
                     "role": "tester",
-                    "skills_dir": "", "model": "openai/gpt-4o-mini", "browser_backend": "",
+                    "skills_dir": "", "model": "openai/gpt-4o-mini",
                 },
             },
         }
@@ -536,7 +536,6 @@ class TestDashboardAgentConfig:
                     "model": "openai/gpt-4.1",
                     "role": "researcher",
                     "budget": {"daily_usd": 5.0},
-                    "browser_backend": "stealth",
                 },
             },
         }
@@ -546,7 +545,6 @@ class TestDashboardAgentConfig:
         assert data["id"] == "alpha"
         assert data["model"] == "openai/gpt-4.1"
         assert data["role"] == "researcher"
-        assert data["browser_backend"] == "stealth"
         assert "system_prompt" not in data
 
     def test_get_config_not_found(self):
@@ -579,32 +577,6 @@ class TestDashboardAgentConfig:
             resp = self.client.put(
                 "/dashboard/api/agents/alpha/config",
                 json={"model": "invalid/model"},
-            )
-            assert resp.status_code == 400
-
-    @patch("src.cli.config._update_agent_field")
-    @patch("src.cli.config._load_config")
-    def test_put_config_browser_validation(self, mock_load, mock_update):
-        mock_load.return_value = {
-            "llm": {"default_model": "openai/gpt-4.1-mini"},
-            "agents": {"alpha": {"browser_backend": "basic"}},
-        }
-        resp = self.client.put(
-            "/dashboard/api/agents/alpha/config",
-            json={"browser_backend": "stealth"},
-        )
-        assert resp.status_code == 200
-        assert "browser_backend" in resp.json()["updated"]
-
-    def test_put_config_invalid_browser(self):
-        with patch("src.cli.config._load_config") as mock_load:
-            mock_load.return_value = {
-                "llm": {"default_model": "openai/gpt-4.1-mini"},
-                "agents": {"alpha": {}},
-            }
-            resp = self.client.put(
-                "/dashboard/api/agents/alpha/config",
-                json={"browser_backend": "invalid_browser"},
             )
             assert resp.status_code == 400
 
@@ -811,7 +783,6 @@ class TestDashboardSettings:
         assert "pubsub_subscriptions" in data
         assert "model_costs" in data
         assert "provider_models" in data
-        assert "browser_backends" in data
 
     def test_credentials_no_values(self):
         resp = self.client.get("/dashboard/api/settings")

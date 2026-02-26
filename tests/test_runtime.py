@@ -113,34 +113,8 @@ class TestSandboxBackend:
         )
         assert not (ws / "PROJECT.md").exists()
 
-    def test_prepare_workspace_browser_backend(self, tmp_path):
-        """browser_backend config is passed as BROWSER_BACKEND env var."""
-        project_root = tmp_path / "project"
-        project_root.mkdir()
-
-        backend = SandboxBackend.__new__(SandboxBackend)
-        backend.project_root = project_root
-        backend.mesh_host_port = 8420
-        backend.agents = {}
-        backend.auth_tokens = {}
-        backend.extra_env = {}
-        backend._workspace_root = tmp_path / ".openlegion" / "agents"
-        backend._workspace_root.mkdir(parents=True)
-
-        ws = backend._prepare_workspace(
-            agent_id="beta",
-            role="scraper",
-            skills_dir="",
-            system_prompt="",
-            model="openai/gpt-4o-mini",
-            browser_backend="stealth",
-        )
-
-        env_content = (ws / ".agent.env").read_text()
-        assert "BROWSER_BACKEND=stealth" in env_content
-
-    def test_prepare_workspace_no_browser_backend(self, tmp_path):
-        """Without browser_backend, BROWSER_BACKEND is not in env."""
+    def test_prepare_workspace_env_no_browser_vars(self, tmp_path):
+        """BROWSER_BACKEND is not written to the env config file."""
         project_root = tmp_path / "project"
         project_root.mkdir()
 
@@ -360,8 +334,8 @@ class TestDockerBackendVNCPort:
         backend.project_root = __import__("pathlib").Path("/tmp")
         return backend
 
-    def test_persistent_backend_allocates_vnc_port(self):
-        """persistent browser_backend gets VNC port and URL in agent info."""
+    def test_all_agents_get_vnc_port(self):
+        """Every agent gets a VNC port and URL in agent info."""
         import docker as _docker
 
         backend = self._make_backend()
@@ -375,7 +349,6 @@ class TestDockerBackendVNCPort:
             agent_id="test-agent",
             role="test",
             skills_dir="",
-            browser_backend="persistent",
         )
 
         agent_info = backend.agents["test-agent"]
@@ -389,51 +362,17 @@ class TestDockerBackendVNCPort:
         assert "6080/tcp" in ports
         assert ports["6080/tcp"] == agent_info["vnc_port"]
 
-        # Memory should be 2g for persistent (Chrome + VNC + JS-heavy sites)
-        assert run_call.kwargs.get("mem_limit") == "2g"
+        # Memory should be 1g for all agents (Chrome + VNC)
+        assert run_call.kwargs.get("mem_limit") == "1g"
 
-        # CPU quota should be 200000 for persistent (2 cores)
-        assert run_call.kwargs.get("cpu_quota") == 200000
+        # CPU quota should be 100000 for all agents (1 core)
+        assert run_call.kwargs.get("cpu_quota") == 100000
 
-    def test_basic_backend_no_vnc_port(self):
-        """Non-persistent backends do not allocate VNC port."""
-        import docker as _docker
+        # shm_size should be 256m for all agents
+        assert run_call.kwargs.get("shm_size") == "256m"
 
-        backend = self._make_backend()
-        mock_container = MagicMock()
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
-        backend.client = mock_client
-
-        backend.start_agent(
-            agent_id="test-basic",
-            role="test",
-            skills_dir="",
-            browser_backend="basic",
-        )
-
-        agent_info = backend.agents["test-basic"]
-        assert "vnc_port" not in agent_info
-        assert "vnc_url" not in agent_info
-
-        # Verify port mapping does NOT include 6080/tcp
-        run_call = mock_client.containers.run.call_args
-        ports = run_call.kwargs.get("ports", {})
-        assert "6080/tcp" not in ports
-
-        # CPU quota should be 50000 for non-persistent
-        assert run_call.kwargs.get("cpu_quota") == 50000
-
-        # Memory should be 512m for basic
-        assert run_call.kwargs.get("mem_limit") == "512m"
-
-        # VNC_PASSWORD should not be in environment
-        env = run_call.kwargs.get("environment", {})
-        assert "VNC_PASSWORD" not in env
-
-    def test_persistent_host_network_sets_vnc_port_env(self):
-        """In host-network mode, VNC_PORT env var is set for persistent agents."""
+    def test_host_network_sets_vnc_port_env(self):
+        """In host-network mode, VNC_PORT env var is set for all agents."""
         import docker as _docker
 
         backend = self._make_backend()
@@ -448,7 +387,6 @@ class TestDockerBackendVNCPort:
             agent_id="test-host-vnc",
             role="test",
             skills_dir="",
-            browser_backend="persistent",
         )
 
         run_call = mock_client.containers.run.call_args
@@ -456,7 +394,7 @@ class TestDockerBackendVNCPort:
         assert "VNC_PORT" in env
         assert env["VNC_PORT"] == str(backend.agents["test-host-vnc"]["vnc_port"])
 
-    def test_persistent_bridge_network_no_vnc_port_env(self):
+    def test_bridge_network_no_vnc_port_env(self):
         """In bridge mode (default), VNC_PORT env var is NOT set."""
         import docker as _docker
 
@@ -471,7 +409,6 @@ class TestDockerBackendVNCPort:
             agent_id="test-bridge-vnc",
             role="test",
             skills_dir="",
-            browser_backend="persistent",
         )
 
         run_call = mock_client.containers.run.call_args

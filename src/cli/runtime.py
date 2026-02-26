@@ -282,7 +282,6 @@ class RuntimeContext:
             skills_dir = os.path.abspath(agent_cfg.get("skills_dir", ""))
             agent_model = agent_cfg.get("model", default_model)
             agent_mcp_servers = agent_cfg.get("mcp_servers") or None
-            agent_browser_backend = agent_cfg.get("browser_backend", "")
             agent_thinking = agent_cfg.get("thinking", "")
 
             # Seed AGENTS.md from initial_instructions on first boot
@@ -308,7 +307,6 @@ class RuntimeContext:
                     system_prompt="",
                     model=agent_model,
                     mcp_servers=agent_mcp_servers,
-                    browser_backend=agent_browser_backend,
                     thinking=agent_thinking,
                 )
             except (subprocess.TimeoutExpired, RuntimeError) as exc:
@@ -336,8 +334,7 @@ class RuntimeContext:
                         system_prompt="",
                         model=agent_model,
                         mcp_servers=agent_mcp_servers,
-                        browser_backend=agent_browser_backend,
-                        thinking=agent_thinking,
+                            thinking=agent_thinking,
                     )
                 else:
                     raise
@@ -534,10 +531,8 @@ class RuntimeContext:
             for agent_id, ready in agent_results:
                 agent_cfg = agents_cfg.get(agent_id, {})
                 model = agent_cfg.get("model", default_model)
-                browser = agent_cfg.get("browser_backend", "persistent") or "persistent"
                 if ready:
-                    echo_ok(f"{agent_id:<20} ready     model: {model:<20} browser: {browser}")
-                    # Print KasmVNC URL for persistent browser agents
+                    echo_ok(f"{agent_id:<20} ready     model: {model}")
                     agent_info = self.runtime.agents.get(agent_id, {})
                     if agent_info.get("vnc_url"):
                         click.echo(f"    Browser: {agent_info['vnc_url']}")

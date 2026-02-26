@@ -369,8 +369,7 @@ openlegion/
 | `pydantic` | Type validation |
 | `sqlite-vec` | Vector search for memory |
 | `mcp` | Model Context Protocol client |
-| `playwright` | Browser automation — basic tier (Chromium) |
-| `camoufox` | Anti-detect browser — stealth tier (Firefox) |
+| `playwright` | Browser automation (Chromium via CDP) |
 
 ### Optional
 

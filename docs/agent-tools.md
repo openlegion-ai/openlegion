@@ -28,18 +28,7 @@ All file operations are scoped to `/data` inside the container. Path traversal i
 
 ### Browser Automation
 
-Four browser backends controlled by `browser_backend` in `config/agents.yaml`:
-
-| Backend | Stack | Anti-Detection | Cost |
-|---------|-------|---------------|------|
-| **basic** | Playwright + Chromium (headless) | Low | Free |
-| **stealth** | Camoufox (Firefox-based anti-detect) with Xvfb | Medium | Free |
-| **advanced** | Bright Data Scraping Browser via CDP | High (residential proxies, CAPTCHA solving) | Paid |
-| **persistent** (default) | Playwright + Chromium with persistent profile + KasmVNC | Low | Free |
-
-The backend is selected per-agent via the `BROWSER_BACKEND` environment variable. All backends expose the same tool interface — downstream tools work identically regardless of backend.
-
-The **persistent** backend maintains a browser profile across sessions at `/data/browser_profile` and runs KasmVNC on port 6080 for live VNC viewing via the dashboard. This is ideal for agents that need to maintain login sessions or cookies across restarts.
+All agents use a single browser architecture: **Chrome + KasmVNC**. A Chromium instance runs with a persistent profile at `/data/browser_profile`, and KasmVNC serves a live browser view on port 6080 (accessible via the dashboard). Playwright connects to Chrome via CDP on-demand when browser tools are called and disconnects after each operation. This maintains login sessions and cookies across restarts while keeping the browser viewable in real-time.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
@@ -49,7 +38,7 @@ The **persistent** backend maintains a browser profile across sessions at `/data
 | `browser_click` | `ref` or `selector` | Click element by accessibility ref or CSS selector |
 | `browser_type` | `ref` or `selector`, `text` | Type into input field (supports `$CRED{name}` handles) |
 | `browser_evaluate` | `script` | Run JavaScript in page context |
-| `browser_reset` | -- | Force-close browser session and reconnect fresh (new IP for Bright Data) |
+| `browser_reset` | -- | Force-close browser session and reconnect fresh |
 
 ### Memory
 
