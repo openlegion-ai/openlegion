@@ -104,6 +104,7 @@ class TestAgentAdd:
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["agent", "add", "existing"])
+            assert result.exit_code == 1
             assert "already exists" in result.output
 
 
@@ -213,6 +214,7 @@ class TestAgentEdit:
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["agent", "edit", "ghost", "--model", "x"])
+            assert result.exit_code == 1
             assert "not found" in result.output
 
     def test_edit_no_change(self, tmp_path):
@@ -330,6 +332,7 @@ class TestAgentRemove:
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["agent", "remove", "ghost"])
+            assert result.exit_code == 1
             assert "not found" in result.output
 
 
@@ -931,7 +934,7 @@ class TestChatNoMesh:
     def test_chat_fails_gracefully_when_mesh_not_running(self):
         runner = CliRunner()
         result = runner.invoke(cli, ["chat", "testbot", "--port", "19999"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "not running" in result.output
 
 
@@ -1073,7 +1076,7 @@ class TestProjectCreate:
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["project", "create", "../escape", "-d", "bad"])
-            assert result.exit_code == 0  # Click catches the error
+            assert result.exit_code == 1
             assert "Invalid project name" in result.output
 
     def test_create_project_unknown_agents(self, tmp_path):
@@ -1097,6 +1100,7 @@ class TestProjectCreate:
                 cli,
                 ["project", "create", "proj", "-d", "x", "-a", "nonexistent"],
             )
+            assert result.exit_code == 1
             assert "Unknown agent" in result.output
 
 

@@ -115,7 +115,7 @@ def echo_ok(text: str) -> None:
 
 def echo_warn(text: str) -> None:
     """Warning."""
-    click.echo(click.style("  \u26a0 ", fg="yellow") + text)
+    click.echo(click.style("  \u26a0 ", fg="yellow") + text, err=True)
 
 
 def echo_fail(text: str) -> None:

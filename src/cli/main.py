@@ -97,8 +97,8 @@ def agent_add(name: str | None, model_override: str | None):
         name = click.prompt("Agent name")
 
     if name in cfg.get("agents", {}):
-        click.echo(f"Agent '{name}' already exists.")
-        return
+        click.echo(f"Agent '{name}' already exists. Edit it: openlegion agent edit {name}", err=True)
+        sys.exit(1)
 
     description = click.prompt(
         "What should this agent do?",
@@ -141,7 +141,7 @@ def agent_edit(
     cfg = _load_config()
     name = _resolve_agent_name(cfg, name)
     if name is None:
-        return
+        sys.exit(1)
 
     # Direct flag mode: apply each provided flag
     has_flags = any(v is not None for v in [
@@ -186,11 +186,11 @@ def _resolve_agent_name(cfg: dict, name: str | None) -> str | None:
     """Resolve agent name: return as-is if valid, prompt interactively if None."""
     agents = cfg.get("agents", {})
     if not agents:
-        click.echo("No agents configured. Run: openlegion agent add")
+        click.echo("No agents configured. Run: openlegion agent add", err=True)
         return None
     if name is not None:
         if name not in agents:
-            click.echo(f"Agent '{name}' not found.")
+            click.echo(f"Agent '{name}' not found. Available: {', '.join(sorted(agents))}", err=True)
             return None
         return name
     # Interactive picker
@@ -241,7 +241,7 @@ def agent_remove(name: str | None, yes: bool):
     cfg = _load_config()
     name = _resolve_agent_name(cfg, name)
     if name is None:
-        return
+        sys.exit(1)
     if not yes:
         click.confirm(f"Remove agent '{name}'? This deletes its config and permissions.", abort=True)
 
@@ -293,8 +293,8 @@ def channels_add(channel_type: str | None):
 
     channel_type = channel_type.lower()
     if channel_type not in CHANNEL_TYPES:
-        click.echo(f"Unknown channel '{channel_type}'. Available: {', '.join(CHANNEL_TYPES)}")
-        return
+        click.echo(f"Unknown channel '{channel_type}'. Available: {', '.join(CHANNEL_TYPES)}", err=True)
+        sys.exit(1)
 
     ch = CHANNEL_TYPES[channel_type]
     click.echo(f"\n  {ch['label']} Setup")
@@ -376,8 +376,8 @@ def channels_remove(channel_type: str):
     """
     channel_type = channel_type.lower()
     if channel_type not in CHANNEL_TYPES:
-        click.echo(f"Unknown channel '{channel_type}'. Available: {', '.join(CHANNEL_TYPES)}")
-        return
+        click.echo(f"Unknown channel '{channel_type}'. Available: {', '.join(CHANNEL_TYPES)}", err=True)
+        sys.exit(1)
 
     ch = CHANNEL_TYPES[channel_type]
 
@@ -439,7 +439,7 @@ def skill_install(repo_url: str, ref: str):
     result = install_skill(repo_url, cli_config.MARKETPLACE_DIR, ref=ref)
     if "error" in result:
         click.echo(f"Error: {result['error']}", err=True)
-        return
+        sys.exit(1)
     click.echo(f"Installed '{result['name']}' v{result.get('version', '?')}")
     click.echo(f"  {result.get('description', '')}")
     click.echo("\nRestart agents to load the new skill.")
@@ -481,7 +481,7 @@ def skill_remove(name: str, yes: bool):
     result = remove_skill(name, cli_config.MARKETPLACE_DIR)
     if "error" in result:
         click.echo(f"Error: {result['error']}", err=True)
-        return
+        sys.exit(1)
     click.echo(f"Removed skill '{name}'.")
     click.echo("Restart agents for changes to take effect.")
 
@@ -534,12 +534,12 @@ def project_create(name: str | None, desc: str, agents_str: str):
         _validate_project_name(name)
     except ValueError as e:
         click.echo(str(e), err=True)
-        return
+        sys.exit(1)
 
     existing = _load_projects()
     if name in existing:
-        click.echo(f"Project '{name}' already exists.")
-        return
+        click.echo(f"Project '{name}' already exists. Edit it: openlegion project edit {name}", err=True)
+        sys.exit(1)
 
     if not desc:
         desc = click.prompt("Description", default="")
@@ -562,14 +562,14 @@ def project_create(name: str | None, desc: str, agents_str: str):
     all_agents = set(cfg.get("agents", {}))
     invalid = [a for a in members if a not in all_agents]
     if invalid:
-        click.echo(f"Unknown agent(s): {', '.join(invalid)}", err=True)
-        return
+        click.echo(f"Unknown agent(s): {', '.join(invalid)}. Available: {', '.join(sorted(all_agents))}", err=True)
+        sys.exit(1)
 
     try:
         _create_project(name, description=desc, members=members)
     except ValueError as e:
         click.echo(str(e), err=True)
-        return
+        sys.exit(1)
 
     click.echo(f"\nProject '{name}' created.")
     if members:
@@ -634,8 +634,8 @@ def project_delete(name: str | None, yes: bool):
         name = names[choice - 1]
 
     if name not in projects:
-        click.echo(f"Project '{name}' not found.")
-        return
+        click.echo(f"Project '{name}' not found. List projects: openlegion project list", err=True)
+        sys.exit(1)
 
     if not yes:
         members = projects[name].get("members", [])
@@ -648,7 +648,7 @@ def project_delete(name: str | None, yes: bool):
         _delete_project(name)
     except ValueError as e:
         click.echo(str(e), err=True)
-        return
+        sys.exit(1)
 
     click.echo(f"Deleted project '{name}'.")
 
@@ -682,23 +682,23 @@ def project_add_agent(project_name: str | None, agent_name: str | None):
             project_name = names[choice - 1]
 
     if project_name not in projects:
-        click.echo(f"Project '{project_name}' not found.")
-        return
+        click.echo(f"Project '{project_name}' not found. List projects: openlegion project list", err=True)
+        sys.exit(1)
 
     cfg = _load_config()
     if agent_name is None:
         agent_name = _resolve_agent_name(cfg, None)
     if agent_name is None:
-        return
+        sys.exit(1)
     if agent_name not in cfg.get("agents", {}):
-        click.echo(f"Agent '{agent_name}' not found.")
-        return
+        click.echo(f"Agent '{agent_name}' not found. List agents: openlegion agent list", err=True)
+        sys.exit(1)
 
     try:
         _add_agent_to_project(project_name, agent_name)
     except ValueError as e:
         click.echo(str(e), err=True)
-        return
+        sys.exit(1)
 
     click.echo(f"Added '{agent_name}' to project '{project_name}'.")
     click.echo("  Restart to apply: openlegion start")
@@ -732,13 +732,17 @@ def project_remove_agent(project_name: str | None, agent_name: str | None):
             project_name = names[choice - 1]
 
     if project_name not in projects:
-        click.echo(f"Project '{project_name}' not found.")
-        return
+        click.echo(f"Project '{project_name}' not found. List projects: openlegion project list", err=True)
+        sys.exit(1)
 
     members = projects[project_name].get("members", [])
     if not members:
-        click.echo(f"Project '{project_name}' has no members.")
-        return
+        click.echo(
+            f"Project '{project_name}' has no members."
+            f" Add one: openlegion project add-agent {project_name}",
+            err=True,
+        )
+        sys.exit(1)
 
     if agent_name is None:
         if len(members) == 1:
@@ -750,14 +754,14 @@ def project_remove_agent(project_name: str | None, agent_name: str | None):
             agent_name = members[choice - 1]
 
     if agent_name not in members:
-        click.echo(f"Agent '{agent_name}' is not in project '{project_name}'.")
-        return
+        click.echo(f"Agent '{agent_name}' is not in project '{project_name}'.", err=True)
+        sys.exit(1)
 
     try:
         _remove_agent_from_project(project_name, agent_name)
     except ValueError as e:
         click.echo(str(e), err=True)
-        return
+        sys.exit(1)
 
     click.echo(f"Removed '{agent_name}' from project '{project_name}' (now standalone).")
     click.echo("  Restart to apply: openlegion start")
@@ -790,8 +794,8 @@ def project_edit(name: str | None):
             name = names[choice - 1]
 
     if name not in projects:
-        click.echo(f"Project '{name}' not found.")
-        return
+        click.echo(f"Project '{name}' not found. List projects: openlegion project list", err=True)
+        sys.exit(1)
 
     click.echo(f"\nProject: {name}")
     click.echo(f"  Description: {projects[name].get('description', '(none)')}")
@@ -953,12 +957,12 @@ def _start_detached(config_path: str) -> None:
             pass
         click.echo("Runtime failed to start. Check logs.", err=True)
         click.echo(f"  Log: {log_path}", err=True)
-        return
+        sys.exit(1)
 
     if not ready:
         click.echo("Startup timed out. Check logs.", err=True)
         click.echo(f"  Log: {log_path}", err=True)
-        return
+        sys.exit(1)
 
     # Write PID file so `openlegion stop` can kill the host process
     pid_path = cli_config.PROJECT_ROOT / ".openlegion.pid"
@@ -990,10 +994,10 @@ def chat(name: str | None, port: int):
         agents = resp.json()
     except httpx.ConnectError:
         click.echo("Mesh is not running. Start it first: openlegion start", err=True)
-        return
+        sys.exit(1)
     except Exception as e:
         click.echo(f"Error contacting mesh: {e}", err=True)
-        return
+        sys.exit(1)
 
     if not agents:
         click.echo("No agents running.", err=True)
@@ -1019,7 +1023,7 @@ def chat(name: str | None, port: int):
     if not agent_info:
         available = ", ".join(agents.keys()) if agents else "(none)"
         click.echo(f"Agent '{name}' is not running. Running agents: {available}", err=True)
-        return
+        sys.exit(1)
 
     agent_url = agent_info.get("url", agent_info) if isinstance(agent_info, dict) else agent_info
     click.echo(f"Connected to '{name}' at {agent_url}")
@@ -1055,7 +1059,7 @@ def _single_agent_repl(agent_name: str, agent_url: str) -> None:
                     httpx.post(f"{agent_url}/chat/reset", timeout=5)
                     click.echo("Conversation reset.")
                 except Exception as e:
-                    click.echo(f"Error: {e}")
+                    click.echo(f"Error: {e}", err=True)
                 continue
             elif cmd == "/status":
                 try:
@@ -1066,7 +1070,7 @@ def _single_agent_repl(agent_name: str, agent_url: str) -> None:
                     click.echo(f"  Tools: {', '.join(data.get('capabilities', []))}")
                     click.echo(f"  Tasks completed: {data.get('tasks_completed', 0)}")
                 except Exception as e:
-                    click.echo(f"Error: {e}")
+                    click.echo(f"Error: {e}", err=True)
                 continue
             elif cmd == "/help":
                 click.echo("Commands:")
@@ -1086,16 +1090,16 @@ def _single_agent_repl(agent_name: str, agent_url: str) -> None:
                 timeout=120,
             )
             if resp.status_code != 200:
-                click.echo(f"Error: HTTP {resp.status_code}: {resp.text}")
+                click.echo(f"Error: HTTP {resp.status_code}: {resp.text}", err=True)
                 continue
 
             data = resp.json()
             display_response(agent_name, data)
 
         except httpx.TimeoutException:
-            click.echo("Request timed out. The agent may still be processing.")
+            click.echo("Request timed out. The agent may still be processing.", err=True)
         except Exception as e:
-            click.echo(f"Error: {e}")
+            click.echo(f"Error: {e}", err=True)
 
 
 # ── status ───────────────────────────────────────────────────
@@ -1161,7 +1165,11 @@ def stop():
     import signal
     import time
 
-    import docker
+    try:
+        import docker
+    except ImportError:
+        click.echo("Docker SDK not installed. Install with: pip install docker", err=True)
+        sys.exit(1)
 
     host_stopped = False
 
