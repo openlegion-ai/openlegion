@@ -94,13 +94,7 @@ class TelegramChannel(Channel):
                 logger.debug("Cleanup of previous app failed: %s", e)
             self._app = None
 
-        self._app = (
-            Application.builder()
-            .token(self.token)
-            .connect_timeout(10.0)
-            .read_timeout(10.0)
-            .build()
-        )
+        self._app = Application.builder().token(self.token).build()
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("allow", self._cmd_allow))
         self._app.add_handler(CommandHandler("revoke", self._cmd_revoke))
@@ -134,14 +128,11 @@ class TelegramChannel(Channel):
         # call forces Telegram to drop the old long-poll connection.
         try:
             await self._app.bot.get_updates(offset=-1, timeout=0)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Bot get_updates cleanup failed: %s", e)
         await asyncio.sleep(0.5)
         await self._app.updater.start_polling(
             drop_pending_updates=True,
-            bootstrap_retries=3,
-            connect_timeout=20,
-            read_timeout=10,
         )
         owner = self._pairing.owner
         if owner:
