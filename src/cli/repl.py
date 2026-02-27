@@ -95,6 +95,15 @@ class _REPLCompleter:
         return []
 
 
+def _bar(value: float, max_val: float, width: int = 20) -> str:
+    """Render a simple ASCII bar chart segment."""
+    if max_val <= 0 or value < 0:
+        return "\u2591" * width
+    filled = int((value / max_val) * width)
+    filled = max(0, min(filled, width))
+    return "\u2588" * filled + "\u2591" * (width - filled)
+
+
 class REPLSession:
     """Interactive REPL supporting multiple agents, @mentions, and slash commands."""
 
@@ -554,6 +563,13 @@ class REPLSession:
                 click.echo(f"\n  Today's spend: ${total:.4f}\n")
                 for a in agents_spend:
                     click.echo(f"  {a['agent']:<20} {a['tokens']:>8,} tokens    ${a['cost']:.4f}")
+
+                if len(agents_spend) > 1:
+                    max_cost = max(a["cost"] for a in agents_spend) or 0.01
+                    click.echo()
+                    for a in agents_spend:
+                        bar = _bar(a["cost"], max_cost)
+                        click.echo(f"  {a['agent']:<20} {bar} ${a['cost']:.4f}")
 
             # Context window usage
             click.echo("\n  Context usage")

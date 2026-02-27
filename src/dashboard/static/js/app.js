@@ -208,9 +208,21 @@ function dashboard() {
     _cronInterval: null,
     _seenEventIds: new Set(),
 
+    // Theme
+    darkMode: localStorage.getItem('ol_theme') !== 'light',
+
     // URL routing
     _skipPush: false,
     _popstateHandler: null,
+
+    // ── Theme ──────────────────────────────────────────
+
+    toggleTheme() {
+      this.darkMode = !this.darkMode;
+      localStorage.setItem('ol_theme', this.darkMode ? 'dark' : 'light');
+      document.body.classList.toggle('light', !this.darkMode);
+      document.documentElement.classList.toggle('dark', this.darkMode);
+    },
 
     // ── URL Routing ──────────────────────────────────────────
 
@@ -457,6 +469,12 @@ function dashboard() {
         onDisconnect: () => { this.connected = false; },
       });
       this._ws.connect();
+
+      // Restore theme preference
+      if (!this.darkMode) {
+        document.body.classList.add('light');
+        document.documentElement.classList.remove('dark');
+      }
 
       this.fetchAgents();
       this.fetchSettings();

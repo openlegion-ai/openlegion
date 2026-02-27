@@ -208,6 +208,15 @@
           <span>Search</span>
           <kbd class="text-[10px] text-gray-600 bg-gray-900 px-1 py-0.5 rounded border border-gray-700 ml-1">&#8984;K</kbd>
         </button>
+        <!-- Theme toggle -->
+        <button @click="toggleTheme()" class="text-gray-500 hover:text-gray-300 transition-colors" title="Toggle theme">
+          <svg x-show="darkMode" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <circle cx="12" cy="12" r="5"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.73 12.73l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+          </svg>
+          <svg x-show="!darkMode" x-cloak class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+          </svg>
+        </button>
         <!-- Connection indicator -->
         <div class="flex items-center gap-1.5 text-xs">
           <span class="relative flex h-2 w-2">

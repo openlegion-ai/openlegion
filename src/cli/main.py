@@ -1842,6 +1842,86 @@ def config_path():
     click.echo(f"Skills market:   {cli_config.MARKETPLACE_DIR}")
 
 
+@config.command("export")
+@click.argument("output", default="-", type=click.Path())
+def config_export(output: str):
+    """Export configuration as a tarball.
+
+    \b
+    Examples:
+      openlegion config export backup.tar.gz
+      openlegion config export -  # to stdout
+    """
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for path in [cli_config.CONFIG_FILE, cli_config.AGENTS_FILE, cli_config.PERMISSIONS_FILE]:
+            if path.exists():
+                tar.add(str(path), arcname=path.name)
+        # Add project metadata
+        if cli_config.PROJECTS_DIR.exists():
+            for meta_file in cli_config.PROJECTS_DIR.glob("*/metadata.yaml"):
+                arcname = f"projects/{meta_file.parent.name}/{meta_file.name}"
+                tar.add(str(meta_file), arcname=arcname)
+
+    if output == "-":
+        sys.stdout.buffer.write(buf.getvalue())
+    else:
+        with open(output, "wb") as f:
+            f.write(buf.getvalue())
+        click.echo(f"Configuration exported to {output}")
+
+
+@config.command("import")
+@click.argument("archive", type=click.Path(exists=True))
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+def config_import(archive: str, yes: bool):
+    """Import configuration from a tarball.
+
+    \b
+    Examples:
+      openlegion config import backup.tar.gz
+    """
+    import tarfile
+
+    if not yes:
+        click.confirm("Import will overwrite existing configuration. Continue?", abort=True)
+
+    with tarfile.open(archive, "r:gz") as tar:
+        # Security: validate member names and reject symlinks/hardlinks
+        for member in tar.getmembers():
+            if member.name.startswith("/") or ".." in member.name:
+                click.echo(f"Unsafe path in archive: {member.name}", err=True)
+                raise SystemExit(1)
+            if member.issym() or member.islnk():
+                click.echo(f"Unsafe link in archive: {member.name}", err=True)
+                raise SystemExit(1)
+
+        config_dir = cli_config.CONFIG_FILE.parent
+        config_dir.mkdir(parents=True, exist_ok=True)
+
+        for member in tar.getmembers():
+            if member.name.startswith("projects/"):
+                # Extract to projects dir
+                dest = cli_config.PROJECTS_DIR / member.name[len("projects/"):]
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                f = tar.extractfile(member)
+                if f:
+                    dest.write_bytes(f.read())
+                    click.echo(f"  Imported {member.name}")
+            else:
+                # Extract to config dir
+                dest = config_dir / member.name
+                f = tar.extractfile(member)
+                if f:
+                    dest.write_bytes(f.read())
+                    click.echo(f"  Imported {member.name}")
+
+    click.echo("Configuration imported. Restart to apply: openlegion start")
+
+
 # ── health ───────────────────────────────────────────────────
 
 @cli.command("health")

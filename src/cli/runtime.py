@@ -66,9 +66,11 @@ class RuntimeContext:
         self._dispatch_loop = None
         self._server = None
         self._active_channels: list = []
+        self._start_time: float | None = None
 
     def start(self) -> None:
         """Initialize and start all components. Called once."""
+        self._start_time = time.time()
         # Match detached mode behavior so relative paths (pubsub.db, skills/, config/)
         # resolve under the OpenLegion project root even when launched elsewhere.
         os.chdir(PROJECT_ROOT)
@@ -728,4 +730,9 @@ class RuntimeContext:
             mesh_port = self.cfg["mesh"]["port"]
             click.echo("\nNo agents running. Add one with /add or via the dashboard:")
             click.echo(f"  http://localhost:{mesh_port}/dashboard")
-        click.echo("")
+
+        if self._start_time:
+            elapsed = time.time() - self._start_time
+            click.echo(f"  Started in {elapsed:.1f}s\n")
+        else:
+            click.echo("")

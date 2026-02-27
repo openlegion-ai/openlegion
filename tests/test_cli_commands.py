@@ -373,6 +373,148 @@ class _MockCtx:
         return self._dispatch_loop
 
 
+class TestCostsBarChart:
+    def test_bar_chart_function(self):
+        """Bar chart renders correctly."""
+        from src.cli.repl import _bar
+
+        assert len(_bar(5, 10)) == 20
+        assert "\u2588" in _bar(5, 10)
+        assert _bar(0, 10) == "\u2591" * 20
+        assert _bar(10, 10) == "\u2588" * 20
+
+    def test_bar_zero_max(self):
+        """Zero max value returns all empty blocks."""
+        from src.cli.repl import _bar
+
+        assert _bar(5, 0) == "\u2591" * 20
+
+    def test_bar_custom_width(self):
+        """Custom width is respected."""
+        from src.cli.repl import _bar
+
+        assert len(_bar(5, 10, width=10)) == 10
+
+    def test_bar_negative_value(self):
+        """_bar handles negative values by returning empty bar."""
+        from src.cli.repl import _bar
+
+        assert _bar(-5, 10) == "\u2591" * 20
+
+
+class TestConfigExportImport:
+    def test_config_export_creates_file(self, tmp_path):
+        """Export creates a tarball containing config files."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+        perms_file = tmp_path / "permissions.json"
+        projects_dir = tmp_path / "projects"
+
+        config_file.write_text(yaml.dump({"mesh": {"host": "0.0.0.0", "port": 8420}}))
+        agents_file.write_text(yaml.dump({"agents": {"bot": {"role": "test"}}}))
+        perms_file.write_text(json.dumps({"permissions": {}}))
+
+        archive = tmp_path / "backup.tar.gz"
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["config", "export", str(archive)])
+            assert result.exit_code == 0, result.output
+            assert archive.exists()
+
+    def test_config_import_restores_files(self, tmp_path):
+        """Import restores config from tarball."""
+        import tarfile
+
+        # Create a source tarball with config content
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        (src_dir / "mesh.yaml").write_text(yaml.dump({"mesh": {"port": 9999}}))
+        (src_dir / "agents.yaml").write_text(yaml.dump({"agents": {"bot": {"role": "test"}}}))
+
+        archive = tmp_path / "backup.tar.gz"
+        with tarfile.open(str(archive), "w:gz") as tar:
+            tar.add(str(src_dir / "mesh.yaml"), arcname="mesh.yaml")
+            tar.add(str(src_dir / "agents.yaml"), arcname="agents.yaml")
+
+        # Set up destination config dir
+        dest_dir = tmp_path / "dest"
+        dest_dir.mkdir()
+        config_file = dest_dir / "mesh.yaml"
+        agents_file = dest_dir / "agents.yaml"
+        perms_file = dest_dir / "permissions.json"
+        projects_dir = dest_dir / "projects"
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["config", "import", str(archive), "--yes"])
+            assert result.exit_code == 0, result.output
+            assert config_file.exists()
+            restored = yaml.safe_load(config_file.read_text())
+            assert restored["mesh"]["port"] == 9999
+
+    def test_config_import_rejects_unsafe_path(self, tmp_path):
+        """Import rejects archives with path traversal."""
+        import tarfile
+
+        archive = tmp_path / "evil.tar.gz"
+        with tarfile.open(str(archive), "w:gz") as tar:
+            import io
+            data = b"evil"
+            info = tarfile.TarInfo(name="../../../etc/passwd")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+        config_file = tmp_path / "mesh.yaml"
+        projects_dir = tmp_path / "projects"
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["config", "import", str(archive), "--yes"])
+            assert result.exit_code != 0
+
+    def test_config_import_rejects_symlinks(self, tmp_path):
+        """config import rejects archives containing symlinks."""
+        import io
+        import tarfile
+
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            info = tarfile.TarInfo(name="evil_link")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            tar.addfile(info)
+        buf.seek(0)
+
+        archive = tmp_path / "evil.tar.gz"
+        archive.write_bytes(buf.read())
+
+        config_file = tmp_path / "mesh.yaml"
+        projects_dir = tmp_path / "projects"
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["config", "import", str(archive), "--yes"])
+            assert result.exit_code == 1
+            assert "Unsafe link" in result.output
+
+
 class TestREPLZeroAgents:
     """REPLSession with no agents configured."""
 
