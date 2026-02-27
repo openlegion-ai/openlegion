@@ -41,7 +41,7 @@ class Blackboard:
         import threading
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA busy_timeout=5000")
+        self.db.execute("PRAGMA busy_timeout=30000")
         self._write_lock = threading.Lock()
         self._event_bus = event_bus
         self._last_ttl_gc: float = 0.0
@@ -177,12 +177,13 @@ class Blackboard:
 
     def gc_expired(self) -> int:
         """Garbage-collect entries that have exceeded their TTL. Returns count deleted."""
-        cursor = self.db.execute(
-            "DELETE FROM entries WHERE ttl IS NOT NULL AND "
-            "datetime(updated_at, '+' || ttl || ' seconds') < datetime('now') "
-            "AND key NOT LIKE 'history/%'"
-        )
-        self.db.commit()
+        with self._write_lock:
+            cursor = self.db.execute(
+                "DELETE FROM entries WHERE ttl IS NOT NULL AND "
+                "datetime(updated_at, '+' || ttl || ' seconds') < datetime('now') "
+                "AND key NOT LIKE 'history/%'"
+            )
+            self.db.commit()
         return cursor.rowcount
 
     _EVENT_LOG_GC_THRESHOLD = 10_000
@@ -201,14 +202,15 @@ class Blackboard:
         Must be called AFTER the caller's commit() so the GC DELETE
         doesn't accidentally commit unrelated pending writes.
         """
-        count = self.db.execute("SELECT COUNT(*) FROM event_log").fetchone()[0]
-        if count > self._EVENT_LOG_GC_THRESHOLD:
-            self.db.execute(
-                "DELETE FROM event_log WHERE id NOT IN "
-                "(SELECT id FROM event_log ORDER BY id DESC LIMIT ?)",
-                (self._EVENT_LOG_GC_KEEP,),
-            )
-            self.db.commit()
+        with self._write_lock:
+            count = self.db.execute("SELECT COUNT(*) FROM event_log").fetchone()[0]
+            if count > self._EVENT_LOG_GC_THRESHOLD:
+                self.db.execute(
+                    "DELETE FROM event_log WHERE id NOT IN "
+                    "(SELECT id FROM event_log ORDER BY id DESC LIMIT ?)",
+                    (self._EVENT_LOG_GC_KEEP,),
+                )
+                self.db.commit()
 
     def _maybe_gc_ttl(self) -> None:
         """Garbage-collect TTL-expired entries, throttled to once per 60s.
@@ -217,9 +219,10 @@ class Blackboard:
         doesn't accidentally commit unrelated pending writes.
         """
         now = time.monotonic()
-        if now - self._last_ttl_gc < self._TTL_GC_INTERVAL:
-            return
-        self._last_ttl_gc = now
+        with self._write_lock:
+            if now - self._last_ttl_gc < self._TTL_GC_INTERVAL:
+                return
+            self._last_ttl_gc = now
         self.gc_expired()
 
     def close(self) -> None:
@@ -241,14 +244,16 @@ class PubSub:
     _EVENT_GC_KEEP = 5_000
 
     def __init__(self, db_path: str | None = None) -> None:
+        import threading
         self.subscriptions: dict[str, list[str]] = {}
         self.event_log: deque[dict] = deque(maxlen=self._EVENT_GC_KEEP)
         self._db: sqlite3.Connection | None = None
+        self._lock = threading.Lock()
 
         if db_path is not None:
             self._db = sqlite3.connect(db_path, check_same_thread=False)
             self._db.execute("PRAGMA journal_mode=WAL")
-            self._db.execute("PRAGMA busy_timeout=5000")
+            self._db.execute("PRAGMA busy_timeout=30000")
             self._init_schema()
             self._load_subscriptions()
             self._load_events()
@@ -290,54 +295,63 @@ class PubSub:
             self.event_log.append({"topic": topic, "event": event})
 
     def subscribe(self, topic: str, agent_id: str) -> None:
-        if topic not in self.subscriptions:
-            self.subscriptions[topic] = []
-        if agent_id not in self.subscriptions[topic]:
-            self.subscriptions[topic].append(agent_id)
-            if self._db is not None:
-                self._db.execute(
-                    "INSERT OR IGNORE INTO subscriptions (topic, agent_id) VALUES (?, ?)",
-                    (topic, agent_id),
-                )
-                self._db.commit()
+        with self._lock:
+            if topic not in self.subscriptions:
+                self.subscriptions[topic] = []
+            if agent_id not in self.subscriptions[topic]:
+                self.subscriptions[topic].append(agent_id)
+                if self._db is not None:
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO subscriptions (topic, agent_id) VALUES (?, ?)",
+                        (topic, agent_id),
+                    )
+                    self._db.commit()
 
     def unsubscribe(self, topic: str, agent_id: str) -> None:
-        if topic in self.subscriptions:
-            self.subscriptions[topic] = [a for a in self.subscriptions[topic] if a != agent_id]
-            if self._db is not None:
-                self._db.execute(
-                    "DELETE FROM subscriptions WHERE topic = ? AND agent_id = ?",
-                    (topic, agent_id),
-                )
-                self._db.commit()
+        with self._lock:
+            if topic in self.subscriptions:
+                self.subscriptions[topic] = [a for a in self.subscriptions[topic] if a != agent_id]
+                if self._db is not None:
+                    self._db.execute(
+                        "DELETE FROM subscriptions WHERE topic = ? AND agent_id = ?",
+                        (topic, agent_id),
+                    )
+                    self._db.commit()
 
     def unsubscribe_agent(self, agent_id: str) -> None:
         """Remove an agent from ALL topic subscriptions."""
-        for topic in list(self.subscriptions):
-            self.subscriptions[topic] = [a for a in self.subscriptions[topic] if a != agent_id]
-            if not self.subscriptions[topic]:
-                del self.subscriptions[topic]
-        if self._db is not None:
-            self._db.execute("DELETE FROM subscriptions WHERE agent_id = ?", (agent_id,))
-            self._db.commit()
+        with self._lock:
+            for topic in list(self.subscriptions):
+                self.subscriptions[topic] = [a for a in self.subscriptions[topic] if a != agent_id]
+                if not self.subscriptions[topic]:
+                    del self.subscriptions[topic]
+            if self._db is not None:
+                self._db.execute("DELETE FROM subscriptions WHERE agent_id = ?", (agent_id,))
+                self._db.commit()
 
     def get_subscribers(self, topic: str) -> list[str]:
-        return self.subscriptions.get(topic, [])
+        with self._lock:
+            return list(self.subscriptions.get(topic, []))
 
     def publish(self, topic: str, event: Any) -> list[str]:
         """Record an event and return the list of subscribers for it."""
-        self.event_log.append({"topic": topic, "event": event})
-        if self._db is not None:
-            self._db.execute(
-                "INSERT INTO events (topic, data) VALUES (?, ?)",
-                (topic, json.dumps(event, default=str)),
-            )
-            self._db.commit()
-            self._maybe_gc_events()
-        return self.get_subscribers(topic)
+        with self._lock:
+            self.event_log.append({"topic": topic, "event": event})
+            if self._db is not None:
+                self._db.execute(
+                    "INSERT INTO events (topic, data) VALUES (?, ?)",
+                    (topic, json.dumps(event, default=str)),
+                )
+                self._db.commit()
+                self._maybe_gc_events()
+            subscribers = list(self.subscriptions.get(topic, []))
+        return subscribers
 
     def _maybe_gc_events(self) -> None:
-        """Garbage-collect old events when the table exceeds the threshold."""
+        """Garbage-collect old events when the table exceeds the threshold.
+
+        Caller must hold ``self._lock``.
+        """
         if self._db is None:
             return
         count = self._db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
@@ -371,16 +385,21 @@ class MessageRouter:
         self._capabilities_cache: dict[str, list[str]] = {}
         self._registry_lock = threading.Lock()
         self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
         self._trace_store = trace_store
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=30)
-        return self._client
+        if self._client is not None and not self._client.is_closed:
+            return self._client
+        async with self._client_lock:
+            if self._client is None or self._client.is_closed:
+                self._client = httpx.AsyncClient(timeout=30)
+            return self._client
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+        self._client = None
 
     async def route(self, message: AgentMessage) -> dict:
         """Route a message. Resolves capability-based addressing. Enforces permissions."""

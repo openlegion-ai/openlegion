@@ -287,10 +287,11 @@ async def _browser_cleanup_soft():
     _pw = _browser = _context = _page = None
     _page_refs.clear()
     _credential_filled_refs.clear()
-    _cleanup_stale_profile()
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _cleanup_stale_profile)
     # Relaunch Chrome clean (no Playwright) for VNC
     try:
-        _launch_chrome_subprocess()
+        await loop.run_in_executor(None, _launch_chrome_subprocess)
         await asyncio.sleep(1)
     except (RuntimeError, OSError):
         logger.debug("Could not relaunch Chrome subprocess (not in container?)")
@@ -481,8 +482,9 @@ async def start_browser():
     # The browser runs clean for VNC interaction.  Playwright connects
     # later (via _get_page → _launch_persistent → connect_over_cdp)
     # only when the agent needs programmatic control.
-    _cleanup_stale_profile()
-    _launch_chrome_subprocess()
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _cleanup_stale_profile)
+    await loop.run_in_executor(None, _launch_chrome_subprocess)
     await asyncio.sleep(1)  # let Chrome initialize before agent actions
     await _inject_vnc_input_fix()
 

@@ -112,7 +112,6 @@ class CronScheduler:
         content = json.dumps(data, indent=2) + "\n"
         # Atomic write: write to a temp file in the same directory, then rename.
         # This prevents partial reads if two async tasks save concurrently.
-        import tempfile
         fd, tmp_path = tempfile.mkstemp(
             dir=str(self.config_path.parent), suffix=".tmp",
         )
@@ -243,131 +242,134 @@ class CronScheduler:
                 asyncio.create_task(self._execute_job(job))
 
     async def _execute_job(self, job: CronJob) -> str | None:
-        try:
-            async with self._job_locks[job.id]:
+        lock = self._job_locks[job.id]
+        if lock.locked():
+            logger.debug("Job %s already running, skipping this tick", job.id)
+            return None
+        async with lock:
+            try:
                 job.last_run = datetime.now(UTC).isoformat()
                 job.run_count += 1
                 self._save()
-            if self._trace_store:
-                from src.shared.trace import new_trace_id
-                self._trace_store.record(
-                    trace_id=new_trace_id(), source="cron", agent=job.agent,
-                    event_type="cron_trigger",
-                    detail=f"job={job.id} schedule={job.schedule}",
-                )
+                if self._trace_store:
+                    from src.shared.trace import new_trace_id
+                    self._trace_store.record(
+                        trace_id=new_trace_id(), source="cron", agent=job.agent,
+                        event_type="cron_trigger",
+                        detail=f"job={job.id} schedule={job.schedule}",
+                    )
 
-            response = None
-            if job.workflow and self.workflow_trigger_fn:
-                payload = json.loads(job.workflow_payload) if job.workflow_payload else {}
-                payload.setdefault("date", datetime.now(UTC).strftime("%Y-%m-%d"))
-                response = await self.workflow_trigger_fn(job.workflow, payload)
-                logger.info(f"Cron {job.id} triggered workflow '{job.workflow}'")
-            elif self.dispatch_fn:
-                if job.heartbeat:
-                    probes = self._run_heartbeat_probes(job.agent)
-                    triggered = [p for p in probes if p.triggered]
+                response = None
+                if job.workflow and self.workflow_trigger_fn:
+                    payload = json.loads(job.workflow_payload) if job.workflow_payload else {}
+                    payload.setdefault("date", datetime.now(UTC).strftime("%Y-%m-%d"))
+                    response = await self.workflow_trigger_fn(job.workflow, payload)
+                    logger.info(f"Cron {job.id} triggered workflow '{job.workflow}'")
+                elif self.dispatch_fn:
+                    if job.heartbeat:
+                        probes = self._run_heartbeat_probes(job.agent)
+                        triggered = [p for p in probes if p.triggered]
 
-                    # Fetch agent workspace context (HEARTBEAT.md, daily logs)
-                    ctx = {}
-                    if self.context_fn:
-                        try:
-                            ctx = await self.context_fn(job.agent)
-                        except Exception as e:
-                            logger.warning(
-                                "context_fn failed for '%s': %s", job.agent, e,
+                        # Fetch agent workspace context (HEARTBEAT.md, daily logs)
+                        ctx = {}
+                        if self.context_fn:
+                            try:
+                                ctx = await self.context_fn(job.agent)
+                            except Exception as e:
+                                logger.warning(
+                                    "context_fn failed for '%s': %s", job.agent, e,
+                                )
+
+                        is_default = ctx.get("is_default_heartbeat", True)
+                        has_activity = ctx.get("has_recent_activity", False)
+
+                        # Skip-LLM optimization: no custom rules, no activity, no probes
+                        if is_default and not has_activity and not triggered:
+                            logger.debug(
+                                "Heartbeat %s: skipped (default rules, no activity, "
+                                "no probes) for '%s'", job.id, job.agent,
+                            )
+                            return None
+
+                        # Build rich heartbeat message
+                        sections: list[str] = [f"Heartbeat for {job.agent}."]
+
+                        # Hardcoded operating rules — always included, cannot be
+                        # overridden by agent-editable HEARTBEAT.md
+                        sections.append(
+                            "## Heartbeat Operating Rules (non-negotiable)\n\n"
+                            "1. Be ECONOMICAL. Each heartbeat costs API credits. "
+                            "Only call tools if there is actual work to do.\n"
+                            "2. If nothing needs attention, respond HEARTBEAT_OK "
+                            "immediately. Do NOT make unnecessary tool calls.\n"
+                            "3. Report what you worked on to the USER via "
+                            "notify_user — not the blackboard.\n"
+                            "4. The blackboard is for sharing data with other "
+                            "agents. Do NOT write status updates or progress "
+                            "reports there.\n"
+                            "5. Do NOT change your heartbeat schedule to run "
+                            "more frequently unless the user asked you to. "
+                            "More frequent heartbeats waste credits."
+                        )
+
+                        rules = ctx.get("heartbeat_rules", "")
+                        if rules and not is_default:
+                            sections.append(
+                                f"## Your Heartbeat Rules\n\n{rules.strip()}"
                             )
 
-                    is_default = ctx.get("is_default_heartbeat", True)
-                    has_activity = ctx.get("has_recent_activity", False)
+                        daily = ctx.get("daily_logs", "")
+                        if daily and daily.strip():
+                            capped = daily[:4000]
+                            if len(daily) > 4000:
+                                capped += "\n\n... (truncated)"
+                            sections.append(
+                                f"## Your Recent Activity\n\n{capped}"
+                            )
 
-                    # Skip-LLM optimization: no custom rules, no activity, no probes
-                    if is_default and not has_activity and not triggered:
-                        logger.debug(
-                            "Heartbeat %s: skipped (default rules, no activity, "
-                            "no probes) for '%s'", job.id, job.agent,
-                        )
-                        return None
+                        if triggered:
+                            probe_lines = "\n".join(
+                                f"- [{p.name}] {p.detail}" for p in triggered
+                            )
+                            sections.append(
+                                f"## Probe Alerts\n\n{probe_lines}"
+                            )
 
-                    # Build rich heartbeat message
-                    sections: list[str] = [f"Heartbeat for {job.agent}."]
+                        pending = self._get_pending_details(job.agent, probes)
+                        if pending:
+                            sections.append(pending)
 
-                    # Hardcoded operating rules — always included, cannot be
-                    # overridden by agent-editable HEARTBEAT.md
-                    sections.append(
-                        "## Heartbeat Operating Rules (non-negotiable)\n\n"
-                        "1. Be ECONOMICAL. Each heartbeat costs API credits. "
-                        "Only call tools if there is actual work to do.\n"
-                        "2. If nothing needs attention, respond HEARTBEAT_OK "
-                        "immediately. Do NOT make unnecessary tool calls.\n"
-                        "3. Report what you worked on to the USER via "
-                        "notify_user — not the blackboard.\n"
-                        "4. The blackboard is for sharing data with other "
-                        "agents. Do NOT write status updates or progress "
-                        "reports there.\n"
-                        "5. Do NOT change your heartbeat schedule to run "
-                        "more frequently unless the user asked you to. "
-                        "More frequent heartbeats waste credits."
-                    )
+                        if is_default:
+                            sections.append(
+                                "Work toward your goals. If nothing needs attention, "
+                                "respond HEARTBEAT_OK."
+                            )
+                        else:
+                            sections.append(
+                                "Follow your HEARTBEAT.md rules. If nothing needs "
+                                "attention, respond HEARTBEAT_OK."
+                            )
 
-                    rules = ctx.get("heartbeat_rules", "")
-                    if rules and not is_default:
-                        sections.append(
-                            f"## Your Heartbeat Rules\n\n{rules.strip()}"
-                        )
-
-                    daily = ctx.get("daily_logs", "")
-                    if daily and daily.strip():
-                        capped = daily[:4000]
-                        if len(daily) > 4000:
-                            capped += "\n\n... (truncated)"
-                        sections.append(
-                            f"## Your Recent Activity\n\n{capped}"
-                        )
-
-                    if triggered:
-                        probe_lines = "\n".join(
-                            f"- [{p.name}] {p.detail}" for p in triggered
-                        )
-                        sections.append(
-                            f"## Probe Alerts\n\n{probe_lines}"
-                        )
-
-                    pending = self._get_pending_details(job.agent, probes)
-                    if pending:
-                        sections.append(pending)
-
-                    if is_default:
-                        sections.append(
-                            "Work toward your goals. If nothing needs attention, "
-                            "respond HEARTBEAT_OK."
+                        message = "\n\n".join(sections)
+                        response = await self.dispatch_fn(job.agent, message)
+                        logger.info(
+                            f"Heartbeat {job.id}: dispatched for '{job.agent}' "
+                            f"({len(triggered)} probes triggered)"
                         )
                     else:
-                        sections.append(
-                            "Follow your HEARTBEAT.md rules. If nothing needs "
-                            "attention, respond HEARTBEAT_OK."
-                        )
+                        response = await self.dispatch_fn(job.agent, job.message)
 
-                    message = "\n\n".join(sections)
-                    response = await self.dispatch_fn(job.agent, message)
-                    logger.info(
-                        f"Heartbeat {job.id}: dispatched for '{job.agent}' "
-                        f"({len(triggered)} probes triggered)"
-                    )
-                else:
-                    response = await self.dispatch_fn(job.agent, job.message)
+                    if job.suppress_empty and _is_empty_response(response):
+                        logger.debug(f"Cron {job.id}: suppressed empty response")
+                        return response
+                    logger.info(f"Cron {job.id} executed for agent '{job.agent}'")
 
-                if job.suppress_empty and _is_empty_response(response):
-                    logger.debug(f"Cron {job.id}: suppressed empty response")
-                    return response
-                logger.info(f"Cron {job.id} executed for agent '{job.agent}'")
-
-            return response
-        except Exception as e:
-            async with self._job_locks[job.id]:
+                return response
+            except Exception as e:
                 job.error_count += 1
                 self._save()
-            logger.error(f"Cron {job.id} failed: {e}")
-            return None
+                logger.error(f"Cron {job.id} failed: {e}")
+                return None
 
     def _run_heartbeat_probes(self, agent: str) -> list[HeartbeatProbeResult]:
         """Run cheap, deterministic probes before invoking the LLM."""

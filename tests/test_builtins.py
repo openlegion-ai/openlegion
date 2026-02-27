@@ -350,7 +350,8 @@ class TestHttpTool:
         mock_client = AsyncMock()
         mock_client.request = AsyncMock(return_value=mock_response)
 
-        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client), \
+             patch("src.agent.builtins.http_tool._is_private_url", return_value=False):
             result = await http_request(
                 url="https://api.github.com/user",
                 headers={"Authorization": "Bearer $CRED{github_token}"},
@@ -374,7 +375,7 @@ class TestHttpTool:
         mock_mesh.vault_resolve = AsyncMock(return_value=None)
 
         result = await http_request(
-            url="https://api.example.com",
+            url="https://8.8.8.8/api",
             headers={"Authorization": "Bearer $CRED{nonexistent}"},
             mesh_client=mock_mesh,
         )
@@ -387,7 +388,7 @@ class TestHttpTool:
         from src.agent.builtins.http_tool import http_request
 
         result = await http_request(
-            url="https://api.example.com",
+            url="https://8.8.8.8/api",
             headers={"Authorization": "Bearer $CRED{token}"},
         )
         assert "error" in result
@@ -408,7 +409,8 @@ class TestHttpTool:
         mock_client = AsyncMock()
         mock_client.request = AsyncMock(return_value=mock_response)
 
-        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client), \
+             patch("src.agent.builtins.http_tool._is_private_url", return_value=False):
             result = await http_request(
                 url="https://example.com",
                 headers={"Accept": "application/json"},
@@ -433,7 +435,8 @@ class TestHttpTool:
         mock_client = AsyncMock()
         mock_client.request = AsyncMock(return_value=mock_response)
 
-        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client), \
+             patch("src.agent.builtins.http_tool._is_private_url", return_value=False):
             await http_request(
                 url="https://api.example.com/data?key=$CRED{api_key}",
                 mesh_client=mock_mesh,
@@ -464,7 +467,7 @@ class TestHttpTool:
 
         with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
             await http_request(
-                url="https://api.example.com",
+                url="https://8.8.8.8/api",
                 method="POST",
                 body='{"token": "$CRED{my_token}"}',
                 mesh_client=mock_mesh,
@@ -496,7 +499,7 @@ class TestHttpTool:
 
         with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
             result = await http_request(
-                url="https://api.example.com",
+                url="https://8.8.8.8/api",
                 headers={"Authorization": "Bearer $CRED{token}"},
                 mesh_client=mock_mesh,
             )
@@ -528,7 +531,8 @@ class TestHttpTool:
         mock_client = AsyncMock()
         mock_client.request = AsyncMock(return_value=mock_response)
 
-        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client), \
+             patch("src.agent.builtins.http_tool._is_private_url", return_value=False):
             result = await http_request(
                 url="https://api.example.com?key=$CRED{api_key}",
                 mesh_client=mock_mesh,
@@ -552,7 +556,8 @@ class TestHttpTool:
             side_effect=Exception("Connection failed to https://api.example.com?key=super-secret-key")
         )
 
-        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client), \
+             patch("src.agent.builtins.http_tool._is_private_url", return_value=False):
             result = await http_request(
                 url="https://api.example.com?key=$CRED{key}",
                 mesh_client=mock_mesh,
@@ -576,7 +581,7 @@ class TestHttpTool:
         )
 
         result = await http_request(
-            url="https://api.example.com",
+            url="https://8.8.8.8/api",
             headers={
                 "X-First": "$CRED{good_token}",
                 "X-Second": "$CRED{bad_token}",
@@ -604,7 +609,8 @@ class TestHttpTool:
         mock_client = AsyncMock()
         mock_client.request = AsyncMock(return_value=mock_response)
 
-        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client):
+        with patch("src.agent.builtins.http_tool._get_client", return_value=mock_client), \
+             patch("src.agent.builtins.http_tool._is_private_url", return_value=False):
             result = await http_request(url="https://example.com")
 
         assert result["body"] == '{"data": "normal response"}'

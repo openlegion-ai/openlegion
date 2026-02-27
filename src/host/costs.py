@@ -65,6 +65,7 @@ class CostTracker:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=30000")
         self._event_bus = event_bus
         self._init_schema()
         self.budgets: dict[str, dict[str, float]] = {}

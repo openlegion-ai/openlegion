@@ -144,6 +144,7 @@ class CredentialVault:
         self.service_handlers: dict[str, Callable] = {}
         self.cost_tracker = cost_tracker
         self._http_client: httpx.AsyncClient | None = None
+        self._http_client_lock = asyncio.Lock()
         self._budget_locks: dict[str, asyncio.Lock] = {}
         self._load_credentials()
         self._register_handlers()
@@ -155,13 +156,17 @@ class CredentialVault:
         )
 
     async def _get_http_client(self) -> httpx.AsyncClient:
-        if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(timeout=30)
-        return self._http_client
+        if self._http_client is not None and not self._http_client.is_closed:
+            return self._http_client
+        async with self._http_client_lock:
+            if self._http_client is None or self._http_client.is_closed:
+                self._http_client = httpx.AsyncClient(timeout=30)
+            return self._http_client
 
     async def close(self) -> None:
         if self._http_client and not self._http_client.is_closed:
             await self._http_client.aclose()
+        self._http_client = None
 
     def cleanup_agent(self, agent_id: str) -> None:
         """Remove per-agent state (budget locks) for a deregistered agent."""

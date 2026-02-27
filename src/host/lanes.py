@@ -185,7 +185,10 @@ class LaneManager:
         queue = self._queues[agent]
         lock = self._state_locks[agent]
         while True:
-            task = await queue.get()
+            try:
+                task = await queue.get()
+            except asyncio.CancelledError:
+                return
             async with lock:
                 self._busy[agent] = True
             current_trace_id.set(task.trace_id)

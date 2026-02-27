@@ -6,6 +6,7 @@ All external interaction is mediated by the mesh host process.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Optional
 
@@ -28,6 +29,7 @@ class MeshClient:
         self.agent_id = agent_id
         self.project_name = project_name
         self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
         self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
 
     @property
@@ -48,12 +50,15 @@ class MeshClient:
         return key
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            headers: dict[str, str] = {}
-            if self._auth_token:
-                headers["Authorization"] = f"Bearer {self._auth_token}"
-            self._client = httpx.AsyncClient(timeout=30, headers=headers)
-        return self._client
+        if self._client is not None and not self._client.is_closed:
+            return self._client
+        async with self._client_lock:
+            if self._client is None or self._client.is_closed:
+                headers: dict[str, str] = {}
+                if self._auth_token:
+                    headers["Authorization"] = f"Bearer {self._auth_token}"
+                self._client = httpx.AsyncClient(timeout=30, headers=headers)
+            return self._client
 
     def _trace_headers(self) -> dict[str, str]:
         """Return current trace headers for per-request injection."""
@@ -63,6 +68,7 @@ class MeshClient:
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+        self._client = None
 
     async def register(
         self, capabilities: list[str], port: int = 8400, timeout: int = 5,

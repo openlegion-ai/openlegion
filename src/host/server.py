@@ -418,6 +418,10 @@ def create_mesh_app(
         value = data.get("value", "")
         if not name or not value:
             raise HTTPException(400, "name and value are required")
+        if not _re.match(r"^[a-zA-Z0-9_.-]{1,128}$", name):
+            raise HTTPException(400, "Credential name must be 1-128 alphanumeric/underscore/dot/dash chars")
+        if len(value) > 10_000:
+            raise HTTPException(400, "Credential value exceeds 10KB limit")
         if is_system_credential(name):
             raise HTTPException(403, f"Cannot store system credential: {name}")
         handle = credential_vault.add_credential(name, value)
@@ -519,13 +523,15 @@ def create_mesh_app(
         return {"sent": True}
 
     @app.get("/mesh/agents")
-    async def list_agents(project: str = "", agent_id: str = "") -> dict:
+    async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:
         """List registered agents, optionally scoped by project or agent_id.
 
         - project set: return only that project's members
         - agent_id set (standalone): return only that agent
         - neither (dashboard/internal): return all
         """
+        if agent_id:
+            _verify_auth(agent_id, request)
         def _agent_entry(aid: str, url: str) -> dict:
             return {"url": url, "role": router.agent_roles.get(aid, "")}
 

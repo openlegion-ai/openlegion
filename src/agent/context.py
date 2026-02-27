@@ -9,6 +9,7 @@ Write-then-compact: always persist before discarding.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import TYPE_CHECKING
@@ -108,6 +109,7 @@ class ContextManager:
         self.workspace = workspace
         self.memory = memory
         self._flush_triggered = False
+        self._flush_lock = asyncio.Lock()
 
     def reset(self) -> None:
         """Reset per-session state for a new conversation."""
@@ -157,7 +159,10 @@ class ContextManager:
             and self.llm
             and self.workspace
         ):
-            self._flush_triggered = True
+            async with self._flush_lock:
+                if self._flush_triggered:
+                    return messages  # another coroutine already flushed
+                self._flush_triggered = True
             await self._proactive_flush(system_prompt, messages)
             return messages  # don't compact yet
 
@@ -301,8 +306,6 @@ class ContextManager:
             f"Conversation:\n{conversation_text[:20000]}"
         )
 
-        import asyncio as _asyncio
-
         last_err = None
         for attempt in range(self._SUMMARIZE_RETRIES + 1):
             try:
@@ -322,7 +325,7 @@ class ContextManager:
                         f"Summarization failed (attempt {attempt + 1}/{self._SUMMARIZE_RETRIES + 1}), "
                         f"retrying in {wait}s: {e}"
                     )
-                    await _asyncio.sleep(wait)
+                    await asyncio.sleep(wait)
                 else:
                     logger.warning(f"Summarization failed after {self._SUMMARIZE_RETRIES + 1} attempts, "
                                    f"falling back to hard prune: {last_err}")

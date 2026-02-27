@@ -151,16 +151,20 @@ class Orchestrator:
         self.container_manager = container_manager
         self._trace_store = trace_store
         self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
         self._pending_results: dict[str, asyncio.Future] = {}
         self._result_lock = asyncio.Lock()
         self._cancelled: set[str] = set()
-        self._cleanup_tasks: list[asyncio.Task] = []
+        self._cleanup_tasks: set[asyncio.Task] = set()
         self._load_workflows(workflows_dir)
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=120)
-        return self._client
+        if self._client is not None and not self._client.is_closed:
+            return self._client
+        async with self._client_lock:
+            if self._client is None or self._client.is_closed:
+                self._client = httpx.AsyncClient(timeout=120)
+            return self._client
 
     async def close(self) -> None:
         for t in self._cleanup_tasks:
@@ -168,6 +172,7 @@ class Orchestrator:
         self._cleanup_tasks.clear()
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+        self._client = None
 
     async def resolve_task_result(self, task_id: str, result: TaskResult) -> bool:
         """Resolve a pending future for a task. Returns True if matched."""
@@ -175,7 +180,10 @@ class Orchestrator:
             future = self._pending_results.pop(task_id, None)
             if future is None or future.done():
                 return False
-            future.set_result(result)
+            try:
+                future.set_result(result)
+            except asyncio.InvalidStateError:
+                return False
             return True
 
     def cancel_execution(self, execution_id: str) -> bool:
@@ -394,10 +402,8 @@ class Orchestrator:
                 await asyncio.sleep(300)  # keep for 5 minutes for status queries
                 self.active_executions.pop(execution.id, None)
             cleanup_task = asyncio.create_task(_cleanup())
-            self._cleanup_tasks.append(cleanup_task)
-            cleanup_task.add_done_callback(
-                lambda t: self._cleanup_tasks.remove(t) if t in self._cleanup_tasks else None
-            )
+            self._cleanup_tasks.add(cleanup_task)
+            cleanup_task.add_done_callback(self._cleanup_tasks.discard)
             # Evict oldest finished executions if cache exceeds limit
             finished = [
                 (eid, ex) for eid, ex in self.active_executions.items()
@@ -483,12 +489,25 @@ class Orchestrator:
                 try:
                     result = await asyncio.wait_for(future, timeout=step.timeout)
                 except asyncio.TimeoutError:
-                    # Remove future first so resolve_task_result won't race
+                    # Atomically pop and check under lock to avoid TOCTOU race
+                    result_from_agent = None
                     async with self._result_lock:
-                        self._pending_results.pop(assignment.task_id, None)
-                    # Check if the result arrived between timeout and lock acquisition
-                    if future.done() and not future.cancelled():
-                        result = future.result()
+                        popped = self._pending_results.pop(assignment.task_id, None)
+                        if popped is not None and popped.done() and not popped.cancelled():
+                            try:
+                                result_from_agent = popped.result()
+                            except (asyncio.InvalidStateError, asyncio.CancelledError):
+                                pass
+                    if result_from_agent is not None:
+                        result = result_from_agent
+                    elif future.done() and not future.cancelled():
+                        # resolve_task_result already popped and resolved the
+                        # future, but wait_for's timeout fired at nearly the
+                        # same instant.  The result is in the local future.
+                        try:
+                            result = future.result()
+                        except (asyncio.InvalidStateError, asyncio.CancelledError):
+                            result = await self._wait_for_task_result(agent_url, assignment, step.timeout)
                     else:
                         # Fallback to polling as a last resort
                         result = await self._wait_for_task_result(agent_url, assignment, step.timeout)

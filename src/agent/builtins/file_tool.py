@@ -60,8 +60,13 @@ def _safe_path(path: str) -> Path:
                 )
             current = target
 
-    # Final check on the fully-resolved path
-    resolved = current.resolve() if current.exists() else current
+    # Final check on the fully-resolved path.
+    # For non-existent paths, resolve the existing parent and re-append
+    # the final component so symlinks in parent dirs are still caught.
+    if current.exists():
+        resolved = current.resolve()
+    else:
+        resolved = current.parent.resolve() / current.name
     if not resolved.is_relative_to(root):
         raise ValueError(f"Path escapes allowed root: {path}")
     return resolved

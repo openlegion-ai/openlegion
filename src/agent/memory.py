@@ -51,7 +51,7 @@ class MemoryStore:
     ):
         self.db = sqlite3.connect(db_path)
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA busy_timeout=5000")
+        self.db.execute("PRAGMA busy_timeout=30000")
         self.db.enable_load_extension(True)
         sqlite_vec.load(self.db)
         self.db.enable_load_extension(False)
@@ -211,9 +211,10 @@ class MemoryStore:
             else:
                 results[fact_id] = {"vector_score": 0.0, "keyword_score": rank}
 
+        facts_map = self._get_facts_batch(list(results.keys()))
         scored_facts = []
         for fact_id, scores in results.items():
-            fact = self._get_fact(fact_id)
+            fact = facts_map.get(fact_id)
             if fact:
                 combined = 0.7 * scores["vector_score"] + 0.3 * scores["keyword_score"]
                 final_score = combined * fact.decay_score
@@ -292,6 +293,29 @@ class MemoryStore:
             decay_score=row[9],
         )
 
+    def _get_facts_batch(self, fact_ids: list[str]) -> dict[str, MemoryFact]:
+        """Batch-fetch facts by IDs. Returns {fact_id: MemoryFact}."""
+        if not fact_ids:
+            return {}
+        placeholders = ",".join("?" * len(fact_ids))
+        rows = self.db.execute(
+            f"SELECT f.id, f.key, f.value, f.category, f.source, f.confidence, "
+            f"f.access_count, f.last_accessed, f.created_at, f.decay_score, "
+            f"c.name "
+            f"FROM facts f LEFT JOIN categories c ON f.category_id = c.id "
+            f"WHERE f.id IN ({placeholders})",
+            fact_ids,
+        ).fetchall()
+        result = {}
+        for row in rows:
+            category = row[10] if row[10] else row[3]
+            result[row[0]] = MemoryFact(
+                id=row[0], key=row[1], value=row[2], category=category,
+                source=row[4], confidence=row[5], access_count=row[6],
+                last_accessed=row[7], created_at=row[8], decay_score=row[9],
+            )
+        return result
+
     def _get_fact_by_key(self, key: str) -> Optional[MemoryFact]:
         """Look up a fact by key (used in tests)."""
         row = self.db.execute("SELECT id FROM facts WHERE key = ?", (key,)).fetchone()
@@ -330,12 +354,9 @@ class MemoryStore:
     def get_high_salience_facts(self, top_k: int = 20) -> list[MemoryFact]:
         """Return facts with highest salience scores."""
         rows = self.db.execute("SELECT id FROM facts ORDER BY decay_score DESC LIMIT ?", (top_k,)).fetchall()
-        facts = []
-        for r in rows:
-            fact = self._get_fact(r[0])
-            if fact:
-                facts.append(fact)
-        return facts
+        fact_ids = [r[0] for r in rows]
+        facts_map = self._get_facts_batch(fact_ids)
+        return [facts_map[fid] for fid in fact_ids if fid in facts_map]
 
     async def store_facts_batch(self, facts: list[dict]) -> int:
         """Store multiple structured facts at once.
@@ -672,9 +693,10 @@ class MemoryStore:
             logger.warning(f"Scoped keyword search failed: {e}")
 
         # Score and rank
+        facts_map = self._get_facts_batch(list(results.keys()))
         scored_facts = []
         for fact_id, scores in results.items():
-            fact = self._get_fact(fact_id)
+            fact = facts_map.get(fact_id)
             if fact:
                 combined = 0.7 * scores["vector_score"] + 0.3 * scores["keyword_score"]
                 final_score = combined * fact.decay_score
