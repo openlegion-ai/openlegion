@@ -522,7 +522,7 @@ def project_create(name: str | None, desc: str, agents_str: str):
     \b
     Examples:
       openlegion project create my-project
-      openlegion project create my-project -d "Marketing automation" -a agent1,agent2
+      openlegion project create my-project -D "Marketing automation" -a agent1,agent2
       openlegion project create           # interactive
     """
     from src.cli.config import _create_project, _load_projects, _validate_project_name
