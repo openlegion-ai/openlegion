@@ -196,6 +196,46 @@
 
       <!-- Fleet Overview (merged: Fleet + Agents + Queues) -->
       <div x-show="activeTab === 'fleet' && !detailAgent" x-cloak>
+        <!-- Project switcher + Add Agent row -->
+        <div x-show="agents.length > 0" class="flex items-center justify-between gap-3 mb-3" x-cloak>
+          <div class="flex items-center gap-2">
+            <div x-show="projects.length > 0" class="flex gap-0.5 bg-gray-800/40 rounded-lg p-0.5 w-fit">
+              <button @click="switchProject(null)"
+                class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+                :class="!activeProject
+                  ? 'bg-gray-700 text-white shadow-sm'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
+                Standalone
+                <span class="opacity-60 ml-0.5" x-text="'(' + unassignedAgents.length + ')'"></span>
+              </button>
+              <template x-for="proj in projects" :key="proj.name">
+                <button @click="switchProject(proj.name)"
+                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+                  :class="activeProject === proj.name
+                    ? 'bg-gray-700 text-white shadow-sm'
+                    : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  :title="(proj.members || []).length + ' member' + ((proj.members || []).length !== 1 ? 's' : '')">
+                  <span x-text="proj.name"></span>
+                  <span class="opacity-60 ml-0.5" x-text="'(' + agents.filter(a => a.project === proj.name).length + ')'"></span>
+                </button>
+              </template>
+            </div>
+            <button @click="showProjectForm = !showProjectForm"
+              class="px-2.5 py-1 rounded-md text-xs text-gray-500 hover:text-white hover:bg-gray-700 transition-colors flex items-center gap-1"
+              :class="showProjectForm ? 'bg-gray-700 text-white' : ''"
+              title="Create project">
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              New Project
+            </button>
+          </div>
+          <button @click="openAddAgentModal()"
+            class="text-xs px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5"
+            :class="addAgentMode ? 'bg-indigo-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white'"
+          >
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add Agent
+          </button>
+        </div>
         <!-- Fleet summary bar -->
         <div class="flex items-center justify-between mb-4" x-show="filteredAgents.length > 0" x-cloak>
           <h2 class="text-sm font-medium text-gray-400 flex items-center gap-1.5">
@@ -206,16 +246,7 @@
             <span class="text-gray-600 mx-0.5">&middot;</span>
             <span x-text="filteredFleetTokens.toLocaleString()"></span> tokens
           </h2>
-          <div class="flex items-center gap-3">
-            <button @click="openAddAgentModal()"
-              class="text-xs px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5"
-              :class="addAgentMode ? 'bg-indigo-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white'"
-            >
-              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              Add Agent
-            </button>
-            <div class="text-xs text-gray-600" x-text="'Updated ' + timeAgo(lastRefresh)"></div>
-          </div>
+          <div class="text-xs text-gray-600" x-text="'Updated ' + timeAgo(lastRefresh)"></div>
         </div>
         <!-- Fleet health summary strip -->
         <div x-show="filteredAgents.length > 0" class="flex items-center gap-3 text-xs text-gray-500 mb-3" x-cloak>
@@ -231,37 +262,6 @@
           <template x-if="fleetHealthCounts.unknown > 0">
             <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-gray-600 inline-block"></span><span x-text="fleetHealthCounts.unknown + ' unknown'"></span></span>
           </template>
-        </div>
-        <!-- Project scope switcher -->
-        <div x-show="agents.length > 0" class="flex items-center gap-2 mb-3" x-cloak>
-          <div x-show="projects.length > 0" class="flex gap-0.5 bg-gray-800/40 rounded-lg p-0.5 w-fit">
-            <button @click="switchProject(null)"
-              class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-              :class="!activeProject
-                ? 'bg-gray-700 text-white shadow-sm'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
-              Standalone
-              <span class="opacity-60 ml-0.5" x-text="'(' + unassignedAgents.length + ')'"></span>
-            </button>
-            <template x-for="proj in projects" :key="proj.name">
-              <button @click="switchProject(proj.name)"
-                class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                :class="activeProject === proj.name
-                  ? 'bg-gray-700 text-white shadow-sm'
-                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-                :title="(proj.members || []).length + ' member' + ((proj.members || []).length !== 1 ? 's' : '')">
-                <span x-text="proj.name"></span>
-                <span class="opacity-60 ml-0.5" x-text="'(' + agents.filter(a => a.project === proj.name).length + ')'"></span>
-              </button>
-            </template>
-          </div>
-          <button @click="showProjectForm = !showProjectForm"
-            class="px-2.5 py-1 rounded-md text-xs text-gray-500 hover:text-white hover:bg-gray-700 transition-colors flex items-center gap-1"
-            :class="showProjectForm ? 'bg-gray-700 text-white' : ''"
-            title="Create project">
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            New Project
-          </button>
         </div>
         <!-- Create project form -->
         <div x-show="showProjectForm" x-cloak class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4"

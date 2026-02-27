@@ -183,12 +183,27 @@ def _launch_chrome_subprocess():
             # Required for Docker — Chrome's sandbox needs kernel capabilities
             # that aren't available in containers with no-new-privileges.
             "--no-sandbox",
+            # Use /tmp instead of /dev/shm for shared memory.  Docker's /dev/shm
+            # can fill up under heavy JS; when it does, renderers crash silently
+            # (buttons stop responding, "Aw Snap!" pages).
+            "--disable-dev-shm-usage",
+            # NOTE: do NOT add --disable-gpu — reCAPTCHA Enterprise uses WebGL
+            # and Canvas fingerprinting.  Disabling GPU is a bot signal that
+            # causes invisible CAPTCHA to silently block form submissions.
             # Disable Chrome's built-in async DNS client — it bypasses Docker
             # Desktop's DNS forwarder, causing 10-30s timeouts on every request.
             # Belt-and-suspenders with the enterprise policy in the Dockerfile.
             "--disable-features=AsyncDns",
             "--no-first-run",
             "--no-default-browser-check",
+            # No extensions or sync needed in the container.
+            "--disable-extensions",
+            "--disable-sync",
+            "--disable-translate",
+            # NOTE: do NOT add --disable-background-networking — reCAPTCHA
+            # Enterprise needs background network calls to Google for scoring.
+            # Limit renderer processes — one active tab + one spare.
+            "--renderer-process-limit=2",
             # --test-type suppresses the "unsupported command-line flag" infobar.
             # --disable-infobars was deprecated and ironically triggers its own
             # warning banner in newer Chrome, which shifts page content down.
@@ -310,6 +325,74 @@ async def _disconnect_cdp():
     logger.debug("Disconnected Playwright CDP — Chrome running clean")
 
 
+_VNC_INPUT_FIX_JS = r"""
+(() => {
+    if (window.__vnc_input_fix) return;
+    window.__vnc_input_fix = true;
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype, 'value'
+    ).set;
+    const tracked = new Map();
+    function scan() {
+        document.querySelectorAll('*').forEach(el => {
+            if (el.shadowRoot) {
+                el.shadowRoot.querySelectorAll('input, textarea').forEach(inp => {
+                    if (!tracked.has(inp)) tracked.set(inp, inp.value);
+                });
+            }
+        });
+    }
+    setInterval(() => {
+        scan();
+        tracked.forEach((prev, inp) => {
+            if (inp.value !== prev) {
+                tracked.set(inp, inp.value);
+                nativeSetter.call(inp, inp.value);
+                inp.dispatchEvent(new InputEvent('input', {
+                    bubbles: true, composed: true,
+                    inputType: 'insertText', data: inp.value,
+                }));
+                inp.dispatchEvent(new Event('change', {bubbles: true, composed: true}));
+            }
+        });
+    }, 300);
+})();
+"""
+
+
+async def _inject_vnc_input_fix():
+    """Inject a script into Chrome that fixes Shadow DOM input handling for VNC.
+
+    Modern sites (Reddit, etc.) use web components with Shadow DOM inputs.
+    VNC keyboard events update the inner <input> value visually but don't
+    fire the framework events (InputEvent with composed:true) that the
+    outer component needs to update its state.  This causes buttons to
+    stay disabled even after the user types credentials.
+
+    The fix: a small polling script that detects value changes in Shadow DOM
+    inputs and dispatches proper InputEvent/change events.  Registered via
+    CDP Page.addScriptToEvaluateOnNewDocument so it runs on every page load.
+    The CDP connection is closed immediately after registration.
+    """
+    try:
+        from playwright.async_api import async_playwright
+        pw = await async_playwright().start()
+        browser = await pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
+        cdp = await browser.contexts[0].new_cdp_session(browser.contexts[0].pages[0])
+        # Register script for all future page loads
+        await cdp.send(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": _VNC_INPUT_FIX_JS},
+        )
+        # Also run it on the current page
+        await cdp.send("Runtime.evaluate", {"expression": _VNC_INPUT_FIX_JS})
+        await browser.close()
+        await pw.stop()
+        logger.info("Injected VNC Shadow DOM input fix")
+    except Exception as e:
+        logger.debug("Could not inject VNC input fix (non-fatal): %s", e)
+
+
 async def start_browser():
     """Start Chrome + KasmVNC at container boot.
 
@@ -394,6 +477,7 @@ async def start_browser():
     _cleanup_stale_profile()
     _launch_chrome_subprocess()
     await asyncio.sleep(1)  # let Chrome initialize before agent actions
+    await _inject_vnc_input_fix()
 
 
 async def browser_cleanup():
