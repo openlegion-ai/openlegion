@@ -1440,7 +1440,10 @@ def completion(shell: str):
     # The var name is derived from the CLI group name.
     env_var = "_OPENLEGION_COMPLETE"
     source_type = f"{shell}_source"
-    click.echo(f'eval "$({env_var}={source_type} openlegion)"')
+    if shell == "fish":
+        click.echo(f"set -x {env_var} {source_type}; openlegion; set -e {env_var}")
+    else:
+        click.echo(f'eval "$({env_var}={source_type} openlegion)"')
 
 
 if __name__ == "__main__":

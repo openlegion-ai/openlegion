@@ -1526,6 +1526,30 @@ class TestJsonOutput:
             assert "standalone" in data
 
 
+    def test_channels_list_json(self, tmp_path):
+        """channels list --json returns valid JSON with channels key."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+        perms_file = tmp_path / "permissions.json"
+
+        config_file.write_text(yaml.dump({"agents": {}}))
+        agents_file.write_text(yaml.dump({"agents": {}}))
+        perms_file.write_text(json.dumps({"permissions": {}}))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.PROJECT_ROOT", tmp_path),
+            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["channels", "list", "--json"])
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert "channels" in data
+
+
 class TestCompletion:
     def test_completion_bash(self):
         """completion bash outputs eval string."""
