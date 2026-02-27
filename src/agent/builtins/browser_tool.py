@@ -288,7 +288,7 @@ async def _browser_cleanup_soft():
     try:
         _launch_chrome_subprocess()
         await asyncio.sleep(1)
-    except RuntimeError:
+    except (RuntimeError, OSError):
         logger.debug("Could not relaunch Chrome subprocess (not in container?)")
 
 
