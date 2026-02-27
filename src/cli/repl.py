@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import readline
 from typing import TYPE_CHECKING
 
 import click
@@ -32,6 +33,66 @@ if TYPE_CHECKING:
     from src.cli.runtime import RuntimeContext
 
 logger = logging.getLogger("cli.repl")
+
+
+class _REPLCompleter:
+    """Tab completion for the REPL using readline."""
+
+    def __init__(self, session: "REPLSession"):
+        self._session = session
+        self._matches: list[str] = []
+
+    def complete(self, text: str, state: int) -> str | None:
+        if state == 0:
+            line = readline.get_line_buffer().lstrip()
+            self._matches = self._get_completions(line, text)
+        return self._matches[state] if state < len(self._matches) else None
+
+    def _get_completions(self, line: str, text: str) -> list[str]:
+        if line.startswith("@"):
+            # Complete agent names after @
+            prefix = text.lstrip("@")
+            return [f"@{n} " for n in self._session.ctx.agents if n.startswith(prefix)]
+
+        if line.startswith("/") and " " not in line:
+            # Complete command names
+            return [c + " " for c in self._session._commands if c.startswith(text)]
+
+        if line.startswith("/use "):
+            # Complete agent names after /use
+            return [n + " " for n in self._session.ctx.agents if n.startswith(text)]
+
+        if line.startswith("/blackboard "):
+            parts = line.split()
+            if len(parts) <= 2:
+                subs = ["list", "get", "set", "del"]
+                return [s + " " for s in subs if s.startswith(text)]
+
+        if line.startswith("/cron "):
+            parts = line.split()
+            if len(parts) <= 2:
+                subs = ["list", "del", "pause", "resume", "run"]
+                return [s + " " for s in subs if s.startswith(text)]
+
+        if line.startswith("/workflow "):
+            parts = line.split()
+            if len(parts) <= 2:
+                subs = ["list", "run"]
+                return [s + " " for s in subs if s.startswith(text)]
+
+        if line.startswith("/project "):
+            parts = line.split()
+            if len(parts) <= 2:
+                subs = ["list", "use", "info"]
+                return [s + " " for s in subs if s.startswith(text)]
+
+        if line.startswith("/credential "):
+            parts = line.split()
+            if len(parts) <= 2:
+                subs = ["add", "list", "remove"]
+                return [s + " " for s in subs if s.startswith(text)]
+
+        return []
 
 
 class REPLSession:
@@ -97,6 +158,24 @@ class REPLSession:
             "/help":       (self._cmd_help,       "Show this help"),
         }
 
+        # Streaming fallback warning (shown at most once per session)
+        self._streaming_warned = False
+
+        # Set up readline tab completion
+        self._completer = _REPLCompleter(self)
+        readline.set_completer(self._completer.complete)
+        readline.parse_and_bind("tab: complete")
+        readline.set_completer_delims(" \t")
+
+        # Command history
+        from src.cli import config as cli_config
+
+        self._history_file = cli_config.PROJECT_ROOT / ".openlegion_history"
+        try:
+            readline.read_history_file(str(self._history_file))
+        except (FileNotFoundError, OSError):
+            pass
+
     def _inline_setup(self) -> None:
         """Show onboarding prompts for first-time users (no credentials, no agents)."""
         from src.setup_wizard import InlineSetup
@@ -157,42 +236,52 @@ class REPLSession:
     def run(self) -> None:
         """Main REPL loop."""
         self._inline_setup()
-        while True:
-            try:
-                # Detect agent removed externally (e.g. via dashboard)
-                if self.current and self.current not in self.ctx.agents:
-                    click.echo(f"Agent '{self.current}' is no longer available.")
-                    self.current = None
-                if self.current is None and self.ctx.agents:
-                    self.current = next(iter(self.ctx.agents))
-                    click.echo(f"Now chatting with '{self.current}'.")
-                if self.current:
-                    prompt_prefix = f"[{self._active_project}] " if self._active_project else ""
-                    user_input = input(prompt_prefix + user_prompt(self.current)).strip()
-                else:
-                    prompt_prefix = f"[{self._active_project}] " if self._active_project else ""
-                    user_input = input(prompt_prefix + "openlegion> ").strip()
-            except EOFError:
-                break
-
-            if not user_input:
-                continue
-
-            # Commands work regardless of active agent
-            if user_input.startswith("/"):
-                if self._dispatch_command(user_input) == "quit":
+        try:
+            while True:
+                try:
+                    # Detect agent removed externally (e.g. via dashboard)
+                    if self.current and self.current not in self.ctx.agents:
+                        click.echo(f"Agent '{self.current}' is no longer available.")
+                        self.current = None
+                    if self.current is None and self.ctx.agents:
+                        self.current = next(iter(self.ctx.agents))
+                        click.echo(f"Now chatting with '{self.current}'.")
+                    if self.current:
+                        prompt_prefix = f"[{self._active_project}] " if self._active_project else ""
+                        user_input = input(prompt_prefix + user_prompt(self.current)).strip()
+                    else:
+                        prompt_prefix = f"[{self._active_project}] " if self._active_project else ""
+                        user_input = input(prompt_prefix + "openlegion> ").strip()
+                except EOFError:
                     break
-                continue
 
-            target, message = self._parse_input(user_input)
-            if target is None:
-                if message:
-                    # Bare text with no active agent — _parse_input returned (None, text)
-                    click.echo("No active agent. Use /add to create one, or @agent to direct a message.")
-                continue
+                if not user_input:
+                    continue
 
-            from src.shared.trace import new_trace_id
-            self._send_message(target, message, trace_id=new_trace_id())
+                # Commands work regardless of active agent
+                if user_input.startswith("/"):
+                    if self._dispatch_command(user_input) == "quit":
+                        break
+                    continue
+
+                target, message = self._parse_input(user_input)
+                if target is None:
+                    if message:
+                        # Bare text with no active agent — _parse_input returned (None, text)
+                        click.echo("No active agent. Use /add to create one, or @agent to direct a message.")
+                    continue
+
+                from src.shared.trace import new_trace_id
+                self._send_message(target, message, trace_id=new_trace_id())
+        finally:
+            self._save_history()
+
+    def _save_history(self) -> None:
+        """Save readline history to disk."""
+        try:
+            readline.write_history_file(str(self._history_file))
+        except OSError:
+            pass
 
     def _parse_input(self, text: str) -> tuple[str | None, str]:
         """Parse @mentions, return (target_agent, message)."""
@@ -1051,11 +1140,19 @@ class REPLSession:
                 elif line:
                     click.echo("(type /steer <msg> to redirect the agent)")
 
+        def _warn_streaming_fallback() -> None:
+            if not self._streaming_warned:
+                from src.cli.formatting import echo_warn
+
+                echo_warn("Streaming unavailable, using fallback")
+                self._streaming_warned = True
+
         try:
             _send_message_streaming(
                 self.ctx.transport, target, message, self.ctx.dispatch_loop,
                 steer_fn=_steer_poll, trace_id=trace_id,
                 event_bus=self.ctx.event_bus,
+                streaming_warn_cb=_warn_streaming_fallback,
             )
         except Exception as e:
             click.echo(f"Error: {e}")
@@ -1067,6 +1164,7 @@ def _send_message_streaming(
     steer_fn=None,
     trace_id: str | None = None,
     event_bus=None,
+    streaming_warn_cb=None,
 ) -> None:
     """Send a message via streaming endpoint, falling back to non-streaming.
 
@@ -1138,6 +1236,8 @@ def _send_message_streaming(
                             return
             except Exception as e:
                 logger.debug("Streaming dispatch failed, falling back: %s", e)
+                if streaming_warn_cb:
+                    streaming_warn_cb()
                 # Fallback to non-streaming
                 data = await transport.request(
                     target, "POST", "/chat",

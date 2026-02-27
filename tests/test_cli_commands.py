@@ -1563,3 +1563,97 @@ class TestCompletion:
         runner = CliRunner()
         result = runner.invoke(cli, ["completion", "powershell"])
         assert result.exit_code != 0
+
+
+class TestREPLCompleter:
+    def test_completer_commands(self):
+        """Tab completer completes /st to /status and /steer."""
+        from unittest.mock import MagicMock
+
+        from src.cli.repl import _REPLCompleter
+
+        session = MagicMock()
+        session.ctx.agents = {
+            "researcher": "http://localhost:8401",
+            "coder": "http://localhost:8402",
+        }
+        session._commands = {
+            "/status": None,
+            "/steer": None,
+            "/quit": None,
+            "/help": None,
+            "/use": None,
+            "/add": None,
+        }
+
+        completer = _REPLCompleter(session)
+
+        import readline
+
+        with patch.object(readline, "get_line_buffer", return_value="/st"):
+            result0 = completer.complete("/st", 0)
+            assert result0 is not None
+            assert result0.startswith("/st")
+            # Should match /status and /steer
+            result1 = completer.complete("/st", 1)
+            assert result1 is not None
+
+    def test_completer_agents(self):
+        """Tab completer completes @res to @researcher."""
+        from unittest.mock import MagicMock
+
+        from src.cli.repl import _REPLCompleter
+
+        session = MagicMock()
+        session.ctx.agents = {
+            "researcher": "http://localhost:8401",
+            "coder": "http://localhost:8402",
+        }
+        session._commands = {}
+
+        completer = _REPLCompleter(session)
+
+        import readline
+
+        with patch.object(readline, "get_line_buffer", return_value="@res"):
+            result = completer.complete("@res", 0)
+            assert result == "@researcher "
+
+    def test_completer_use_subcommand(self):
+        """Tab completer completes agent names after /use."""
+        from unittest.mock import MagicMock
+
+        from src.cli.repl import _REPLCompleter
+
+        session = MagicMock()
+        session.ctx.agents = {
+            "researcher": "http://localhost:8401",
+            "coder": "http://localhost:8402",
+        }
+        session._commands = {}
+
+        completer = _REPLCompleter(session)
+
+        import readline
+
+        with patch.object(readline, "get_line_buffer", return_value="/use c"):
+            result = completer.complete("c", 0)
+            assert result == "coder "
+
+    def test_completer_no_match(self):
+        """Tab completer returns None when no match."""
+        from unittest.mock import MagicMock
+
+        from src.cli.repl import _REPLCompleter
+
+        session = MagicMock()
+        session.ctx.agents = {}
+        session._commands = {}
+
+        completer = _REPLCompleter(session)
+
+        import readline
+
+        with patch.object(readline, "get_line_buffer", return_value="hello"):
+            result = completer.complete("hello", 0)
+            assert result is None
