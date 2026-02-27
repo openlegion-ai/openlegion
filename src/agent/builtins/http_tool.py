@@ -6,7 +6,11 @@ via the mesh vault at execution time so the agent never sees raw secrets.
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import re
+import socket
+from urllib.parse import urlparse
 
 import httpx
 
@@ -19,17 +23,63 @@ _CRED_HANDLE_RE = re.compile(r"\$CRED\{([^}]+)\}")
 # Shared client for connection pooling across tool invocations.
 # Avoids repeated TCP handshakes and TLS negotiation.
 _client: httpx.AsyncClient | None = None
+_client_lock = asyncio.Lock()
 
 
 async def _get_client() -> httpx.AsyncClient:
     global _client
-    if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(
-            follow_redirects=True,
-            max_redirects=5,
-            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-        )
-    return _client
+    if _client is not None and not _client.is_closed:
+        return _client
+    async with _client_lock:
+        if _client is None or _client.is_closed:
+            _client = httpx.AsyncClient(
+                follow_redirects=True,
+                max_redirects=5,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
+        return _client
+
+
+async def close_client() -> None:
+    """Close the shared HTTP client. Called during agent shutdown."""
+    global _client
+    if _client and not _client.is_closed:
+        await _client.aclose()
+    _client = None
+
+
+def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True if the IP is in a range that should be blocked for SSRF."""
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        return True
+    # IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) — check the mapped v4 address too
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        mapped = ip.ipv4_mapped
+        if mapped.is_private or mapped.is_loopback or mapped.is_link_local or mapped.is_reserved:
+            return True
+    return False
+
+
+def _is_private_url(url: str) -> bool:
+    """Reject requests to private IP ranges, loopback, link-local, and reserved addresses."""
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        return True  # Reject malformed URLs
+    try:
+        ip = ipaddress.ip_address(hostname)
+        return _is_blocked_ip(ip)
+    except ValueError:
+        # It's a hostname — resolve to check the actual IP
+        try:
+            resolved = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            for family, _, _, _, sockaddr in resolved:
+                ip = ipaddress.ip_address(sockaddr[0])
+                if _is_blocked_ip(ip):
+                    return True
+        except (socket.gaierror, OSError):
+            pass  # DNS resolution failed — allow (will fail at request time)
+        return False
 
 
 async def _resolve_creds(text: str, mesh_client) -> tuple[str, list[str]]:
@@ -114,6 +164,10 @@ async def http_request(
         # Resolve $CRED{name} handles in url, headers, and body
         resolved_url, url_secrets = await _resolve_creds(url, mesh_client)
         all_secrets.extend(url_secrets)
+
+        # SSRF protection: block requests to private/internal networks
+        if _is_private_url(resolved_url):
+            return {"error": "SSRF protection: requests to private/internal addresses are blocked", "status_code": 0}
 
         resolved_headers = {}
         for k, v in (headers or {}).items():
