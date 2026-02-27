@@ -1657,3 +1657,151 @@ class TestREPLCompleter:
         with patch.object(readline, "get_line_buffer", return_value="hello"):
             result = completer.complete("hello", 0)
             assert result is None
+
+
+# ── WP5: logs, config, health, version commands ─────────────
+
+
+class TestLogsCommand:
+    def test_logs_reads_logfile(self, tmp_path):
+        """logs command reads from .openlegion.log."""
+        log_file = tmp_path / ".openlegion.log"
+        log_file.write_text("line1\nline2\nline3\n")
+
+        with patch("src.cli.config.PROJECT_ROOT", tmp_path):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["logs", "-n", "2"])
+            assert result.exit_code == 0
+            assert "line2" in result.output
+            assert "line3" in result.output
+
+    def test_logs_level_filter(self, tmp_path):
+        """logs --level filters by level."""
+        log_file = tmp_path / ".openlegion.log"
+        log_file.write_text(
+            '{"level":"INFO","msg":"ok"}\n{"level":"ERROR","msg":"bad"}\n'
+        )
+
+        with patch("src.cli.config.PROJECT_ROOT", tmp_path):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["logs", "--level", "error"])
+            assert result.exit_code == 0
+            assert "ERROR" in result.output
+            assert "INFO" not in result.output
+
+    def test_logs_no_file(self, tmp_path):
+        """logs exits non-zero when no log file exists."""
+        with patch("src.cli.config.PROJECT_ROOT", tmp_path):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["logs"])
+            assert result.exit_code != 0
+
+
+class TestConfigCommand:
+    def test_config_show(self, tmp_path):
+        """config show outputs YAML."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+        perms_file = tmp_path / "permissions.json"
+
+        config_file.write_text(
+            yaml.dump({"mesh": {"host": "0.0.0.0", "port": 8420}})
+        )
+        agents_file.write_text(yaml.dump({"agents": {}}))
+        perms_file.write_text(json.dumps({"permissions": {}}))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.PROJECT_ROOT", tmp_path),
+            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["config", "show"])
+            assert result.exit_code == 0
+            assert "mesh" in result.output
+
+    def test_config_show_json(self, tmp_path):
+        """config show --json outputs valid JSON."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+        perms_file = tmp_path / "permissions.json"
+
+        config_file.write_text(
+            yaml.dump({"mesh": {"host": "0.0.0.0", "port": 8420}})
+        )
+        agents_file.write_text(yaml.dump({"agents": {}}))
+        perms_file.write_text(json.dumps({"permissions": {}}))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.PROJECT_ROOT", tmp_path),
+            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["config", "show", "--json"])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert "mesh" in data
+
+    def test_config_validate_ok(self, tmp_path):
+        """config validate exits 0 with valid config."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+        perms_file = tmp_path / "permissions.json"
+        env_file = tmp_path / ".env"
+
+        config_file.write_text(
+            yaml.dump({"mesh": {"host": "0.0.0.0", "port": 8420}})
+        )
+        agents_file.write_text(yaml.dump({"agents": {}}))
+        perms_file.write_text(json.dumps({"permissions": {}}))
+        env_file.write_text("")
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.ENV_FILE", env_file),
+            patch("src.cli.config.PROJECT_ROOT", tmp_path),
+            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["config", "validate"])
+            assert result.exit_code == 0
+
+    def test_config_path(self):
+        """config path shows file locations."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["config", "path"])
+        assert result.exit_code == 0
+        assert "Project root" in result.output
+
+
+class TestHealthCommand:
+    def test_health_no_docker(self):
+        """health reports Docker status."""
+        with patch("src.cli.config._check_docker_running", return_value=False):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["health"])
+            # Should exit non-zero if docker is down
+            assert result.exit_code != 0
+
+
+class TestVersionCommand:
+    def test_version_basic(self):
+        """version shows version string."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["version"])
+        assert result.exit_code == 0
+        assert "OpenLegion" in result.output
+
+    def test_version_verbose(self):
+        """version -v shows Python version."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["version", "-v"])
+        assert result.exit_code == 0
+        assert "Python" in result.output

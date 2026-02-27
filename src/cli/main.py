@@ -6,6 +6,14 @@ Core:
   stop                     Stop all containers
   status                   Show agent status
   chat <name>              Connect to a running agent
+  logs [-f] [--level]      View runtime logs
+  health                   Pre-flight health checks
+  version [-v]             Show version info
+
+Configuration:
+  config show [--json]     Show effective configuration
+  config validate          Check for config errors
+  config path              Show config file locations
 
 Agent management:
   agent add [name]         Add a new agent
@@ -1237,7 +1245,7 @@ def _single_agent_repl(agent_name: str, agent_url: str) -> None:
     """Interactive chat REPL with a single agent (for detached mode)."""
     import httpx
 
-    from src.cli.formatting import display_response, user_prompt
+    from src.cli.formatting import user_prompt
 
     while True:
         try:
@@ -1281,23 +1289,79 @@ def _single_agent_repl(agent_name: str, agent_url: str) -> None:
                 click.echo(f"Unknown command: {cmd}. Type /help for commands.")
                 continue
 
+        # Try streaming first, fall back to sync
         try:
-            resp = httpx.post(
-                f"{agent_url}/chat",
-                json={"message": user_input},
-                timeout=120,
-            )
-            if resp.status_code != 200:
-                click.echo(f"Error: HTTP {resp.status_code}: {resp.text}", err=True)
+            _stream_detached_chat(agent_name, agent_url, user_input)
+        except (httpx.HTTPError, httpx.StreamError, OSError):
+            _sync_detached_chat(agent_name, agent_url, user_input)
+
+
+def _stream_detached_chat(agent_name: str, agent_url: str, message: str) -> None:
+    """Stream a chat response via SSE."""
+    import json as _json
+
+    import httpx
+
+    from src.cli.formatting import (
+        agent_prompt,
+        display_stream_text_delta,
+        display_stream_tool_result,
+        display_stream_tool_start,
+    )
+
+    response_text = ""
+    tool_count = 0
+    with httpx.stream(
+        "POST", f"{agent_url}/chat/stream",
+        json={"message": message}, timeout=120,
+    ) as resp:
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if not line.startswith("data: "):
                 continue
+            try:
+                event = _json.loads(line[6:])
+            except _json.JSONDecodeError:
+                continue
+            etype = event.get("type", "")
+            if etype == "tool_start":
+                tool_count += 1
+                display_stream_tool_start(
+                    event.get("name", "?"), event.get("input", {}), tool_count,
+                )
+            elif etype == "tool_result":
+                display_stream_tool_result(
+                    event.get("name", "?"), event.get("output", {}),
+                )
+            elif etype == "text_delta":
+                content = event.get("content", "")
+                display_stream_text_delta(
+                    agent_name, content, not response_text,
+                )
+                response_text += content
+            elif etype == "done":
+                if not response_text:
+                    resp_text = event.get("response", "(no response)")
+                    click.echo(f"\n{agent_prompt(agent_name)}{resp_text}")
+                click.echo("")
+                return
+    if response_text:
+        click.echo("")
 
-            data = resp.json()
-            display_response(agent_name, data)
 
-        except httpx.TimeoutException:
-            click.echo("Request timed out. The agent may still be processing.", err=True)
-        except Exception as e:
-            click.echo(f"Error: {e}", err=True)
+def _sync_detached_chat(agent_name: str, agent_url: str, message: str) -> None:
+    """Synchronous chat fallback."""
+    import httpx
+
+    from src.cli.formatting import display_response
+
+    resp = httpx.post(
+        f"{agent_url}/chat", json={"message": message}, timeout=120,
+    )
+    if resp.status_code != 200:
+        click.echo(f"Error: HTTP {resp.status_code}: {resp.text}", err=True)
+        return
+    display_response(agent_name, resp.json())
 
 
 # ── status ───────────────────────────────────────────────────
@@ -1444,6 +1508,270 @@ def completion(shell: str):
         click.echo(f"set -x {env_var} {source_type}; openlegion; set -e {env_var}")
     else:
         click.echo(f'eval "$({env_var}={source_type} openlegion)"')
+
+
+# ── logs ─────────────────────────────────────────────────────
+
+@cli.command("logs")
+@click.option("--lines", "-n", default=50, type=int, help="Number of lines to show")
+@click.option("--follow", "-f", is_flag=True, help="Follow log output")
+@click.option(
+    "--level",
+    type=click.Choice(["debug", "info", "warning", "error"]),
+    default=None,
+)
+def logs(lines: int, follow: bool, level: str | None):
+    """View runtime and agent logs.
+
+    \b
+    Examples:
+      openlegion logs                 # last 50 lines of mesh log
+      openlegion logs -f              # follow mesh log
+      openlegion logs --level error   # filter by level
+    """
+    log_path = cli_config.PROJECT_ROOT / ".openlegion.log"
+    if not log_path.exists():
+        click.echo("No log file found. Start the runtime first: openlegion start")
+        raise SystemExit(1)
+
+    content = log_path.read_text()
+    all_lines = content.splitlines()
+
+    # Filter by level if specified
+    level_pat = None
+    if level:
+        import re
+
+        level_upper = level.upper()
+        level_pat = re.compile(r"\b" + re.escape(level_upper) + r"\b")
+        all_lines = [line for line in all_lines if level_pat.search(line.upper())]
+
+    # Show last N lines
+    for line in all_lines[-lines:]:
+        click.echo(line)
+
+    if follow:
+        import time
+
+        seen = len(content)
+        try:
+            while True:
+                time.sleep(0.5)
+                new_content = log_path.read_text()
+                if len(new_content) > seen:
+                    new_lines = new_content[seen:].splitlines()
+                    for line in new_lines:
+                        if level_pat and not level_pat.search(line.upper()):
+                            continue
+                        click.echo(line)
+                    seen = len(new_content)
+        except KeyboardInterrupt:
+            pass
+
+
+# ── config ───────────────────────────────────────────────────
+
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def config(ctx):
+    """View and validate configuration."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(config_show)
+
+
+@config.command("show")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def config_show(as_json: bool):
+    """Show effective configuration."""
+    cfg = _load_config()
+    # Remove internal keys
+    cfg.pop("_agent_projects", None)
+    if as_json:
+        import json as _json
+
+        click.echo(_json.dumps(cfg, default=str))
+    else:
+        click.echo(yaml.dump(cfg, default_flow_style=False, sort_keys=False))
+
+
+@config.command("validate")
+def config_validate():
+    """Check configuration for errors."""
+    from src.cli.formatting import echo_fail, echo_ok
+
+    errors = 0
+
+    # Check config files exist
+    if cli_config.CONFIG_FILE.exists():
+        echo_ok(f"mesh.yaml: {cli_config.CONFIG_FILE}")
+        try:
+            with open(cli_config.CONFIG_FILE) as f:
+                yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            echo_fail(f"  Parse error: {e}")
+            errors += 1
+    else:
+        echo_fail(f"mesh.yaml not found: {cli_config.CONFIG_FILE}")
+        errors += 1
+
+    if cli_config.AGENTS_FILE.exists():
+        echo_ok(f"agents.yaml: {cli_config.AGENTS_FILE}")
+        try:
+            with open(cli_config.AGENTS_FILE) as f:
+                data = yaml.safe_load(f)
+            agents = data.get("agents", {}) if data else {}
+            echo_ok(f"  {len(agents)} agent(s) configured")
+        except yaml.YAMLError as e:
+            echo_fail(f"  Parse error: {e}")
+            errors += 1
+    else:
+        from src.cli.formatting import echo_warn
+
+        echo_warn(f"agents.yaml not found: {cli_config.AGENTS_FILE}")
+
+    if cli_config.PERMISSIONS_FILE.exists():
+        import json as _json
+
+        echo_ok(f"permissions.json: {cli_config.PERMISSIONS_FILE}")
+        try:
+            with open(cli_config.PERMISSIONS_FILE) as f:
+                _json.load(f)
+        except _json.JSONDecodeError as e:
+            echo_fail(f"  Parse error: {e}")
+            errors += 1
+    else:
+        from src.cli.formatting import echo_warn
+
+        echo_warn(f"permissions.json not found: {cli_config.PERMISSIONS_FILE}")
+
+    # Check .env
+    if cli_config.ENV_FILE.exists():
+        echo_ok(f".env: {cli_config.ENV_FILE}")
+    else:
+        from src.cli.formatting import echo_warn
+
+        echo_warn(f".env not found: {cli_config.ENV_FILE}")
+
+    if errors:
+        raise SystemExit(1)
+    else:
+        echo_ok("Configuration valid")
+
+
+@config.command("path")
+def config_path():
+    """Show configuration file locations."""
+    click.echo(f"Project root:    {cli_config.PROJECT_ROOT}")
+    click.echo(f"Mesh config:     {cli_config.CONFIG_FILE}")
+    click.echo(f"Agent config:    {cli_config.AGENTS_FILE}")
+    click.echo(f"Permissions:     {cli_config.PERMISSIONS_FILE}")
+    click.echo(f"Environment:     {cli_config.ENV_FILE}")
+    click.echo(f"Projects:        {cli_config.PROJECTS_DIR}")
+    click.echo(f"Skills market:   {cli_config.MARKETPLACE_DIR}")
+
+
+# ── health ───────────────────────────────────────────────────
+
+@cli.command("health")
+@click.option("--port", default=8420, type=int)
+def health(port: int):
+    """Run pre-flight health checks.
+
+    \b
+    Examples:
+      openlegion health
+    """
+    from src.cli.formatting import echo_fail, echo_ok, echo_warn
+
+    errors = 0
+
+    # 1. Docker
+    from src.cli.config import _check_docker_running
+
+    if _check_docker_running():
+        echo_ok("Docker daemon running")
+    else:
+        echo_fail("Docker daemon not running")
+        errors += 1
+
+    # 2. Port check
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            result = s.connect_ex(("localhost", port))
+            if result == 0:
+                echo_ok(f"Port {port}: in use (mesh may be running)")
+            else:
+                echo_ok(f"Port {port}: available")
+    except Exception:
+        echo_warn(f"Port {port}: could not check")
+
+    # 3. Config files
+    if cli_config.CONFIG_FILE.exists():
+        echo_ok("Config files present")
+    else:
+        echo_warn("No mesh.yaml found")
+
+    # 4. Credentials
+    if cli_config.ENV_FILE.exists():
+        env_content = cli_config.ENV_FILE.read_text()
+        has_creds = (
+            "OPENLEGION_SYSTEM_" in env_content
+            or "OPENLEGION_CRED_" in env_content
+        )
+        if has_creds:
+            echo_ok("Credentials configured")
+        else:
+            echo_warn("No credentials in .env")
+    else:
+        echo_warn("No .env file")
+
+    # 5. Mesh status
+    try:
+        import httpx
+
+        resp = httpx.get(f"http://localhost:{port}/mesh/agents", timeout=3)
+        agents = resp.json()
+        echo_ok(f"Mesh online: {len(agents)} agent(s)")
+    except Exception:
+        echo_warn("Mesh not running")
+
+    if errors:
+        raise SystemExit(1)
+
+
+# ── version ──────────────────────────────────────────────────
+
+@cli.command("version")
+@click.option("--verbose", "-v", is_flag=True)
+def version_cmd(verbose: bool):
+    """Show version and environment information."""
+    import platform
+    from importlib.metadata import version as pkg_version
+
+    try:
+        ver = pkg_version("openlegion")
+    except Exception:
+        ver = "dev"
+    click.echo(f"OpenLegion v{ver}")
+    if verbose:
+        click.echo(f"Python {sys.version.split()[0]}")
+        try:
+            import docker
+
+            docker_ver = docker.from_env().version().get("Version", "unknown")
+            click.echo(f"Docker {docker_ver}")
+        except Exception:
+            click.echo("Docker: not available")
+        click.echo(
+            f"OS: {platform.system()} {platform.release()} ({platform.machine()})"
+        )
+        click.echo(f"Config: {cli_config.CONFIG_FILE}")
+        cfg = _load_config()
+        n_agents = len(cfg.get("agents", {}))
+        click.echo(f"Agents: {n_agents} configured")
 
 
 if __name__ == "__main__":
