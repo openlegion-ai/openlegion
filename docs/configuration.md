@@ -10,6 +10,7 @@ OpenLegion uses YAML and JSON files in the `config/` directory. Config files are
 | `config/mesh.yaml` | YAML | Mesh host settings, LLM defaults, channel config |
 | `config/permissions.json` | JSON | Per-agent ACL matrix |
 | `config/cron.json` | JSON | Scheduled job state (auto-managed) |
+| `config/projects/` | Directory | Per-project data (project.md, members) |
 | `.env` | dotenv | API keys and credentials |
 
 ## `config/agents.yaml`
@@ -149,8 +150,8 @@ Per-agent access control lists. Default policy is **deny** -- if not listed, it'
       "can_message": ["orchestrator"],
       "can_publish": ["research_complete"],
       "can_subscribe": ["new_lead"],
-      "blackboard_read": ["tasks/*", "context/*"],
-      "blackboard_write": ["context/prospect_*"],
+      "blackboard_read": ["projects/sales/*"],
+      "blackboard_write": ["projects/sales/*"],
       "allowed_apis": ["llm", "brave_search"],
       "allowed_credentials": ["brightdata_*"]
     },
@@ -158,14 +159,16 @@ Per-agent access control lists. Default policy is **deny** -- if not listed, it'
       "can_message": ["*"],
       "can_publish": ["*"],
       "can_subscribe": ["*"],
-      "blackboard_read": ["*"],
-      "blackboard_write": ["artifacts/*"],
+      "blackboard_read": ["projects/content/*"],
+      "blackboard_write": ["projects/content/*"],
       "allowed_apis": ["llm"],
       "allowed_credentials": ["*"]
     }
   }
 }
 ```
+
+Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a project via `openlegion project add-agent`, it automatically receives read/write access to that project's namespace. Standalone agents (not in any project) get empty blackboard permissions. The `MeshClient` on the agent side transparently prefixes all blackboard keys with the project namespace, so agents use natural keys like `tasks/research_01` while data is stored under `projects/sales/tasks/research_01`.
 
 ### Permission Fields
 
@@ -182,8 +185,11 @@ Per-agent access control lists. Default policy is **deny** -- if not listed, it'
 ### Glob Patterns
 
 - `*` matches everything
+- `projects/myproject/*` matches all keys under the `myproject` namespace
 - `tasks/*` matches `tasks/abc123`, `tasks/research_01`, etc.
 - `context/prospect_*` matches `context/prospect_acme`, etc.
+
+Note: Blackboard permissions are managed automatically when agents join/leave projects. You generally don't need to edit blackboard patterns by hand.
 
 ## `.env` — Credentials
 
@@ -257,6 +263,7 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `MESH_HOST` | -- | Mesh host URL (set automatically in containers) |
 | `AGENT_ID` | -- | Agent identifier (set automatically in containers) |
 | `THINKING` | `off` | Extended thinking/reasoning mode (set automatically from `thinking` in agents.yaml) |
+| `PROJECT_NAME` | -- | Project this agent belongs to (set automatically for project members) |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for memory vector search (set automatically from `llm.embedding_model` in mesh.yaml). Set to `"none"` to disable vector search |
 
 The mesh port is configured in `config/mesh.yaml` (`mesh.port`), not via environment variable.

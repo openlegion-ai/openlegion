@@ -102,15 +102,16 @@ Every inter-agent operation checks per-agent ACLs defined in `config/permissions
     "can_message": ["orchestrator"],
     "can_publish": ["research_complete"],
     "can_subscribe": ["new_lead"],
-    "blackboard_read": ["tasks/*", "context/*"],
-    "blackboard_write": ["context/prospect_*"],
+    "blackboard_read": ["projects/sales/*"],
+    "blackboard_write": ["projects/sales/*"],
     "allowed_apis": ["llm", "brave_search"],
     "allowed_credentials": ["brightdata_*"]
   }
 }
 ```
 
-- **Glob patterns** for blackboard paths and credential access (`tasks/*` matches `tasks/abc123`)
+- **Project-scoped blackboard** -- agents can only access keys under their project's namespace (`projects/{name}/*`). The `MeshClient` auto-prefixes all blackboard keys with the project namespace, so agents use natural keys while isolation is enforced transparently. Standalone agents get empty blackboard permissions.
+- **Glob patterns** for blackboard paths and credential access
 - **Explicit allowlists** for messaging, pub/sub, API access, and credential access
 - **Default deny** -- if not listed, it's blocked
 - Enforced at the mesh host before every operation

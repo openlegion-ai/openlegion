@@ -8,7 +8,7 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 1368](https://img.shields.io/badge/tests-1368%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 1385](https://img.shields.io/badge/tests-1385%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -116,7 +116,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 1368 tests including full Docker E2E |
+| **Test coverage** | Minimal | 1385 tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~22,000 lines — auditable in a day |
 
 ---
@@ -131,7 +131,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**1368 tests passing** across **~22,000 lines** of application code.
+**1385 tests passing** across **~22,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
@@ -241,6 +241,10 @@ as a single FastAPI process.
 ### Blackboard (Shared State Store)
 
 SQLite-backed key-value store with versioning, TTL, and garbage collection.
+Project agents' blackboard access is automatically scoped to `projects/{name}/*` —
+agents use natural keys (e.g. `tasks/research_abc123`) while the MeshClient
+transparently namespaces them under the project. Standalone agents have no
+blackboard access.
 
 | Namespace | Purpose | Example |
 |-----------|---------|---------|
@@ -274,13 +278,17 @@ Every inter-agent operation is checked against per-agent ACLs:
     "can_message": ["orchestrator"],
     "can_publish": ["research_complete"],
     "can_subscribe": ["new_lead"],
-    "blackboard_read": ["tasks/*", "context/*"],
-    "blackboard_write": ["context/prospect_*"],
+    "blackboard_read": ["projects/myproject/*"],
+    "blackboard_write": ["projects/myproject/*"],
     "allowed_apis": ["llm", "brave_search"],
     "allowed_credentials": ["brightdata_*"]
   }
 }
 ```
+
+Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
+project, it receives read/write access to that namespace. Standalone agents get
+empty blackboard permissions.
 
 ### Orchestrator (Workflow DAG Executor)
 
@@ -357,7 +365,7 @@ structured output and optional blackboard promotions.
 ### Chat Mode (`chat`)
 
 Accepts a user message. On the first message, loads workspace context
-(PROJECT.md, AGENTS.md, SOUL.md, USER.md, MEMORY.md, SYSTEM.md) into the system prompt,
+(PROJECT.md if in a project, AGENTS.md, SOUL.md, USER.md, MEMORY.md, SYSTEM.md) into the system prompt,
 injects a live Runtime Context block (permissions, budget, fleet, cron),
 and searches memory for relevant facts. Executes tool calls in a bounded loop
 (max 30 rounds) and runs context compaction when needed.
@@ -398,7 +406,7 @@ canonicalized parameters and results over a 15-call sliding window.
 | `memory_save` | Save fact to workspace and structured memory DB |
 | `memory_recall` | Semantic search over structured facts with category filtering |
 | `web_search` | Search the web via DuckDuckGo (no API key) |
-| `list_agents` | Discover other agents in the fleet |
+| `list_agents` | Discover agents in your project (standalone agents see only themselves) |
 | `read_shared_state` | Read from the shared blackboard |
 | `write_shared_state` | Write to the shared blackboard |
 | `list_shared_state` | Browse blackboard entries by prefix |
@@ -681,9 +689,11 @@ Templates are offered during first-run setup (via `openlegion start`):
 
 ## Configuration
 
-### `PROJECT.md` — Fleet-Wide Context
+### `PROJECT.md` — Per-Project Context
 
-Shared across all agents. Loaded into every agent's system prompt.
+Each project has its own `PROJECT.md` stored in `config/projects/{name}/project.md`.
+It is mounted into project member agents' containers and loaded into their system
+prompts. Standalone agents (not in a project) do not receive any PROJECT.md.
 
 ```markdown
 # PROJECT.md
@@ -868,7 +878,7 @@ pytest tests/
 | Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
 | Context Manager | 34 | Token estimation (tiktoken + model-aware), compaction, flushing, flush reset |
 | Runtime Backend | 34 | DockerBackend, SandboxBackend, browser_backend, extra_env, name sanitization, detection, selection |
-| Projects | 30 | Multi-project CRUD, config, agent membership |
+| Projects | 47 | Multi-project CRUD, config, agent membership, blackboard key scoping, cross-project permission isolation |
 | Events | 31 | Event streaming, filtering, WebSocket, notification events |
 | Traces | 30 | Trace recording, grouping, summaries, prompt preview extraction |
 | Orchestrator | 32 | Workflows, conditions, retries, failures |
@@ -898,7 +908,7 @@ pytest tests/
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **1368** | |
+| **Total** | **1385** | |
 
 ---
 

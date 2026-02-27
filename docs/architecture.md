@@ -127,6 +127,22 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `utils.py` | ID generation, structured logging, prompt injection sanitization |
 | `trace.py` | Distributed trace context propagation |
 
+## Project Isolation
+
+Agents can be organized into **projects** — isolated namespaces that scope blackboard access, agent visibility, and shared context.
+
+### How It Works
+
+- **Blackboard scoping**: The `MeshClient` auto-prefixes all blackboard keys with `projects/{name}/`. An agent writing to `tasks/research_01` in project "sales" actually writes to `projects/sales/tasks/research_01`. Agents see natural keys — the prefix is stripped on read. This is enforced at both the client (auto-namespacing) and server (permission matrix) layers.
+- **Agent visibility**: `list_agents` returns only project peers for project agents, or only the agent itself for standalone agents.
+- **PROJECT.md**: Only project members receive a PROJECT.md in their container. Standalone agents get none.
+- **Permission management**: When an agent joins a project, it receives `blackboard_read: ["projects/{name}/*"]` and `blackboard_write: ["projects/{name}/*"]`. When removed, blackboard permissions are cleared.
+- **Standalone agents**: Agents not assigned to any project have no blackboard access, see only themselves in `list_agents`, and receive no PROJECT.md.
+
+### Project Data
+
+Project configuration is stored in `config/projects/{name}/` with a `project.md` file for shared context and membership tracked in the project metadata.
+
 ## Data Flow
 
 ### Task Execution
@@ -173,3 +189,4 @@ Both implement `RuntimeBackend` ABC so the rest of the system is isolation-agnos
 6. **Write-then-compact** -- facts are flushed to memory before discarding context
 7. **Tool-call message grouping** -- assistant(tool_calls) and tool(results) are never separated in context trimming
 8. **Unicode sanitization** -- all untrusted text passes through `sanitize_for_prompt()` before reaching LLM context (user input, tool results, system prompt context)
+9. **Project isolation** -- blackboard keys are auto-namespaced under `projects/{name}/`, agent visibility is scoped to project peers, and standalone agents have no blackboard access

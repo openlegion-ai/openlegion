@@ -20,6 +20,33 @@ The dashboard uses a consolidated three-tab layout:
 
 A command palette (**Cmd+K** / **Ctrl+K**) provides quick access to agents, actions, and navigation. The search button in the nav bar also opens it.
 
+## Project Management
+
+The dashboard supports multi-project namespaces for organizing agents into isolated groups.
+
+### Project Switcher
+
+A tab bar at the top of the Fleet view shows all projects plus an "All Agents" view. Click a project tab to filter the agent grid to that project's members. The "All Agents" tab shows every agent with project badges. Each tab displays a member count.
+
+### Create Project
+
+Click the **+** button next to the project tabs to create a new project. Enter a name and optional description. Projects are stored in `config/projects/{name}/`.
+
+### Project Members
+
+When a project is selected:
+- An "Add member" dropdown lists unassigned agents
+- Each member card shows a "Remove" button
+- Adding/removing a member auto-restarts the agent so the new scope takes effect
+
+### Delete Project
+
+Click the **Delete Project** button (requires confirmation). Members become standalone agents.
+
+### PROJECT.md
+
+When a project is selected, a PROJECT.md banner appears above the agent grid. Edit it to set shared context for all project members. The content is pushed to running member agents on save. When no project is selected (All Agents view), the banner is hidden.
+
 ## Fleet Tab
 
 Overview of all registered agents showing health status, activity state (idle/thinking/tool), daily cost, token usage, and restart count. Click any agent card to drill down into its detail view with cost breakdowns, budget bars, workspace file editor, and recent events. Also includes agent configuration management — view and edit each agent's model, browser backend, role, system prompt, and daily budget. Changes that require a restart (model, browser) are flagged.
@@ -136,7 +163,7 @@ Closing the chat panel while a response is streaming cancels the in-flight reque
 
 ## Broadcast
 
-Send a message to all agents simultaneously using the broadcast bar below the agent grid. Each agent processes the message independently. Responses display inline with expand/collapse for long replies (200+ characters).
+Send a message to multiple agents simultaneously using the broadcast bar below the agent grid. When a project is selected, the broadcast targets only that project's members. When viewing "All Agents", it targets every agent. Standalone agents (not in any project) are included only in the "All Agents" broadcast. Each agent processes the message independently. Responses display inline with expand/collapse for long replies (200+ characters).
 
 ## Blackboard Operations
 
@@ -189,8 +216,13 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `DELETE` | `/dashboard/api/credentials/{name}` | Remove a credential |
 | `GET` | `/dashboard/api/costs/{agent_id}` | Cost data for a specific agent |
 | `GET` | `/dashboard/api/costs` | Cost data with optional period |
-| `GET` | `/dashboard/api/project` | Read PROJECT.md content |
-| `PUT` | `/dashboard/api/project` | Update PROJECT.md content |
+| `GET` | `/dashboard/api/projects` | List all projects with members |
+| `POST` | `/dashboard/api/projects` | Create a new project |
+| `DELETE` | `/dashboard/api/projects/{name}` | Delete a project |
+| `POST` | `/dashboard/api/projects/{name}/members` | Add agent to project (auto-restarts agent) |
+| `DELETE` | `/dashboard/api/projects/{name}/members/{agent}` | Remove agent from project (auto-restarts agent) |
+| `GET` | `/dashboard/api/project?project={name}` | Read project's PROJECT.md (requires project param) |
+| `PUT` | `/dashboard/api/project?project={name}` | Update project's PROJECT.md (requires project param) |
 | `GET` | `/dashboard/api/traces` | Recent trace events |
 | `GET` | `/dashboard/api/traces/{id}` | Trace detail |
 | `GET` | `/dashboard/api/queues` | Queue status per agent |

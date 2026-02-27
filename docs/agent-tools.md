@@ -63,13 +63,15 @@ The **persistent** backend maintains a browser profile across sessions at `/data
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `list_agents` | -- | Discover other agents in the fleet |
-| `read_shared_state` | `key` | Read from the shared blackboard |
-| `write_shared_state` | `key`, `value` | Write to the shared blackboard |
-| `list_shared_state` | `prefix` | Browse blackboard entries by prefix |
+| `list_agents` | -- | Discover agents in your project (standalone agents see only themselves) |
+| `read_shared_state` | `key` | Read from the project-scoped blackboard. Keys are auto-namespaced under `projects/{name}/` — agents use natural keys like `tasks/abc` |
+| `write_shared_state` | `key`, `value` | Write to the project-scoped blackboard |
+| `list_shared_state` | `prefix` | Browse project blackboard entries by prefix |
 | `publish_event` | `topic`, `data` | Publish event to mesh pub/sub |
-| `save_artifact` | `name`, `content` | Save deliverable to workspace and register on blackboard |
+| `save_artifact` | `name`, `content` | Save deliverable to workspace and register on project blackboard |
 | `notify_user` | `message` | Send a notification to the user across all connected channels (CLI, Telegram, Discord, Slack, etc.) |
+
+**Project isolation:** Blackboard tools (`read_shared_state`, `write_shared_state`, `list_shared_state`, `save_artifact`) are only available to agents assigned to a project. Standalone agents cannot access the blackboard — calls return an error explaining they must be added to a project first.
 
 ### Workspace
 
