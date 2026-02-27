@@ -161,12 +161,34 @@ class ChannelManager:
                 logger.debug("Error stopping channel %s: %s", type(ch).__name__, e)
 
     def _start_async_channel(self, channel) -> None:
-        """Start an async channel in a background thread."""
+        """Start an async channel in a background thread with retry."""
+        max_retries = 3
+        name = type(channel).__name__
+
         def _run():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             channel._channel_loop = loop
-            loop.run_until_complete(channel.start())
+            for attempt in range(max_retries):
+                try:
+                    loop.run_until_complete(channel.start())
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        delay = 5 * (attempt + 1)
+                        logger.warning(
+                            "%s failed to connect (attempt %d/%d): %s. Retrying in %ds...",
+                            name, attempt + 1, max_retries, e, delay,
+                        )
+                        import time
+                        time.sleep(delay)
+                    else:
+                        logger.error(
+                            "%s failed to connect after %d attempts: %s. "
+                            "Channel will not be available. Check your network connection.",
+                            name, max_retries, e,
+                        )
+                        return
             loop.run_forever()
 
         t = threading.Thread(target=_run, daemon=True)

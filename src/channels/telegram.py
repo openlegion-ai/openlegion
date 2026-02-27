@@ -85,6 +85,15 @@ class TelegramChannel(Channel):
             )
             return
 
+        # Clean up any partially-initialized app from a previous failed attempt
+        if self._app is not None:
+            try:
+                await self._app.stop()
+                await self._app.shutdown()
+            except Exception as e:
+                logger.debug("Cleanup of previous app failed: %s", e)
+            self._app = None
+
         self._app = Application.builder().token(self.token).build()
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("allow", self._cmd_allow))
@@ -109,7 +118,12 @@ class TelegramChannel(Channel):
         except Exception:
             pass
         await asyncio.sleep(0.5)
-        await self._app.updater.start_polling(drop_pending_updates=True)
+        await self._app.updater.start_polling(
+            drop_pending_updates=True,
+            bootstrap_retries=3,
+            connect_timeout=20,
+            read_timeout=10,
+        )
         owner = self._pairing.owner
         if owner:
             logger.info(f"Telegram channel started (owner: {owner})")

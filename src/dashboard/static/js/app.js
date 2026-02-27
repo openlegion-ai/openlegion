@@ -1799,10 +1799,15 @@ function dashboard() {
 
     // ── Broadcast ────────────────────────────────────────
 
+    get broadcastTargets() {
+      // Project selected → project members; no project → all agents
+      return this.activeProject ? this.filteredAgents : this.agents;
+    },
+
     sendBroadcast() {
       const msg = (this.broadcastMessage || '').trim();
       if (!msg) return;
-      const targets = this.filteredAgents.map(a => a.id);
+      const targets = this.broadcastTargets.map(a => a.id);
       if (targets.length === 0) return;
       this.broadcastMessage = '';
       for (const agentId of targets) this.openChat(agentId);
@@ -1810,7 +1815,9 @@ function dashboard() {
       let sent = 0;
       for (const agentId of targets) {
         if (this.chatStreamingAgents[agentId]) continue;
-        this.sendChatTo(agentId, msg); // fire concurrently, don't await
+        this.sendChatTo(agentId, msg).catch(e => {
+          console.warn('Broadcast sendChatTo failed for', agentId, e);
+        });
         sent++;
       }
       if (sent === 0) {
