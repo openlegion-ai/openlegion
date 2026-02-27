@@ -316,6 +316,7 @@ def agent_restart(names: tuple, restart_all: bool, port: int):
         click.echo("No agents specified. Use agent names or --all.")
         raise SystemExit(1)
 
+    errors = 0
     for name in targets:
         if name not in running_agents:
             click.echo(f"Agent '{name}' is not running. Skipping.")
@@ -329,8 +330,12 @@ def agent_restart(names: tuple, restart_all: bool, port: int):
                 click.echo(f"Restarted '{name}'.")
             else:
                 click.echo(f"Failed to restart '{name}': {resp.text}", err=True)
+                errors += 1
         except Exception as e:
             click.echo(f"Error restarting '{name}': {e}", err=True)
+            errors += 1
+    if errors:
+        raise SystemExit(1)
 
 
 # ── channels subgroup ────────────────────────────────────────
@@ -1519,7 +1524,7 @@ def status(port: int, wide: bool, watch_interval: int | None, as_json: bool):
 
         try:
             while True:
-                click.echo("\033[2J\033[H", nl=False)  # Clear screen
+                click.clear()
                 agents_data, mesh_online, configured = _collect_status()
                 _print_status(agents_data, mesh_online, configured)
                 click.echo(
@@ -1578,11 +1583,13 @@ def webhook_list(port: int):
 @click.option("--port", default=8420, type=int)
 def webhook_test(name: str, port: int):
     """Send a test payload to a webhook."""
+    from urllib.parse import quote
+
     import httpx
 
     try:
         resp = httpx.post(
-            f"http://localhost:{port}/dashboard/api/webhooks/{name}/test",
+            f"http://localhost:{port}/dashboard/api/webhooks/{quote(name, safe='')}/test",
             json={"test": True, "source": "cli"},
             timeout=30,
         )
