@@ -38,9 +38,11 @@ class Blackboard:
     """
 
     def __init__(self, db_path: str = "blackboard.db", event_bus=None):
+        import threading
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
+        self._write_lock = threading.Lock()
         self._event_bus = event_bus
         self._last_ttl_gc: float = 0.0
         self._init_schema()
@@ -83,21 +85,22 @@ class Blackboard:
         """Write or update a blackboard entry (atomic upsert)."""
         value_json = json.dumps(value, default=str)
 
-        cursor = self.db.execute(
-            "INSERT INTO entries (key, value, written_by, workflow_id, ttl, version) "
-            "VALUES (?, ?, ?, ?, ?, 1) "
-            "ON CONFLICT(key) DO UPDATE SET "
-            "value = excluded.value, written_by = excluded.written_by, "
-            "workflow_id = excluded.workflow_id, updated_at = datetime('now'), "
-            "ttl = excluded.ttl, version = version + 1 "
-            "RETURNING version",
-            (key, value_json, written_by, workflow_id, ttl),
-        )
-        row = cursor.fetchone()
-        new_version = row[0] if row else 1
+        with self._write_lock:
+            cursor = self.db.execute(
+                "INSERT INTO entries (key, value, written_by, workflow_id, ttl, version) "
+                "VALUES (?, ?, ?, ?, ?, 1) "
+                "ON CONFLICT(key) DO UPDATE SET "
+                "value = excluded.value, written_by = excluded.written_by, "
+                "workflow_id = excluded.workflow_id, updated_at = datetime('now'), "
+                "ttl = excluded.ttl, version = version + 1 "
+                "RETURNING version",
+                (key, value_json, written_by, workflow_id, ttl),
+            )
+            row = cursor.fetchone()
+            new_version = row[0] if row else 1
 
-        self._log_event("write", key, written_by, value_json)
-        self.db.commit()
+            self._log_event("write", key, written_by, value_json)
+            self.db.commit()
         self._maybe_gc_event_log()
         self._maybe_gc_ttl()
 
@@ -165,9 +168,10 @@ class Blackboard:
         """Delete an entry (NOT allowed for history/ namespace)."""
         if key.startswith("history/"):
             raise ValueError("Cannot delete from history namespace")
-        self.db.execute("DELETE FROM entries WHERE key = ?", (key,))
-        self._log_event("delete", key, deleted_by)
-        self.db.commit()
+        with self._write_lock:
+            self.db.execute("DELETE FROM entries WHERE key = ?", (key,))
+            self._log_event("delete", key, deleted_by)
+            self.db.commit()
         self._maybe_gc_event_log()
         self._maybe_gc_ttl()
 
@@ -359,11 +363,13 @@ class MessageRouter:
         agent_registry: dict[str, str],
         trace_store: Any = None,
     ):
+        import threading
         self.permissions = permissions
         self.agent_registry: dict[str, str] = agent_registry
         self.agent_roles: dict[str, str] = {}
         self.message_log: deque[dict] = deque(maxlen=10_000)
         self._capabilities_cache: dict[str, list[str]] = {}
+        self._registry_lock = threading.Lock()
         self._client: httpx.AsyncClient | None = None
         self._trace_store = trace_store
 
@@ -412,6 +418,7 @@ class MessageRouter:
                     json=payload,
                     timeout=message.ttl,
                 )
+                response.raise_for_status()
                 return response.json()
             except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                 last_err = e
@@ -420,6 +427,16 @@ class MessageRouter:
                         f"Transient error routing to {message.to}, retrying in 1s: {e}"
                     )
                     await asyncio.sleep(1)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (502, 503, 504) and attempt == 0:
+                    last_err = e
+                    logger.warning(
+                        f"Agent {message.to} returned HTTP {e.response.status_code}, retrying in 1s"
+                    )
+                    await asyncio.sleep(1)
+                    continue
+                logger.error(f"Failed to route message to {message.to}: HTTP {e.response.status_code}")
+                return {"error": f"Delivery failed: HTTP {e.response.status_code}"}
             except httpx.HTTPError as e:
                 logger.error(f"Failed to route message to {message.to}: {e}")
                 return {"error": f"Delivery failed: {e}"}
@@ -428,14 +445,15 @@ class MessageRouter:
 
     def _resolve_target(self, target: str) -> Optional[str]:
         """Resolve agent ID or capability to a container URL."""
-        if target in self.agent_registry:
-            return self.agent_registry[target]
+        with self._registry_lock:
+            if target in self.agent_registry:
+                return self.agent_registry[target]
 
-        if target.startswith("capability:"):
-            capability = target.split(":", 1)[1]
-            for agent_id, url in self.agent_registry.items():
-                if capability in self._capabilities_cache.get(agent_id, []):
-                    return url
+            if target.startswith("capability:"):
+                capability = target.split(":", 1)[1]
+                for agent_id, url in self.agent_registry.items():
+                    if capability in self._capabilities_cache.get(agent_id, []):
+                        return url
 
         return None
 
@@ -445,16 +463,18 @@ class MessageRouter:
         role: str = "",
     ) -> None:
         """Register an agent and its capabilities."""
-        self.agent_registry[agent_id] = url
-        if role:
-            self.agent_roles[agent_id] = role
-        if capabilities:
-            self._capabilities_cache[agent_id] = capabilities
-        else:
-            self._capabilities_cache.pop(agent_id, None)
+        with self._registry_lock:
+            self.agent_registry[agent_id] = url
+            if role:
+                self.agent_roles[agent_id] = role
+            if capabilities:
+                self._capabilities_cache[agent_id] = capabilities
+            else:
+                self._capabilities_cache.pop(agent_id, None)
 
     def unregister_agent(self, agent_id: str) -> None:
         """Remove an agent from the registry."""
-        self.agent_registry.pop(agent_id, None)
-        self._capabilities_cache.pop(agent_id, None)
-        self.agent_roles.pop(agent_id, None)
+        with self._registry_lock:
+            self.agent_registry.pop(agent_id, None)
+            self._capabilities_cache.pop(agent_id, None)
+            self.agent_roles.pop(agent_id, None)

@@ -221,8 +221,8 @@ def agent_list():
         for c in containers:
             agent_id = c.name.replace("openlegion_", "")
             running.add(agent_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Docker container list failed: %s", e)
 
     default_model = _get_default_model()
     click.echo(f"{'Name':<16} {'Model':<40} {'Status':<10}")
@@ -1141,7 +1141,8 @@ def status(port: int):
             try:
                 sr = httpx.get(f"{agent_url}/status", timeout=3)
                 state = sr.json().get("state", "running")
-            except Exception:
+            except Exception as e:
+                logger.debug("Agent status check failed for %s: %s", name, e)
                 state = "unreachable"
         else:
             state = "stopped"

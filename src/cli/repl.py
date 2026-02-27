@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import logging
 import os
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,8 @@ from src.cli.formatting import (
 
 if TYPE_CHECKING:
     from src.cli.runtime import RuntimeContext
+
+logger = logging.getLogger("cli.repl")
 
 
 class REPLSession:
@@ -124,8 +127,8 @@ class REPLSession:
             click.echo(f"\n  Dashboard: {url}")
             try:
                 click.launch(url)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Dashboard launch failed: %s", e)
             click.echo("  Add your API key there, then come back here.\n")
             return
 
@@ -370,7 +373,8 @@ class REPLSession:
                 tasks = data.get("tasks_completed", 0)
                 line = f"  {name:<20} {state:<12} {tasks} tasks    model: {model}"
                 click.echo(line + proj_label)
-            except Exception:
+            except Exception as e:
+                logger.debug("Agent status request failed for %s: %s", name, e)
                 click.echo(f"  {name:<20} unreachable{proj_label}")
 
     def _cmd_broadcast(self, arg: str) -> None:
@@ -469,7 +473,8 @@ class REPLSession:
                         click.echo(f"  {name:<20} {ctx_tokens:,}/{ctx_max:,} tokens ({pct_str})")
                     else:
                         click.echo(f"  {name:<20} n/a")
-                except Exception:
+                except Exception as e:
+                    logger.debug("Context usage request failed for %s: %s", name, e)
                     click.echo(f"  {name:<20} unreachable")
 
             # Model health
@@ -862,8 +867,8 @@ class REPLSession:
         # Stop old container
         try:
             self.ctx.runtime.stop_agent(name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Stop agent failed during restart of %s: %s", name, e)
 
         # Read fresh config
         fresh_cfg = _load_config()
@@ -928,8 +933,8 @@ class REPLSession:
         # Stop the container
         try:
             self.ctx.runtime.stop_agent(name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Stop agent failed during removal of %s: %s", name, e)
 
         # Remove from router and transport
         if self.ctx.router:
@@ -1096,7 +1101,8 @@ def _send_message_streaming(
                         elif "error" in event:
                             click.echo(f"Error: {event['error']}")
                             return
-            except Exception:
+            except Exception as e:
+                logger.debug("Streaming dispatch failed, falling back: %s", e)
                 # Fallback to non-streaming
                 data = await transport.request(
                     target, "POST", "/chat",

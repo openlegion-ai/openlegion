@@ -261,12 +261,15 @@ class SandboxTransport(Transport):
                 return {"error": err or f"exit code {proc.returncode}"}
             return json_module.loads(stdout.decode(errors="replace"))
         except asyncio.TimeoutError:
-            if proc is not None:
+            if proc is not None and proc.returncode is None:
                 try:
                     proc.kill()
-                    await proc.wait()
                 except ProcessLookupError:
-                    pass
+                    pass  # Process already exited between returncode check and kill
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    logger.warning("Failed to reap subprocess for '%s' after kill", agent_id)
             logger.warning(f"sandbox exec timed out for '{agent_id}' ({path})")
             return {"error": f"Timeout after {timeout}s"}
         except json_module.JSONDecodeError as e:

@@ -52,7 +52,8 @@ def _parse_skill_manifest(path: Path) -> dict | None:
 
     try:
         meta = yaml.safe_load(parts[1])
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to parse SKILL.md YAML frontmatter: %s", e)
         return None
 
     if not isinstance(meta, dict):

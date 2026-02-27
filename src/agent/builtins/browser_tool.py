@@ -104,8 +104,8 @@ def _cleanup_stale_profile():
             ["pkill", "-f", "browser_profile"],
             capture_output=True, timeout=5,
         )
-    except Exception:
-        pass  # pkill may not exist or no matching processes
+    except Exception as e:
+        logger.debug("pkill browser_profile failed (expected if none running): %s", e)
 
     # Remove stale Chrome lock files
     lock_names = (
@@ -135,8 +135,8 @@ def _find_chromium_binary() -> str:
             )
             if result.returncode == 0:
                 return result.stdout.strip()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("which %s failed: %s", name, e)
     # Fallback to Playwright's bundled Chromium
     for pattern in [
         "/opt/pw-browsers/chromium-*/chrome-linux64/chrome",
@@ -154,8 +154,8 @@ def _find_chromium_binary() -> str:
             )
             if result.returncode == 0:
                 return result.stdout.strip()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("which %s failed: %s", name, e)
     raise RuntimeError("No Chrome/Chromium binary found in container")
 
 
@@ -831,18 +831,20 @@ async def _draw_labels(image_path: str) -> dict[str, str]:
     font = None
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
-    except Exception:
+    except Exception as e:
+        logger.debug("DejaVu font not available, using default: %s", e)
         try:
             font = ImageFont.load_default()
-        except Exception:
-            pass
+        except Exception as e2:
+            logger.debug("Default font also unavailable: %s", e2)
 
     labels: dict[str, str] = {}
     for ref, locator in _page_refs.items():
         num = ref.lstrip("e")
         try:
             bbox = await locator.bounding_box(timeout=1000)
-        except Exception:
+        except Exception as e:
+            logger.debug("Bounding box for %s failed: %s", ref, e)
             continue
         if bbox is None:
             continue

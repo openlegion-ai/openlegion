@@ -16,6 +16,10 @@ from typing import TYPE_CHECKING
 import click
 import yaml
 
+from src.shared.utils import setup_logging
+
+logger = setup_logging("setup_wizard")
+
 if TYPE_CHECKING:
     from src.host.credentials import CredentialVault
 
@@ -370,8 +374,9 @@ class SetupWizard:
                 return True
             except litellm.AuthenticationError:
                 return False
-            except Exception:
+            except Exception as e:
                 # Network errors, rate limits, etc. — don't block setup
+                logger.debug("API key validation skipped due to error: %s", e)
                 return True
             finally:
                 if env_var:

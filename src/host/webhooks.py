@@ -99,7 +99,8 @@ class WebhookManager:
 
             try:
                 body = json.loads(raw_body)
-            except Exception:
+            except Exception as e:
+                logger.debug("Webhook body is not valid JSON, using raw: %s", e)
                 body = {"raw": raw_body.decode(errors="replace")[:5000]}
 
             hook["call_count"] = hook.get("call_count", 0) + 1

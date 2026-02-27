@@ -155,8 +155,8 @@ class SlackChannel(Channel):
                     help_text = await self.handle_message(user_id, "/help")
                     if help_text:
                         await say(text=help_text[:MAX_SLACK_LEN], thread_ts=thread_ts)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Help fetch after pairing failed: %s", e)
                 return
             else:
                 await say(
@@ -337,8 +337,8 @@ class SlackChannel(Channel):
                                     ts=streaming_ts,
                                     text=display[:MAX_SLACK_LEN],
                                 )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Streaming text edit failed: %s", e)
 
                 elif etype == "done":
                     response_text = event.get("response", response_text)
@@ -363,7 +363,8 @@ class SlackChannel(Channel):
                     if len(final_text) > MAX_SLACK_LEN:
                         for part in chunk_text(final_text[MAX_SLACK_LEN:], MAX_SLACK_LEN):
                             await say(text=part, thread_ts=thread_ts)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Final message edit failed, sending new: %s", e)
                     for part in chunk_text(final_text, MAX_SLACK_LEN):
                         await say(text=part, thread_ts=thread_ts)
             else:

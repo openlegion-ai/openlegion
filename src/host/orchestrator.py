@@ -152,7 +152,9 @@ class Orchestrator:
         self._trace_store = trace_store
         self._client: httpx.AsyncClient | None = None
         self._pending_results: dict[str, asyncio.Future] = {}
+        self._result_lock = asyncio.Lock()
         self._cancelled: set[str] = set()
+        self._cleanup_tasks: list[asyncio.Task] = []
         self._load_workflows(workflows_dir)
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -161,16 +163,20 @@ class Orchestrator:
         return self._client
 
     async def close(self) -> None:
+        for t in self._cleanup_tasks:
+            t.cancel()
+        self._cleanup_tasks.clear()
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
-    def resolve_task_result(self, task_id: str, result: TaskResult) -> bool:
+    async def resolve_task_result(self, task_id: str, result: TaskResult) -> bool:
         """Resolve a pending future for a task. Returns True if matched."""
-        future = self._pending_results.pop(task_id, None)
-        if future is None or future.done():
-            return False
-        future.set_result(result)
-        return True
+        async with self._result_lock:
+            future = self._pending_results.pop(task_id, None)
+            if future is None or future.done():
+                return False
+            future.set_result(result)
+            return True
 
     def cancel_execution(self, execution_id: str) -> bool:
         """Request cancellation of a running workflow. Checked between steps."""
@@ -196,7 +202,7 @@ class Orchestrator:
                     wf.name = f"{namespace}/{wf.name}"
                 self.workflows[wf.name] = wf
                 logger.info(f"Loaded workflow: {wf.name}")
-            except Exception as e:
+            except (yaml.YAMLError, ValueError, TypeError, KeyError, OSError) as e:
                 logger.error(f"Failed to load workflow {yaml_file}: {e}")
 
     def load_project_workflows(self, project_name: str, workflows_dir: str) -> None:
@@ -271,9 +277,18 @@ class Orchestrator:
         self.active_executions[execution.id] = execution
 
         task = asyncio.create_task(self._run_workflow(execution))
+        task.add_done_callback(self._on_workflow_done)
         execution._task = task
 
         return execution.id
+
+    def _on_workflow_done(self, task: asyncio.Task) -> None:
+        """Observe workflow task exceptions so they don't go unreported."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error("Workflow task failed with unhandled exception: %s", exc)
 
     async def _run_workflow(self, execution: WorkflowExecution) -> None:
         """Execute a workflow DAG to completion."""
@@ -378,7 +393,11 @@ class Orchestrator:
             async def _cleanup():
                 await asyncio.sleep(300)  # keep for 5 minutes for status queries
                 self.active_executions.pop(execution.id, None)
-            asyncio.create_task(_cleanup())
+            cleanup_task = asyncio.create_task(_cleanup())
+            self._cleanup_tasks.append(cleanup_task)
+            cleanup_task.add_done_callback(
+                lambda t: self._cleanup_tasks.remove(t) if t in self._cleanup_tasks else None
+            )
             # Evict oldest finished executions if cache exceeds limit
             finished = [
                 (eid, ex) for eid, ex in self.active_executions.items()
@@ -459,14 +478,23 @@ class Orchestrator:
                 # its result back via mesh /mesh/message to="orchestrator".
                 loop = asyncio.get_running_loop()
                 future = loop.create_future()
-                self._pending_results[assignment.task_id] = future
+                async with self._result_lock:
+                    self._pending_results[assignment.task_id] = future
                 try:
                     result = await asyncio.wait_for(future, timeout=step.timeout)
                 except asyncio.TimeoutError:
-                    # Fallback to polling as a last resort
-                    result = await self._wait_for_task_result(agent_url, assignment, step.timeout)
-                finally:
-                    self._pending_results.pop(assignment.task_id, None)
+                    # Remove future first so resolve_task_result won't race
+                    async with self._result_lock:
+                        self._pending_results.pop(assignment.task_id, None)
+                    # Check if the result arrived between timeout and lock acquisition
+                    if future.done() and not future.cancelled():
+                        result = future.result()
+                    else:
+                        # Fallback to polling as a last resort
+                        result = await self._wait_for_task_result(agent_url, assignment, step.timeout)
+                else:
+                    async with self._result_lock:
+                        self._pending_results.pop(assignment.task_id, None)
                 self._record_step_end(_step_trace_id, step, execution, _step_t0)
                 return result
             else:

@@ -195,7 +195,8 @@ def _check_docker_running() -> bool:
         client = docker.from_env()
         client.ping()
         return True
-    except Exception:
+    except Exception as e:
+        logger.debug("Docker daemon check failed: %s", e)
         return False
 
 
@@ -206,7 +207,8 @@ def _check_docker_image() -> bool:
         client = docker.from_env()
         client.images.get(DOCKER_IMAGE)
         return True
-    except Exception:
+    except Exception as e:
+        logger.debug("Docker image check failed: %s", e)
         return False
 
 
@@ -238,7 +240,8 @@ def _docker_image_is_stale() -> bool:
             if df_mtime > image_time:
                 return True
         return False
-    except Exception:
+    except Exception as e:
+        logger.debug("Docker image staleness check failed: %s", e)
         return False
 
 

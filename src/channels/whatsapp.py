@@ -192,8 +192,8 @@ class WhatsAppChannel(Channel):
                     if help_text:
                         for part in chunk_text(help_text, MAX_WA_LEN):
                             await self._send_text(phone, part)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Help fetch after pairing failed: %s", e)
                 return
             else:
                 await self._send_text(

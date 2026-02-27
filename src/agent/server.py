@@ -81,11 +81,10 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         handle = loop._current_task_handle
         if handle and not handle.done():
             loop._cancel_requested = True
-            try:
-                await asyncio.wait_for(asyncio.shield(handle), timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                if not handle.done():
-                    handle.cancel()
+            # Give the loop up to 2s to notice _cancel_requested and exit cleanly.
+            done, _ = await asyncio.wait({handle}, timeout=2.0)
+            if not done and not handle.done():
+                handle.cancel()
         return {"status": "cancelled"}
 
     @app.get("/status", response_model=AgentStatus)

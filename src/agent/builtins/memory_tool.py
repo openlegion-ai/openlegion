@@ -169,10 +169,12 @@ async def memory_recall(
 
     try:
         facts = await memory_store.search_hierarchical(query, top_k=fetch_k)
-    except Exception:
+    except Exception as e:
+        logger.debug("Hierarchical search failed, falling back to flat search: %s", e)
         try:
             facts = await memory_store.search(query, top_k=fetch_k)
-        except Exception:
+        except Exception as e2:
+            logger.warning("Memory search failed: %s", e2)
             return {"error": "Memory search failed", "results": []}
 
     results = []

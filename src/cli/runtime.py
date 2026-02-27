@@ -496,7 +496,8 @@ class RuntimeContext:
                 httpx.get(f"http://localhost:{mesh_port}/mesh/agents", timeout=1)
                 mesh_ready = True
                 break
-            except Exception:
+            except Exception as e:
+                logger.debug("Mesh not ready yet: %s", e)
                 time.sleep(0.5)
 
         if not mesh_ready:
@@ -559,7 +560,8 @@ class RuntimeContext:
                 return await self.transport.request(
                     agent_name, "GET", "/heartbeat-context", timeout=10,
                 )
-            except Exception:
+            except Exception as e:
+                logger.debug("Failed to fetch heartbeat context for '%s': %s", agent_name, e)
                 return {}
 
         self.cron_scheduler = CronScheduler(
@@ -610,7 +612,8 @@ class RuntimeContext:
         def _channel_status(agent_name: str) -> dict | None:
             try:
                 return self.transport.request_sync(agent_name, "GET", "/status", timeout=3)
-            except Exception:
+            except Exception as e:
+                logger.debug("Channel status check failed for '%s': %s", agent_name, e)
                 return None
 
         def _channel_costs() -> list[dict]:
@@ -620,7 +623,8 @@ class RuntimeContext:
             try:
                 self.transport.request_sync(agent_name, "POST", "/chat/reset", timeout=5)
                 return True
-            except Exception:
+            except Exception as e:
+                logger.debug("Channel reset failed for '%s': %s", agent_name, e)
                 return False
 
         async def stream_dispatch_to_agent(agent_name: str, message: str):

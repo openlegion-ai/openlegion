@@ -9,6 +9,9 @@ from __future__ import annotations
 import json
 
 from src.agent.skills import skill
+from src.shared.utils import setup_logging
+
+logger = setup_logging("agent.builtins.mesh_tool")
 
 
 @skill(
@@ -482,8 +485,8 @@ async def update_workspace(
             else:
                 summary = f"[{agent_id}] Updated {filename} based on what I've learned."
             await mesh_client.notify_user(summary)
-        except Exception:
-            pass  # Non-fatal — the write still succeeded
+        except Exception as e:
+            logger.debug("Non-fatal: workspace notification failed: %s", e)
     return result
 
 

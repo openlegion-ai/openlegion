@@ -150,6 +150,27 @@ def create_mesh_app(
         if not expected or not hmac.compare_digest(token, expected):
             raise HTTPException(401, "Invalid authentication token")
 
+    def _extract_verified_agent_id(request: Request) -> str:
+        """Extract and verify agent identity from an auth token.
+
+        Unlike _verify_auth (which trusts caller-supplied agent_id), this
+        derives the agent_id from the Bearer token itself, preventing
+        identity spoofing via headers or query parameters.
+
+        Returns 'unknown' when auth is not configured (dev/test mode).
+        """
+        if not _auth_tokens:
+            # Auth not configured (dev/test mode) — fall back to header hint
+            return request.headers.get("X-Agent-ID", "unknown")
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(401, "Missing authentication token")
+        token = auth_header[7:]
+        for aid, expected in _auth_tokens.items():
+            if hmac.compare_digest(token, expected):
+                return aid
+        raise HTTPException(401, "Invalid authentication token")
+
     # === System Messaging (orchestrator/mesh → agent) ===
 
     @app.post("/mesh/message")
@@ -165,7 +186,7 @@ def create_mesh_app(
             from src.shared.types import TaskResult
             try:
                 result = TaskResult(**msg.payload)
-                resolved = orchestrator.resolve_task_result(result.task_id, result)
+                resolved = await orchestrator.resolve_task_result(result.task_id, result)
                 return {"delivered": resolved, "target": "orchestrator"}
             except Exception as e:
                 return {"error": f"Failed to resolve task result: {e}"}
@@ -540,8 +561,7 @@ def create_mesh_app(
         Agents use this to understand their permissions, budget, fleet,
         cron schedule, and health.  No sensitive data is exposed.
         """
-        agent_id = request.headers.get("X-Agent-ID", "unknown")
-        _verify_auth(agent_id, request)
+        agent_id = _extract_verified_agent_id(request)
         result: dict = {}
 
         if section in ("permissions", "all"):
@@ -788,8 +808,8 @@ def create_mesh_app(
         try:
             while True:
                 await websocket.receive_text()  # keep-alive
-        except Exception:
-            pass
+        except Exception as e:
+            _server_logger.debug("WebSocket disconnected: %s", e)
         finally:
             event_bus.unsubscribe(websocket)
 

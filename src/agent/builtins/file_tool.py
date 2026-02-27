@@ -24,11 +24,44 @@ _PROTECTED_WORKSPACE_FILES = frozenset({
 def _safe_path(path: str) -> Path:
     """Resolve a path and ensure it stays within the allowed root.
 
-    resolve() follows symlinks, so a symlink pointing outside /data
-    will be caught by the is_relative_to check.
+    Validates in two stages:
+      1. Reject explicit parent-directory traversal (``..`` components).
+      2. Resolve symlinks and verify the final target is within the root.
+
+    This prevents TOCTOU attacks where an agent creates a symlink inside
+    /data that points to a mounted volume outside /data.
     """
-    resolved = Path(_ALLOWED_ROOT, path).resolve()
     root = Path(_ALLOWED_ROOT).resolve()
+
+    # Stage 0: reject absolute paths immediately — agents must use
+    # relative paths within their sandbox root.
+    if path.startswith("/") or path.startswith("\\"):
+        raise ValueError(f"Absolute paths not allowed: {path}")
+
+    # Stage 1: reject any ".." components before resolution to prevent
+    # path-based traversal regardless of symlinks.
+    candidate = Path(_ALLOWED_ROOT) / path
+    for part in candidate.parts[len(Path(_ALLOWED_ROOT).parts):]:
+        if part == "..":
+            raise ValueError(f"Path traversal not allowed: {path}")
+
+    # Stage 2: walk the path component-by-component, checking each
+    # intermediate symlink target to ensure we never leave the root.
+    current = root
+    for part in Path(path).parts:
+        if part in (".", ""):
+            continue
+        current = current / part
+        if current.is_symlink():
+            target = current.resolve()
+            if not target.is_relative_to(root):
+                raise ValueError(
+                    f"Symlink escapes allowed root: {path} -> {target}"
+                )
+            current = target
+
+    # Final check on the fully-resolved path
+    resolved = current.resolve() if current.exists() else current
     if not resolved.is_relative_to(root):
         raise ValueError(f"Path escapes allowed root: {path}")
     return resolved

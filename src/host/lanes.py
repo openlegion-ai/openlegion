@@ -52,6 +52,7 @@ class LaneManager:
         self._pending: dict[str, list[QueuedTask]] = {}
         self._collect_buffers: dict[str, list[str]] = {}
         self._busy: dict[str, bool] = {}
+        self._state_locks: dict[str, asyncio.Lock] = {}
 
     def _ensure_lane(self, agent: str) -> None:
         """Lazily create queue, worker, and tracking structures for an agent."""
@@ -60,6 +61,7 @@ class LaneManager:
             self._pending[agent] = []
             self._busy[agent] = False
             self._collect_buffers[agent] = []
+            self._state_locks[agent] = asyncio.Lock()
             self._workers[agent] = asyncio.create_task(self._worker(agent))
 
     async def enqueue(
@@ -120,23 +122,22 @@ class LaneManager:
 
     async def _handle_collect(self, agent: str, message: str) -> str:
         """Batch messages when agent is busy, dispatch immediately when idle."""
-        if not self._busy.get(agent, False):
-            # Agent is idle — dispatch immediately
-            return await self._handle_followup(agent, message)
+        async with self._state_locks[agent]:
+            if not self._busy.get(agent, False):
+                # Agent is idle — dispatch immediately (release lock first
+                # since _handle_followup may await)
+                pass
+            else:
+                # Agent is busy — buffer the message
+                self._collect_buffers[agent].append(message)
+                logger.debug(
+                    f"Collected message for '{agent}' "
+                    f"(buffer size: {len(self._collect_buffers[agent])})"
+                )
+                return SILENT_REPLY_TOKEN
 
-        # Agent is busy — buffer the message
-        self._collect_buffers[agent].append(message)
-        logger.debug(
-            f"Collected message for '{agent}' "
-            f"(buffer size: {len(self._collect_buffers[agent])})"
-        )
-
-        # Guard against race: if agent finished between the busy check and
-        # the buffer append, flush now so messages aren't stuck forever.
-        if not self._busy.get(agent, False):
-            self._flush_collect_buffer(agent)
-
-        return SILENT_REPLY_TOKEN
+        # Outside lock — agent was idle, dispatch immediately
+        return await self._handle_followup(agent, message)
 
     def _flush_collect_buffer(self, agent: str) -> None:
         """Drain the collect buffer and enqueue a combined message as followup."""
@@ -182,9 +183,11 @@ class LaneManager:
         from src.shared.trace import current_trace_id
 
         queue = self._queues[agent]
+        lock = self._state_locks[agent]
         while True:
             task = await queue.get()
-            self._busy[agent] = True
+            async with lock:
+                self._busy[agent] = True
             current_trace_id.set(task.trace_id)
             t0 = _time.time()
             if task.trace_id and self._trace_store:
@@ -209,9 +212,11 @@ class LaneManager:
                         status="error" if task.future.done() and task.future.exception() else "ok",
                         error=str(task.future.exception()) if task.future.done() and task.future.exception() else "",
                     )
-                self._busy[agent] = False
-                if agent in self._pending and task in self._pending[agent]:
-                    self._pending[agent].remove(task)
+                async with lock:
+                    self._busy[agent] = False
+                    pending = self._pending.get(agent, [])
+                    if task in pending:
+                        pending.remove(task)
                 queue.task_done()
                 self._flush_collect_buffer(agent)
 
@@ -236,6 +241,7 @@ class LaneManager:
         self._pending.pop(agent, None)
         self._collect_buffers.pop(agent, None)
         self._busy.pop(agent, None)
+        self._state_locks.pop(agent, None)
 
     async def stop(self) -> None:
         """Cancel all worker tasks."""

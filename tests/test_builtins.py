@@ -104,8 +104,12 @@ class TestFileTool:
         assert "b.txt" in names
 
     def test_path_traversal_blocked(self):
-        with pytest.raises(ValueError, match="escapes"):
+        with pytest.raises(ValueError, match="(escapes|traversal)"):
             self._ft._safe_path("../../etc/passwd")
+
+    def test_absolute_path_blocked(self):
+        with pytest.raises(ValueError, match="Absolute"):
+            self._ft._safe_path("/etc/passwd")
 
     def test_read_with_offset_limit(self):
         self._ft.write_file(path="lines.txt", content="line0\nline1\nline2\nline3\n")

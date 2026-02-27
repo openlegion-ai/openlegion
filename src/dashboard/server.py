@@ -204,12 +204,12 @@ def create_dashboard_router(
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-        # Stop container
+        # Stop container (best-effort — agent may already be gone)
         if runtime is not None:
             try:
                 runtime.stop_agent(agent_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Runtime cleanup for '%s' failed: %s", agent_id, e)
 
         # Unregister from router, transport, and health monitor
         if router is not None:
@@ -940,8 +940,9 @@ def create_dashboard_router(
         value = body.get("value", {})
         if not isinstance(value, dict):
             raise HTTPException(status_code=400, detail="value must be a JSON object")
-        written_by = body.get("written_by", "dashboard")
-        entry = blackboard.write(key, value, written_by=written_by)
+        # Always attribute to "dashboard" — never trust client-supplied written_by
+        # to prevent impersonation of agents via the dashboard API.
+        entry = blackboard.write(key, value, written_by="dashboard")
         return entry.model_dump(mode="json")
 
     @api_router.delete("/api/blackboard/{key:path}")

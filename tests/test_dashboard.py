@@ -754,12 +754,14 @@ class TestDashboardBlackboardWrite:
         assert resp.status_code == 400
 
     def test_write_with_custom_author(self):
+        """S2 fix: dashboard always attributes writes to 'dashboard' regardless of
+        client-supplied written_by to prevent spoofing."""
         resp = self.client.put(
             "/dashboard/api/blackboard/test/authored",
             json={"value": {"data": 1}, "written_by": "admin"},
         )
         assert resp.status_code == 200
-        assert resp.json()["written_by"] == "admin"
+        assert resp.json()["written_by"] == "dashboard"
 
 
 # ── V2 Tests: Settings ──────────────────────────────────────

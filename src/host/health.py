@@ -61,6 +61,7 @@ class HealthMonitor:
         self._cleanup_rate_limits = cleanup_rate_limits_fn
         self._blackboard = blackboard
         self.agents: dict[str, AgentHealth] = {}
+        self._agent_lock = asyncio.Lock()
         self._running = False
 
     def register(self, agent_id: str, url: str = "") -> None:
@@ -96,27 +97,29 @@ class HealthMonitor:
     async def _cleanup_ephemeral_agents(self) -> None:
         """Remove ephemeral (spawned) agents that have exceeded their TTL."""
         now = time.time()
-        for agent_id in list(self.agents.keys()):
-            info = self.runtime.agents.get(agent_id, {})
-            if not info.get("ephemeral"):
-                continue
-            ttl = info.get("ttl", 3600)
-            spawned_at = info.get("spawned_at", 0)
-            if now - spawned_at < ttl:
-                continue
-            logger.info("Ephemeral agent '%s' exceeded TTL (%ss), removing", agent_id, ttl)
-            try:
-                self.runtime.stop_agent(agent_id)
-            except Exception as e:
-                logger.warning("Error stopping ephemeral agent '%s': %s", agent_id, e)
-            self.router.unregister_agent(agent_id)
-            if self._cleanup_rate_limits:
-                self._cleanup_rate_limits(agent_id)
-            del self.agents[agent_id]
-            if self._event_bus:
-                self._event_bus.emit("agent_state", agent=agent_id, data={
-                    "state": "removed", "reason": "ttl_expired",
-                })
+        async with self._agent_lock:
+            for agent_id in list(self.agents.keys()):
+                info = self.runtime.agents.get(agent_id, {})
+                if not info.get("ephemeral"):
+                    continue
+                ttl = info.get("ttl", 3600)
+                spawned_at = info.get("spawned_at", 0)
+                if now - spawned_at < ttl:
+                    continue
+                logger.info("Ephemeral agent '%s' exceeded TTL (%ss), removing", agent_id, ttl)
+                try:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
+                except Exception as e:
+                    logger.warning("Error stopping ephemeral agent '%s': %s", agent_id, e)
+                self.router.unregister_agent(agent_id)
+                if self._cleanup_rate_limits:
+                    self._cleanup_rate_limits(agent_id)
+                del self.agents[agent_id]
+                if self._event_bus:
+                    self._event_bus.emit("agent_state", agent=agent_id, data={
+                        "state": "removed", "reason": "ttl_expired",
+                    })
 
     async def _check_agent(self, agent_id: str) -> None:
         health = self.agents.get(agent_id)
@@ -204,19 +207,24 @@ class HealthMonitor:
             health.status = "failed"
             return
         try:
-            self.runtime.stop_agent(agent_id)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
         except Exception as e:
             logger.warning(f"Error stopping agent '{agent_id}' during restart: {e}")
 
         try:
-            url = self.runtime.start_agent(
-                agent_id=agent_id,
-                role=info.get("role", ""),
-                skills_dir=info.get("skills_dir", ""),
-                system_prompt="",
-                model=info.get("model", ""),
-                mcp_servers=info.get("mcp_servers"),
-                thinking=info.get("thinking", ""),
+            loop = asyncio.get_running_loop()
+            url = await loop.run_in_executor(
+                None,
+                lambda: self.runtime.start_agent(
+                    agent_id=agent_id,
+                    role=info.get("role", ""),
+                    skills_dir=info.get("skills_dir", ""),
+                    system_prompt="",
+                    model=info.get("model", ""),
+                    mcp_servers=info.get("mcp_servers"),
+                    thinking=info.get("thinking", ""),
+                ),
             )
 
             self.router.register_agent(agent_id, url)

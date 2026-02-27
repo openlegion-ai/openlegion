@@ -142,7 +142,8 @@ class EventBus:
                 continue
             try:
                 await sub.ws.send_text(payload)
-            except Exception:
+            except Exception as e:
+                logger.debug("Event send to WebSocket failed (client disconnected?): %s", e)
                 dead.append(sub)
         for d in dead:
             self._clients.remove(d)

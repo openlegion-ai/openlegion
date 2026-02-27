@@ -202,8 +202,8 @@ class MemoryStore:
                 for fact_id, distance in self._vector_search(query_embedding, top_k * 2):
                     similarity = 1.0 / (1.0 + distance)
                     results[fact_id] = {"vector_score": similarity, "keyword_score": 0.0}
-            except Exception:
-                logger.warning("Vector search failed, falling back to keyword only")
+            except Exception as e:
+                logger.warning("Vector search failed, falling back to keyword only: %s", e)
 
         for fact_id, rank in self._keyword_search(query, top_k * 2):
             if fact_id in results:
@@ -600,8 +600,8 @@ class MemoryStore:
                     # Sufficiency check
                     if len(results) >= top_k:
                         return results[:top_k]
-            except Exception:
-                logger.warning("Hierarchical search tier 1/2 failed, falling back to flat")
+            except Exception as e:
+                logger.warning("Hierarchical search tier 1/2 failed, falling back to flat: %s", e)
 
         # Tier 3: Flat fallback
         flat_results = await self.search(query, top_k=top_k)

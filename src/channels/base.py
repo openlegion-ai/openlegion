@@ -40,8 +40,8 @@ class PairingManager:
         if self._path.exists():
             try:
                 return json.loads(self._path.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as e:
+                logger.debug("Pairing config load failed: %s", e)
         return {"owner": None, "allowed": []}
 
     def save(self) -> None:

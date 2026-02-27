@@ -223,30 +223,30 @@ def test_orchestrator_execution_status():
 # === Push-Based Task Resolution ===
 
 
-def test_resolve_task_result():
+@pytest.mark.asyncio
+async def test_resolve_task_result():
     """resolve_task_result resolves a pending future."""
     import asyncio
 
     orch = Orchestrator(mesh_url="http://localhost:8420", workflows_dir="/nonexistent")
-    loop = asyncio.new_event_loop()
+    loop = asyncio.get_running_loop()
 
     future = loop.create_future()
     orch._pending_results["task_1"] = future
 
     result = TaskResult(task_id="task_1", status="complete", result={"data": "ok"})
-    assert orch.resolve_task_result("task_1", result) is True
+    assert await orch.resolve_task_result("task_1", result) is True
     assert future.done()
     assert future.result() is result
     assert "task_1" not in orch._pending_results
 
-    loop.close()
 
-
-def test_resolve_unknown_task_id():
+@pytest.mark.asyncio
+async def test_resolve_unknown_task_id():
     """resolve_task_result returns False for unknown task IDs."""
     orch = Orchestrator(mesh_url="http://localhost:8420", workflows_dir="/nonexistent")
     result = TaskResult(task_id="unknown", status="complete")
-    assert orch.resolve_task_result("unknown", result) is False
+    assert await orch.resolve_task_result("unknown", result) is False
 
 
 @pytest.mark.asyncio
@@ -283,7 +283,7 @@ async def test_execute_step_uses_future():
     assert len(orch._pending_results) == 1
     task_id = next(iter(orch._pending_results))
     push_result = TaskResult(task_id=task_id, status="complete", result={"found": True})
-    orch.resolve_task_result(task_id, push_result)
+    await orch.resolve_task_result(task_id, push_result)
 
     result = await step_task
     assert result.status == "complete"
@@ -406,7 +406,7 @@ async def test_execute_step_scoped_context_for_project_workflow():
     # Resolve the pending future
     task_id = next(iter(orch._pending_results))
     push_result = TaskResult(task_id=task_id, status="complete", result={"done": True})
-    orch.resolve_task_result(task_id, push_result)
+    await orch.resolve_task_result(task_id, push_result)
 
     await step_task
 
@@ -465,7 +465,7 @@ async def test_execute_step_global_context_for_global_workflow():
 
     task_id = next(iter(orch._pending_results))
     push_result = TaskResult(task_id=task_id, status="complete", result={"done": True})
-    orch.resolve_task_result(task_id, push_result)
+    await orch.resolve_task_result(task_id, push_result)
 
     await step_task
 

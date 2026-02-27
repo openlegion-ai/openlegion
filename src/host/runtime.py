@@ -317,25 +317,28 @@ class DockerBackend(RuntimeBackend):
             return False
         start = time.time()
         last_error = ""
-        while time.time() - start < timeout:
-            if not self.health_check(agent_id):
-                logs = self.get_logs(agent_id, tail=20)
-                logger.warning(
-                    f"Agent '{agent_id}' container exited during startup. "
-                    f"Logs:\n{logs}"
-                )
-                return False
-            try:
-                async with httpx.AsyncClient(timeout=3) as client:
+        loop = asyncio.get_running_loop()
+        async with httpx.AsyncClient(timeout=3) as client:
+            while time.time() - start < timeout:
+                # health_check does blocking Docker API calls — run off event loop
+                is_healthy = await loop.run_in_executor(None, self.health_check, agent_id)
+                if not is_healthy:
+                    logs = await loop.run_in_executor(None, self.get_logs, agent_id, 20)
+                    logger.warning(
+                        f"Agent '{agent_id}' container exited during startup. "
+                        f"Logs:\n{logs}"
+                    )
+                    return False
+                try:
                     resp = await client.get(f"{url}/status")
                     if resp.status_code == 200:
                         return True
-            except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
-                last_error = str(e)
-            except Exception as e:
-                last_error = str(e)
-                logger.debug(f"Unexpected error polling agent '{agent_id}': {e}")
-            await asyncio.sleep(0.5)
+                except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+                    last_error = str(e)
+                except Exception as e:
+                    last_error = str(e)
+                    logger.debug(f"Unexpected error polling agent '{agent_id}': {e}")
+                await asyncio.sleep(0.5)
         logger.warning(
             f"Agent '{agent_id}' did not respond within {timeout}s. "
             f"URL: {url}, last error: {last_error}"
@@ -581,8 +584,11 @@ class SandboxBackend(RuntimeBackend):
         from src.host.transport import SandboxTransport
         transport = SandboxTransport()
         start = time.time()
+        loop = asyncio.get_running_loop()
         while time.time() - start < timeout:
-            if not self.health_check(agent_id):
+            # health_check does blocking subprocess.run — run off event loop
+            is_healthy = await loop.run_in_executor(None, self.health_check, agent_id)
+            if not is_healthy:
                 logger.warning(f"Agent '{agent_id}' sandbox not running during startup")
                 return False
             if await transport.is_reachable(agent_id, timeout=5):

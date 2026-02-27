@@ -154,7 +154,8 @@ class AgentLoop:
                 roster.append(entry)
             self._fleet_roster = roster
             self._fleet_roster_ts = time.time()
-        except Exception:
+        except Exception as e:
+            logger.debug("Fleet roster fetch failed, using empty roster: %s", e)
             self._fleet_roster = []
             self._fleet_roster_ts = time.time()
         return self._fleet_roster

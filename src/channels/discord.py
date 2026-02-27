@@ -207,8 +207,8 @@ class DiscordChannel(Channel):
                             await interaction.followup.send(
                                 help_text[:MAX_DC_LEN], ephemeral=True
                             )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Help fetch after slash pairing failed: %s", e)
             else:
                 if channel_ref._is_allowed(author_id):
                     if interaction.channel:
@@ -360,8 +360,8 @@ class DiscordChannel(Channel):
                             )
                             if help_text:
                                 await message.channel.send(help_text[:MAX_DC_LEN])
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Help fetch after pairing failed: %s", e)
                 else:
                     await message.channel.send(
                         "This bot requires pairing. Send `/start <pairing_code>` to begin."
@@ -482,8 +482,8 @@ class DiscordChannel(Channel):
                                     streaming_msg = await channel.send(display[:MAX_DC_LEN])
                                 else:
                                     await streaming_msg.edit(content=display[:MAX_DC_LEN])
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug("Streaming text edit failed: %s", e)
 
                     elif etype == "done":
                         response_text = event.get("response", response_text)
@@ -504,7 +504,8 @@ class DiscordChannel(Channel):
                     if len(final_text) > MAX_DC_LEN:
                         for chunk in chunk_text(final_text[MAX_DC_LEN:], MAX_DC_LEN):
                             await channel.send(chunk)
-                except Exception:
+                except Exception as e:
+                    logger.debug("Final message edit failed, sending new: %s", e)
                     for chunk in chunk_text(final_text, MAX_DC_LEN):
                         await channel.send(chunk)
             else:
