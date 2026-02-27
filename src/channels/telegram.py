@@ -94,7 +94,13 @@ class TelegramChannel(Channel):
                 logger.debug("Cleanup of previous app failed: %s", e)
             self._app = None
 
-        self._app = Application.builder().token(self.token).build()
+        self._app = (
+            Application.builder()
+            .token(self.token)
+            .connect_timeout(20.0)
+            .read_timeout(20.0)
+            .build()
+        )
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("allow", self._cmd_allow))
         self._app.add_handler(CommandHandler("revoke", self._cmd_revoke))
@@ -133,6 +139,7 @@ class TelegramChannel(Channel):
         await asyncio.sleep(0.5)
         await self._app.updater.start_polling(
             drop_pending_updates=True,
+            bootstrap_retries=3,
         )
         owner = self._pairing.owner
         if owner:
