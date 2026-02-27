@@ -1646,6 +1646,56 @@ class TestMemorySave:
         store.close()
 
 
+class TestSearchWithFallback:
+    """Tests for the _search_with_fallback helper in memory_tool."""
+
+    @pytest.mark.asyncio
+    async def test_hierarchical_success(self):
+        """Returns hierarchical results when it succeeds."""
+        from src.agent.builtins.memory_tool import _search_with_fallback
+
+        store = AsyncMock()
+        store.search_hierarchical.return_value = [MagicMock(key="k", value="v")]
+        result = await _search_with_fallback(store, "query", 5)
+        assert len(result) == 1
+        store.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fallback_to_flat(self):
+        """Falls back to flat search when hierarchical raises."""
+        from src.agent.builtins.memory_tool import _search_with_fallback
+
+        store = AsyncMock()
+        store.search_hierarchical.side_effect = RuntimeError("no embeddings")
+        store.search.return_value = [MagicMock(key="k", value="v")]
+        result = await _search_with_fallback(store, "query", 5)
+        assert len(result) == 1
+        store.search.assert_called_once_with("query", top_k=5)
+
+    @pytest.mark.asyncio
+    async def test_both_fail_returns_none(self):
+        """Returns None when both searches fail."""
+        from src.agent.builtins.memory_tool import _search_with_fallback
+
+        store = AsyncMock()
+        store.search_hierarchical.side_effect = RuntimeError("fail")
+        store.search.side_effect = RuntimeError("fail")
+        result = await _search_with_fallback(store, "query", 5)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_empty_list_returned_not_none(self):
+        """Empty list from hierarchical is returned as-is, not as None."""
+        from src.agent.builtins.memory_tool import _search_with_fallback
+
+        store = AsyncMock()
+        store.search_hierarchical.return_value = []
+        result = await _search_with_fallback(store, "query", 5)
+        assert result == []
+        assert result is not None
+        store.search.assert_not_called()
+
+
 # ── labeled screenshots ──────────────────────────────────────
 
 _has_pillow = True
