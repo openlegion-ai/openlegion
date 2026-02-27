@@ -1048,7 +1048,7 @@ class TestProjectCreate:
             runner = CliRunner()
             result = runner.invoke(
                 cli,
-                ["project", "create", "test-proj", "-d", "Test project", "-a", "bot1,bot2"],
+                ["project", "create", "test-proj", "-D", "Test project", "-a", "bot1,bot2"],
             )
             assert result.exit_code == 0
             assert "test-proj" in result.output
@@ -1075,7 +1075,7 @@ class TestProjectCreate:
             patch("src.cli.config.AGENTS_FILE", agents_file),
         ):
             runner = CliRunner()
-            result = runner.invoke(cli, ["project", "create", "../escape", "-d", "bad"])
+            result = runner.invoke(cli, ["project", "create", "../escape", "-D", "bad"])
             assert result.exit_code == 1
             assert "Invalid project name" in result.output
 
@@ -1098,7 +1098,7 @@ class TestProjectCreate:
             runner = CliRunner()
             result = runner.invoke(
                 cli,
-                ["project", "create", "proj", "-d", "x", "-a", "nonexistent"],
+                ["project", "create", "proj", "-D", "x", "-a", "nonexistent"],
             )
             assert result.exit_code == 1
             assert "Unknown agent" in result.output
@@ -1296,6 +1296,98 @@ class TestREPLBlackboardProjectScoping:
         assert "projects/alpha/ctx" in out
         assert "global/other" in out
         bb.close()
+
+
+class TestExitCodes:
+    def test_agent_add_duplicate_exits_nonzero(self, tmp_path):
+        """Adding an existing agent exits with code 1."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+        perms_file = tmp_path / "permissions.json"
+
+        config_file.write_text(yaml.dump({
+            "mesh": {"host": "0.0.0.0", "port": 8420},
+            "llm": {"default_model": "openai/gpt-4.1"},
+        }))
+        agents_file.write_text(yaml.dump({"agents": {"mybot": {"role": "test", "model": "openai/gpt-4.1"}}}))
+        perms_file.write_text(json.dumps({"permissions": {"mybot": {}}}))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.PROJECT_ROOT", tmp_path),
+            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["agent", "add", "mybot"], input="test\n1\n")
+            assert result.exit_code != 0
+
+    def test_channels_add_unknown_exits_nonzero(self):
+        """Adding unknown channel type exits with code 1."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["channels", "add", "fakechannel"])
+        assert result.exit_code != 0
+
+    def test_channels_remove_unknown_exits_nonzero(self):
+        """Removing unknown channel type exits with code 1."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["channels", "remove", "fakechannel"])
+        assert result.exit_code != 0
+
+
+class TestBudgetValidation:
+    def test_agent_edit_negative_budget_rejected(self, tmp_path):
+        """Negative budget via --budget flag is rejected by Click."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+        perms_file = tmp_path / "permissions.json"
+
+        config_file.write_text(yaml.dump({
+            "mesh": {"host": "0.0.0.0", "port": 8420},
+            "llm": {"default_model": "openai/gpt-4.1"},
+        }))
+        agents_file.write_text(yaml.dump({"agents": {"mybot": {"role": "test", "model": "openai/gpt-4.1"}}}))
+        perms_file.write_text(json.dumps({"permissions": {"mybot": {}}}))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.PROJECT_ROOT", tmp_path),
+            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["agent", "edit", "mybot", "--budget", "-5"])
+            assert result.exit_code != 0
+
+
+class TestFlagConflicts:
+    def test_project_create_uppercase_d_for_description(self, tmp_path):
+        """project create -D sets description (not detach conflict)."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+        perms_file = tmp_path / "permissions.json"
+        projects_dir = tmp_path / "projects"
+
+        config_file.write_text(yaml.dump({
+            "mesh": {"host": "0.0.0.0", "port": 8420},
+            "llm": {"default_model": "openai/gpt-4.1"},
+        }))
+        agents_file.write_text(yaml.dump({"agents": {}}))
+        perms_file.write_text(json.dumps({"permissions": {}}))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.PROJECT_ROOT", tmp_path),
+            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["project", "create", "testproj", "-D", "My description"])
+            assert result.exit_code == 0, result.output
+            assert "testproj" in result.output
 
 
 class TestREPLWorkflowProjectScoping:

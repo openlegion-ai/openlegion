@@ -784,6 +784,9 @@ def _edit_agent_interactive(name: str) -> str | None:
             return None
         try:
             new_budget = float(new_budget_str)
+            if new_budget < 0:
+                click.echo("Budget cannot be negative.")
+                return None
             _update_agent_field(name, "budget", {"daily_usd": new_budget})
             click.echo(f"Agent '{name}' budget: ${new_budget:.2f}/day")
             return "budget"
