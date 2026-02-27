@@ -34,7 +34,7 @@ mcp = [
 ]
 
 channels = [
-    "python-telegram-bot>=21.0",
+    "python-telegram-bot>=22.0",
     "discord.py>=2.0",
     "slack-bolt>=1.18",
 ]

@@ -9,7 +9,7 @@ Bridges Telegram to the OpenLegion mesh with the same UX as the CLI REPL:
   - Pairing: owner must send /start <pairing_code> to claim the bot.
     Code is generated during `openlegion start`. Others need /allow.
 
-Requires: pip install python-telegram-bot>=21.0
+Requires: pip install python-telegram-bot>=22.0
 Config: TELEGRAM_BOT_TOKEN in .env, channels.telegram in mesh.yaml
 """
 
@@ -94,13 +94,7 @@ class TelegramChannel(Channel):
                 logger.debug("Cleanup of previous app failed: %s", e)
             self._app = None
 
-        self._app = (
-            Application.builder()
-            .token(self.token)
-            .connect_timeout(10.0)
-            .read_timeout(10.0)
-            .build()
-        )
+        self._app = Application.builder().token(self.token).build()
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("allow", self._cmd_allow))
         self._app.add_handler(CommandHandler("revoke", self._cmd_revoke))
@@ -139,9 +133,6 @@ class TelegramChannel(Channel):
         await asyncio.sleep(0.5)
         await self._app.updater.start_polling(
             drop_pending_updates=True,
-            bootstrap_retries=3,
-            connect_timeout=20,
-            read_timeout=10,
         )
         owner = self._pairing.owner
         if owner:
