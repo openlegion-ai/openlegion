@@ -6,6 +6,7 @@ import shutil
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 
@@ -2580,8 +2581,8 @@ class TestBrowserNavigateCaptcha:
         assert "Welcome" in result["content"]
 
     @pytest.mark.asyncio
-    async def test_navigate_reports_captcha_without_key(self):
-        """browser_navigate reports captcha_detected when no API key available."""
+    async def test_navigate_reports_captcha_solve_failed(self):
+        """browser_navigate reports captcha_detected when solving fails."""
         import src.agent.builtins.browser_tool as bt
 
         mock_page = AsyncMock()
@@ -2612,6 +2613,7 @@ class TestBrowserNavigateCaptcha:
 
         assert result["captcha_detected"] == "hcaptcha"
         assert "vault" in result["captcha_note"].lower()
+        assert "could not be solved" in result["captcha_note"].lower()
 
     @pytest.mark.asyncio
     async def test_navigate_no_captcha_unchanged(self):
@@ -2692,8 +2694,8 @@ class TestBrowserSolveCaptchaSkill:
         assert result["status"] == "no_captcha"
 
     @pytest.mark.asyncio
-    async def test_solve_captcha_skill_no_key(self):
-        """browser_solve_captcha reports no_key when vault has no CAPTCHA key."""
+    async def test_solve_captcha_skill_solve_failed(self):
+        """browser_solve_captcha reports solve_failed when solving fails."""
         import src.agent.builtins.browser_tool as bt
 
         mock_page = AsyncMock()
@@ -2715,6 +2717,317 @@ class TestBrowserSolveCaptchaSkill:
              ):
             result = await bt.browser_solve_captcha(mesh_client=mock_mesh)
 
-        assert result["status"] == "no_key"
+        assert result["status"] == "solve_failed"
         assert result["captcha_type"] == "recaptcha_v2"
         assert "vault" in result["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_solve_captcha_skill_no_mesh_client(self):
+        """browser_solve_captcha returns no_client when mesh_client is None."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.is_closed.return_value = False
+
+        with patch.object(bt, "_get_page", return_value=mock_page), \
+             patch(
+                 "src.agent.builtins.captcha.detect_captcha",
+                 new_callable=AsyncMock,
+                 return_value={"type": "turnstile", "sitekey": "k"},
+             ):
+            result = await bt.browser_solve_captcha(mesh_client=None)
+
+        assert result["status"] == "no_client"
+        assert result["captcha_type"] == "turnstile"
+
+    @pytest.mark.asyncio
+    async def test_solve_captcha_skill_injection_fails(self):
+        """browser_solve_captcha reports injected=False when injection fails."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com"
+        mock_page.is_closed.return_value = False
+
+        mock_mesh = AsyncMock()
+
+        with patch.object(bt, "_get_page", return_value=mock_page), \
+             patch(
+                 "src.agent.builtins.captcha.detect_captcha",
+                 new_callable=AsyncMock,
+                 return_value={"type": "hcaptcha", "sitekey": "k"},
+             ), \
+             patch(
+                 "src.agent.builtins.captcha.solve_captcha",
+                 new_callable=AsyncMock,
+                 return_value="token-xyz",
+             ), \
+             patch(
+                 "src.agent.builtins.captcha.inject_captcha_token",
+                 new_callable=AsyncMock,
+                 return_value=False,
+             ):
+            result = await bt.browser_solve_captcha(mesh_client=mock_mesh)
+
+        assert result["status"] == "solved"
+        assert result["injected"] is False
+        # Should NOT wait_for_timeout when injection fails
+        mock_page.wait_for_timeout.assert_not_called()
+
+
+class TestCaptchaSolvingEdgeCases:
+    @pytest.mark.asyncio
+    async def test_solve_create_task_api_error(self):
+        """solve_captcha returns None when createTask API call fails."""
+        from src.agent.builtins.captcha import solve_captcha
+
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(side_effect=lambda name: (
+            "key" if name == "capsolver_key" else None
+        ))
+
+        with patch("src.agent.builtins.captcha.asyncio.sleep", new_callable=AsyncMock):
+            with patch("src.agent.builtins.captcha.httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.post = AsyncMock(
+                    side_effect=httpx.HTTPStatusError(
+                        "Internal Server Error",
+                        request=MagicMock(),
+                        response=MagicMock(status_code=500),
+                    ),
+                )
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client_cls.return_value = mock_client
+
+                token = await solve_captcha(
+                    {"type": "recaptcha_v2", "sitekey": "k"},
+                    "https://example.com",
+                    mock_mesh,
+                )
+
+        assert token is None
+
+    @pytest.mark.asyncio
+    async def test_solve_create_task_returns_error(self):
+        """solve_captcha returns None when createTask returns an error response."""
+        from src.agent.builtins.captcha import solve_captcha
+
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(side_effect=lambda name: (
+            "key" if name == "capsolver_key" else None
+        ))
+
+        error_resp = MagicMock()
+        error_resp.status_code = 200
+        error_resp.raise_for_status = MagicMock()
+        error_resp.json.return_value = {
+            "errorId": 1,
+            "errorCode": "ERROR_KEY_DOES_NOT_EXIST",
+            "errorDescription": "Account not found",
+        }
+
+        with patch("src.agent.builtins.captcha.asyncio.sleep", new_callable=AsyncMock):
+            with patch("src.agent.builtins.captcha.httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.post = AsyncMock(return_value=error_resp)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client_cls.return_value = mock_client
+
+                token = await solve_captcha(
+                    {"type": "recaptcha_v2", "sitekey": "k"},
+                    "https://example.com",
+                    mock_mesh,
+                )
+
+        assert token is None
+
+    @pytest.mark.asyncio
+    async def test_solve_task_failed_status(self):
+        """solve_captcha returns None when task status is 'failed'."""
+        from src.agent.builtins.captcha import solve_captcha
+
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(side_effect=lambda name: (
+            "key" if name == "capsolver_key" else None
+        ))
+
+        create_resp = MagicMock()
+        create_resp.status_code = 200
+        create_resp.raise_for_status = MagicMock()
+        create_resp.json.return_value = {"taskId": "t1"}
+
+        failed_resp = MagicMock()
+        failed_resp.status_code = 200
+        failed_resp.raise_for_status = MagicMock()
+        failed_resp.json.return_value = {
+            "status": "failed",
+            "errorDescription": "CAPTCHA_UNSOLVABLE",
+        }
+
+        with patch("src.agent.builtins.captcha.asyncio.sleep", new_callable=AsyncMock):
+            with patch("src.agent.builtins.captcha.httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client.post = AsyncMock(side_effect=[create_resp, failed_resp])
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client_cls.return_value = mock_client
+
+                token = await solve_captcha(
+                    {"type": "hcaptcha", "sitekey": "k"},
+                    "https://example.com",
+                    mock_mesh,
+                )
+
+        assert token is None
+
+    @pytest.mark.asyncio
+    async def test_solve_timeout(self):
+        """solve_captcha returns None after polling timeout."""
+        from src.agent.builtins.captcha import solve_captcha
+
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(side_effect=lambda name: (
+            "key" if name == "capsolver_key" else None
+        ))
+
+        create_resp = MagicMock()
+        create_resp.status_code = 200
+        create_resp.raise_for_status = MagicMock()
+        create_resp.json.return_value = {"taskId": "t1"}
+
+        processing_resp = MagicMock()
+        processing_resp.status_code = 200
+        processing_resp.raise_for_status = MagicMock()
+        processing_resp.json.return_value = {"status": "processing"}
+
+        with patch("src.agent.builtins.captcha.asyncio.sleep", new_callable=AsyncMock), \
+             patch("src.agent.builtins.captcha._POLL_TIMEOUT", 6), \
+             patch("src.agent.builtins.captcha._POLL_INTERVAL", 3):
+            with patch("src.agent.builtins.captcha.httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                # createTask + 2 polls (at 3s and 6s) then timeout
+                mock_client.post = AsyncMock(
+                    side_effect=[create_resp, processing_resp, processing_resp],
+                )
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client_cls.return_value = mock_client
+
+                token = await solve_captcha(
+                    {"type": "turnstile", "sitekey": "k"},
+                    "https://example.com",
+                    mock_mesh,
+                )
+
+        assert token is None
+
+    @pytest.mark.asyncio
+    async def test_solve_unsupported_captcha_type(self):
+        """solve_captcha returns None for an unrecognized CAPTCHA type."""
+        from src.agent.builtins.captcha import solve_captcha
+
+        mock_mesh = AsyncMock()
+        mock_mesh.vault_resolve = AsyncMock(side_effect=lambda name: (
+            "key" if name == "capsolver_key" else None
+        ))
+
+        token = await solve_captcha(
+            {"type": "unknown_captcha_v99", "sitekey": "k"},
+            "https://example.com",
+            mock_mesh,
+        )
+
+        assert token is None
+
+
+class TestCaptchaDetectionEdgeCases:
+    @pytest.mark.asyncio
+    async def test_detect_empty_dict(self):
+        """detect_captcha returns None for empty dict result."""
+        from src.agent.builtins.captcha import detect_captcha
+
+        mock_page = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value={})
+
+        result = await detect_captcha(mock_page)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_detect_dict_without_type(self):
+        """detect_captcha returns None for dict missing 'type' key."""
+        from src.agent.builtins.captcha import detect_captcha
+
+        mock_page = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value={"sitekey": "abc123"})
+
+        result = await detect_captcha(mock_page)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_detect_non_dict_result(self):
+        """detect_captcha returns None for non-dict truthy results."""
+        from src.agent.builtins.captcha import detect_captcha
+
+        mock_page = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value="unexpected string")
+
+        result = await detect_captcha(mock_page)
+        assert result is None
+
+
+class TestBrowserNavigateCaptchaEdgeCases:
+    @pytest.mark.asyncio
+    async def test_navigate_captcha_detected_no_mesh_client(self):
+        """browser_navigate reports captcha when no mesh_client available."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://protected.example.com"
+        mock_page.title = AsyncMock(return_value="Protected")
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_page.goto = AsyncMock(return_value=mock_response)
+        mock_page.inner_text = AsyncMock(return_value="Captcha page")
+
+        with patch.object(bt, "_get_page", return_value=mock_page), \
+             patch(
+                 "src.agent.builtins.captcha.detect_captcha",
+                 new_callable=AsyncMock,
+                 return_value={"type": "turnstile", "sitekey": "test"},
+             ):
+            # No mesh_client passed
+            result = await bt.browser_navigate(
+                url="https://protected.example.com",
+            )
+
+        assert result["captcha_detected"] == "turnstile"
+        assert "captcha_note" in result
+
+    @pytest.mark.asyncio
+    async def test_navigate_captcha_exception_is_swallowed(self):
+        """browser_navigate swallows CAPTCHA errors and returns normal content."""
+        import src.agent.builtins.browser_tool as bt
+
+        mock_page = AsyncMock()
+        mock_page.url = "https://example.com"
+        mock_page.title = AsyncMock(return_value="Example")
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_page.goto = AsyncMock(return_value=mock_response)
+        mock_page.inner_text = AsyncMock(return_value="Normal content")
+
+        with patch.object(bt, "_get_page", return_value=mock_page), \
+             patch(
+                 "src.agent.builtins.captcha.detect_captcha",
+                 new_callable=AsyncMock,
+                 side_effect=RuntimeError("Something broke in captcha module"),
+             ):
+            result = await bt.browser_navigate(url="https://example.com")
+
+        # Should return content normally despite captcha error
+        assert result["content"] == "Normal content"
+        assert "error" not in result
+        assert "captcha_solved" not in result
+        assert "captcha_detected" not in result

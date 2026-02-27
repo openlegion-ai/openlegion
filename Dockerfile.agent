@@ -44,7 +44,7 @@ RUN mkdir -p /etc/opt/chrome/policies/managed \
     && printf '{"BuiltInDnsClientEnabled": false, "DnsOverHttpsMode": "off"}\n' \
        > /etc/opt/chrome/policies/managed/dns_policy.json
 
-# Install Playwright Chromium (for agent programmatic control via CDP).
+# Install Patchright Chromium (for agent programmatic control via CDP).
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN patchright install chromium --with-deps \
     && chmod -R o+rx /opt/pw-browsers

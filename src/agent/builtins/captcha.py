@@ -21,13 +21,13 @@ logger = setup_logging("agent.captcha")
 _DETECT_JS = """
 (() => {
     const result = {};
+    const scriptSrcs = [...document.querySelectorAll('script[src]')]
+        .map(s => s.src);
 
     // --- reCAPTCHA ---
     const recapEl = document.querySelector('.g-recaptcha');
-    const recapScripts = [...document.querySelectorAll('script[src]')]
-        .map(s => s.src);
-    const hasEnterprise = recapScripts.some(s => s.includes('recaptcha/enterprise'));
-    const hasRecapApi = recapScripts.some(s => s.includes('recaptcha/api'));
+    const hasEnterprise = scriptSrcs.some(s => s.includes('recaptcha/enterprise'));
+    const hasRecapApi = scriptSrcs.some(s => s.includes('recaptcha/api'));
 
     if (recapEl || hasEnterprise || hasRecapApi) {
         const sitekey = (recapEl && recapEl.getAttribute('data-sitekey')) || '';
@@ -45,8 +45,7 @@ _DETECT_JS = """
 
     // --- hCaptcha ---
     const hcapEl = document.querySelector('.h-captcha');
-    const hasHcapScript = recapScripts.some(s => s.includes('hcaptcha.com'));
-    if (hcapEl || hasHcapScript) {
+    if (hcapEl || scriptSrcs.some(s => s.includes('hcaptcha.com'))) {
         const sitekey = (hcapEl && hcapEl.getAttribute('data-sitekey')) || '';
         result.type = 'hcaptcha';
         result.sitekey = sitekey;
@@ -55,8 +54,7 @@ _DETECT_JS = """
 
     // --- Cloudflare Turnstile ---
     const cfEl = document.querySelector('.cf-turnstile');
-    const hasCfScript = recapScripts.some(s => s.includes('challenges.cloudflare.com'));
-    if (cfEl || hasCfScript) {
+    if (cfEl || scriptSrcs.some(s => s.includes('challenges.cloudflare.com'))) {
         const sitekey = (cfEl && cfEl.getAttribute('data-sitekey')) || '';
         result.type = 'turnstile';
         result.sitekey = sitekey;

@@ -1,9 +1,9 @@
-"""Browser automation via Playwright CDP.
+"""Browser automation via Patchright/Playwright CDP.
 
 Every agent gets Chrome + KasmVNC by default.  Chrome runs as a subprocess
-on the X display for VNC interaction; Playwright connects on-demand via CDP
-for programmatic control, then disconnects after each operation so Chrome
-runs clean for manual use.
+on the X display for VNC interaction; Patchright (stealth Playwright fork)
+connects on-demand via CDP for programmatic control, then disconnects after
+each operation so Chrome runs clean for manual use.
 """
 
 from __future__ import annotations
@@ -564,10 +564,12 @@ async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -
                     )
 
                     captcha_info = await detect_captcha(page)
-                    if captcha_info and mesh_client:
-                        token = await solve_captcha(
-                            captcha_info, page.url, mesh_client,
-                        )
+                    if captcha_info:
+                        token = None
+                        if mesh_client:
+                            token = await solve_captcha(
+                                captcha_info, page.url, mesh_client,
+                            )
                         if token:
                             await inject_captcha_token(
                                 page, captcha_info, token,
@@ -581,15 +583,10 @@ async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -
                         else:
                             result["captcha_detected"] = captcha_info["type"]
                             result["captcha_note"] = (
-                                "No CAPTCHA API key configured. Add "
-                                "2captcha_key or capsolver_key to vault."
+                                "CAPTCHA detected but could not be solved "
+                                "automatically. Ensure 2captcha_key or "
+                                "capsolver_key is set in the vault."
                             )
-                    elif captcha_info:
-                        result["captcha_detected"] = captcha_info["type"]
-                        result["captcha_note"] = (
-                            "No CAPTCHA API key configured. Add "
-                            "2captcha_key or capsolver_key to vault."
-                        )
                 except Exception as captcha_exc:
                     logger.debug("CAPTCHA auto-solve error: %s", captcha_exc)
                 # Disconnect CDP so Chrome runs clean for VNC interaction.
@@ -1048,11 +1045,12 @@ async def browser_solve_captcha(*, mesh_client=None) -> dict:
             if not token:
                 await _disconnect_cdp()
                 return {
-                    "status": "no_key",
+                    "status": "solve_failed",
                     "captcha_type": captcha_info["type"],
                     "message": (
-                        "No CAPTCHA API key configured. Add 2captcha_key "
-                        "or capsolver_key to vault."
+                        "CAPTCHA detected but could not be solved. "
+                        "Ensure 2captcha_key or capsolver_key is set "
+                        "in the vault."
                     ),
                 }
 
