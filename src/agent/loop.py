@@ -15,7 +15,7 @@ import httpx
 
 from src.agent.loop_detector import ToolLoopDetector
 from src.agent.workspace import INTROSPECT_PERM_KEYS
-from src.shared.types import AgentStatus, TaskAssignment, TaskResult
+from src.shared.types import SILENT_REPLY_TOKEN, AgentStatus, TaskAssignment, TaskResult
 from src.shared.utils import format_dict, generate_id, sanitize_for_prompt, setup_logging, truncate
 
 if TYPE_CHECKING:
@@ -27,8 +27,6 @@ if TYPE_CHECKING:
     from src.agent.workspace import WorkspaceManager
 
 logger = setup_logging("agent.loop")
-
-SILENT_REPLY_TOKEN = "__SILENT__"
 
 # Status codes that indicate transient server-side errors worth retrying
 _RETRYABLE_STATUS_CODES = {429, 502, 503}

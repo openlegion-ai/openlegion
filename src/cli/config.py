@@ -12,6 +12,8 @@ from pathlib import Path
 import click
 import yaml
 
+from src.shared.utils import truncate
+
 logger = logging.getLogger("cli")
 
 # ── Path constants ──────────────────────────────────────────
@@ -743,7 +745,7 @@ def _edit_agent_interactive(name: str) -> str | None:
 
     options = [
         ("model", current_model),
-        ("description", _truncate(current_desc, 50) or "(none)"),
+        ("description", truncate(current_desc, 50) or "(none)"),
         ("budget", f"${current_budget:.2f}/day" if current_budget is not None else "(none)"),
     ]
 
@@ -790,13 +792,6 @@ def _edit_agent_interactive(name: str) -> str | None:
             return None
 
     return None
-
-
-def _truncate(text: str, length: int) -> str:
-    """Truncate text with ellipsis if longer than length."""
-    if len(text) > length:
-        return text[:length] + "..."
-    return text
 
 
 def _setup_agent_wizard(model: str) -> str:

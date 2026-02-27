@@ -12,6 +12,11 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+# === Protocol Constants ===
+
+SILENT_REPLY_TOKEN = "__SILENT__"
+"""Sentinel returned by agents to suppress empty responses."""
+
 # === Inter-Component Messages ===
 
 

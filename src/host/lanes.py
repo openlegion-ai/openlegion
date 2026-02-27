@@ -18,11 +18,10 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.shared.types import SILENT_REPLY_TOKEN
 from src.shared.utils import generate_id, setup_logging
 
 logger = setup_logging("host.lanes")
-
-SILENT_REPLY_TOKEN = "__SILENT__"
 
 
 @dataclass

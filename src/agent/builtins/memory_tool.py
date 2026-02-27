@@ -12,6 +12,19 @@ from src.shared.utils import setup_logging
 logger = setup_logging("agent.builtins.memory_tool")
 
 
+async def _search_with_fallback(memory_store, query: str, top_k: int):
+    """Try hierarchical search, fall back to flat search on failure."""
+    try:
+        return await memory_store.search_hierarchical(query, top_k=top_k)
+    except Exception as e:
+        logger.debug("Hierarchical search failed, falling back to flat: %s", e)
+    try:
+        return await memory_store.search(query, top_k=top_k)
+    except Exception as e2:
+        logger.warning("Flat memory search also failed: %s", e2)
+        return None
+
+
 def _parse_fact(content: str) -> tuple[str, str]:
     """Parse free-text content into a (key, value) pair for structured storage.
 
@@ -61,8 +74,8 @@ async def memory_search(query: str, max_results: int = 5, *, workspace_manager=N
 
     # Structured memory DB search (vector + BM25)
     if memory_store is not None:
-        try:
-            db_facts = await memory_store.search_hierarchical(query, top_k=max_results)
+        db_facts = await _search_with_fallback(memory_store, query, max_results)
+        if db_facts:
             for fact in db_facts:
                 results.append({
                     "key": fact.key,
@@ -71,20 +84,6 @@ async def memory_search(query: str, max_results: int = 5, *, workspace_manager=N
                     "confidence": fact.confidence,
                     "source": "memory_db",
                 })
-        except Exception as e:
-            logger.warning(f"Hierarchical memory search failed, trying flat: {e}")
-            try:
-                db_facts = await memory_store.search(query, top_k=max_results)
-                for fact in db_facts:
-                    results.append({
-                        "key": fact.key,
-                        "value": fact.value,
-                        "category": fact.category,
-                        "confidence": fact.confidence,
-                        "source": "memory_db",
-                    })
-            except Exception as e2:
-                logger.warning(f"Flat memory search also failed: {e2}")
 
     if not results and workspace_manager is None and memory_store is None:
         return {"error": "No memory backends available", "results": []}
@@ -167,15 +166,9 @@ async def memory_recall(
     # may discard many results
     fetch_k = max_results * 3 if category else max_results
 
-    try:
-        facts = await memory_store.search_hierarchical(query, top_k=fetch_k)
-    except Exception as e:
-        logger.debug("Hierarchical search failed, falling back to flat search: %s", e)
-        try:
-            facts = await memory_store.search(query, top_k=fetch_k)
-        except Exception as e2:
-            logger.warning("Memory search failed: %s", e2)
-            return {"error": "Memory search failed", "results": []}
+    facts = await _search_with_fallback(memory_store, query, fetch_k)
+    if facts is None:
+        return {"error": "Memory search failed", "results": []}
 
     results = []
     for fact in facts:

@@ -64,7 +64,7 @@ def _parse_ddg_html(html: str, max_results: int) -> list[dict]:
         },
     },
 )
-async def web_search(query: str, max_results: int = 5, **_kwargs) -> dict:
+async def web_search(query: str, max_results: int = 5) -> dict:
     """Search the web using DuckDuckGo (no API key needed)."""
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
