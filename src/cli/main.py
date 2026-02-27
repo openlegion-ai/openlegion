@@ -141,7 +141,7 @@ def agent_edit(
     cfg = _load_config()
     name = _resolve_agent_name(cfg, name)
     if name is None:
-        return
+        sys.exit(1)
 
     # Direct flag mode: apply each provided flag
     has_flags = any(v is not None for v in [
@@ -241,7 +241,7 @@ def agent_remove(name: str | None, yes: bool):
     cfg = _load_config()
     name = _resolve_agent_name(cfg, name)
     if name is None:
-        return
+        sys.exit(1)
     if not yes:
         click.confirm(f"Remove agent '{name}'? This deletes its config and permissions.", abort=True)
 
@@ -689,7 +689,7 @@ def project_add_agent(project_name: str | None, agent_name: str | None):
     if agent_name is None:
         agent_name = _resolve_agent_name(cfg, None)
     if agent_name is None:
-        return
+        sys.exit(1)
     if agent_name not in cfg.get("agents", {}):
         click.echo(f"Agent '{agent_name}' not found. List agents: openlegion agent list", err=True)
         sys.exit(1)
