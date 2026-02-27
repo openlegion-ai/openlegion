@@ -320,8 +320,8 @@ function dashboard() {
       this.confirmModal = { open: false, title: '', message: '', action: null, destructive: false };
     },
 
-    executeConfirm() {
-      if (this.confirmModal.action) this.confirmModal.action();
+    async executeConfirm() {
+      if (this.confirmModal.action) await this.confirmModal.action();
       this.cancelConfirm();
     },
 
@@ -1290,7 +1290,7 @@ function dashboard() {
             this.showToast(`Restart failed`);
           }
         } catch (e) { this.showToast(`Error: ${e.message}`); }
-      });
+      }, true);
     },
 
     async updateBudget(agentId, dailyUsd) {

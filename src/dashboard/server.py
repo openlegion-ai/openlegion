@@ -7,6 +7,7 @@ objects — no HTTP round-trips through mesh endpoints.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1183,7 +1184,8 @@ def create_dashboard_router(
 
         if level:
             level_upper = level.upper()
-            all_lines = [ln for ln in all_lines if level_upper in ln.upper()]
+            level_pat = re.compile(r'\b' + re.escape(level_upper) + r'\b')
+            all_lines = [ln for ln in all_lines if level_pat.search(ln.upper())]
 
         result_lines = all_lines[-lines:]
         return {"lines": result_lines, "total": len(all_lines)}
