@@ -197,7 +197,7 @@
       <!-- Fleet Overview (merged: Fleet + Agents + Queues) -->
       <div x-show="activeTab === 'fleet' && !detailAgent" x-cloak>
         <!-- Project switcher + Add Agent row -->
-        <div x-show="agents.length > 0" class="flex items-center justify-between gap-3 mb-3" x-cloak>
+        <div x-show="agents.length > 0" class="flex flex-wrap items-center justify-between gap-3 mb-3" x-cloak>
           <div class="flex items-center gap-2">
             <div x-show="projects.length > 0" class="flex gap-0.5 bg-gray-800/40 rounded-lg p-0.5 w-fit">
               <button @click="switchProject(null)"
