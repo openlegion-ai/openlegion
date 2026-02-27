@@ -600,8 +600,8 @@ def _add_project_blackboard_permissions(agent: str, project: str) -> None:
 def _remove_project_blackboard_permissions(agent: str, project: str) -> None:
     """Revoke all blackboard access when an agent leaves a project.
 
-    Clears both the project-specific pattern and shared collaboration
-    patterns, restoring the agent to standalone (no blackboard access).
+    Clears the project namespace pattern, restoring the agent to
+    standalone state (no blackboard access).
     """
     perms = _load_permissions()
     agent_perms = perms.get("permissions", {}).get(agent)
