@@ -159,13 +159,7 @@ function dashboard() {
     identityLearningsLoading: false,
 
     // Broadcast
-    broadcastMode: false,
     broadcastMessage: '',
-    broadcastLoading: false,
-    broadcastResults: null,
-    broadcastStreaming: false,
-    broadcastSentMessage: '',
-    _broadcastAbort: null,
 
     // Command palette (Cmd+K)
     cmdPaletteOpen: false,
@@ -439,7 +433,7 @@ function dashboard() {
           const active = document.activeElement;
           const tag = active ? active.tagName.toLowerCase() : '';
           if (tag === 'input' || tag === 'textarea' || tag === 'select' || active?.isContentEditable) return;
-          if (this.cmdPaletteOpen || this.detailAgent || this.addAgentMode || this.broadcastMode) return;
+          if (this.cmdPaletteOpen || this.detailAgent || this.addAgentMode) return;
           e.preventDefault();
           const tabMap = { '1': 'fleet', '2': 'activity', '3': 'system' };
           this.switchTab(tabMap[e.key]);
@@ -531,7 +525,6 @@ function dashboard() {
       Object.values(this._stateTimers).forEach(clearTimeout);
       Object.values(this._scrollTimers).forEach(clearTimeout);
       Object.values(this._chatAborts).forEach(c => c?.abort());
-      if (this._broadcastAbort) this._broadcastAbort.abort();
       if (this._cmdPaletteHandler) document.removeEventListener('keydown', this._cmdPaletteHandler);
       if (this._popstateHandler) window.removeEventListener('popstate', this._popstateHandler);
     },
@@ -970,8 +963,6 @@ function dashboard() {
       this.projectEditing = false;
       this.projectEditBuffer = '';
       this.projectBannerExpanded = false;
-      this.broadcastResults = null;
-      this.broadcastSentMessage = '';
       this.showProjectForm = false;
       this.fetchProject();
     },
@@ -1275,18 +1266,6 @@ function dashboard() {
     closeAddAgentModal() {
       if (this.addAgentLoading) return;
       this.addAgentMode = false;
-    },
-
-    openBroadcastModal() {
-      this.broadcastMode = true;
-      this.$nextTick(() => {
-        const el = document.getElementById('broadcast-message-input');
-        if (el) el.focus();
-      });
-    },
-
-    closeBroadcastModal() {
-      this.broadcastMode = false;
     },
 
     async removeAgent(agentId) {
@@ -1821,94 +1800,24 @@ function dashboard() {
     // ── Broadcast ────────────────────────────────────────
 
     async sendBroadcast() {
-      if (!this.broadcastMessage.trim()) return;
-      const msg = this.broadcastMessage.trim();
-      this.broadcastLoading = true;
-      this.broadcastStreaming = true;
-      this.broadcastResults = {};  // Show results area immediately
-      this.broadcastSentMessage = msg;
+      const msg = (this.broadcastMessage || '').trim();
+      if (!msg) return;
+      const targets = this.filteredAgents.map(a => a.id);
+      if (targets.length === 0) return;
       this.broadcastMessage = '';
-      this.closeBroadcastModal();
-
-      const controller = new AbortController();
-      this._broadcastAbort = controller;
-
-      try {
-        const broadcastBody = { message: msg };
-        if (this.activeProject) broadcastBody.project = this.activeProject;
-        else if (this.projects.length > 0) broadcastBody.standalone = true;
-        const resp = await fetch(`${window.__config.apiBase}/broadcast/stream`, {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(broadcastBody),
-          signal: controller.signal,
-        });
-        if (!resp.ok) {
-          this.showToast('Broadcast failed');
-          this.broadcastLoading = false;
-          this.broadcastStreaming = false;
-          return;
-        }
-
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            let data;
-            try { data = JSON.parse(line.slice(6)); } catch (_) { continue; }
-
-            if (data.type === 'agent_start') {
-              // Spread needed: new key triggers x-for re-evaluation
-              this.broadcastResults = { ...this.broadcastResults, [data.agent]: { streaming: true, content: '' } };
-            } else if (data.type === 'text_delta' && data.agent) {
-              if (!this.broadcastResults[data.agent]) {
-                this.broadcastResults = { ...this.broadcastResults, [data.agent]: { streaming: true, content: '' } };
-              }
-              this.broadcastResults[data.agent].content += data.content || '';
-            } else if ((data.type === 'done' || data.type === 'agent_done') && data.agent) {
-              const entry = this.broadcastResults[data.agent];
-              if (entry) {
-                if (data.response) entry.content = data.response;
-                entry.streaming = false;
-              }
-            } else if (data.type === 'error' && data.agent) {
-              if (!this.broadcastResults[data.agent]) {
-                this.broadcastResults = { ...this.broadcastResults, [data.agent]: { streaming: false, content: '' } };
-              } else {
-                this.broadcastResults[data.agent].streaming = false;
-                this.broadcastResults[data.agent].error = true;
-              }
-              this.broadcastResults[data.agent].content = data.message || 'Error';
-            } else if (data.type === 'all_done') {
-              break;
-            }
-          }
-        }
-        this.showToast('Broadcast complete');
-      } catch (e) {
-        if (e.name !== 'AbortError') this.showToast(`Error: ${e.message}`);
+      for (const agentId of targets) this.openChat(agentId);
+      this.activeChatId = targets[0];
+      let sent = 0;
+      for (const agentId of targets) {
+        if (this.chatStreamingAgents[agentId]) continue;
+        this.sendChatTo(agentId, msg); // fire concurrently, don't await
+        sent++;
       }
-      this._broadcastAbort = null;
-      this.broadcastLoading = false;
-      this.broadcastStreaming = false;
-    },
-
-    cancelBroadcast() {
-      if (this._broadcastAbort) {
-        this._broadcastAbort.abort();
-        this._broadcastAbort = null;
+      if (sent === 0) {
+        this.showToast('All targeted agents are busy');
+      } else {
+        this.showToast(`Broadcast sent to ${sent} agent${sent !== 1 ? 's' : ''}`);
       }
-      this.broadcastStreaming = false;
-      this.broadcastLoading = false;
     },
 
     // ── Command palette (Cmd+K) ────────────────────────────
@@ -1941,7 +1850,7 @@ function dashboard() {
       // Quick actions
       const actions = [
         { label: 'Add Agent', desc: 'Open add agent form', keywords: ['add', 'agent', 'new', 'create'], action: () => { this.switchTab('fleet'); this.openAddAgentModal(); } },
-        { label: 'Broadcast', desc: this.activeProject ? `Broadcast to ${this.activeProject} agents` : (this.projects.length > 0 ? 'Broadcast to standalone agents' : 'Send message to all agents'), keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); this.openBroadcastModal(); } },
+        { label: 'Broadcast', desc: this.activeProject ? `Broadcast to ${this.activeProject} agents` : (this.projects.length > 0 ? 'Broadcast to standalone agents' : 'Send message to all agents'), keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); this.$nextTick(() => document.getElementById('broadcast-input')?.focus()); } },
         ...(this.activeProject ? [{ label: 'Edit PROJECT.md', desc: `Edit ${this.activeProject} project context`, keywords: ['project', 'edit', 'context'], action: () => { this.switchTab('fleet'); this.projectBannerExpanded = true; this.startProjectEdit(); } }] : []),
       ];
       for (const act of actions) {

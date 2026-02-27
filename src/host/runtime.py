@@ -226,9 +226,9 @@ class DockerBackend(RuntimeBackend):
                 mp_path = marketplace_dir.as_posix()
             volumes[mp_path] = {"bind": "/app/marketplace_skills", "mode": "ro"}
 
-        # Every agent gets Chrome + VNC.  1GB / 1 CPU / 256MB shm is a
-        # middle ground — enough for JS-heavy sites without being excessive
-        # in multi-agent setups.
+        # Every agent gets Chrome + VNC.  1GB / 1 CPU / 256MB shm.
+        # Chrome with memory-saving flags idles at ~500MB.
+        # JS-heavy sites spike briefly but fit within 1GB headroom.
         run_kwargs: dict[str, Any] = {
             "detach": True,
             "name": f"openlegion_{safe_name}",

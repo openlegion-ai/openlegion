@@ -2142,6 +2142,7 @@ class TestBrowserLifecycle:
             return m
 
         with patch.object(bt, "_find_chromium_binary", return_value="/usr/bin/chromium"), \
+             patch.object(bt, "_inject_vnc_input_fix", new_callable=AsyncMock), \
              patch("subprocess.Popen", side_effect=mock_popen), \
              patch("asyncio.sleep", new_callable=AsyncMock), \
              patch("pathlib.Path.mkdir"):
@@ -2183,6 +2184,7 @@ class TestBrowserLifecycle:
 
         with patch.dict(os.environ, {"VNC_PORT": "9999"}):
             with patch.object(bt, "_find_chromium_binary", return_value="/usr/bin/chromium"), \
+                 patch.object(bt, "_inject_vnc_input_fix", new_callable=AsyncMock), \
                  patch("subprocess.Popen", side_effect=mock_popen), \
                  patch("asyncio.sleep", new_callable=AsyncMock), \
                  patch("pathlib.Path.mkdir"):

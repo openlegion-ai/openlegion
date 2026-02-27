@@ -35,6 +35,18 @@ class MeshClient:
         """True when this agent is not assigned to any project."""
         return self.project_name is None
 
+    def _scope_key(self, key: str) -> str:
+        """Prefix a blackboard key with the project namespace.
+
+        Project agents transparently read/write under ``projects/{name}/``
+        so that each project's blackboard data is isolated.  Standalone
+        agents (no project) pass keys through unchanged — but they are
+        blocked from the blackboard at both the tool and permission layers.
+        """
+        if self.project_name:
+            return f"projects/{self.project_name}/{key}"
+        return key
+
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             headers: dict[str, str] = {}
@@ -67,9 +79,10 @@ class MeshClient:
 
     async def read_blackboard(self, key: str) -> Optional[dict]:
         """Read a value from the shared blackboard."""
+        scoped = self._scope_key(key)
         client = await self._get_client()
         response = await client.get(
-            f"{self.mesh_url}/mesh/blackboard/{key}",
+            f"{self.mesh_url}/mesh/blackboard/{scoped}",
             params={"agent_id": self.agent_id},
             headers=self._trace_headers(),
         )
@@ -80,9 +93,10 @@ class MeshClient:
 
     async def write_blackboard(self, key: str, value: dict) -> dict:
         """Write a value to the shared blackboard."""
+        scoped = self._scope_key(key)
         client = await self._get_client()
         response = await client.put(
-            f"{self.mesh_url}/mesh/blackboard/{key}",
+            f"{self.mesh_url}/mesh/blackboard/{scoped}",
             params={"agent_id": self.agent_id},
             json=value,
             headers=self._trace_headers(),
@@ -92,14 +106,23 @@ class MeshClient:
 
     async def list_blackboard(self, prefix: str) -> list[dict]:
         """List blackboard entries by key prefix."""
+        scoped = self._scope_key(prefix)
         client = await self._get_client()
         response = await client.get(
             f"{self.mesh_url}/mesh/blackboard/",
-            params={"agent_id": self.agent_id, "prefix": prefix},
+            params={"agent_id": self.agent_id, "prefix": scoped},
             headers=self._trace_headers(),
         )
         response.raise_for_status()
-        return response.json()
+        entries = response.json()
+        # Strip project prefix from returned keys so agents see natural keys
+        if self.project_name:
+            scope = f"projects/{self.project_name}/"
+            for entry in entries:
+                k = entry.get("key", "")
+                if k.startswith(scope):
+                    entry["key"] = k[len(scope):]
+        return entries
 
     async def notify_user(self, message: str) -> None:
         """Send an unsolicited notification to the user via all channels."""

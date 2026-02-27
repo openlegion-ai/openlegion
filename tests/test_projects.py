@@ -168,10 +168,11 @@ class TestCreateProject:
     def test_create_with_members(self, tmp_path):
         projects_dir = tmp_path / "projects"
         perms_file = tmp_path / "permissions.json"
+        # Agents start with empty blackboard (standalone)
         perms_file.write_text(json.dumps({
             "permissions": {
-                "agent1": {"blackboard_read": ["context/*"], "blackboard_write": ["context/*"]},
-                "agent2": {"blackboard_read": ["context/*"], "blackboard_write": ["context/*"]},
+                "agent1": {"blackboard_read": [], "blackboard_write": []},
+                "agent2": {"blackboard_read": [], "blackboard_write": []},
             }
         }))
 
@@ -184,11 +185,12 @@ class TestCreateProject:
         meta = yaml.safe_load((projects_dir / "my-proj" / "metadata.yaml").read_text())
         assert meta["members"] == ["agent1", "agent2"]
 
-        # Check permissions were updated
+        # Only the project-specific pattern is granted (no shared patterns)
         perms = json.loads(perms_file.read_text())
-        assert "projects/my-proj/*" in perms["permissions"]["agent1"]["blackboard_read"]
-        assert "projects/my-proj/*" in perms["permissions"]["agent1"]["blackboard_write"]
-        assert "projects/my-proj/*" in perms["permissions"]["agent2"]["blackboard_read"]
+        assert perms["permissions"]["agent1"]["blackboard_read"] == ["projects/my-proj/*"]
+        assert perms["permissions"]["agent1"]["blackboard_write"] == ["projects/my-proj/*"]
+        assert perms["permissions"]["agent2"]["blackboard_read"] == ["projects/my-proj/*"]
+        assert perms["permissions"]["agent2"]["blackboard_write"] == ["projects/my-proj/*"]
 
     def test_create_moves_agent_from_existing_project(self, tmp_path):
         """Creating a project with members already in another project moves them."""
@@ -204,8 +206,8 @@ class TestCreateProject:
         perms_file.write_text(json.dumps({
             "permissions": {
                 "agent1": {
-                    "blackboard_read": ["context/*", "projects/old-proj/*"],
-                    "blackboard_write": ["context/*", "projects/old-proj/*"],
+                    "blackboard_read": ["projects/old-proj/*"],
+                    "blackboard_write": ["projects/old-proj/*"],
                 },
             }
         }))
@@ -224,10 +226,10 @@ class TestCreateProject:
         old_meta = yaml.safe_load((old_dir / "metadata.yaml").read_text())
         assert "agent1" not in old_meta["members"]
 
-        # Permissions updated
+        # Permissions updated: new project pattern present, old one gone
         perms = json.loads(perms_file.read_text())
-        assert "projects/new-proj/*" in perms["permissions"]["agent1"]["blackboard_read"]
-        assert "projects/old-proj/*" not in perms["permissions"]["agent1"]["blackboard_read"]
+        assert perms["permissions"]["agent1"]["blackboard_read"] == ["projects/new-proj/*"]
+        assert perms["permissions"]["agent1"]["blackboard_write"] == ["projects/new-proj/*"]
 
     def test_create_duplicate_raises(self, tmp_path):
         projects_dir = tmp_path / "projects"
@@ -257,8 +259,8 @@ class TestDeleteProject:
         perms_file.write_text(json.dumps({
             "permissions": {
                 "agent1": {
-                    "blackboard_read": ["context/*", "projects/doomed/*"],
-                    "blackboard_write": ["context/*", "projects/doomed/*"],
+                    "blackboard_read": ["projects/doomed/*"],
+                    "blackboard_write": ["projects/doomed/*"],
                 },
             }
         }))
@@ -271,10 +273,10 @@ class TestDeleteProject:
 
         assert not proj_dir.exists()
 
-        # Permissions cleaned up
+        # Agent becomes standalone — all blackboard permissions cleared
         perms = json.loads(perms_file.read_text())
-        assert "projects/doomed/*" not in perms["permissions"]["agent1"]["blackboard_read"]
-        assert "projects/doomed/*" not in perms["permissions"]["agent1"]["blackboard_write"]
+        assert perms["permissions"]["agent1"]["blackboard_read"] == []
+        assert perms["permissions"]["agent1"]["blackboard_write"] == []
 
     def test_delete_nonexistent_raises(self, tmp_path):
         with patch("src.cli.config.PROJECTS_DIR", tmp_path / "nope"):
@@ -292,11 +294,12 @@ class TestAddRemoveAgentProject:
         }))
 
         perms_file = tmp_path / "permissions.json"
+        # Standalone agent: no blackboard permissions
         perms_file.write_text(json.dumps({
             "permissions": {
                 "agent1": {
-                    "blackboard_read": ["context/*"],
-                    "blackboard_write": ["context/*"],
+                    "blackboard_read": [],
+                    "blackboard_write": [],
                 },
             }
         }))
@@ -314,8 +317,10 @@ class TestAddRemoveAgentProject:
         meta = yaml.safe_load((projects_dir / "proj1" / "metadata.yaml").read_text())
         assert "agent1" in meta["members"]
 
+        # Agent gets only project-scoped blackboard permissions
         perms = json.loads(perms_file.read_text())
-        assert "projects/proj1/*" in perms["permissions"]["agent1"]["blackboard_read"]
+        assert perms["permissions"]["agent1"]["blackboard_read"] == ["projects/proj1/*"]
+        assert perms["permissions"]["agent1"]["blackboard_write"] == ["projects/proj1/*"]
 
     def test_add_agent_idempotent(self, tmp_path):
         projects_dir, perms_file = self._setup(tmp_path)
@@ -329,6 +334,11 @@ class TestAddRemoveAgentProject:
 
         meta = yaml.safe_load((projects_dir / "proj1" / "metadata.yaml").read_text())
         assert meta["members"].count("agent1") == 1
+
+        # Pattern should not be duplicated
+        perms = json.loads(perms_file.read_text())
+        read_patterns = perms["permissions"]["agent1"]["blackboard_read"]
+        assert read_patterns.count("projects/proj1/*") == 1
 
     def test_add_to_nonexistent_project_raises(self, tmp_path):
         projects_dir = tmp_path / "projects"
@@ -355,8 +365,8 @@ class TestAddRemoveAgentProject:
         perms_file.write_text(json.dumps({
             "permissions": {
                 "agent1": {
-                    "blackboard_read": ["context/*", "projects/proj1/*"],
-                    "blackboard_write": ["context/*", "projects/proj1/*"],
+                    "blackboard_read": ["projects/proj1/*"],
+                    "blackboard_write": ["projects/proj1/*"],
                 },
             }
         }))
@@ -370,8 +380,10 @@ class TestAddRemoveAgentProject:
         meta = yaml.safe_load((proj_dir / "metadata.yaml").read_text())
         assert "agent1" not in meta["members"]
 
+        # Agent becomes standalone — all blackboard permissions cleared
         perms = json.loads(perms_file.read_text())
-        assert "projects/proj1/*" not in perms["permissions"]["agent1"]["blackboard_read"]
+        assert perms["permissions"]["agent1"]["blackboard_read"] == []
+        assert perms["permissions"]["agent1"]["blackboard_write"] == []
 
     def test_move_agent_between_projects(self, tmp_path):
         projects_dir = tmp_path / "projects"
@@ -387,8 +399,8 @@ class TestAddRemoveAgentProject:
         perms_file.write_text(json.dumps({
             "permissions": {
                 "agent1": {
-                    "blackboard_read": ["context/*", "projects/proj1/*"],
-                    "blackboard_write": ["context/*", "projects/proj1/*"],
+                    "blackboard_read": ["projects/proj1/*"],
+                    "blackboard_write": ["projects/proj1/*"],
                 },
             }
         }))
@@ -407,18 +419,20 @@ class TestAddRemoveAgentProject:
         meta2 = yaml.safe_load((projects_dir / "proj2" / "metadata.yaml").read_text())
         assert "agent1" in meta2["members"]
 
-        # Permissions updated
+        # Permissions updated: new project pattern only
         perms = json.loads(perms_file.read_text())
-        assert "projects/proj1/*" not in perms["permissions"]["agent1"]["blackboard_read"]
-        assert "projects/proj2/*" in perms["permissions"]["agent1"]["blackboard_read"]
+        assert perms["permissions"]["agent1"]["blackboard_read"] == ["projects/proj2/*"]
+        assert perms["permissions"]["agent1"]["blackboard_write"] == ["projects/proj2/*"]
 
 
 class TestBlackboardPermissions:
     def test_add_permissions(self, tmp_path):
+        """Adding project permissions grants only the project namespace pattern."""
         perms_file = tmp_path / "permissions.json"
+        # Start with empty blackboard (standalone agent)
         perms_file.write_text(json.dumps({
             "permissions": {
-                "bot": {"blackboard_read": ["context/*"], "blackboard_write": ["context/*"]},
+                "bot": {"blackboard_read": [], "blackboard_write": []},
             }
         }))
 
@@ -426,16 +440,19 @@ class TestBlackboardPermissions:
             _add_project_blackboard_permissions("bot", "marketing")
 
         perms = json.loads(perms_file.read_text())
-        assert "projects/marketing/*" in perms["permissions"]["bot"]["blackboard_read"]
-        assert "projects/marketing/*" in perms["permissions"]["bot"]["blackboard_write"]
+        read = perms["permissions"]["bot"]["blackboard_read"]
+        write = perms["permissions"]["bot"]["blackboard_write"]
+        assert read == ["projects/marketing/*"]
+        assert write == ["projects/marketing/*"]
 
     def test_remove_permissions(self, tmp_path):
+        """Removing project permissions clears ALL blackboard access."""
         perms_file = tmp_path / "permissions.json"
         perms_file.write_text(json.dumps({
             "permissions": {
                 "bot": {
-                    "blackboard_read": ["context/*", "projects/marketing/*"],
-                    "blackboard_write": ["context/*", "projects/marketing/*"],
+                    "blackboard_read": ["projects/marketing/*"],
+                    "blackboard_write": ["projects/marketing/*"],
                 },
             }
         }))
@@ -444,8 +461,8 @@ class TestBlackboardPermissions:
             _remove_project_blackboard_permissions("bot", "marketing")
 
         perms = json.loads(perms_file.read_text())
-        assert "projects/marketing/*" not in perms["permissions"]["bot"]["blackboard_read"]
-        assert "projects/marketing/*" not in perms["permissions"]["bot"]["blackboard_write"]
+        assert perms["permissions"]["bot"]["blackboard_read"] == []
+        assert perms["permissions"]["bot"]["blackboard_write"] == []
 
 
 class TestLoadConfigWithProjects:
@@ -511,12 +528,12 @@ class TestRemoveAgentCleansProject:
         perms_file.write_text(json.dumps({
             "permissions": {
                 "agent1": {
-                    "blackboard_read": ["context/*", "projects/proj1/*"],
-                    "blackboard_write": ["context/*", "projects/proj1/*"],
+                    "blackboard_read": ["projects/proj1/*"],
+                    "blackboard_write": ["projects/proj1/*"],
                 },
                 "agent2": {
-                    "blackboard_read": ["context/*", "projects/proj1/*"],
-                    "blackboard_write": ["context/*", "projects/proj1/*"],
+                    "blackboard_read": ["projects/proj1/*"],
+                    "blackboard_write": ["projects/proj1/*"],
                 },
             }
         }))
@@ -540,3 +557,200 @@ class TestRemoveAgentCleansProject:
         # agent1 removed from permissions
         perms = json.loads(perms_file.read_text())
         assert "agent1" not in perms["permissions"]
+
+
+class TestMeshClientKeyScoping:
+    """MeshClient transparently prefixes blackboard keys by project."""
+
+    def test_scope_key_with_project(self):
+        from src.agent.mesh_client import MeshClient
+        client = MeshClient("http://mesh:8420", "bot1", project_name="alpha")
+        assert client._scope_key("context/market") == "projects/alpha/context/market"
+        assert client._scope_key("goals/researcher") == "projects/alpha/goals/researcher"
+
+    def test_scope_key_standalone(self):
+        from src.agent.mesh_client import MeshClient
+        client = MeshClient("http://mesh:8420", "bot1", project_name=None)
+        assert client._scope_key("context/market") == "context/market"
+
+    def test_scope_key_empty(self):
+        from src.agent.mesh_client import MeshClient
+        client = MeshClient("http://mesh:8420", "bot1", project_name="alpha")
+        assert client._scope_key("") == "projects/alpha/"
+
+    def _mock_client(self, project_name, response_data, status_code=200):
+        """Create a MeshClient with mocked httpx transport."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.agent.mesh_client import MeshClient
+        client = MeshClient("http://mesh:8420", "bot1", project_name=project_name)
+        mock_http = MagicMock()
+        mock_http.is_closed = False
+        mock_resp = MagicMock()
+        mock_resp.status_code = status_code
+        mock_resp.json.return_value = response_data
+        mock_resp.raise_for_status = MagicMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.put = AsyncMock(return_value=mock_resp)
+        client._client = mock_http
+        client._trace_headers = lambda: {}
+        return client, mock_http
+
+    @pytest.mark.asyncio
+    async def test_read_blackboard_uses_scoped_key(self):
+        """read_blackboard sends the project-prefixed key in the URL."""
+        client, mock_http = self._mock_client(
+            "alpha", {"key": "projects/alpha/context/market", "value": {"data": 1}},
+        )
+        result = await client.read_blackboard("context/market")
+        url = mock_http.get.call_args[0][0]
+        assert "projects/alpha/context/market" in url
+        assert result["value"] == {"data": 1}
+
+    @pytest.mark.asyncio
+    async def test_write_blackboard_uses_scoped_key(self):
+        """write_blackboard sends the project-prefixed key in the URL."""
+        client, mock_http = self._mock_client(
+            "alpha", {"key": "projects/alpha/goals/v1", "version": 1},
+        )
+        await client.write_blackboard("goals/v1", {"objective": "test"})
+        url = mock_http.put.call_args[0][0]
+        assert "projects/alpha/goals/v1" in url
+
+    @pytest.mark.asyncio
+    async def test_list_blackboard_scopes_prefix_and_strips_keys(self):
+        """list_blackboard scopes the prefix and strips project prefix from returned keys."""
+        client, mock_http = self._mock_client("alpha", [
+            {"key": "projects/alpha/context/market", "value": {"data": 1}},
+            {"key": "projects/alpha/context/competitor", "value": {"data": 2}},
+        ])
+        entries = await client.list_blackboard("context/")
+        # Prefix was scoped in the request
+        params = mock_http.get.call_args[1]["params"]
+        assert params["prefix"] == "projects/alpha/context/"
+        # Keys were stripped in the response
+        assert entries[0]["key"] == "context/market"
+        assert entries[1]["key"] == "context/competitor"
+
+    @pytest.mark.asyncio
+    async def test_standalone_blackboard_no_scoping(self):
+        """Standalone agent's blackboard calls use raw keys (no prefix)."""
+        client, mock_http = self._mock_client(
+            None, {"key": "context/market", "value": {"data": 1}},
+        )
+        await client.read_blackboard("context/market")
+        url = mock_http.get.call_args[0][0]
+        # No project prefix — raw key in URL
+        assert "projects/" not in url
+        assert "context/market" in url
+
+
+class TestCrossProjectPermissionIsolation:
+    """Verify PermissionMatrix enforces cross-project isolation."""
+
+    def test_project_agent_can_access_own_namespace(self, tmp_path):
+        """Agent with projects/alpha/* can read/write under that namespace."""
+        from src.host.permissions import PermissionMatrix
+
+        perms_file = tmp_path / "perms.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {
+                "bot1": {
+                    "blackboard_read": ["projects/alpha/*"],
+                    "blackboard_write": ["projects/alpha/*"],
+                },
+            }
+        }))
+        pm = PermissionMatrix(config_path=str(perms_file))
+
+        assert pm.can_read_blackboard("bot1", "projects/alpha/context/market")
+        assert pm.can_read_blackboard("bot1", "projects/alpha/goals/v1")
+        assert pm.can_write_blackboard("bot1", "projects/alpha/tasks/todo")
+
+    def test_project_agent_cannot_access_other_project(self, tmp_path):
+        """Agent with projects/alpha/* CANNOT access projects/beta/*."""
+        from src.host.permissions import PermissionMatrix
+
+        perms_file = tmp_path / "perms.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {
+                "bot1": {
+                    "blackboard_read": ["projects/alpha/*"],
+                    "blackboard_write": ["projects/alpha/*"],
+                },
+            }
+        }))
+        pm = PermissionMatrix(config_path=str(perms_file))
+
+        assert not pm.can_read_blackboard("bot1", "projects/beta/context/market")
+        assert not pm.can_write_blackboard("bot1", "projects/beta/goals/v1")
+        assert not pm.can_read_blackboard("bot1", "projects/beta/anything")
+
+    def test_project_agent_cannot_access_global_keys(self, tmp_path):
+        """Agent with projects/alpha/* CANNOT access unprefixed global keys."""
+        from src.host.permissions import PermissionMatrix
+
+        perms_file = tmp_path / "perms.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {
+                "bot1": {
+                    "blackboard_read": ["projects/alpha/*"],
+                    "blackboard_write": ["projects/alpha/*"],
+                },
+            }
+        }))
+        pm = PermissionMatrix(config_path=str(perms_file))
+
+        assert not pm.can_read_blackboard("bot1", "context/market")
+        assert not pm.can_read_blackboard("bot1", "tasks/todo")
+        assert not pm.can_write_blackboard("bot1", "goals/v1")
+
+    def test_standalone_agent_has_no_blackboard_access(self, tmp_path):
+        """Standalone agent (empty patterns) cannot access any blackboard key."""
+        from src.host.permissions import PermissionMatrix
+
+        perms_file = tmp_path / "perms.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {
+                "solo": {
+                    "blackboard_read": [],
+                    "blackboard_write": [],
+                },
+            }
+        }))
+        pm = PermissionMatrix(config_path=str(perms_file))
+
+        assert not pm.can_read_blackboard("solo", "context/anything")
+        assert not pm.can_read_blackboard("solo", "projects/alpha/data")
+        assert not pm.can_write_blackboard("solo", "anything")
+
+    def test_two_projects_fully_isolated(self, tmp_path):
+        """Two agents in different projects have zero overlap in blackboard access."""
+        from src.host.permissions import PermissionMatrix
+
+        perms_file = tmp_path / "perms.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {
+                "alpha_worker": {
+                    "blackboard_read": ["projects/alpha/*"],
+                    "blackboard_write": ["projects/alpha/*"],
+                },
+                "beta_worker": {
+                    "blackboard_read": ["projects/beta/*"],
+                    "blackboard_write": ["projects/beta/*"],
+                },
+            }
+        }))
+        pm = PermissionMatrix(config_path=str(perms_file))
+
+        # alpha_worker can access alpha, not beta
+        assert pm.can_read_blackboard("alpha_worker", "projects/alpha/data")
+        assert not pm.can_read_blackboard("alpha_worker", "projects/beta/data")
+
+        # beta_worker can access beta, not alpha
+        assert pm.can_read_blackboard("beta_worker", "projects/beta/data")
+        assert not pm.can_read_blackboard("beta_worker", "projects/alpha/data")
+
+        # Neither can access global keys
+        assert not pm.can_read_blackboard("alpha_worker", "context/global")
+        assert not pm.can_read_blackboard("beta_worker", "context/global")

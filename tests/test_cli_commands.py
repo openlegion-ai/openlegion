@@ -1031,8 +1031,8 @@ class TestProjectCreate:
         }))
         perms_file.write_text(json.dumps({
             "permissions": {
-                "bot1": {"blackboard_read": ["context/*"], "blackboard_write": ["context/*"]},
-                "bot2": {"blackboard_read": ["context/*"], "blackboard_write": ["context/*"]},
+                "bot1": {"blackboard_read": [], "blackboard_write": []},
+                "bot2": {"blackboard_read": [], "blackboard_write": []},
             }
         }))
 
@@ -1166,8 +1166,8 @@ class TestProjectDelete:
         perms_file.write_text(json.dumps({
             "permissions": {
                 "bot1": {
-                    "blackboard_read": ["context/*", "projects/doomed/*"],
-                    "blackboard_write": ["context/*", "projects/doomed/*"],
+                    "blackboard_read": ["projects/doomed/*"],
+                    "blackboard_write": ["projects/doomed/*"],
                 },
             }
         }))

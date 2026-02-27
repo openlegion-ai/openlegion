@@ -329,8 +329,8 @@ def _add_agent_permissions(name: str) -> None:
         "can_message": can_message,
         "can_publish": ["*"] if collab else [f"{name}_complete"],
         "can_subscribe": ["*"] if collab else [],
-        "blackboard_read": ["context/*", "tasks/*", "goals/*", "signals/*", "artifacts/*"],
-        "blackboard_write": ["context/*", "goals/*", "signals/*", "artifacts/*"],
+        "blackboard_read": [],
+        "blackboard_write": [],
         "allowed_apis": ["llm"],
         "allowed_credentials": ["*"],
     }
@@ -572,32 +572,39 @@ def _remove_agent_from_project(project: str, agent: str) -> None:
 
 
 def _add_project_blackboard_permissions(agent: str, project: str) -> None:
-    """Add projects/<name>/* patterns to agent's blackboard permissions."""
+    """Grant blackboard access for a project member.
+
+    Only grants ``projects/{project}/*``.  The MeshClient auto-prefixes
+    all blackboard keys with the project namespace, so agents use natural
+    keys (``context/market``) which are transparently stored as
+    ``projects/{project}/context/market``.  This prevents cross-project
+    leakage — each project's data lives under its own namespace.
+    """
     perms = _load_permissions()
     agent_perms = perms.get("permissions", {}).get(agent)
     if agent_perms is None:
         return
-    pattern = f"projects/{project}/*"
+    project_pattern = f"projects/{project}/*"
     for field in ("blackboard_read", "blackboard_write"):
         patterns = agent_perms.get(field, [])
-        if pattern not in patterns:
-            patterns.append(pattern)
-            agent_perms[field] = patterns
+        if project_pattern not in patterns:
+            patterns.append(project_pattern)
+        agent_perms[field] = patterns
     _save_permissions(perms)
 
 
 def _remove_project_blackboard_permissions(agent: str, project: str) -> None:
-    """Remove projects/<name>/* patterns from agent's blackboard permissions."""
+    """Revoke all blackboard access when an agent leaves a project.
+
+    Clears the project namespace pattern, restoring the agent to
+    standalone state (no blackboard access).
+    """
     perms = _load_permissions()
     agent_perms = perms.get("permissions", {}).get(agent)
     if agent_perms is None:
         return
-    pattern = f"projects/{project}/*"
-    for field in ("blackboard_read", "blackboard_write"):
-        patterns = agent_perms.get(field, [])
-        if pattern in patterns:
-            patterns.remove(pattern)
-            agent_perms[field] = patterns
+    agent_perms["blackboard_read"] = []
+    agent_perms["blackboard_write"] = []
     _save_permissions(perms)
 
 
