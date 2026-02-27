@@ -94,7 +94,13 @@ class TelegramChannel(Channel):
                 logger.debug("Cleanup of previous app failed: %s", e)
             self._app = None
 
-        self._app = Application.builder().token(self.token).build()
+        self._app = (
+            Application.builder()
+            .token(self.token)
+            .connect_timeout(10.0)
+            .read_timeout(10.0)
+            .build()
+        )
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("allow", self._cmd_allow))
         self._app.add_handler(CommandHandler("revoke", self._cmd_revoke))
@@ -108,7 +114,20 @@ class TelegramChannel(Channel):
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
         )
 
-        await self._app.initialize()
+        # bot.get_me() during initialize() can time out on slow networks;
+        # retry transient errors only — permanent errors (InvalidToken) fail fast.
+        from telegram.error import NetworkError, RetryAfter
+
+        for attempt in range(3):
+            try:
+                await self._app.initialize()
+                break
+            except (NetworkError, RetryAfter) as err:
+                if attempt == 2:
+                    raise
+                wait = 2 * (attempt + 1)
+                logger.warning("Telegram init failed (%s), retry in %ds...", err, wait)
+                await asyncio.sleep(wait)
         await self._app.start()
         # Terminate any stale polling session left by a previous instance
         # (e.g. process killed without clean shutdown).  A quick getUpdates
