@@ -101,6 +101,14 @@ class TelegramChannel(Channel):
 
         await self._app.initialize()
         await self._app.start()
+        # Terminate any stale polling session left by a previous instance
+        # (e.g. process killed without clean shutdown).  A quick getUpdates
+        # call forces Telegram to drop the old long-poll connection.
+        try:
+            await self._app.bot.get_updates(offset=-1, timeout=0)
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
         await self._app.updater.start_polling(drop_pending_updates=True)
         owner = self._pairing.owner
         if owner:
@@ -112,9 +120,19 @@ class TelegramChannel(Channel):
 
     async def stop(self) -> None:
         if self._app:
-            await self._app.updater.stop()
-            await self._app.stop()
-            await self._app.shutdown()
+            try:
+                await self._app.updater.stop()
+            except Exception as e:
+                logger.debug("Error stopping Telegram updater: %s", e)
+            try:
+                await self._app.stop()
+            except Exception as e:
+                logger.debug("Error stopping Telegram app: %s", e)
+            try:
+                await self._app.shutdown()
+            except Exception as e:
+                logger.debug("Error shutting down Telegram app: %s", e)
+            self._app = None
             logger.info("Telegram channel stopped")
 
     async def send_notification(self, text: str) -> None:
