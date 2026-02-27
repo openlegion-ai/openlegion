@@ -104,6 +104,7 @@ class REPLSession:
             ("/broadcast <msg>",  "Send to all agents"),
             ("/steer <msg>",      "Redirect busy agent"),
             ("/reset",            "Clear conversation history"),
+            ("/history [agent]",  "Show recent messages"),
         ]),
         ("Agents", [
             ("/status",           "Show agents, models, and state"),
@@ -122,6 +123,7 @@ class REPLSession:
             ("/cron [list|del|pause|resume|run]", "Manage cron jobs"),
             ("/debug [trace]",                 "Show recent request traces"),
             ("/credential [add|list|remove]",  "Manage credentials"),
+            ("/logs [--level]",                "Show recent runtime logs"),
             ("/addkey [service]",              "Store a credential"),
             ("/removekey [name]",             "Remove a credential"),
             ("/help",                          "Show this help"),
@@ -154,6 +156,8 @@ class REPLSession:
             "/addkey":     (self._cmd_addkey,     "Store a credential"),
             "/removekey":  (self._cmd_removekey,  "Remove a credential"),
             "/reset":      (self._cmd_reset,      "Clear conversation history"),
+            "/history":    (self._cmd_history,    "Show recent messages"),
+            "/logs":       (self._cmd_logs,       "Show recent runtime logs"),
             "/project":    (self._cmd_project,    "Manage project context"),
             "/help":       (self._cmd_help,       "Show this help"),
         }
@@ -952,6 +956,79 @@ class REPLSession:
             click.echo(f"Conversation with '{self.current}' reset.")
         except Exception as e:
             click.echo(f"Error: {e}")
+
+    def _cmd_history(self, arg: str) -> None:
+        """Show recent messages for an agent."""
+        agent = arg.strip() if arg.strip() else self.current
+        if not agent:
+            click.echo("No active agent. Use /add to create one first.")
+            return
+        if agent not in self.ctx.agents:
+            click.echo(f"Agent '{agent}' not found.")
+            return
+        try:
+            data = self.ctx.transport.request_sync(
+                agent, "GET", "/chat/history", timeout=10,
+            )
+            messages = data.get("messages", [])
+            if not messages:
+                click.echo(f"  No message history for '{agent}'.")
+                return
+            click.echo(f"\n  Recent messages for '{agent}':\n")
+            for msg in messages[-20:]:  # Last 20 messages
+                role = msg.get("role", "?")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    # Handle multimodal content
+                    content = " ".join(
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                if len(content) > 120:
+                    content = content[:117] + "..."
+                prefix = "  You:" if role == "user" else f"  {agent}:"
+                click.echo(f"{prefix} {content}")
+            click.echo()
+        except Exception as e:
+            click.echo(f"  Error: {e}")
+
+    def _cmd_logs(self, arg: str) -> None:
+        """Show recent runtime logs."""
+        from src.cli import config as cli_config
+
+        log_path = cli_config.PROJECT_ROOT / ".openlegion.log"
+        if not log_path.exists():
+            click.echo("  No log file found.")
+            return
+
+        level_filter = None
+        lines_count = 30
+        parts = arg.strip().split()
+        for p in parts:
+            if p.startswith("--level="):
+                level_filter = p.split("=", 1)[1].upper()
+            elif p in ("debug", "info", "warning", "error"):
+                level_filter = p.upper()
+            elif p.isdigit():
+                lines_count = int(p)
+
+        all_lines = log_path.read_text().splitlines()
+        if level_filter:
+            all_lines = [line for line in all_lines if level_filter in line.upper()]
+
+        click.echo()
+        for line in all_lines[-lines_count:]:
+            # Color by level
+            if "ERROR" in line.upper():
+                click.echo(click.style(f"  {line}", fg="red"))
+            elif "WARNING" in line.upper():
+                click.echo(click.style(f"  {line}", fg="yellow"))
+            elif "DEBUG" in line.upper():
+                click.echo(click.style(f"  {line}", fg="bright_black"))
+            else:
+                click.echo(f"  {line}")
+        click.echo()
 
     def _cmd_edit(self, arg: str) -> None:
         """Interactive property editor for an agent. Auto-applies changes."""

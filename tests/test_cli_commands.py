@@ -1805,3 +1805,206 @@ class TestVersionCommand:
         result = runner.invoke(cli, ["version", "-v"])
         assert result.exit_code == 0
         assert "Python" in result.output
+
+
+# ── WP7: fleet operations ───────────────────────────────────
+
+
+class TestAgentRestart:
+    def test_agent_restart_all_no_mesh(self):
+        """agent restart --all exits non-zero when mesh is down."""
+        import httpx
+
+        with patch("httpx.get", side_effect=httpx.ConnectError("connection refused")):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["agent", "restart", "--all"])
+            assert result.exit_code != 0
+            assert "not running" in result.output.lower() or "mesh" in result.output.lower()
+
+    def test_agent_restart_no_names_no_flag(self):
+        """agent restart with no names or --all exits non-zero."""
+        from unittest.mock import MagicMock
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"bot1": "http://bot1:8400"}
+        with patch("httpx.get", return_value=mock_resp):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["agent", "restart"])
+            assert result.exit_code != 0
+            assert "no agents specified" in result.output.lower()
+
+
+class TestStatusEnhanced:
+    def test_status_wide(self, tmp_path):
+        """status --wide shows extra columns."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+        perms_file = tmp_path / "permissions.json"
+
+        config_file.write_text(yaml.dump({
+            "mesh": {"host": "0.0.0.0", "port": 8420},
+            "llm": {"default_model": "openai/gpt-4.1"},
+        }))
+        agents_file.write_text(yaml.dump({
+            "agents": {"bot1": {"role": "test", "model": "openai/gpt-4.1"}}
+        }))
+        perms_file.write_text(json.dumps({"permissions": {}}))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.PROJECT_ROOT", tmp_path),
+            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["status", "--wide"])
+            assert result.exit_code == 0
+            assert "Tasks" in result.output
+            assert "Cost" in result.output
+
+    def test_status_json(self, tmp_path):
+        """status --json outputs valid JSON."""
+        config_file = tmp_path / "mesh.yaml"
+        agents_file = tmp_path / "agents.yaml"
+        perms_file = tmp_path / "permissions.json"
+
+        config_file.write_text(yaml.dump({
+            "mesh": {"host": "0.0.0.0", "port": 8420},
+            "llm": {"default_model": "openai/gpt-4.1"},
+        }))
+        agents_file.write_text(yaml.dump({
+            "agents": {"bot1": {"role": "test", "model": "openai/gpt-4.1"}}
+        }))
+        perms_file.write_text(json.dumps({"permissions": {}}))
+
+        with (
+            patch("src.cli.config.CONFIG_FILE", config_file),
+            patch("src.cli.config.AGENTS_FILE", agents_file),
+            patch("src.cli.config.PERMISSIONS_FILE", perms_file),
+            patch("src.cli.config.PROJECT_ROOT", tmp_path),
+            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["status", "--json"])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert "agents" in data
+            assert "mesh_online" in data
+
+
+class TestWebhookCommand:
+    def test_webhook_list_no_mesh(self):
+        """webhook list exits non-zero when mesh is down."""
+        import httpx
+
+        with patch("httpx.get", side_effect=httpx.ConnectError("connection refused")):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["webhook", "list"])
+            assert result.exit_code != 0
+
+    def test_webhook_test_no_mesh(self):
+        """webhook test exits non-zero when mesh is down."""
+        import httpx
+
+        with patch("httpx.post", side_effect=httpx.ConnectError("connection refused")):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["webhook", "test", "my-hook"])
+            assert result.exit_code != 0
+
+
+class TestREPLHistory:
+    """Tests for /history command."""
+
+    def test_history_no_agent(self, capsys):
+        from src.cli.repl import REPLSession
+
+        repl = REPLSession(_MockCtx())
+        repl._cmd_history("")
+        out = capsys.readouterr().out
+        assert "no active agent" in out.lower()
+
+    def test_history_unknown_agent(self, capsys):
+        from src.cli.repl import REPLSession
+
+        ctx = _MockCtx(agent_urls={"bot": "http://bot:8400"})
+        repl = REPLSession(ctx)
+        repl._cmd_history("nonexistent")
+        out = capsys.readouterr().out
+        assert "not found" in out.lower()
+
+    def test_history_shows_messages(self, capsys):
+        from unittest.mock import MagicMock
+
+        from src.cli.repl import REPLSession
+
+        transport = MagicMock()
+        transport.request_sync.return_value = {
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+            ]
+        }
+        ctx = _MockCtx(agent_urls={"bot": "http://bot:8400"})
+        ctx.transport = transport
+        repl = REPLSession(ctx)
+        repl._cmd_history("bot")
+        out = capsys.readouterr().out
+        assert "Hello" in out
+        assert "Hi there!" in out
+
+    def test_history_truncates_long_content(self, capsys):
+        from unittest.mock import MagicMock
+
+        from src.cli.repl import REPLSession
+
+        transport = MagicMock()
+        transport.request_sync.return_value = {
+            "messages": [
+                {"role": "user", "content": "A" * 200},
+            ]
+        }
+        ctx = _MockCtx(agent_urls={"bot": "http://bot:8400"})
+        ctx.transport = transport
+        repl = REPLSession(ctx)
+        repl._cmd_history("bot")
+        out = capsys.readouterr().out
+        assert "..." in out
+
+
+class TestREPLLogs:
+    """Tests for /logs command."""
+
+    def test_logs_no_file(self, capsys, tmp_path):
+        from src.cli.repl import REPLSession
+
+        with patch("src.cli.config.PROJECT_ROOT", tmp_path):
+            repl = REPLSession(_MockCtx())
+            repl._cmd_logs("")
+            out = capsys.readouterr().out
+            assert "no log file" in out.lower()
+
+    def test_logs_shows_lines(self, capsys, tmp_path):
+        from src.cli.repl import REPLSession
+
+        log_file = tmp_path / ".openlegion.log"
+        log_file.write_text("INFO line1\nERROR line2\nDEBUG line3\n")
+        with patch("src.cli.config.PROJECT_ROOT", tmp_path):
+            repl = REPLSession(_MockCtx())
+            repl._cmd_logs("")
+            out = capsys.readouterr().out
+            assert "line1" in out
+            assert "line2" in out
+            assert "line3" in out
+
+    def test_logs_level_filter(self, capsys, tmp_path):
+        from src.cli.repl import REPLSession
+
+        log_file = tmp_path / ".openlegion.log"
+        log_file.write_text("INFO ok\nERROR bad\nINFO also ok\n")
+        with patch("src.cli.config.PROJECT_ROOT", tmp_path):
+            repl = REPLSession(_MockCtx())
+            repl._cmd_logs("error")
+            out = capsys.readouterr().out
+            assert "bad" in out
+            assert "ok" not in out

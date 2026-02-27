@@ -20,6 +20,11 @@ Agent management:
   agent list               List configured agents
   agent edit [name]        Change an agent's settings
   agent remove [name]      Remove an agent
+  agent restart [names]    Restart one or more agents
+
+Webhooks:
+  webhook list             List configured webhooks
+  webhook test <name>      Send a test payload to a webhook
 """
 
 from __future__ import annotations
@@ -276,6 +281,61 @@ def agent_remove(name: str | None, yes: bool):
 
     _remove_agent(name)
     click.echo(f"Removed agent '{name}'.")
+
+
+@agent.command("restart")
+@click.argument("names", nargs=-1)
+@click.option("--all", "restart_all", is_flag=True, help="Restart all agents")
+@click.option("--port", default=8420, type=int)
+def agent_restart(names: tuple, restart_all: bool, port: int):
+    """Restart one or more agents.
+
+    \b
+    Examples:
+      openlegion agent restart researcher coder
+      openlegion agent restart --all
+    """
+    import httpx
+
+    try:
+        resp = httpx.get(f"http://localhost:{port}/mesh/agents", timeout=5)
+        running_agents = resp.json()
+    except httpx.ConnectError:
+        click.echo("Mesh is not running. Start it first: openlegion start", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Error contacting mesh: {e}", err=True)
+        raise SystemExit(1)
+
+    if restart_all:
+        targets = list(running_agents.keys())
+    else:
+        targets = list(names)
+
+    if not targets:
+        click.echo("No agents specified. Use agent names or --all.")
+        raise SystemExit(1)
+
+    errors = 0
+    for name in targets:
+        if name not in running_agents:
+            click.echo(f"Agent '{name}' is not running. Skipping.")
+            continue
+        try:
+            resp = httpx.post(
+                f"http://localhost:{port}/dashboard/api/agents/{name}/restart",
+                timeout=120,
+            )
+            if resp.status_code == 200:
+                click.echo(f"Restarted '{name}'.")
+            else:
+                click.echo(f"Failed to restart '{name}': {resp.text}", err=True)
+                errors += 1
+        except Exception as e:
+            click.echo(f"Error restarting '{name}': {e}", err=True)
+            errors += 1
+    if errors:
+        raise SystemExit(1)
 
 
 # ── channels subgroup ────────────────────────────────────────
@@ -1368,71 +1428,183 @@ def _sync_detached_chat(agent_name: str, agent_url: str, message: str) -> None:
 
 @cli.command("status")
 @click.option("--port", default=8420, type=int, help="Mesh host port")
+@click.option("--wide", "-w", is_flag=True, help="Show additional columns")
+@click.option(
+    "--watch", "watch_interval", default=None, type=int,
+    help="Auto-refresh every N seconds",
+)
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def status(port: int, as_json: bool):
+def status(port: int, wide: bool, watch_interval: int | None, as_json: bool):
     """Show status of all agents."""
     import httpx
 
-    cfg = _load_config()
-    configured = cfg.get("agents", {})
+    def _collect_status():
+        cfg = _load_config()
+        configured = cfg.get("agents", {})
+        mesh_agents: dict = {}
+        mesh_online = False
+        try:
+            resp = httpx.get(f"http://localhost:{port}/mesh/agents", timeout=5)
+            mesh_agents = resp.json()
+            mesh_online = True
+        except httpx.ConnectError:
+            pass
+        except Exception as e:
+            logger.debug("Error checking mesh: %s", e)
 
-    mesh_agents: dict = {}
-    mesh_online = False
-    try:
-        resp = httpx.get(f"http://localhost:{port}/mesh/agents", timeout=5)
-        mesh_agents = resp.json()
-        mesh_online = True
-    except httpx.ConnectError:
-        pass
-    except Exception as e:
-        logger.debug("Error checking mesh: %s", e)
-
-    if not configured and not mesh_agents:
-        if as_json:
-            click.echo(_json.dumps({"agents": [], "mesh_online": mesh_online}))
-            return
-        click.echo("No agents configured. Run: openlegion start")
-        return
-
-    all_names = sorted(set(list(configured.keys()) + list(mesh_agents.keys())))
-
-    # Collect agent data for both JSON and table output
-    agents_data = []
-    for name in all_names:
-        role = configured.get(name, {}).get("role", "n/a")
-
-        if name in mesh_agents:
-            agent_url = mesh_agents[name]
-            if isinstance(agent_url, dict):
-                agent_url = agent_url.get("url", "")
-            try:
-                sr = httpx.get(f"{agent_url}/status", timeout=3)
-                state = sr.json().get("state", "running")
-            except Exception as e:
-                logger.debug("Agent status check failed for %s: %s", name, e)
-                state = "unreachable"
-        else:
+        all_names = sorted(set(list(configured.keys()) + list(mesh_agents.keys())))
+        agents_data = []
+        for name in all_names:
+            role = configured.get(name, {}).get("role", "n/a")
+            if len(role) > 20:
+                role = role[:17] + "..."
             state = "stopped"
+            tasks = 0
+            cost = 0.0
+            if name in mesh_agents:
+                agent_url = mesh_agents[name]
+                if isinstance(agent_url, dict):
+                    agent_url = agent_url.get("url", "")
+                try:
+                    sr = httpx.get(f"{agent_url}/status", timeout=3)
+                    sdata = sr.json()
+                    state = sdata.get("state", "running")
+                    tasks = sdata.get("tasks_completed", 0)
+                except Exception:
+                    state = "unreachable"
+                # Fetch cost data only when wide output is requested
+                if wide:
+                    try:
+                        cr = httpx.get(
+                            f"http://localhost:{port}/dashboard/api/agents/{name}",
+                            timeout=3,
+                        )
+                        cdata = cr.json()
+                        cost = cdata.get("spend_today", {}).get("cost", 0)
+                    except Exception:
+                        pass
+            agents_data.append({
+                "name": name, "role": role, "status": state,
+                "tasks": tasks, "cost": cost,
+            })
+        return agents_data, mesh_online, configured
 
-        agents_data.append({"name": name, "role": role, "status": state})
+    def _print_status(agents_data, mesh_online, _configured):
+        if not agents_data:
+            click.echo("No agents configured. Run: openlegion start")
+            return
+        if wide:
+            click.echo(
+                f"{'Agent':<16} {'Role':<20} {'Status':<12} {'Tasks':<8} {'Cost'}"
+            )
+            click.echo("-" * 65)
+            for a in agents_data:
+                cost_str = f"${a['cost']:.4f}" if a["cost"] else "-"
+                click.echo(
+                    f"{a['name']:<16} {a['role']:<20} {a['status']:<12} "
+                    f"{a['tasks']:<8} {cost_str}"
+                )
+        else:
+            click.echo(f"{'Agent':<16} {'Role':<20} {'Status':<12}")
+            click.echo("-" * 48)
+            for a in agents_data:
+                click.echo(f"{a['name']:<16} {a['role']:<20} {a['status']:<12}")
+        if not mesh_online:
+            click.echo("\nMesh is not running. Start with: openlegion start")
 
     if as_json:
-        click.echo(
-            _json.dumps({"agents": agents_data, "mesh_online": mesh_online})
-        )
+        import json as _json
+
+        agents_data, mesh_online, _ = _collect_status()
+        click.echo(_json.dumps({"agents": agents_data, "mesh_online": mesh_online}))
         return
 
-    click.echo(f"{'Agent':<16} {'Role':<20} {'Status':<12}")
-    click.echo("-" * 48)
-    for entry in agents_data:
-        role = entry["role"]
-        # Truncate long role names to keep columns aligned
-        if len(role) > 20:
-            role = role[:17] + "..."
-        click.echo(f"{entry['name']:<16} {role:<20} {entry['status']:<12}")
+    if watch_interval:
+        import time
 
-    if not mesh_online:
-        click.echo("\nMesh is not running. Start with: openlegion start")
+        try:
+            while True:
+                click.clear()
+                agents_data, mesh_online, configured = _collect_status()
+                _print_status(agents_data, mesh_online, configured)
+                click.echo(
+                    f"\nRefreshing every {watch_interval}s... (Ctrl+C to stop)"
+                )
+                time.sleep(watch_interval)
+        except KeyboardInterrupt:
+            pass
+        return
+
+    agents_data, mesh_online, configured = _collect_status()
+    _print_status(agents_data, mesh_online, configured)
+
+
+# ── webhook ─────────────────────────────────────────────────
+
+
+@cli.group(invoke_without_command=True)
+@click.pass_context
+def webhook(ctx):
+    """Manage webhooks (list, test)."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(webhook_list)
+
+
+@webhook.command("list")
+@click.option("--port", default=8420, type=int)
+def webhook_list(port: int):
+    """List configured webhooks."""
+    import httpx
+
+    try:
+        resp = httpx.get(
+            f"http://localhost:{port}/dashboard/api/webhooks", timeout=5
+        )
+        if resp.status_code == 404:
+            click.echo("No webhook endpoints available.")
+            return
+        webhooks = resp.json()
+        if not webhooks:
+            click.echo("No webhooks configured.")
+            return
+        click.echo(f"{'Name':<20} {'URL'}")
+        click.echo("-" * 50)
+        for wh in webhooks if isinstance(webhooks, list) else []:
+            click.echo(f"{wh.get('name', '?'):<20} {wh.get('url', '')}")
+    except httpx.ConnectError:
+        click.echo("Mesh is not running.", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+
+
+@webhook.command("test")
+@click.argument("name")
+@click.option("--port", default=8420, type=int)
+def webhook_test(name: str, port: int):
+    """Send a test payload to a webhook."""
+    from urllib.parse import quote
+
+    import httpx
+
+    try:
+        resp = httpx.post(
+            f"http://localhost:{port}/dashboard/api/webhooks/{quote(name, safe='')}/test",
+            json={"test": True, "source": "cli"},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            click.echo(f"Webhook '{name}' test: OK")
+        elif resp.status_code == 404:
+            click.echo(f"Webhook '{name}' not found.", err=True)
+            raise SystemExit(1)
+        else:
+            click.echo(f"Webhook '{name}' test failed: {resp.text}", err=True)
+    except httpx.ConnectError:
+        click.echo("Mesh is not running.", err=True)
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
 
 
 # ── stop ─────────────────────────────────────────────────────
