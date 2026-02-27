@@ -1799,7 +1799,7 @@ function dashboard() {
 
     // ── Broadcast ────────────────────────────────────────
 
-    async sendBroadcast() {
+    sendBroadcast() {
       const msg = (this.broadcastMessage || '').trim();
       if (!msg) return;
       const targets = this.filteredAgents.map(a => a.id);
