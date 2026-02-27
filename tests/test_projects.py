@@ -577,3 +577,180 @@ class TestMeshClientKeyScoping:
         from src.agent.mesh_client import MeshClient
         client = MeshClient("http://mesh:8420", "bot1", project_name="alpha")
         assert client._scope_key("") == "projects/alpha/"
+
+    def _mock_client(self, project_name, response_data, status_code=200):
+        """Create a MeshClient with mocked httpx transport."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.agent.mesh_client import MeshClient
+        client = MeshClient("http://mesh:8420", "bot1", project_name=project_name)
+        mock_http = MagicMock()
+        mock_http.is_closed = False
+        mock_resp = MagicMock()
+        mock_resp.status_code = status_code
+        mock_resp.json.return_value = response_data
+        mock_resp.raise_for_status = MagicMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.put = AsyncMock(return_value=mock_resp)
+        client._client = mock_http
+        client._trace_headers = lambda: {}
+        return client, mock_http
+
+    @pytest.mark.asyncio
+    async def test_read_blackboard_uses_scoped_key(self):
+        """read_blackboard sends the project-prefixed key in the URL."""
+        client, mock_http = self._mock_client(
+            "alpha", {"key": "projects/alpha/context/market", "value": {"data": 1}},
+        )
+        result = await client.read_blackboard("context/market")
+        url = mock_http.get.call_args[0][0]
+        assert "projects/alpha/context/market" in url
+        assert result["value"] == {"data": 1}
+
+    @pytest.mark.asyncio
+    async def test_write_blackboard_uses_scoped_key(self):
+        """write_blackboard sends the project-prefixed key in the URL."""
+        client, mock_http = self._mock_client(
+            "alpha", {"key": "projects/alpha/goals/v1", "version": 1},
+        )
+        await client.write_blackboard("goals/v1", {"objective": "test"})
+        url = mock_http.put.call_args[0][0]
+        assert "projects/alpha/goals/v1" in url
+
+    @pytest.mark.asyncio
+    async def test_list_blackboard_scopes_prefix_and_strips_keys(self):
+        """list_blackboard scopes the prefix and strips project prefix from returned keys."""
+        client, mock_http = self._mock_client("alpha", [
+            {"key": "projects/alpha/context/market", "value": {"data": 1}},
+            {"key": "projects/alpha/context/competitor", "value": {"data": 2}},
+        ])
+        entries = await client.list_blackboard("context/")
+        # Prefix was scoped in the request
+        params = mock_http.get.call_args[1]["params"]
+        assert params["prefix"] == "projects/alpha/context/"
+        # Keys were stripped in the response
+        assert entries[0]["key"] == "context/market"
+        assert entries[1]["key"] == "context/competitor"
+
+    @pytest.mark.asyncio
+    async def test_standalone_blackboard_no_scoping(self):
+        """Standalone agent's blackboard calls use raw keys (no prefix)."""
+        client, mock_http = self._mock_client(
+            None, {"key": "context/market", "value": {"data": 1}},
+        )
+        await client.read_blackboard("context/market")
+        url = mock_http.get.call_args[0][0]
+        # No project prefix — raw key in URL
+        assert "projects/" not in url
+        assert "context/market" in url
+
+
+class TestCrossProjectPermissionIsolation:
+    """Verify PermissionMatrix enforces cross-project isolation."""
+
+    def test_project_agent_can_access_own_namespace(self, tmp_path):
+        """Agent with projects/alpha/* can read/write under that namespace."""
+        from src.host.permissions import PermissionMatrix
+
+        perms_file = tmp_path / "perms.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {
+                "bot1": {
+                    "blackboard_read": ["projects/alpha/*"],
+                    "blackboard_write": ["projects/alpha/*"],
+                },
+            }
+        }))
+        pm = PermissionMatrix(config_path=str(perms_file))
+
+        assert pm.can_read_blackboard("bot1", "projects/alpha/context/market")
+        assert pm.can_read_blackboard("bot1", "projects/alpha/goals/v1")
+        assert pm.can_write_blackboard("bot1", "projects/alpha/tasks/todo")
+
+    def test_project_agent_cannot_access_other_project(self, tmp_path):
+        """Agent with projects/alpha/* CANNOT access projects/beta/*."""
+        from src.host.permissions import PermissionMatrix
+
+        perms_file = tmp_path / "perms.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {
+                "bot1": {
+                    "blackboard_read": ["projects/alpha/*"],
+                    "blackboard_write": ["projects/alpha/*"],
+                },
+            }
+        }))
+        pm = PermissionMatrix(config_path=str(perms_file))
+
+        assert not pm.can_read_blackboard("bot1", "projects/beta/context/market")
+        assert not pm.can_write_blackboard("bot1", "projects/beta/goals/v1")
+        assert not pm.can_read_blackboard("bot1", "projects/beta/anything")
+
+    def test_project_agent_cannot_access_global_keys(self, tmp_path):
+        """Agent with projects/alpha/* CANNOT access unprefixed global keys."""
+        from src.host.permissions import PermissionMatrix
+
+        perms_file = tmp_path / "perms.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {
+                "bot1": {
+                    "blackboard_read": ["projects/alpha/*"],
+                    "blackboard_write": ["projects/alpha/*"],
+                },
+            }
+        }))
+        pm = PermissionMatrix(config_path=str(perms_file))
+
+        assert not pm.can_read_blackboard("bot1", "context/market")
+        assert not pm.can_read_blackboard("bot1", "tasks/todo")
+        assert not pm.can_write_blackboard("bot1", "goals/v1")
+
+    def test_standalone_agent_has_no_blackboard_access(self, tmp_path):
+        """Standalone agent (empty patterns) cannot access any blackboard key."""
+        from src.host.permissions import PermissionMatrix
+
+        perms_file = tmp_path / "perms.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {
+                "solo": {
+                    "blackboard_read": [],
+                    "blackboard_write": [],
+                },
+            }
+        }))
+        pm = PermissionMatrix(config_path=str(perms_file))
+
+        assert not pm.can_read_blackboard("solo", "context/anything")
+        assert not pm.can_read_blackboard("solo", "projects/alpha/data")
+        assert not pm.can_write_blackboard("solo", "anything")
+
+    def test_two_projects_fully_isolated(self, tmp_path):
+        """Two agents in different projects have zero overlap in blackboard access."""
+        from src.host.permissions import PermissionMatrix
+
+        perms_file = tmp_path / "perms.json"
+        perms_file.write_text(json.dumps({
+            "permissions": {
+                "alpha_worker": {
+                    "blackboard_read": ["projects/alpha/*"],
+                    "blackboard_write": ["projects/alpha/*"],
+                },
+                "beta_worker": {
+                    "blackboard_read": ["projects/beta/*"],
+                    "blackboard_write": ["projects/beta/*"],
+                },
+            }
+        }))
+        pm = PermissionMatrix(config_path=str(perms_file))
+
+        # alpha_worker can access alpha, not beta
+        assert pm.can_read_blackboard("alpha_worker", "projects/alpha/data")
+        assert not pm.can_read_blackboard("alpha_worker", "projects/beta/data")
+
+        # beta_worker can access beta, not alpha
+        assert pm.can_read_blackboard("beta_worker", "projects/beta/data")
+        assert not pm.can_read_blackboard("beta_worker", "projects/alpha/data")
+
+        # Neither can access global keys
+        assert not pm.can_read_blackboard("alpha_worker", "context/global")
+        assert not pm.can_read_blackboard("beta_worker", "context/global")
