@@ -1,9 +1,9 @@
-"""Browser automation via Playwright CDP.
+"""Browser automation via Patchright/Playwright CDP.
 
 Every agent gets Chrome + KasmVNC by default.  Chrome runs as a subprocess
-on the X display for VNC interaction; Playwright connects on-demand via CDP
-for programmatic control, then disconnects after each operation so Chrome
-runs clean for manual use.
+on the X display for VNC interaction; Patchright (stealth Playwright fork)
+connects on-demand via CDP for programmatic control, then disconnects after
+each operation so Chrome runs clean for manual use.
 """
 
 from __future__ import annotations
@@ -228,12 +228,16 @@ async def _launch_persistent():
     """
     global _pw
     try:
-        from playwright.async_api import async_playwright
+        from patchright.async_api import async_playwright
     except ImportError:
-        raise RuntimeError(
-            "playwright is not installed. The agent container must include "
-            "playwright and chromium. See Dockerfile.agent."
-        )
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            raise RuntimeError(
+                "Neither patchright nor playwright is installed. The agent "
+                "container must include patchright (or playwright) and "
+                "chromium. See Dockerfile.agent."
+            )
     _pw = await async_playwright().start()
     browser = await _pw.chromium.connect_over_cdp(
         "http://localhost:9222", timeout=10000,
@@ -375,7 +379,10 @@ async def _inject_vnc_input_fix():
     The CDP connection is closed immediately after registration.
     """
     try:
-        from playwright.async_api import async_playwright
+        try:
+            from patchright.async_api import async_playwright
+        except ImportError:
+            from playwright.async_api import async_playwright
         pw = await async_playwright().start()
         browser = await pw.chromium.connect_over_cdp("http://127.0.0.1:9222")
         cdp = await browser.contexts[0].new_cdp_session(browser.contexts[0].pages[0])
@@ -635,6 +642,40 @@ async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -
                     "status": response.status if response else 0,
                     "content": _redact_credentials(text[:50000]),
                 }
+                # Auto-detect and solve CAPTCHAs before returning.
+                try:
+                    from src.agent.builtins.captcha import (
+                        detect_captcha,
+                        inject_captcha_token,
+                        solve_captcha,
+                    )
+
+                    captcha_info = await detect_captcha(page)
+                    if captcha_info:
+                        token = None
+                        if mesh_client:
+                            token = await solve_captcha(
+                                captcha_info, page.url, mesh_client,
+                            )
+                        if token:
+                            await inject_captcha_token(
+                                page, captcha_info, token,
+                            )
+                            await page.wait_for_timeout(1000)
+                            text = await page.inner_text("body")
+                            result["content"] = _redact_credentials(
+                                text[:50000],
+                            )
+                            result["captcha_solved"] = captcha_info["type"]
+                        else:
+                            result["captcha_detected"] = captcha_info["type"]
+                            result["captcha_note"] = (
+                                "CAPTCHA detected but could not be solved "
+                                "automatically. Ensure 2captcha_key or "
+                                "capsolver_key is set in the vault."
+                            )
+                except Exception as captcha_exc:
+                    logger.debug("CAPTCHA auto-solve error: %s", captcha_exc)
                 # Disconnect CDP so Chrome runs clean for VNC interaction.
                 await _disconnect_cdp()
                 return result
@@ -1049,6 +1090,67 @@ async def browser_evaluate(script: str, *, mesh_client=None) -> dict:
                 ]
             await _disconnect_cdp()
             return {"result": result}
+        except Exception as e:
+            await _disconnect_cdp()
+            return {"error": str(e)}
+
+
+@skill(
+    name="browser_solve_captcha",
+    description=(
+        "Detect and solve a CAPTCHA on the current page. Supports reCAPTCHA "
+        "v2/v3/Enterprise, hCaptcha, and Cloudflare Turnstile. Requires a "
+        "CAPTCHA API key in the vault (2captcha_key or capsolver_key)."
+    ),
+    parameters={},
+)
+async def browser_solve_captcha(*, mesh_client=None) -> dict:
+    """Detect and solve a CAPTCHA on the current page."""
+    from src.agent.builtins.captcha import (
+        detect_captcha,
+        inject_captcha_token,
+        solve_captcha,
+    )
+
+    async with _page_op_lock:
+        try:
+            page = await _get_page(mesh_client=mesh_client)
+            captcha_info = await detect_captcha(page)
+            if not captcha_info:
+                await _disconnect_cdp()
+                return {"status": "no_captcha", "message": "No CAPTCHA detected on the current page."}
+
+            if not mesh_client:
+                await _disconnect_cdp()
+                return {
+                    "status": "no_client",
+                    "captcha_type": captcha_info["type"],
+                    "message": "Mesh client unavailable — cannot resolve vault keys.",
+                }
+
+            token = await solve_captcha(captcha_info, page.url, mesh_client)
+            if not token:
+                await _disconnect_cdp()
+                return {
+                    "status": "solve_failed",
+                    "captcha_type": captcha_info["type"],
+                    "message": (
+                        "CAPTCHA detected but could not be solved. "
+                        "Ensure 2captcha_key or capsolver_key is set "
+                        "in the vault."
+                    ),
+                }
+
+            injected = await inject_captcha_token(page, captcha_info, token)
+            if injected:
+                await page.wait_for_timeout(1000)
+
+            await _disconnect_cdp()
+            return {
+                "status": "solved",
+                "captcha_type": captcha_info["type"],
+                "injected": injected,
+            }
         except Exception as e:
             await _disconnect_cdp()
             return {"error": str(e)}
