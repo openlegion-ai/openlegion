@@ -362,9 +362,19 @@ class SetupWizard:
             except Exception as e:
                 if isinstance(e, getattr(litellm, "PermissionDeniedError", type(None))):
                     return False
-                if isinstance(e, (litellm.Timeout, litellm.APIConnectionError,
-                                  litellm.RateLimitError, litellm.ServiceUnavailableError)):
+                # Some providers wrap auth errors as BadRequest/APIConnection
+                emsg = str(e).lower()
+                _auth_keywords = ("invalid api key", "invalid key", "invalid x-api-key",
+                                  "authentication fail", "login fail", "unauthorized",
+                                  "api key", "api_key", "secret key")
+                if any(kw in emsg for kw in _auth_keywords):
+                    return False
+                if isinstance(e, (litellm.Timeout, litellm.RateLimitError,
+                                  litellm.ServiceUnavailableError)):
                     logger.debug("API key validation skipped due to transient error: %s", e)
+                    return True
+                if isinstance(e, litellm.APIConnectionError):
+                    logger.debug("API key validation skipped due to connection error: %s", e)
                     return True
                 # Unknown errors — default to invalid (safe default)
                 logger.debug("API key validation failed: %s", e)

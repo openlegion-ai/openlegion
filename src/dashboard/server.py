@@ -797,8 +797,18 @@ def create_dashboard_router(
                 return {"valid": False, "skipped": False, "reason": "Invalid API key"}
             if isinstance(e, getattr(litellm, "PermissionDeniedError", type(None))):
                 return {"valid": False, "skipped": False, "reason": "Permission denied — check API key"}
-            if isinstance(e, (litellm.Timeout, litellm.APIConnectionError,
-                              litellm.RateLimitError, litellm.ServiceUnavailableError)):
+            # Some providers wrap auth errors as BadRequest/APIConnection —
+            # check message before treating as transient
+            emsg = str(e).lower()
+            _auth_keywords = ("invalid api key", "invalid key", "invalid x-api-key",
+                              "authentication fail", "login fail", "unauthorized",
+                              "api key", "api_key", "secret key")
+            if any(kw in emsg for kw in _auth_keywords):
+                return {"valid": False, "skipped": False, "reason": "Invalid API key"}
+            if isinstance(e, (litellm.Timeout, litellm.RateLimitError,
+                              litellm.ServiceUnavailableError)):
+                return {"valid": True, "skipped": True, "reason": str(e)[:200]}
+            if isinstance(e, litellm.APIConnectionError):
                 return {"valid": True, "skipped": True, "reason": str(e)[:200]}
             return {"valid": False, "skipped": False, "reason": f"Validation failed: {str(e)[:200]}"}
 
