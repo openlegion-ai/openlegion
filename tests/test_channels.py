@@ -7,9 +7,22 @@ agent name labels on responses, and notification push.
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 from src.channels.base import Channel, chunk_text
+
+try:
+    from telegram.error import Conflict, TelegramError
+
+    from src.channels.telegram import TelegramChannel
+
+    _has_telegram = True
+except ImportError:
+    _has_telegram = False
 
 # ── Test concrete channel ─────────────────────────────────────
 
@@ -546,12 +559,6 @@ class TestResetNotAvailable:
 
 # ── TelegramChannel unit tests ──────────────────────────────────
 
-import tempfile
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
-
-from src.channels.telegram import TelegramChannel
-
 
 def _make_tg_channel(tmp_path: Path | None = None, **overrides) -> TelegramChannel:
     """Create a TelegramChannel with stubbed callbacks for unit testing."""
@@ -576,6 +583,7 @@ def _make_tg_channel(tmp_path: Path | None = None, **overrides) -> TelegramChann
     return ch
 
 
+@pytest.mark.skipif(not _has_telegram, reason="python-telegram-bot not installed")
 class TestTelegramShutdownApp:
     """Test _shutdown_app handles all lifecycle states."""
 
@@ -641,6 +649,7 @@ class TestTelegramShutdownApp:
         assert ch._app is None
 
 
+@pytest.mark.skipif(not _has_telegram, reason="python-telegram-bot not installed")
 class TestTelegramClearStalePolling:
     """Test _clear_stale_polling invalidation rounds."""
 
@@ -680,6 +689,7 @@ class TestTelegramClearStalePolling:
         assert bot.get_updates.await_count == 3
 
 
+@pytest.mark.skipif(not _has_telegram, reason="python-telegram-bot not installed")
 class TestTelegramPollingErrorCallback:
     """Test _on_polling_error — MUST be sync (not async)."""
 
@@ -690,7 +700,6 @@ class TestTelegramPollingErrorCallback:
         assert not asyncio.iscoroutinefunction(ch._on_polling_error)
 
     def test_conflict_logs_warning(self, caplog):
-        from telegram.error import Conflict
         ch = _make_tg_channel()
         import logging
         with caplog.at_level(logging.WARNING):
@@ -698,7 +707,6 @@ class TestTelegramPollingErrorCallback:
         assert "polling conflict" in caplog.text.lower()
 
     def test_other_error_logs_error(self, caplog):
-        from telegram.error import TelegramError
         ch = _make_tg_channel()
         import logging
         with caplog.at_level(logging.ERROR):
@@ -706,14 +714,13 @@ class TestTelegramPollingErrorCallback:
         assert "something else" in caplog.text
 
 
+@pytest.mark.skipif(not _has_telegram, reason="python-telegram-bot not installed")
 class TestTelegramStartConflictRetry:
     """Test the Conflict retry loop in start()."""
 
     @pytest.mark.asyncio
     async def test_start_retries_on_conflict(self):
         """start() retries start_polling up to 3 times on Conflict."""
-        from telegram.error import Conflict
-
         ch = _make_tg_channel()
 
         # Mock the Application and its lifecycle
@@ -750,8 +757,6 @@ class TestTelegramStartConflictRetry:
     @pytest.mark.asyncio
     async def test_start_raises_after_max_conflict_retries(self):
         """start() raises Conflict after 3 failed attempts."""
-        from telegram.error import Conflict
-
         ch = _make_tg_channel()
 
         app = MagicMock()
@@ -780,6 +785,7 @@ class TestTelegramStartConflictRetry:
         assert updater.start_polling.await_count == 3
 
 
+@pytest.mark.skipif(not _has_telegram, reason="python-telegram-bot not installed")
 class TestTelegramStop:
     """Test stop() delegates to _shutdown_app and logs."""
 
