@@ -280,7 +280,7 @@ openlegion/
 │   │       ├── exec_tool.py     # Shell execution
 │   │       ├── file_tool.py     # File operations
 │   │       ├── http_tool.py     # HTTP requests
-│   │       ├── browser_tool.py  # Playwright browser
+│   │       ├── browser_tool.py  # Patchright browser
 │   │       ├── memory_tool.py   # Memory search/save/recall
 │   │       ├── mesh_tool.py     # Blackboard, pub/sub, artifacts, cron
 │   │       ├── vault_tool.py    # Credential vault (blind storage)
@@ -303,9 +303,9 @@ openlegion/
 │   │   ├── failover.py          # LLM model failover logic
 │   │   ├── webhooks.py          # Webhook manager
 │   │   ├── watchers.py          # File watchers
-│   │   ├── containers.py        # Container management facade
+│   │   ├── containers.py        # Backward-compat alias for DockerBackend
 │   │   ├── traces.py            # Request tracing and diagnostics
-│   │   └── transcript.py        # Conversation transcript storage
+│   │   └── transcript.py        # Provider-specific transcript sanitization
 │   ├── channels/                # Messaging adapters
 │   │   ├── base.py              # Abstract channel
 │   │   ├── telegram.py          # Telegram bot
@@ -338,7 +338,7 @@ openlegion/
 │   ├── permissions.json
 │   ├── cron.json
 │   └── workflows/
-├── tests/                       # Test suite (1368 tests)
+├── tests/                       # Test suite (1550 tests)
 │   └── fixtures/                # Test fixtures (echo MCP server, etc.)
 ├── Dockerfile.agent             # Agent container image
 └── pyproject.toml               # Project metadata
@@ -369,7 +369,7 @@ openlegion/
 | `pydantic` | Type validation |
 | `sqlite-vec` | Vector search for memory |
 | `mcp` | Model Context Protocol client |
-| `playwright` | Browser automation (Chromium via CDP) |
+| `patchright` | Browser automation (Chromium via CDP) |
 
 ### Optional
 

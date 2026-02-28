@@ -24,11 +24,11 @@ All file operations are scoped to `/data` inside the container. Path traversal i
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `http_request` | `url`, `method`, `headers`, `body`, `timeout` | Make HTTP requests (GET/POST/PUT/DELETE/PATCH). Supports `$CRED{name}` handles in URL, headers, and body for credential-blind API calls. Resolved credentials are redacted from responses. Timeout default: 30s. |
+| `http_request` | `url`, `method`, `headers`, `body`, `timeout` | Make HTTP requests (GET/POST/PUT/DELETE/PATCH). Supports `$CRED{name}` handles in URL, headers, and body for credential-blind API calls. Resolved credentials are redacted from responses. Timeout default: 30s. SSRF protection blocks requests to private/internal addresses (loopback, link-local, reserved ranges) including redirect targets. |
 
 ### Browser Automation
 
-All agents use a single browser architecture: **Chrome + KasmVNC**. A Chromium instance runs with a persistent profile at `/data/browser_profile`, and KasmVNC serves a live browser view on port 6080 (accessible via the dashboard). Playwright connects to Chrome via CDP on-demand when browser tools are called and disconnects after each operation. This maintains login sessions and cookies across restarts while keeping the browser viewable in real-time.
+All agents use a single browser architecture: **Chrome + KasmVNC**. A Chromium instance runs with a persistent profile at `/data/browser_profile`, and KasmVNC serves a live browser view on port 6080 (accessible via the dashboard). Patchright (a Playwright fork) connects to Chrome via CDP on-demand when browser tools are called and disconnects after each operation. This maintains login sessions and cookies across restarts while keeping the browser viewable in real-time.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
@@ -39,6 +39,7 @@ All agents use a single browser architecture: **Chrome + KasmVNC**. A Chromium i
 | `browser_type` | `ref` or `selector`, `text` | Type into input field (supports `$CRED{name}` handles) |
 | `browser_evaluate` | `script` | Run JavaScript in page context |
 | `browser_reset` | -- | Force-close browser session and reconnect fresh |
+| `browser_solve_captcha` | -- | Detect and solve CAPTCHAs (reCAPTCHA v2/v3/Enterprise, hCaptcha, Turnstile). Requires `2captcha_key` or `capsolver_key` in vault. |
 
 ### Memory
 

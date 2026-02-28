@@ -52,9 +52,9 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 | `failover.py` | Model health tracking and failover chains |
 | `webhooks.py` | Named webhook endpoints |
 | `watchers.py` | File watcher with polling |
-| `containers.py` | Container management facade |
+| `containers.py` | Backward-compat alias (`ContainerManager = DockerBackend`) |
 | `traces.py` | Request tracing and diagnostics |
-| `transcript.py` | Conversation transcript storage |
+| `transcript.py` | Provider-specific transcript sanitization |
 
 ### Agent (`src/agent/`)
 
@@ -81,7 +81,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `exec_tool.py` | Shell command execution |
 | `file_tool.py` | File read/write/list scoped to /data |
 | `http_tool.py` | HTTP requests |
-| `browser_tool.py` | Browser automation: Chrome + KasmVNC with Playwright connecting via CDP on-demand |
+| `browser_tool.py` | Browser automation: Chrome + KasmVNC with Patchright connecting via CDP on-demand |
 | `mesh_tool.py` | Blackboard, PubSub, fleet awareness, artifacts, cron, heartbeat, spawn |
 | `memory_tool.py` | Memory search, save, recall |
 | `vault_tool.py` | Credential-blind vault operations |
@@ -185,7 +185,7 @@ Both implement `RuntimeBackend` ABC so the rest of the system is isolation-agnos
 2. **No `eval()` on untrusted input** -- workflow conditions use a regex-based safe parser
 3. **Permission checks before every cross-boundary operation** -- default deny
 4. **Path traversal protection** -- agent file operations confined to `/data`
-5. **Bounded execution** -- 20 iterations for tasks, 30 tool rounds for chat
+5. **Bounded execution** -- 20 iterations for tasks, 30 tool rounds for chat, 200 total rounds per session
 6. **Write-then-compact** -- facts are flushed to memory before discarding context
 7. **Tool-call message grouping** -- assistant(tool_calls) and tool(results) are never separated in context trimming
 8. **Unicode sanitization** -- all untrusted text passes through `sanitize_for_prompt()` before reaching LLM context (user input, tool results, system prompt context)

@@ -8,7 +8,7 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 1385](https://img.shields.io/badge/tests-1385%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 1550](https://img.shields.io/badge/tests-1550%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -116,8 +116,8 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 1385 tests including full Docker E2E |
-| **Codebase size** | 430,000+ lines | ~22,000 lines — auditable in a day |
+| **Test coverage** | Minimal | 1550 tests including full Docker E2E |
+| **Codebase size** | 430,000+ lines | ~25,000 lines — auditable in a day |
 
 ---
 
@@ -131,7 +131,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**1385 tests passing** across **~22,000 lines** of application code.
+**1550 tests passing** across **~25,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
@@ -220,7 +220,7 @@ connections.
 │ :8401   │ │ :8402   │ │ :8403   │       │ :840N   │
 └─────────┘ └─────────┘ └─────────┘       └─────────┘
   Each agent: isolated Docker container, own /data volume,
-  own memory DB, own workspace, 512MB RAM, 0.5 CPU cap
+  own memory DB, own workspace, 1GB RAM, 0.5 CPU cap
 ```
 
 ### Trust Zones
@@ -313,10 +313,10 @@ steps:
 ### Container Manager
 
 Each agent runs in an isolated Docker container with:
-- **Image**: `openlegion-agent:latest` (Python 3.12, system tools, Playwright, Chromium, Camoufox, KasmVNC)
+- **Image**: `openlegion-agent:latest` (Python 3.12, system tools, Patchright, Chromium, KasmVNC)
 - **Network**: Bridge with port mapping (macOS/Windows) or host network (Linux)
 - **Volume**: `openlegion_data_{agent_id}` mounted at `/data` (agent names with spaces/special chars are sanitized)
-- **Resources**: 512MB RAM limit, 50% CPU quota
+- **Resources**: 1GB RAM limit (includes Chrome + KasmVNC), 50% CPU quota
 - **Security**: `no-new-privileges`, runs as non-root `agent` user (UID 1000)
 - **Ports**: 8400 (FastAPI), 6080 (KasmVNC for persistent browser)
 
@@ -368,7 +368,7 @@ Accepts a user message. On the first message, loads workspace context
 (PROJECT.md if in a project, AGENTS.md, SOUL.md, USER.md, MEMORY.md, SYSTEM.md) into the system prompt,
 injects a live Runtime Context block (permissions, budget, fleet, cron),
 and searches memory for relevant facts. Executes tool calls in a bounded loop
-(max 30 rounds) and runs context compaction when needed.
+(max 30 rounds per turn, 200 total rounds per session) and runs context compaction when needed.
 
 ### Tool Loop Detection
 
@@ -378,9 +378,9 @@ escalates through three levels:
 
 | Level | Trigger | Action |
 |-------|---------|--------|
-| **Warn** | 3rd identical call | System message: "Try a different approach" |
-| **Block** | 5th identical call | Tool skipped, error returned to agent |
-| **Terminate** | 10th call with same params | Loop terminated with failure status |
+| **Warn** | 2nd identical call | System message: "Try a different approach" |
+| **Block** | 4th identical call | Tool skipped, error returned to agent |
+| **Terminate** | 9th call with same params | Loop terminated with failure status |
 
 Memory retrieval tools (`memory_search`, `memory_recall`) are exempt since
 repeated searches are legitimate. Detection uses SHA-256 hashes of
@@ -582,7 +582,7 @@ Defense-in-depth with six layers:
 | Container hardening | Non-root user, no-new-privileges, memory/CPU limits | Privilege escalation, resource abuse |
 | Credential separation | Vault holds keys, agents call via proxy | Key leakage, unauthorized API use |
 | Permission enforcement | Per-agent ACLs for messaging, blackboard, pub/sub, APIs | Unauthorized data access |
-| Input validation | Path traversal prevention, safe condition eval (no `eval()`), token budgets, iteration limits | Injection, runaway loops |
+| Input validation | Path traversal prevention, SSRF blocking, safe condition eval (no `eval()`), token budgets, iteration limits, rate limiting | Injection, runaway loops, network abuse |
 | Unicode sanitization | Invisible character stripping at three choke points | Prompt injection via hidden Unicode |
 
 ### Dual Runtime Backend
@@ -597,7 +597,7 @@ OpenLegion supports two isolation levels:
 | **Requirements** | Any Docker install | Docker Desktop 4.58+ |
 | **Enable** | `openlegion start` | `openlegion start --sandbox` |
 
-**Docker containers** (default) run agents as non-root with `no-new-privileges`, 512MB memory limit, 50% CPU cap, and no host filesystem access. This is secure for most use cases.
+**Docker containers** (default) run agents as non-root with `no-new-privileges`, 1GB memory limit (includes Chrome + KasmVNC), 50% CPU cap, and no host filesystem access. This is secure for most use cases.
 
 **Docker Sandbox microVMs** give each agent its own Linux kernel via Apple Virtualization.framework (macOS) or Hyper-V (Windows). Even if an agent achieves code execution, it's trapped inside a lightweight VM with no visibility into other agents or the host. Use this when running untrusted code or when compliance requires hypervisor isolation.
 
@@ -616,17 +616,58 @@ openlegion start --sandbox
 ## CLI Reference
 
 ```
-openlegion [--version]
+openlegion [--verbose/-v] [--quiet/-q] [--config PATH]
 ├── start [--config PATH] [-d] [--sandbox]  # Start runtime + interactive REPL (inline setup on first run)
 ├── stop                                 # Stop all containers
 ├── chat <name> [--port PORT]            # Connect to a running agent
 ├── status [--port PORT]                 # Show agent status
+├── version [--verbose]                  # Show version and environment info
+├── health [--port PORT]                 # Run pre-flight health checks
+├── logs [-n LINES] [-f] [--level LEVEL] # View runtime and agent logs
+├── queue [--port PORT] [--json]         # Show agent task queues
+├── debug [TRACE_ID] [--port PORT]       # View request traces for debugging
 │
 ├── agent
 │   ├── add [name]                       # Add a new agent
 │   ├── edit <name>                      # Edit agent settings (model, browser, budget)
 │   ├── list                             # List configured agents
-│   └── remove <name> [--yes]            # Remove an agent
+│   ├── remove <name> [--yes]            # Remove an agent
+│   └── restart [NAMES...] [--all]       # Restart one or more agents
+│
+├── credential
+│   ├── add [SERVICE] [--key] [--tier]   # Add a new credential
+│   ├── list [--json]                    # List stored credentials (masked)
+│   └── remove <name> [--yes]            # Remove a credential
+│
+├── webhook
+│   ├── add <name> --agent <name>        # Create a webhook endpoint
+│   ├── list [--json]                    # List configured webhooks
+│   ├── remove <name> [--yes]            # Remove a webhook
+│   └── test <name> [--payload JSON]     # Send a test payload
+│
+├── blackboard
+│   ├── list [--prefix] [--json]         # List blackboard entries
+│   ├── get <key>                        # Get a blackboard entry
+│   ├── set <key> <value>                # Set a blackboard entry
+│   └── delete <key> [--yes]             # Delete a blackboard entry
+│
+├── cron
+│   ├── list [--json]                    # List cron jobs
+│   ├── delete <job_id> [--yes]          # Delete a cron job
+│   ├── pause <job_id>                   # Pause a cron job
+│   ├── resume <job_id>                  # Resume a paused cron job
+│   └── run <job_id>                     # Trigger a cron job immediately
+│
+├── workflow
+│   ├── list [--json]                    # List configured workflows
+│   └── run <name> [--payload JSON]      # Trigger a workflow
+│
+├── config
+│   ├── show [--json]                    # Show effective configuration
+│   ├── validate                         # Check configuration for errors
+│   ├── path                             # Show config file locations
+│   ├── export [OUTPUT]                  # Export configuration as tarball
+│   └── import <archive> [--yes]         # Import configuration from tarball
 │
 ├── skill
 │   ├── install <repo_url> [--ref TAG]         # Install skill from git repo
@@ -656,22 +697,26 @@ openlegion [--version]
 /add                                 Add a new agent (hot-adds to running system)
 /edit [name]                         Edit agent settings (model, browser, budget)
 /remove [name]                       Remove an agent
+/restart [name]                      Restart an agent container
 /status                              Show agent health
 /broadcast <msg>                     Send message to all agents
 /steer <msg>                         Inject message into busy agent's context
+/history [agent]                     Show recent conversation messages
 /costs                               Show today's LLM spend + context usage + model health
 /blackboard [list|get|set|del]       View/edit shared blackboard entries
 /queue                               Show agent task queue status
 /workflow [list|run]                 List or trigger workflows
 /cron [list|del|pause|resume|run]    Manage cron jobs
 /project [list|create|delete|...]    Manage multi-project namespaces
+/credential [add|list|remove]        Manage API credentials
 /debug [trace]                       Show recent request traces
+/logs [--level LEVEL]                Show recent runtime logs
 /addkey <svc> [key]                  Add an API credential to the vault
 /removekey [name]                    Remove a credential from the vault
 /reset                               Clear conversation with active agent
 /quit                                Exit and stop runtime
 
-Aliases: /exit = /quit, /agents = /status
+Aliases: /exit = /quit, /agents = /status, /traces = /debug
 ```
 
 ### Team Templates
@@ -904,7 +949,7 @@ pytest tests/
 | Memory Tools | 6 | memory_search, memory_save, memory_recall |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **1385** | |
+| **Total** | **1550** | |
 
 ---
 
@@ -922,7 +967,7 @@ pytest tests/
 | click | CLI framework |
 | docker | Docker API client |
 | python-dotenv | `.env` file loading |
-| playwright | Browser automation via CDP (in container only) |
+| patchright | Browser automation via CDP (Playwright fork, in container only) |
 | mcp | MCP tool server client (in container only, optional) |
 | slack-bolt | Slack channel adapter (optional) |
 
@@ -959,7 +1004,7 @@ src/
 │       ├── exec_tool.py                # Shell execution
 │       ├── file_tool.py                # File I/O (read, write, list)
 │       ├── http_tool.py                # HTTP requests
-│       ├── browser_tool.py             # Playwright automation (Chrome + KasmVNC with on-demand CDP)
+│       ├── browser_tool.py             # Patchright automation (Chrome + KasmVNC with on-demand CDP)
 │       ├── web_search_tool.py          # Web search via DuckDuckGo
 │       ├── memory_tool.py              # Memory search, save, recall
 │       ├── mesh_tool.py                # Shared state, fleet awareness, artifacts
@@ -1027,7 +1072,7 @@ config/
 | The mesh is the only door | No agent has network access except through the mesh. No agent holds credentials. |
 | Private by default, shared by promotion | Agents keep knowledge private. Facts are explicitly promoted to the blackboard. |
 | Explicit failure handling | Every workflow step declares what happens on failure. No silent error swallowing. |
-| Small enough to audit | ~22,000 total lines. The entire codebase is auditable in a day. |
+| Small enough to audit | ~25,000 total lines. The entire codebase is auditable in a day. |
 | Skills over features | New capabilities are agent skills, not mesh or orchestrator code. |
 | SQLite for all state | Single-file databases. No external services. WAL mode for concurrent reads. |
 | Zero vendor lock-in | LiteLLM supports 100+ providers. Markdown workspace files. No proprietary formats. |
@@ -1060,7 +1105,7 @@ Looking for alternatives? OpenLegion is often compared to:
 
 OpenLegion differs from all of these in combining **fleet orchestration,
 Docker isolation, credential vaulting, and cost enforcement** in a single
-~22,000 line auditable codebase.
+~25,000 line auditable codebase.
 
 **Keywords:** autonomous AI agents, multi-agent framework, LLM agent orchestration,
 self-hosted AI agents, Docker AI agents, OpenClaw alternative, AI agent security,

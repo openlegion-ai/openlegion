@@ -234,8 +234,15 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `DELETE` | `/dashboard/api/cron/{id}` | Delete cron job |
 | `GET` | `/dashboard/api/settings` | Environment settings |
 | `POST` | `/dashboard/api/broadcast` | Send message to all agents |
+| `POST` | `/dashboard/api/broadcast/stream` | SSE streaming broadcast to all agents |
 | `GET` | `/dashboard/api/messages` | Recent message log |
 | `GET` | `/dashboard/api/workflows` | Workflow definitions |
+| `POST` | `/dashboard/api/workflows/{name}/run` | Trigger a workflow by name |
+| `GET` | `/dashboard/api/webhooks` | List configured webhooks |
+| `POST` | `/dashboard/api/webhooks` | Create a webhook endpoint |
+| `DELETE` | `/dashboard/api/webhooks/{name}` | Delete a webhook |
+| `POST` | `/dashboard/api/webhooks/{name}/test` | Send test payload to webhook |
+| `GET` | `/dashboard/api/logs` | Runtime logs (query: lines, level) |
 | `WS` | `/ws/events` | Real-time event stream |
 
 ## Accessibility

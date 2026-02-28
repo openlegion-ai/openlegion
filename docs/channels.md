@@ -46,7 +46,7 @@ openlegion start -d       # Detached (background)
 openlegion chat <agent>   # Connect to running agent (detached mode)
 ```
 
-The CLI REPL supports the full command set above plus additional management commands (`/add`, `/edit`, `/remove` for agent CRUD) and token-level streaming responses with tool-use progress indicators. External channels (Telegram, Discord, Slack, WhatsApp) support the core command set listed above; `/add`, `/edit`, and `/remove` are REPL-only as they require interactive prompts.
+The CLI REPL supports the full command set above plus additional management commands and token-level streaming responses with tool-use progress indicators. REPL-only commands (not available in external channels): `/add`, `/edit`, `/remove`, `/restart`, `/history`, `/logs`, `/credential`, `/traces`. These require interactive prompts or local system access.
 
 ## Telegram
 

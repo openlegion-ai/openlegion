@@ -118,6 +118,14 @@ Every inter-agent operation checks per-agent ACLs defined in `config/permissions
 
 ## Input Validation
 
+### SSRF Protection
+
+Agent HTTP requests (`src/agent/builtins/http_tool.py`) are blocked from reaching private/internal networks:
+- Resolves hostnames and rejects private, loopback, link-local, and reserved IP ranges
+- Checks both initial URLs and redirect targets (via httpx event hook)
+- IPv4-mapped IPv6 addresses (e.g., `::ffff:127.0.0.1`) are also blocked
+- Prevents agents from using the HTTP tool to scan internal networks or access host services
+
 ### Path Traversal Prevention
 
 Agent file tools (`src/agent/builtins/file_tool.py`) validate all paths are within `/data`:
@@ -136,9 +144,23 @@ Workflow conditions (`src/host/orchestrator.py`) use a regex-based parser:
 ### Bounded Execution
 
 - Task mode: 20 iterations maximum (`AgentLoop.MAX_ITERATIONS`)
-- Chat mode: 30 tool rounds maximum (`CHAT_MAX_TOOL_ROUNDS`)
+- Chat mode: 30 tool rounds maximum (`CHAT_MAX_TOOL_ROUNDS`), 200 total rounds per session (`CHAT_MAX_TOTAL_ROUNDS`)
 - Per-agent token budgets enforced at the vault layer
 - Prevents runaway loops and unbounded spend
+
+### Rate Limiting
+
+Per-agent rate limits on mesh endpoints prevent abuse and resource exhaustion:
+
+| Endpoint | Limit | Window |
+|----------|-------|--------|
+| `vault_resolve` | 5 requests | 60 seconds |
+| `blackboard_read` | 200 requests | 60 seconds |
+| `blackboard_write` | 100 requests | 60 seconds |
+| `publish` | 200 requests | 60 seconds |
+| `cron_create` | 10 requests | 3600 seconds |
+
+Exceeding a rate limit returns HTTP 429. Rate-limit buckets are automatically cleaned up when agents are deregistered.
 
 ## Unicode Sanitization (Prompt Injection Defense)
 
