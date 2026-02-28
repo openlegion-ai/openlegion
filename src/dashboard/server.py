@@ -1016,8 +1016,6 @@ def create_dashboard_router(
                 queues[agent_id] = status
         return {"queues": queues}
 
-    # ── Cron management ──────────────────────────────────────
-
     # ── Model health ──────────────────────────────────────
 
     @api_router.get("/api/model-health")
@@ -1056,9 +1054,6 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="agent, schedule, and message are required")
         if agent not in agent_registry:
             raise HTTPException(status_code=400, detail=f"Agent '{agent}' not found")
-        error = cron_scheduler._validate_schedule(schedule)
-        if error:
-            raise HTTPException(status_code=400, detail=error)
         try:
             job = cron_scheduler.add_job(agent=agent, schedule=schedule, message=message)
             return {"created": True, "job_id": job.id}

@@ -228,10 +228,15 @@ function dashboard() {
     cronFormAgent: '',
     cronFormSchedule: 'every 15m',
     cronFormMessage: '',
+    cronCreating: false,
 
     // Credential update
     editingCredential: null,
     editCredKey: '',
+    credentialSaving: false,
+
+    // Workflow cancel tracking
+    _cancellingWorkflows: {},
 
     // Restart loading
     _restartingAgents: {},
@@ -680,6 +685,7 @@ function dashboard() {
           if (this._refreshInterval) { clearInterval(this._refreshInterval); this._refreshInterval = null; }
           if (this._queueInterval) { clearInterval(this._queueInterval); this._queueInterval = null; }
           if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
+          if (this._modelHealthInterval) { clearInterval(this._modelHealthInterval); this._modelHealthInterval = null; }
           this._stopActivityRefresh();
         } else {
           // Clear favicon badge
@@ -702,6 +708,9 @@ function dashboard() {
             this.fetchCronJobs();
             this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
           }
+          // Resume model health polling
+          this.fetchModelHealth();
+          this._modelHealthInterval = setInterval(() => this.fetchModelHealth(), 60000);
           // Refresh agent detail if we're viewing one
           if (this.detailAgent) {
             this.fetchAgentDetail(this.detailAgent);
@@ -979,6 +988,16 @@ function dashboard() {
           this.agents = (await resp.json()).agents;
           this.lastRefresh = Date.now() / 1000;
           this.connectionError = false;
+          // Prune restored chat tabs for agents that no longer exist
+          const agentIds = new Set(this.agents.map(a => a.id));
+          const stale = this.openChats.filter(id => !agentIds.has(id));
+          if (stale.length) {
+            this.openChats = this.openChats.filter(id => agentIds.has(id));
+            if (this.activeChatId && !agentIds.has(this.activeChatId)) {
+              this.activeChatId = this.openChats[0] || null;
+            }
+            this._saveChatToSession();
+          }
         }
       } catch (e) {
         console.warn('fetchAgents failed:', e);
@@ -1659,19 +1678,23 @@ function dashboard() {
     },
 
     async cancelWorkflow(executionId) {
+      if (this._cancellingWorkflows[executionId]) return;
+      this._cancellingWorkflows = { ...this._cancellingWorkflows, [executionId]: true };
       try {
         const resp = await fetch(`${window.__config.apiBase}/workflows/${encodeURIComponent(executionId)}/cancel`, { method: 'POST' });
         if (resp.ok) {
           this.showToast(`Workflow execution cancelled`);
-          this.fetchWorkflows();
+          await this.fetchWorkflows();
         } else {
           const err = await resp.json().catch(() => ({}));
           this.showToast(`Cancel failed: ${err.detail || 'Unknown error'}`);
         }
       } catch (e) { this.showToast(`Cancel failed: ${e.message}`); }
+      finally { const copy = { ...this._cancellingWorkflows }; delete copy[executionId]; this._cancellingWorkflows = copy; }
     },
 
     async createCronJob() {
+      if (this.cronCreating) return;
       const agent = this.cronFormAgent.trim();
       const schedule = this.cronFormSchedule.trim();
       const message = this.cronFormMessage.trim();
@@ -1679,6 +1702,7 @@ function dashboard() {
         this.showToast('Agent, schedule, and message are required');
         return;
       }
+      this.cronCreating = true;
       try {
         const resp = await fetch(`${window.__config.apiBase}/cron`, {
           method: 'POST',
@@ -1691,19 +1715,22 @@ function dashboard() {
           this.cronFormSchedule = 'every 15m';
           this.cronFormMessage = '';
           this.showCronForm = false;
-          this.fetchCronJobs();
+          await this.fetchCronJobs();
         } else {
           const err = await resp.json().catch(() => ({}));
           this.showToast(`Error: ${err.detail || 'Failed to create job'}`);
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
+      finally { this.cronCreating = false; }
     },
 
     async updateCredential(name) {
+      if (this.credentialSaving) return;
       if (!this.editCredKey.trim()) {
         this.showToast('Key is required');
         return;
       }
+      this.credentialSaving = true;
       try {
         const resp = await fetch(`${window.__config.apiBase}/credentials`, {
           method: 'POST',
@@ -1714,20 +1741,34 @@ function dashboard() {
           this.showToast(`Credential updated: ${name}`);
           this.editingCredential = null;
           this.editCredKey = '';
-          this.fetchSettings();
+          await this.fetchSettings();
         } else {
           const err = await resp.json().catch(() => ({}));
           this.showToast(`Error: ${err.detail || 'Update failed'}`);
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
+      finally { this.credentialSaving = false; }
     },
 
     copyToClipboard(text) {
-      navigator.clipboard.writeText(text).then(() => {
-        this.showToast('URL copied');
-      }).catch(() => {
-        this.showToast('Failed to copy');
-      });
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          this.showToast('URL copied');
+        }).catch(() => {
+          this.showToast('Failed to copy');
+        });
+      } else {
+        // Fallback for insecure contexts (non-HTTPS, non-localhost)
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); this.showToast('URL copied'); }
+        catch (_) { this.showToast('Failed to copy'); }
+        document.body.removeChild(ta);
+      }
     },
 
     _saveChatToSession() {
@@ -1740,16 +1781,34 @@ function dashboard() {
             role: m.role,
             content: m.content,
             streaming: false,
+            phase: m.phase || 'done',
             tools: [],
+            timeline: Array.isArray(m.timeline) ? m.timeline.map(step => ({
+              kind: step.kind, name: step.name,
+              content: step.kind === 'text' ? step.content : undefined,
+            })) : [],
           }));
           histories[agentId] = capped;
         }
-        sessionStorage.setItem('ol_chats', JSON.stringify({
+        const payload = JSON.stringify({
           histories,
           openChats: this.openChats,
           activeChatId: this.activeChatId,
-        }));
-      } catch (_) {}
+        });
+        sessionStorage.setItem('ol_chats', payload);
+      } catch (e) {
+        // On quota exceeded, evict oldest agent history and retry once
+        if (e instanceof DOMException && e.name === 'QuotaExceededError') {
+          try {
+            const keys = Object.keys(this.chatHistories);
+            if (keys.length > 1) {
+              const oldest = keys[0];
+              delete this.chatHistories[oldest];
+              this._saveChatToSession();
+            }
+          } catch (_) {}
+        }
+      }
     },
 
     agentHealthColor(result) {
