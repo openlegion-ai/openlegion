@@ -23,9 +23,13 @@ from fastapi.responses import StreamingResponse
 
 from src.host.credentials import is_system_credential
 from src.shared.types import (
-    AgentMessage, APIProxyRequest, APIProxyResponse,
-    BlackboardClaimRequest, BlackboardWatchRequest,
-    MeshEvent, NotifyRequest,
+    AgentMessage,
+    APIProxyRequest,
+    APIProxyResponse,
+    BlackboardClaimRequest,
+    BlackboardWatchRequest,
+    MeshEvent,
+    NotifyRequest,
 )
 from src.shared.utils import setup_logging
 

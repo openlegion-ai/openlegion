@@ -1378,12 +1378,9 @@ def test_claim_endpoint_notifies_watchers(tmp_path):
     })
     assert resp.status_code == 200
 
-    # Verify run_coroutine_threadsafe was called for the watcher
-    import asyncio
-    # The steer notification should have been scheduled
-    # (via asyncio.run_coroutine_threadsafe which writes to mock_loop)
-    # We can't easily intercept the future, but we can verify the watch
-    # was registered and the watcher was in the list
+    # The steer notification should have been scheduled via
+    # asyncio.run_coroutine_threadsafe — verify the watch was registered
+    # and the watcher is in the list for this key
     assert "watcher_agent" in bb.get_watchers_for_key("tasks/t1")
 
     bb.close()
