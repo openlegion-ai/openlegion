@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.host.credentials import (
-    _ANTHROPIC_OAUTH_API_KEY_SENTINEL,
     _ANTHROPIC_OAUTH_BETAS,
     AGENT_PREFIX,
     SYSTEM_CREDENTIAL_PROVIDERS,
@@ -1129,14 +1128,12 @@ class TestOAuth:
         assert headers == {}
 
     def test_get_auth_for_model_oauth_token(self, monkeypatch):
-        """OAuth token returns sentinel api_key, Bearer auth, and beta headers."""
+        """OAuth token is passed through as api_key (litellm handles headers)."""
         monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-token123")
         v = CredentialVault()
         api_key, headers = v._get_auth_for_model("anthropic/claude-sonnet-4-6")
-        assert api_key == _ANTHROPIC_OAUTH_API_KEY_SENTINEL
-        assert headers["Authorization"] == "Bearer sk-ant-oat01-token123"
-        assert headers["anthropic-beta"] == _ANTHROPIC_OAUTH_BETAS
-        assert headers["x-api-key"] == ""
+        assert api_key == "sk-ant-oat01-token123"
+        assert headers == {}
 
     def test_get_auth_for_model_non_anthropic_ignores_oauth(self, monkeypatch):
         """OAuth prefix on a non-Anthropic model produces no auth headers."""
@@ -1172,10 +1169,10 @@ class TestOAuth:
 
 
 class TestOAuthIntegration:
-    """Integration test: OAuth headers flow through to litellm."""
+    """Integration test: OAuth token reaches litellm for its built-in handling."""
 
-    async def test_handle_llm_oauth_sends_correct_headers(self, monkeypatch):
-        """Verify OAuth token results in correct extra_headers to litellm."""
+    async def test_handle_llm_oauth_passes_real_token(self, monkeypatch):
+        """Verify real OAuth token is passed as api_key so litellm handles auth."""
         litellm = pytest.importorskip("litellm")  # noqa: F841
 
         monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-integration")
@@ -1203,14 +1200,14 @@ class TestOAuthIntegration:
             result = await v.execute_api_call(req)
 
         assert result.success
-        assert captured["api_key"] == _ANTHROPIC_OAUTH_API_KEY_SENTINEL
-        assert "extra_headers" in captured
-        assert captured["extra_headers"]["Authorization"] == "Bearer sk-ant-oat01-integration"
-        assert captured["extra_headers"]["anthropic-beta"] == _ANTHROPIC_OAUTH_BETAS
-        assert captured["extra_headers"]["x-api-key"] == ""
+        # Real token must reach litellm so its built-in OAuth detection
+        # (sk-ant-oat prefix) sets Authorization: Bearer and omits x-api-key.
+        assert captured["api_key"] == "sk-ant-oat01-integration"
+        # No manual extra_headers override — litellm handles OAuth internally.
+        assert "extra_headers" not in captured
 
-    async def test_stream_llm_oauth_sends_sentinel_and_bearer(self, monkeypatch):
-        """Verify streaming path sends sentinel api_key and Bearer header."""
+    async def test_stream_llm_oauth_passes_real_token(self, monkeypatch):
+        """Verify streaming path passes real OAuth token to litellm."""
         pytest.importorskip("litellm")
 
         monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-stream")
@@ -1241,7 +1238,5 @@ class TestOAuthIntegration:
             async for _ in v.stream_llm(req):
                 pass
 
-        assert captured["api_key"] == _ANTHROPIC_OAUTH_API_KEY_SENTINEL
-        assert captured["extra_headers"]["Authorization"] == "Bearer sk-ant-oat01-stream"
-        assert captured["extra_headers"]["anthropic-beta"] == _ANTHROPIC_OAUTH_BETAS
-        assert captured["extra_headers"]["x-api-key"] == ""
+        assert captured["api_key"] == "sk-ant-oat01-stream"
+        assert "extra_headers" not in captured

@@ -108,7 +108,6 @@ AGENT_PREFIX = "OPENLEGION_CRED_"
 # ── Anthropic OAuth constants ──────────────────────────────
 _ANTHROPIC_OAUTH_PREFIX = "sk-ant-oat"
 _ANTHROPIC_OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
-_ANTHROPIC_OAUTH_API_KEY_SENTINEL = "oauth-via-bearer"
 
 # System credential patterns — used by is_system_credential() for
 # defense-in-depth permission checks and by CLI/dashboard for
@@ -408,29 +407,18 @@ class CredentialVault:
     def _get_auth_for_model(self, model: str) -> tuple[str | None, dict[str, str]]:
         """Resolve API key and any extra auth headers for a model.
 
-        For Anthropic OAuth tokens (``sk-ant-oat*``), returns a sentinel
-        api_key (not the real token) so litellm won't set it as ``x-api-key``.
-        The real token is sent only via ``Authorization: Bearer`` in the
-        extra headers, along with required beta headers.
+        For Anthropic OAuth tokens (``sk-ant-oat*``), the real token is
+        returned as ``api_key``.  Litellm's built-in OAuth detection
+        (``common_utils.get_anthropic_headers``) recognises the
+        ``sk-ant-oat`` prefix and automatically sets
+        ``Authorization: Bearer`` instead of ``x-api-key``.
 
-        For standard API keys, returns the real key with empty extra headers.
+        For all models the second element is extra headers to merge into
+        the request (currently always empty — reserved for future use).
         """
         api_key = self._get_api_key_for_model(model)
         if api_key is None:
             return None, {}
-        if model.startswith("anthropic/") and self._is_anthropic_oauth(api_key):
-            # OAuth tokens must be sent ONLY as Authorization: Bearer.
-            # Litellm passes api_key to the Anthropic SDK which sets it as
-            # x-api-key.  The API validates x-api-key first and rejects
-            # invalid values before checking Authorization: Bearer.
-            # Fix: return a sentinel api_key (so guards pass) and override
-            # x-api-key to empty in extra_headers — the SDK merges
-            # extra_headers with priority over client defaults.
-            return _ANTHROPIC_OAUTH_API_KEY_SENTINEL, {
-                "Authorization": f"Bearer {api_key}",
-                "anthropic-beta": _ANTHROPIC_OAUTH_BETAS,
-                "x-api-key": "",
-            }
         return api_key, {}
 
     def get_providers_with_credentials(self) -> set[str]:
