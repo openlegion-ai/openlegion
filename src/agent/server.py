@@ -60,7 +60,12 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         _trace_id = request.headers.get("x-trace-id")
 
         async def run() -> None:
-            result = await loop.execute_task(assignment, trace_id=_trace_id)
+            try:
+                result = await loop.execute_task(assignment, trace_id=_trace_id)
+            except asyncio.CancelledError:
+                loop.state = "idle"
+                loop.current_task = None
+                return
             try:
                 await loop.mesh_client.send_system_message(
                     to="orchestrator",

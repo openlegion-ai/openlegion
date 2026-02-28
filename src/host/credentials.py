@@ -362,7 +362,10 @@ class CredentialVault:
                         return await _execute()
             except TimeoutError:
                 logger.warning("Budget lock timed out for agent '%s'", agent_id)
-                return await _execute()
+                return APIProxyResponse(
+                    success=False,
+                    error="Budget lock contention — too many concurrent LLM calls. Retry shortly.",
+                )
         return await _execute()
 
     # Provider prefix → credential key mapping (shared by key + base lookups)

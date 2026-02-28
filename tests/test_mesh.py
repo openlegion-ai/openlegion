@@ -72,6 +72,50 @@ def test_blackboard_gc_expired(blackboard):
     assert deleted >= 0
 
 
+def test_ttl_gc_runs_once_under_concurrent_writes(tmp_path):
+    """Concurrent writes with TTL entries should only trigger GC once per interval."""
+    import threading
+
+    bb = Blackboard(db_path=str(tmp_path / "gc_race.db"))
+    bb._TTL_GC_INTERVAL = 60  # large interval so only one GC should run
+
+    gc_call_count = 0
+    original_gc_unlocked = bb._gc_expired_unlocked
+    gc_lock = threading.Lock()
+
+    def counting_gc():
+        nonlocal gc_call_count
+        with gc_lock:
+            gc_call_count += 1
+        return original_gc_unlocked()
+
+    # Write a TTL entry so GC has something to do (before patching,
+    # so the write's own _maybe_gc_ttl call doesn't count)
+    bb.write("context/ttl_entry", {"x": 1}, written_by="a1", ttl=0)
+
+    bb._gc_expired_unlocked = counting_gc
+
+    # Force the last GC time far in the past so the next call triggers GC
+    bb._last_ttl_gc = 0
+
+    start_event = threading.Event()
+
+    def concurrent_gc():
+        start_event.wait(timeout=5)
+        bb._maybe_gc_ttl()
+
+    threads = [threading.Thread(target=concurrent_gc) for _ in range(5)]
+    for t in threads:
+        t.start()
+    start_event.set()
+    for t in threads:
+        t.join(timeout=10)
+
+    # Only one thread should have called _gc_expired_unlocked
+    assert gc_call_count == 1
+    bb.close()
+
+
 # === PubSub Tests ===
 
 

@@ -489,28 +489,27 @@ class Orchestrator:
                 try:
                     result = await asyncio.wait_for(future, timeout=step.timeout)
                 except asyncio.TimeoutError:
-                    # Atomically pop and check under lock to avoid TOCTOU race
-                    result_from_agent = None
+                    # Clean up pending entry under lock
                     async with self._result_lock:
-                        popped = self._pending_results.pop(assignment.task_id, None)
-                        if popped is not None and popped.done() and not popped.cancelled():
-                            try:
-                                result_from_agent = popped.result()
-                            except (asyncio.InvalidStateError, asyncio.CancelledError):
-                                pass
-                    if result_from_agent is not None:
-                        result = result_from_agent
-                    elif future.done() and not future.cancelled():
-                        # resolve_task_result already popped and resolved the
-                        # future, but wait_for's timeout fired at nearly the
-                        # same instant.  The result is in the local future.
+                        self._pending_results.pop(assignment.task_id, None)
+                    # Check if future was resolved between timeout and cleanup
+                    # (resolve_task_result may have popped and set the result
+                    # just as wait_for's timeout fired)
+                    if future.done() and not future.cancelled():
                         try:
                             result = future.result()
-                        except (asyncio.InvalidStateError, asyncio.CancelledError):
-                            result = await self._wait_for_task_result(agent_url, assignment, step.timeout)
+                        except Exception:
+                            result = TaskResult(
+                                task_id=assignment.task_id,
+                                status="timeout",
+                                error=f"Step '{step.id}' timed out after {step.timeout}s",
+                            )
                     else:
-                        # Fallback to polling as a last resort
-                        result = await self._wait_for_task_result(agent_url, assignment, step.timeout)
+                        result = TaskResult(
+                            task_id=assignment.task_id,
+                            status="timeout",
+                            error=f"Step '{step.id}' timed out after {step.timeout}s",
+                        )
                 else:
                     async with self._result_lock:
                         self._pending_results.pop(assignment.task_id, None)

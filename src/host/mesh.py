@@ -228,16 +228,20 @@ class Blackboard:
         self._maybe_gc_event_log()
         self._maybe_gc_ttl()
 
+    def _gc_expired_unlocked(self) -> int:
+        """Run TTL garbage collection. Caller must hold _write_lock."""
+        cursor = self.db.execute(
+            "DELETE FROM entries WHERE ttl IS NOT NULL AND "
+            "datetime(updated_at, '+' || ttl || ' seconds') < datetime('now') "
+            "AND key NOT LIKE 'history/%'"
+        )
+        self.db.commit()
+        return cursor.rowcount
+
     def gc_expired(self) -> int:
         """Garbage-collect entries that have exceeded their TTL. Returns count deleted."""
         with self._write_lock:
-            cursor = self.db.execute(
-                "DELETE FROM entries WHERE ttl IS NOT NULL AND "
-                "datetime(updated_at, '+' || ttl || ' seconds') < datetime('now') "
-                "AND key NOT LIKE 'history/%'"
-            )
-            self.db.commit()
-        return cursor.rowcount
+            return self._gc_expired_unlocked()
 
     _EVENT_LOG_GC_THRESHOLD = 10_000
     _EVENT_LOG_GC_KEEP = 5_000
@@ -270,13 +274,15 @@ class Blackboard:
 
         Must be called AFTER the caller's commit() so the GC DELETE
         doesn't accidentally commit unrelated pending writes.
+        GC runs inside the lock to prevent two threads from both passing
+        the throttle check and running GC concurrently.
         """
         now = time.monotonic()
         with self._write_lock:
             if now - self._last_ttl_gc < self._TTL_GC_INTERVAL:
                 return
             self._last_ttl_gc = now
-        self.gc_expired()
+            self._gc_expired_unlocked()
 
     def close(self) -> None:
         self.db.close()

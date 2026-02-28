@@ -322,6 +322,54 @@ async def test_execute_step_timeout():
     assert result.status == "timeout"
 
 
+@pytest.mark.asyncio
+async def test_execute_step_race_resolve_during_timeout():
+    """If future resolves concurrently with timeout, we get a clean result (not a crash)."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    orch = Orchestrator(mesh_url="http://localhost:8420", workflows_dir="/nonexistent")
+    orch.container_manager = MagicMock()
+    orch.container_manager.get_agent_url = MagicMock(return_value="http://localhost:8401")
+
+    mock_client = AsyncMock()
+    mock_client.is_closed = False
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"accepted": True}
+    mock_client.post = AsyncMock(return_value=mock_response)
+    orch._client = mock_client
+
+    wf = WorkflowDefinition(
+        name="test", trigger="test",
+        steps=[WorkflowStep(id="s1", task_type="research", agent="alpha", timeout=1)],
+    )
+    execution = WorkflowExecution(wf, {})
+
+    # Run the step in background — it will timeout after 1s
+    step_task = asyncio.create_task(orch._execute_step(execution, wf.steps[0]))
+    await asyncio.sleep(0.05)
+
+    # Resolve the future concurrently with timeout (just before it fires)
+    assert len(orch._pending_results) == 1
+    task_id = next(iter(orch._pending_results))
+    late_result = TaskResult(task_id=task_id, status="complete", result={"late": True})
+
+    async def delayed_resolve():
+        await asyncio.sleep(0.95)  # Just before the 1s timeout
+        await orch.resolve_task_result(task_id, late_result)
+
+    resolve_task = asyncio.create_task(delayed_resolve())
+
+    result = await step_task
+    await resolve_task
+
+    # Should get either "complete" (if resolve won the race) or "timeout"
+    # but never crash or fall through to a polling path
+    assert result.status in ("complete", "timeout")
+    # Pending results should be cleaned up
+    assert task_id not in orch._pending_results
+
+
 # === Project Workflow Loading ===
 
 

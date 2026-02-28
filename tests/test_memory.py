@@ -102,7 +102,7 @@ async def test_decay_reduces_scores(memory):
     assert initial is not None
     initial_score = initial.decay_score
 
-    memory.decay_all()
+    await memory.decay_all()
 
     decayed = memory._get_fact_by_key("key1")
     assert decayed is not None
@@ -114,7 +114,7 @@ async def test_high_salience_facts(memory):
     for i in range(5):
         await memory.store_fact(f"key_{i}", f"value_{i}")
 
-    high = memory.get_high_salience_facts(top_k=3)
+    high = await memory.get_high_salience_facts(top_k=3)
     assert len(high) == 3
 
 
@@ -354,15 +354,17 @@ def test_boost_formula_correctness():
 
 
 class TestToolOutcomes:
-    def test_store_and_retrieve(self, memory):
-        memory.store_tool_outcome("exec", {"command": "ls"}, "file.txt", success=True)
+    @pytest.mark.asyncio
+    async def test_store_and_retrieve(self, memory):
+        await memory.store_tool_outcome("exec", {"command": "ls"}, "file.txt", success=True)
         history = memory.get_tool_history("exec")
         assert len(history) == 1
         assert history[0]["tool_name"] == "exec"
         assert history[0]["success"] is True
 
-    def test_failure_recorded(self, memory):
-        memory.store_tool_outcome("exec", {"command": "bad"}, "error: not found", success=False)
+    @pytest.mark.asyncio
+    async def test_failure_recorded(self, memory):
+        await memory.store_tool_outcome("exec", {"command": "bad"}, "error: not found", success=False)
         history = memory.get_tool_history("exec")
         assert len(history) == 1
         assert history[0]["success"] is False
@@ -378,23 +380,26 @@ class TestToolOutcomes:
         assert isinstance(h, str)
         assert len(h) == 16
 
-    def test_prune_keeps_50(self, memory):
+    @pytest.mark.asyncio
+    async def test_prune_keeps_50(self, memory):
         for i in range(60):
-            memory.store_tool_outcome("exec", {"i": i}, f"output_{i}")
+            await memory.store_tool_outcome("exec", {"i": i}, f"output_{i}")
         history = memory.get_tool_history("exec", limit=100)
         assert len(history) == 50
 
-    def test_filter_by_params_hash(self, memory):
-        memory.store_tool_outcome("exec", {"command": "ls"}, "files", success=True)
-        memory.store_tool_outcome("exec", {"command": "pwd"}, "/home", success=True)
+    @pytest.mark.asyncio
+    async def test_filter_by_params_hash(self, memory):
+        await memory.store_tool_outcome("exec", {"command": "ls"}, "files", success=True)
+        await memory.store_tool_outcome("exec", {"command": "pwd"}, "/home", success=True)
         h = MemoryStore._compute_params_hash({"command": "ls"})
         history = memory.get_tool_history("exec", params_hash=h)
         assert len(history) == 1
         assert "files" in history[0]["outcome"]
 
-    def test_get_all_tools(self, memory):
-        memory.store_tool_outcome("exec", {}, "ok")
-        memory.store_tool_outcome("web_search", {}, "results")
+    @pytest.mark.asyncio
+    async def test_get_all_tools(self, memory):
+        await memory.store_tool_outcome("exec", {}, "ok")
+        await memory.store_tool_outcome("web_search", {}, "results")
         history = memory.get_tool_history(limit=10)
         assert len(history) == 2
 

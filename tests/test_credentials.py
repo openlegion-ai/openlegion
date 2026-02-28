@@ -1141,3 +1141,38 @@ class TestGetAuthForModel:
         v = CredentialVault()
         providers = v.get_providers_with_credentials()
         assert providers == set()
+
+
+# ── Budget lock timeout returns error ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_budget_lock_timeout_returns_error():
+    """Budget lock timeout returns an error instead of silently retrying."""
+    import asyncio
+
+    v = CredentialVault()
+    cost_tracker = MagicMock()
+    cost_tracker.check_budget.return_value = {
+        "allowed": True, "daily_used": 0, "daily_limit": 10,
+        "monthly_used": 0, "monthly_limit": 200, "estimated_cost": 0.01,
+    }
+    v.cost_tracker = cost_tracker
+
+    # Simulate the lock timeout by patching asyncio.timeout to fire immediately
+    req = APIProxyRequest(
+        service="llm", action="chat",
+        params={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    lock = asyncio.Lock()
+    v._budget_locks = {"agent1": lock}
+
+    # Hold the lock in background so execute_api_call cannot acquire it
+    async with lock:
+        # Patch the timeout to 0 so it fires instantly
+        with patch("src.host.credentials.asyncio.timeout", return_value=asyncio.timeout(0)):
+            result = await v.execute_api_call(req, agent_id="agent1")
+
+    assert result.success is False
+    assert "Budget lock contention" in result.error

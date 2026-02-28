@@ -69,9 +69,9 @@ async def test_salience_increases_with_repeated_access(memory_with_embeddings):
     await mem.store_fact("hot_fact", "important info", category="key")
     await mem.store_fact("cold_fact", "unimportant info", category="misc")
 
-    mem.decay_all()
-    mem.decay_all()
-    mem.decay_all()
+    await mem.decay_all()
+    await mem.decay_all()
+    await mem.decay_all()
 
     for _ in range(3):
         await mem.store_fact("hot_fact", "important info updated")
@@ -94,7 +94,7 @@ async def test_high_salience_auto_surface(memory_with_embeddings):
         await mem.store_fact("fact_5", "boosted value")
         await mem.store_fact("fact_10", "also boosted")
 
-    high = mem.get_high_salience_facts(top_k=5)
+    high = await mem.get_high_salience_facts(top_k=5)
     assert len(high) == 5
     keys = [f.key for f in high]
     assert "fact_5" in keys
@@ -111,7 +111,7 @@ async def test_decay_across_tasks(memory_with_embeddings):
     assert initial is not None
 
     for _ in range(10):
-        mem.decay_all()
+        await mem.decay_all()
 
     decayed = mem._get_fact_by_key("old_fact")
     assert decayed is not None

@@ -95,8 +95,8 @@ class CostTracker:
 
     def track(
         self, agent: str, model: str, prompt_tokens: int, completion_tokens: int,
-    ) -> float:
-        """Record a single LLM call. Returns the cost in USD."""
+    ) -> dict:
+        """Record a single LLM call. Returns {"cost": float, "over_budget": bool}."""
         total = prompt_tokens + completion_tokens
         cost = estimate_cost(model, input_tokens=prompt_tokens, output_tokens=completion_tokens)
 
@@ -108,6 +108,7 @@ class CostTracker:
         self.db.commit()
 
         # Post-hoc budget enforcement: warn if this call pushed us over
+        over_budget = False
         budget = self.budgets.get(agent)
         if budget:
             daily_spent = self.get_spend(agent, "today").get("total_cost", 0)
@@ -116,8 +117,16 @@ class CostTracker:
                     "Agent '%s' exceeded daily budget: $%.4f / $%.2f",
                     agent, daily_spent, budget["daily_usd"],
                 )
+                over_budget = True
+            monthly_spent = self.get_spend(agent, "month").get("total_cost", 0)
+            if monthly_spent > budget["monthly_usd"]:
+                logger.warning(
+                    "Agent '%s' exceeded monthly budget: $%.4f / $%.2f",
+                    agent, monthly_spent, budget["monthly_usd"],
+                )
+                over_budget = True
 
-        return cost
+        return {"cost": cost, "over_budget": over_budget}
 
     def check_budget(self, agent: str) -> dict:
         """Check if agent is within budget.

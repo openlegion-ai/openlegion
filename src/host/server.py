@@ -137,6 +137,25 @@ def create_mesh_app(
                 raise HTTPException(429, f"Rate limit exceeded for {endpoint}")
             ts_list.append(now)
 
+    def _notify_watchers_batch(watcher_ids: list[str], msg: str) -> None:
+        """Batch-notify watchers via a single cross-thread call."""
+        if not watcher_ids or lane_manager is None or dispatch_loop is None:
+            return
+
+        async def _do_notify():
+            results = await asyncio.gather(
+                *(lane_manager.enqueue(wid, msg, mode="steer") for wid in watcher_ids),
+                return_exceptions=True,
+            )
+            for wid, result in zip(watcher_ids, results):
+                if isinstance(result, Exception):
+                    _server_logger.warning("Watch notification to %s failed: %s", wid, result)
+
+        try:
+            asyncio.run_coroutine_threadsafe(_do_notify(), dispatch_loop)
+        except Exception as e:
+            _server_logger.warning("Batch watch notification failed: %s", e)
+
     def _cleanup_rate_limits(agent_id: str) -> None:
         """Remove all rate-limit buckets for a deregistered agent.
 
@@ -271,20 +290,13 @@ def create_mesh_app(
                     trace_id=req_trace_id, source="mesh.blackboard", agent=agent_id,
                     event_type="blackboard_write", detail=key,
                 )
-        # Notify watchers via steer
+        # Notify watchers via steer (batched into a single cross-thread call)
         watchers = blackboard.get_watchers_for_key(key, exclude=agent_id)
-        if watchers and lane_manager is not None and dispatch_loop is not None:
+        if watchers:
             notify_msg = (
                 f"[Blackboard: {key}] updated by {agent_id}, v{entry.version}"
             )
-            for watcher_id in watchers:
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        lane_manager.enqueue(watcher_id, notify_msg, mode="steer"),
-                        dispatch_loop,
-                    )
-                except Exception as e:
-                    _server_logger.warning("Watch notification to %s failed: %s", watcher_id, e)
+            _notify_watchers_batch(watchers, notify_msg)
         return entry.model_dump(mode="json")
 
     @app.post("/mesh/blackboard/watch")
@@ -319,20 +331,13 @@ def create_mesh_app(
                     trace_id=req_trace_id, source="mesh.blackboard", agent=agent_id,
                     event_type="blackboard_claim", detail=key,
                 )
-        # Notify watchers (CAS writes are still writes)
+        # Notify watchers (CAS writes are still writes, batched into single call)
         watchers = blackboard.get_watchers_for_key(key, exclude=agent_id)
-        if watchers and lane_manager is not None and dispatch_loop is not None:
+        if watchers:
             notify_msg = (
                 f"[Blackboard: {key}] claimed by {agent_id}, v{entry.version}"
             )
-            for watcher_id in watchers:
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        lane_manager.enqueue(watcher_id, notify_msg, mode="steer"),
-                        dispatch_loop,
-                    )
-                except Exception as e:
-                    _server_logger.warning("Watch notification to %s failed: %s", watcher_id, e)
+            _notify_watchers_batch(watchers, notify_msg)
         return entry.model_dump(mode="json")
 
     # === Pub/Sub ===
@@ -364,20 +369,13 @@ def create_mesh_app(
                 )
         subscribers = pubsub.get_subscribers(event.topic)
         if subscribers:
-            # Prefer steer delivery for real-time reactivity when lane_manager is available
+            # Prefer steer delivery for real-time reactivity (batched into single call)
             if lane_manager is not None and dispatch_loop is not None:
                 formatted_msg = (
                     f"[Event: {event.topic}] from {event.source}: "
                     f"{json.dumps(event.payload, default=str)[:500]}"
                 )
-                for agent_id in subscribers:
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            lane_manager.enqueue(agent_id, formatted_msg, mode="steer"),
-                            dispatch_loop,
-                        )
-                    except Exception as e:
-                        _server_logger.warning("Steer delivery to %s failed: %s", agent_id, e)
+                _notify_watchers_batch(subscribers, formatted_msg)
             else:
                 await asyncio.gather(*(
                     router.route(AgentMessage(

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -322,3 +323,56 @@ class TestWorkspaceLearnings:
             data = resp.json()
             assert data["errors"] == ""
             assert data["corrections"] == ""
+
+
+class TestTaskCancellation:
+    @pytest.mark.asyncio
+    async def test_cancelled_task_resets_state_to_idle(self):
+        """If a task is cancelled before execute_task completes, state resets to idle."""
+        loop = MagicMock()
+        loop.agent_id = "test_agent"
+        loop.role = "researcher"
+        loop.state = "idle"
+        loop.current_task = None
+        loop._current_task_handle = None
+        loop._cancel_requested = False
+        loop.skills = MagicMock()
+        loop.skills.list_skills = MagicMock(return_value=[])
+        loop.skills.get_tool_definitions = MagicMock(return_value=[])
+        loop.workspace = None
+        loop.mesh_client = AsyncMock()
+
+        # Make execute_task block forever then raise CancelledError when cancelled
+        cancel_event = asyncio.Event()
+
+        async def slow_execute(*args, **kwargs):
+            cancel_event.set()
+            await asyncio.sleep(999)
+
+        loop.execute_task = AsyncMock(side_effect=slow_execute)
+
+        app = create_agent_app(loop)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            # Submit a task
+            from src.shared.types import TaskAssignment
+            assignment = TaskAssignment(
+                workflow_id="wf1", step_id="s1",
+                task_type="research", input_data={"q": "test"},
+            )
+            resp = await client.post("/task", json=assignment.model_dump(mode="json"))
+            assert resp.json()["accepted"] is True
+            assert loop.state == "working"
+
+            # Wait for execute_task to start
+            await cancel_event.wait()
+
+            # Cancel the task
+            resp = await client.post("/cancel")
+            assert resp.json()["status"] == "cancelled"
+
+            # Give the cancellation a moment to propagate
+            await asyncio.sleep(0.1)
+
+            # State should be reset to idle
+            assert loop.state == "idle"
+            assert loop.current_task is None
