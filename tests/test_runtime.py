@@ -74,6 +74,7 @@ class TestSandboxBackend:
             agent_id="alpha",
             role="test",
             skills_dir=str(skills_src),
+            system_prompt="You are a test agent.",
             model="openai/gpt-4o-mini",
         )
 
@@ -108,7 +109,7 @@ class TestSandboxBackend:
 
         ws = backend._prepare_workspace(
             agent_id="solo", role="test", skills_dir="",
-            model="",
+            system_prompt="", model="",
         )
         assert not (ws / "PROJECT.md").exists()
 
@@ -130,6 +131,7 @@ class TestSandboxBackend:
             agent_id="gamma",
             role="helper",
             skills_dir="",
+            system_prompt="",
             model="openai/gpt-4o-mini",
         )
 
@@ -154,6 +156,7 @@ class TestSandboxBackend:
             agent_id="delta",
             role="helper",
             skills_dir="",
+            system_prompt="",
             model="openai/gpt-4o-mini",
         )
 
