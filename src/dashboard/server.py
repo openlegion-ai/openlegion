@@ -73,7 +73,7 @@ def create_dashboard_router(
             ws_path="/ws/events",
             api_base="/dashboard/api",
         )
-        return HTMLResponse(html)
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
     def _vnc_url_for_request(request: Request, agent_info: dict) -> str | None:
         """Build VNC URL using the request host so the iframe connects correctly.
@@ -1391,6 +1391,6 @@ def create_spa_catchall_router() -> APIRouter:
             raise HTTPException(status_code=404, detail="Not found")
         template = env.get_template("index.html")
         html = template.render(ws_path="/ws/events", api_base="/dashboard/api")
-        return HTMLResponse(html)
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
     return catchall
