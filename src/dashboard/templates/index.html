@@ -6,9 +6,9 @@
   <title>OpenLegion Dashboard</title>
 
   <!-- Favicon -->
-  <link rel="icon" href="/dashboard/static/favicon.ico" sizes="any">
-  <link rel="icon" href="/dashboard/static/favicon-16x16.png" sizes="16x16" type="image/png">
-  <link rel="icon" href="/dashboard/static/favicon-32x32.png" sizes="32x32" type="image/png">
+  <link rel="icon" href="/dashboard/static/favicon.ico?v={{ v }}" sizes="any">
+  <link rel="icon" href="/dashboard/static/favicon-16x16.png?v={{ v }}" sizes="16x16" type="image/png">
+  <link rel="icon" href="/dashboard/static/favicon-32x32.png?v={{ v }}" sizes="32x32" type="image/png">
 
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -43,7 +43,7 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 
   <!-- Custom CSS -->
-  <link rel="stylesheet" href="/dashboard/static/css/dashboard.css">
+  <link rel="stylesheet" href="/dashboard/static/css/dashboard.css?v={{ v }}">
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
   <script>
@@ -2147,7 +2147,7 @@
 
   <!-- Alpine.js (deferred) -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
-  <script src="/dashboard/static/js/websocket.js"></script>
-  <script src="/dashboard/static/js/app.js"></script>
+  <script src="/dashboard/static/js/websocket.js?v={{ v }}"></script>
+  <script src="/dashboard/static/js/app.js?v={{ v }}"></script>
 </body>
 </html>

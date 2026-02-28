@@ -7,6 +7,7 @@ objects — no HTTP round-trips through mesh endpoints.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -29,6 +30,24 @@ logger = setup_logging("dashboard.server")
 _HERE = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _HERE / "templates"
 _STATIC_DIR = _HERE / "static"
+
+
+def _compute_asset_version() -> str:
+    """Hash all static files + the template to produce a cache-bust version string.
+
+    Changes to ANY dashboard file (JS, CSS, HTML template) produce a new hash,
+    which changes the query parameter on all static file URLs, forcing browsers
+    to fetch fresh copies.  Computed once at import time.
+    """
+    h = hashlib.sha256()
+    for pattern in ("static/**/*", "templates/**/*"):
+        for f in sorted(_HERE.glob(pattern)):
+            if f.is_file():
+                h.update(f.read_bytes())
+    return h.hexdigest()[:12]
+
+
+ASSET_VERSION = _compute_asset_version()
 
 
 def create_dashboard_router(
@@ -72,8 +91,9 @@ def create_dashboard_router(
         html = template.render(
             ws_path="/ws/events",
             api_base="/dashboard/api",
+            v=ASSET_VERSION,
         )
-        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     def _vnc_url_for_request(request: Request, agent_info: dict) -> str | None:
         """Build VNC URL using the request host so the iframe connects correctly.
@@ -1361,15 +1381,22 @@ def create_dashboard_router(
     }
 
     @api_router.get("/static/{file_path:path}")
-    async def static_file(file_path: str) -> FileResponse:
+    async def static_file(file_path: str, v: str | None = None) -> FileResponse:
         full = (_STATIC_DIR / file_path).resolve()
         if not str(full).startswith(str(_STATIC_DIR)) or not full.is_file():
             raise HTTPException(status_code=404, detail="Not found")
         suffix = full.suffix.lower()
+        # When served with a versioned URL (?v=<hash>), cache aggressively —
+        # the URL changes whenever file content changes.  Without a version
+        # param (direct access, bookmarks), prevent caching entirely.
+        if v:
+            cache = "public, max-age=86400, immutable"
+        else:
+            cache = "no-store"
         return FileResponse(
             str(full),
             media_type=_MEDIA_TYPES.get(suffix),
-            headers={"Cache-Control": "no-cache"},
+            headers={"Cache-Control": cache},
         )
 
     return api_router
@@ -1390,7 +1417,7 @@ def create_spa_catchall_router() -> APIRouter:
         if path.startswith(("mesh/", "dashboard/", "ws/")):
             raise HTTPException(status_code=404, detail="Not found")
         template = env.get_template("index.html")
-        html = template.render(ws_path="/ws/events", api_base="/dashboard/api")
-        return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+        html = template.render(ws_path="/ws/events", api_base="/dashboard/api", v=ASSET_VERSION)
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     return catchall

@@ -1470,6 +1470,51 @@ class TestDashboardSPACatchall:
         assert "agents" in data
 
 
+class TestDashboardCacheBusting:
+    """Tests for asset versioning and cache-control headers."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir)
+        self.client = _make_full_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_asset_version_is_deterministic(self):
+        from src.dashboard.server import ASSET_VERSION, _compute_asset_version
+        assert ASSET_VERSION == _compute_asset_version()
+        assert len(ASSET_VERSION) == 12
+
+    def test_html_includes_versioned_static_urls(self):
+        from src.dashboard.server import ASSET_VERSION
+        resp = self.client.get("/dashboard/")
+        assert resp.status_code == 200
+        assert f"app.js?v={ASSET_VERSION}" in resp.text
+        assert f"websocket.js?v={ASSET_VERSION}" in resp.text
+        assert f"dashboard.css?v={ASSET_VERSION}" in resp.text
+
+    def test_html_has_no_store_cache_control(self):
+        resp = self.client.get("/dashboard/")
+        assert resp.headers["cache-control"] == "no-store"
+
+    def test_spa_catchall_has_no_store_cache_control(self):
+        resp = self.client.get("/agents/alice")
+        assert resp.headers["cache-control"] == "no-store"
+
+    def test_static_with_version_param_is_cacheable(self):
+        resp = self.client.get("/dashboard/static/js/app.js?v=abc123")
+        assert resp.status_code == 200
+        assert "max-age=86400" in resp.headers["cache-control"]
+        assert "immutable" in resp.headers["cache-control"]
+
+    def test_static_without_version_param_is_no_store(self):
+        resp = self.client.get("/dashboard/static/js/app.js")
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-store"
+
+
 class TestDashboardProjectAPI:
     """Tests for /api/projects and /api/project endpoints."""
 
