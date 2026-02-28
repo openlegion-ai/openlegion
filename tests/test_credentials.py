@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.host.credentials import (
+    _ANTHROPIC_OAUTH_API_KEY_SENTINEL,
     _ANTHROPIC_OAUTH_BETAS,
     AGENT_PREFIX,
     SYSTEM_CREDENTIAL_PROVIDERS,
@@ -1128,11 +1129,11 @@ class TestOAuth:
         assert headers == {}
 
     def test_get_auth_for_model_oauth_token(self, monkeypatch):
-        """OAuth token returns Bearer auth and beta headers."""
+        """OAuth token returns sentinel api_key, Bearer auth, and beta headers."""
         monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-token123")
         v = CredentialVault()
         api_key, headers = v._get_auth_for_model("anthropic/claude-sonnet-4-6")
-        assert api_key == "sk-ant-oat01-token123"
+        assert api_key == _ANTHROPIC_OAUTH_API_KEY_SENTINEL
         assert headers["Authorization"] == "Bearer sk-ant-oat01-token123"
         assert headers["anthropic-beta"] == _ANTHROPIC_OAUTH_BETAS
 
@@ -1201,6 +1202,43 @@ class TestOAuthIntegration:
             result = await v.execute_api_call(req)
 
         assert result.success
+        assert captured["api_key"] == _ANTHROPIC_OAUTH_API_KEY_SENTINEL
         assert "extra_headers" in captured
         assert captured["extra_headers"]["Authorization"] == "Bearer sk-ant-oat01-integration"
+        assert captured["extra_headers"]["anthropic-beta"] == _ANTHROPIC_OAUTH_BETAS
+
+    async def test_stream_llm_oauth_sends_sentinel_and_bearer(self, monkeypatch):
+        """Verify streaming path sends sentinel api_key and Bearer header."""
+        pytest.importorskip("litellm")
+
+        monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-stream")
+        v = CredentialVault()
+
+        captured: dict = {}
+
+        async def mock_chunk_generator():
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta.content = "hi"
+            chunk.choices[0].delta.tool_calls = None
+            del chunk.choices[0].delta.reasoning_content
+            yield chunk
+
+        async def mock_acompletion(**kwargs):
+            captured.update(kwargs)
+            return mock_chunk_generator()
+
+        with patch("litellm.acompletion", side_effect=mock_acompletion):
+            req = APIProxyRequest(
+                service="llm", action="chat",
+                params={
+                    "model": "anthropic/claude-sonnet-4-6",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+            async for _ in v.stream_llm(req):
+                pass
+
+        assert captured["api_key"] == _ANTHROPIC_OAUTH_API_KEY_SENTINEL
+        assert captured["extra_headers"]["Authorization"] == "Bearer sk-ant-oat01-stream"
         assert captured["extra_headers"]["anthropic-beta"] == _ANTHROPIC_OAUTH_BETAS

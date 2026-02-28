@@ -108,6 +108,7 @@ AGENT_PREFIX = "OPENLEGION_CRED_"
 # ── Anthropic OAuth constants ──────────────────────────────
 _ANTHROPIC_OAUTH_PREFIX = "sk-ant-oat"
 _ANTHROPIC_OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
+_ANTHROPIC_OAUTH_API_KEY_SENTINEL = "oauth-via-bearer"
 
 # System credential patterns — used by is_system_credential() for
 # defense-in-depth permission checks and by CLI/dashboard for
@@ -407,15 +408,20 @@ class CredentialVault:
     def _get_auth_for_model(self, model: str) -> tuple[str | None, dict[str, str]]:
         """Resolve API key and any extra auth headers for a model.
 
-        For Anthropic OAuth tokens (``sk-ant-oat*``), returns Bearer auth
-        and required beta headers. For standard API keys, returns empty
-        extra headers.
+        For Anthropic OAuth tokens (``sk-ant-oat*``), returns a sentinel
+        api_key (not the real token) so litellm won't set it as ``x-api-key``.
+        The real token is sent only via ``Authorization: Bearer`` in the
+        extra headers, along with required beta headers.
+
+        For standard API keys, returns the real key with empty extra headers.
         """
         api_key = self._get_api_key_for_model(model)
         if api_key is None:
             return None, {}
         if model.startswith("anthropic/") and self._is_anthropic_oauth(api_key):
-            return api_key, {
+            # OAuth tokens must be sent as Authorization: Bearer, not x-api-key.
+            # Return a sentinel so litellm won't put the real token in x-api-key.
+            return _ANTHROPIC_OAUTH_API_KEY_SENTINEL, {
                 "Authorization": f"Bearer {api_key}",
                 "anthropic-beta": _ANTHROPIC_OAUTH_BETAS,
             }
