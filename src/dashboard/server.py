@@ -141,6 +141,7 @@ def create_dashboard_router(
                 "daily_tokens": c.get("tokens", 0),
                 "role": acfg.get("role", ""),
                 "model": acfg.get("model", default_model),
+                "avatar": acfg.get("avatar", 30),
                 "project": agent_projects.get(agent_id),
             }
             if runtime:
@@ -159,6 +160,7 @@ def create_dashboard_router(
         name = body.get("name", "").strip()
         role = body.get("role", "").strip()
         model = body.get("model", "").strip()
+        avatar = body.get("avatar", 30)
 
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
@@ -170,6 +172,13 @@ def create_dashboard_router(
         if model and model not in _valid_models:
             raise HTTPException(status_code=400, detail=f"Invalid model: {model}")
 
+        try:
+            avatar = int(avatar)
+            if avatar < 1 or avatar > 50:
+                raise HTTPException(status_code=400, detail="Avatar must be between 1 and 50")
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Avatar must be an integer between 1 and 50")
+
         if not model:
             from src.cli.config import _load_config
             model = _load_config().get("llm", {}).get("default_model", "openai/gpt-4o-mini")
@@ -180,8 +189,9 @@ def create_dashboard_router(
             raise HTTPException(status_code=503, detail="Runtime not available")
 
         try:
-            from src.cli.config import _create_agent, _load_config
+            from src.cli.config import _create_agent, _load_config, _update_agent_field
             _create_agent(name, role, model)
+            _update_agent_field(name, "avatar", avatar)
             if permissions is not None:
                 permissions.reload()
 
@@ -341,6 +351,7 @@ def create_dashboard_router(
             "id": agent_id,
             "model": agent_cfg.get("model", default_model),
             "role": agent_cfg.get("role", ""),
+            "avatar": agent_cfg.get("avatar", 30),
             "budget": agent_cfg.get("budget", {}),
             "allowed_credentials": allowed_creds,
             "available_credentials": sorted(agent_cred_names),
@@ -380,6 +391,16 @@ def create_dashboard_router(
         if "role" in body:
             _update_agent_field(agent_id, "role", body["role"])
             updated.append("role")
+
+        if "avatar" in body:
+            try:
+                av = int(body["avatar"])
+                if av < 1 or av > 50:
+                    raise HTTPException(status_code=400, detail="Avatar must be between 1 and 50")
+                _update_agent_field(agent_id, "avatar", av)
+                updated.append("avatar")
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail="Avatar must be an integer between 1 and 50")
 
         if "budget" in body:
             budget_val = body["budget"]

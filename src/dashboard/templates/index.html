@@ -49,7 +49,8 @@
   <script>
     window.__config = {
       wsUrl: (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + "{{ ws_path }}",
-      apiBase: "{{ api_base }}"
+      apiBase: "{{ api_base }}",
+      assetVersion: "{{ v }}"
     };
   </script>
 
@@ -516,7 +517,7 @@
               <!-- Header: Avatar + Name + Health -->
               <div class="flex items-start gap-3 mb-3 relative">
                 <div class="agent-avatar cursor-pointer" :class="'agent-color-' + agentColorIndex(agent.id)" @click="drillDown(agent.id)" title="View agent details">
-                  <span x-text="agentInitials(agent.id)"></span>
+                  <img :src="agentAvatarUrl(agent.id)" :alt="agent.id">
                   <!-- Activity indicator dot -->
                   <span class="activity-dot"
                     :aria-label="agentStates[agent.id] || 'idle'"
@@ -736,7 +737,7 @@
                   : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
               >
                 <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(chatId)" style="width:1.25rem;height:1.25rem;font-size:0.5rem;">
-                  <span x-text="agentInitials(chatId)"></span>
+                  <img :src="agentAvatarUrl(chatId)" :alt="chatId">
                 </div>
                 <span class="truncate max-w-[5rem]" x-text="chatId"></span>
                 <span x-show="chatUnread[chatId] > 0"
@@ -757,7 +758,7 @@
         <div class="flex items-center gap-2 px-3 py-2 border-b border-gray-800/50 shrink-0"
           :class="(chatStreamingAgents[activeChatId] || chatLoadingAgents[activeChatId]) && 'border-b-indigo-500/50'">
           <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(activeChatId)">
-            <span x-text="agentInitials(activeChatId)"></span>
+            <img :src="agentAvatarUrl(activeChatId)" :alt="activeChatId">
             <span class="activity-dot"
               :aria-label="chatStreamingAgents[activeChatId] ? 'streaming' : (chatLoadingAgents[activeChatId] ? 'thinking' : 'idle')"
               :class="chatStreamingAgents[activeChatId] ? 'bg-green-400' : (chatLoadingAgents[activeChatId] ? 'bg-purple-400' : 'bg-gray-600')"
@@ -1087,7 +1088,7 @@
             <div class="flex items-center justify-between mb-5">
               <div class="flex items-center gap-3">
                 <div class="agent-avatar agent-avatar-lg" :class="'agent-color-' + agentColorIndex(agentDetail.id)">
-                  <span x-text="agentInitials(agentDetail.id)"></span>
+                  <img :src="agentAvatarUrl(agentDetail.id)" :alt="agentDetail.id">
                 </div>
                 <div>
                   <div class="flex items-center gap-2.5">
@@ -1385,6 +1386,26 @@
                           <div>
                             <label class="text-xs text-gray-500 mb-1 block">Role</label>
                             <input type="text" x-model="editForm.role" class="dash-input w-full">
+                          </div>
+                          <div class="relative">
+                            <label class="text-xs text-gray-500 mb-1 block">Avatar</label>
+                            <button type="button" @click="editForm._showAvatarPicker = !editForm._showAvatarPicker"
+                              class="dash-input flex items-center gap-2 cursor-pointer text-left">
+                              <img :src="`/dashboard/static/avatars/${editForm.avatar || 30}.svg?v={{ v }}`" class="w-5 h-5 rounded" :alt="'Avatar ' + editForm.avatar">
+                              <span class="text-xs text-gray-400" x-text="'#' + (editForm.avatar || 30)"></span>
+                            </button>
+                            <div x-show="editForm._showAvatarPicker" x-cloak @click.outside="editForm._showAvatarPicker = false"
+                              class="absolute z-50 mt-1 p-2 bg-gray-800 border border-gray-700 rounded-lg shadow-xl w-[272px] max-h-[200px] overflow-y-auto custom-scrollbar">
+                              <div class="grid grid-cols-8 gap-1">
+                                <template x-for="n in 50" :key="n">
+                                  <button type="button" @click="editForm.avatar = n; editForm._showAvatarPicker = false"
+                                    class="w-7 h-7 rounded cursor-pointer border-2 transition-colors p-0.5"
+                                    :class="editForm.avatar === n ? 'border-indigo-500 bg-gray-700' : 'border-transparent hover:border-gray-600'">
+                                    <img :src="`/dashboard/static/avatars/${n}.svg?v={{ v }}`" class="w-full h-full" :alt="'Avatar ' + n">
+                                  </button>
+                                </template>
+                              </div>
+                            </div>
                           </div>
                           <div>
                             <label class="text-xs text-gray-500 mb-1 block">Budget ($/day)</label>
@@ -1717,8 +1738,9 @@
                     <svg class="bb-chevron" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" /></svg>
                     <!-- Agent avatar -->
                     <div class="agent-avatar agent-avatar-sm"
-                      :class="'agent-color-' + agentColorIndex(entry.written_by)"
-                      x-text="agentInitials(entry.written_by)"></div>
+                      :class="'agent-color-' + agentColorIndex(entry.written_by)">
+                      <img :src="agentAvatarUrl(entry.written_by)" :alt="entry.written_by">
+                    </div>
                     <!-- Namespace badge -->
                     <span x-show="bbNamespaceOf(entry.key)" :class="bbNsBadgeClass(entry.key)"
                       x-text="bbNsName(entry.key)"></span>
@@ -2223,6 +2245,26 @@
                   <option :value="m" x-text="m"></option>
                 </template>
               </select>
+            </div>
+            <div class="relative">
+              <label class="text-xs text-gray-500 mb-1 block">Avatar</label>
+              <button type="button" @click="addAgentForm._showPicker = !addAgentForm._showPicker"
+                class="dash-input w-full flex items-center gap-2 cursor-pointer text-left">
+                <img :src="`/dashboard/static/avatars/${addAgentForm.avatar}.svg?v={{ v }}`" class="w-5 h-5 rounded" :alt="'Avatar ' + addAgentForm.avatar">
+                <span class="text-xs text-gray-400" x-text="'#' + addAgentForm.avatar"></span>
+              </button>
+              <div x-show="addAgentForm._showPicker" x-cloak @click.outside="addAgentForm._showPicker = false"
+                class="absolute z-50 mt-1 p-2 bg-gray-800 border border-gray-700 rounded-lg shadow-xl w-[272px] max-h-[200px] overflow-y-auto custom-scrollbar">
+                <div class="grid grid-cols-8 gap-1">
+                  <template x-for="n in 50" :key="n">
+                    <button type="button" @click="addAgentForm.avatar = n; addAgentForm._showPicker = false"
+                      class="w-7 h-7 rounded cursor-pointer border-2 transition-colors p-0.5"
+                      :class="addAgentForm.avatar === n ? 'border-indigo-500 bg-gray-700' : 'border-transparent hover:border-gray-600'">
+                      <img :src="`/dashboard/static/avatars/${n}.svg?v={{ v }}`" class="w-full h-full" :alt="'Avatar ' + n">
+                    </button>
+                  </template>
+                </div>
+              </div>
             </div>
           </div>
           <div class="flex gap-2 mt-4">
