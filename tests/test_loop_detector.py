@@ -58,15 +58,13 @@ def test_terminate_after_threshold():
 
 
 def test_exempt_tools_always_ok():
-    """memory_search and memory_recall should always return 'ok'."""
+    """memory_search should always return 'ok'."""
     d = ToolLoopDetector()
     args = {"query": "test"}
     result = '{"results": []}'
     for _ in range(10):
         d.record("memory_search", args, result)
-        d.record("memory_recall", args, result)
     assert d.check_before("memory_search", args) == "ok"
-    assert d.check_before("memory_recall", args) == "ok"
 
 
 def test_sliding_window_eviction():

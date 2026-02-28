@@ -48,12 +48,21 @@ def _parse_fact(content: str) -> tuple[str, str]:
 @skill(
     name="memory_search",
     description=(
-        "Search your long-term memory for relevant information. "
-        "Searches both workspace files (BM25) and structured fact database (vector+BM25). "
-        "Use this when you need to recall facts, preferences, or past events."
+        "Search your long-term memory. By default searches both workspace files "
+        "and your structured fact database. Provide a category to search only "
+        "the fact database filtered to that category. Use this to recall facts, "
+        "preferences, decisions, or past events before answering questions."
     ),
     parameters={
         "query": {"type": "string", "description": "What to search for"},
+        "category": {
+            "type": "string",
+            "description": (
+                "Optional: filter to a fact category (e.g. 'user_preferences', "
+                "'decisions'). When set, searches only the structured fact database."
+            ),
+            "default": "",
+        },
         "max_results": {
             "type": "integer",
             "description": "Maximum results to return (default 5)",
@@ -61,18 +70,42 @@ def _parse_fact(content: str) -> tuple[str, str]:
         },
     },
 )
-async def memory_search(query: str, max_results: int = 5, *, workspace_manager=None, memory_store=None) -> dict:
+async def memory_search(
+    query: str, category: str = "", max_results: int = 5,
+    *, workspace_manager=None, memory_store=None,
+) -> dict:
     """Search workspace memory files and structured fact database."""
     results = []
 
-    # Workspace BM25 search
+    # Category-filtered search: only the structured fact DB
+    if category and memory_store is not None:
+        # Over-fetch when filtering by category since post-fetch filtering
+        # may discard many results
+        fetch_k = max_results * 3
+        facts = await _search_with_fallback(memory_store, query, fetch_k)
+        if facts:
+            for fact in facts:
+                if fact.category.lower() != category.lower():
+                    continue
+                results.append({
+                    "key": fact.key,
+                    "value": fact.value,
+                    "category": fact.category,
+                    "confidence": fact.confidence,
+                    "access_count": fact.access_count,
+                    "source": "memory_db",
+                })
+        if not results and not facts:
+            return {"error": "Memory search failed", "results": []}
+        return {"results": results, "count": len(results)}
+
+    # Default: search both workspace and DB
     if workspace_manager is not None:
         ws_hits = workspace_manager.search(query, max_results=max_results)
         for hit in ws_hits:
             hit["source"] = "workspace"
             results.append(hit)
 
-    # Structured memory DB search (vector + BM25)
     if memory_store is not None:
         db_facts = await _search_with_fallback(memory_store, query, max_results)
         if db_facts:
@@ -96,7 +129,7 @@ async def memory_search(query: str, max_results: int = 5, *, workspace_manager=N
     description=(
         "Save an important fact or note to long-term memory. "
         "Saved to both the daily session log and the structured fact database, "
-        "so it can be recalled later with memory_recall or memory_search. "
+        "so it can be recalled later with memory_search. "
         "Examples: user preferences, decisions made, key findings."
     ),
     parameters={
@@ -116,7 +149,7 @@ async def memory_save(content: str, *, workspace_manager=None, memory_store=None
         workspace_manager.append_daily_log(content)
         saved_workspace = True
 
-    # 2. Structured memory DB (searchable via memory_recall)
+    # 2. Structured memory DB (searchable via memory_search)
     if memory_store is not None:
         try:
             # Parse content into key/value — use first sentence or clause as key
@@ -132,54 +165,3 @@ async def memory_save(content: str, *, workspace_manager=None, memory_store=None
         return {"error": "No memory backends available"}
 
     return {"saved": True, "saved_workspace": saved_workspace, "saved_db": saved_db, "content": content}
-
-
-@skill(
-    name="memory_recall",
-    description=(
-        "Search your structured fact database using semantic similarity. "
-        "Better than memory_search for recalling specific facts, preferences, and decisions. "
-        "Supports optional category filtering."
-    ),
-    parameters={
-        "query": {"type": "string", "description": "What to recall"},
-        "category": {
-            "type": "string",
-            "description": "Optional: filter by category name",
-            "default": "",
-        },
-        "max_results": {
-            "type": "integer",
-            "description": "Max results (default 5)",
-            "default": 5,
-        },
-    },
-)
-async def memory_recall(
-    query: str, category: str = "", max_results: int = 5, *, memory_store=None,
-) -> dict:
-    """Search structured fact database with optional category filter."""
-    if memory_store is None:
-        return {"error": "No memory_store available", "results": []}
-
-    # Over-fetch when filtering by category since post-fetch filtering
-    # may discard many results
-    fetch_k = max_results * 3 if category else max_results
-
-    facts = await _search_with_fallback(memory_store, query, fetch_k)
-    if facts is None:
-        return {"error": "Memory search failed", "results": []}
-
-    results = []
-    for fact in facts:
-        if category and fact.category.lower() != category.lower():
-            continue
-        results.append({
-            "key": fact.key,
-            "value": fact.value,
-            "category": fact.category,
-            "confidence": fact.confidence,
-            "access_count": fact.access_count,
-        })
-
-    return {"results": results, "count": len(results)}

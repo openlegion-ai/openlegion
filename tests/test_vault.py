@@ -187,31 +187,3 @@ class TestVaultListTool:
         assert "error" in result
 
 
-class TestVaultStatusTool:
-    @pytest.mark.asyncio
-    async def test_vault_status_exists(self):
-        from src.agent.builtins.vault_tool import vault_status
-
-        mock_client = AsyncMock()
-        mock_client.vault_status.return_value = {"name": "my_key", "exists": True}
-
-        result = await vault_status(name="my_key", mesh_client=mock_client)
-        assert result["name"] == "my_key"
-        assert result["exists"] is True
-
-    @pytest.mark.asyncio
-    async def test_vault_status_not_exists(self):
-        from src.agent.builtins.vault_tool import vault_status
-
-        mock_client = AsyncMock()
-        mock_client.vault_status.return_value = {"name": "nope", "exists": False}
-
-        result = await vault_status(name="nope", mesh_client=mock_client)
-        assert result["exists"] is False
-
-    @pytest.mark.asyncio
-    async def test_vault_status_no_mesh_client(self):
-        from src.agent.builtins.vault_tool import vault_status
-
-        result = await vault_status(name="key", mesh_client=None)
-        assert "error" in result

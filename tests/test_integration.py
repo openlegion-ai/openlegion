@@ -366,24 +366,6 @@ def test_vault_list_endpoint(vault_components):
     assert data["count"] >= 1
 
 
-def test_vault_status_endpoint(vault_components):
-    client = vault_components["client"]
-    vault = vault_components["vault"]
-    vault.credentials["exists_key"] = "val"
-
-    response = client.get(
-        "/mesh/vault/status/exists_key", params={"agent_id": "trusted"},
-    )
-    assert response.status_code == 200
-    assert response.json()["exists"] is True
-
-    response = client.get(
-        "/mesh/vault/status/missing_key", params={"agent_id": "trusted"},
-    )
-    assert response.status_code == 200
-    assert response.json()["exists"] is False
-
-
 def test_vault_resolve_endpoint(vault_components):
     client = vault_components["client"]
     vault = vault_components["vault"]
@@ -568,26 +550,6 @@ def test_vault_list_wildcard_excludes_system(vault_components):
     data = response.json()
     assert "brightdata_cdp_url" in data["credentials"]
     assert "anthropic_api_key" not in data["credentials"]
-
-
-def test_vault_status_scoped_agent(vault_components):
-    """vault_status checks can_access_credential for the specific name."""
-    client = vault_components["client"]
-    vault = vault_components["vault"]
-    vault.credentials["brightdata_cdp_url"] = "wss://test"
-
-    # Scoped agent can check brightdata_*
-    response = client.get(
-        "/mesh/vault/status/brightdata_cdp_url", params={"agent_id": "scoped"},
-    )
-    assert response.status_code == 200
-    assert response.json()["exists"] is True
-
-    # Scoped agent cannot check system credentials
-    response = client.get(
-        "/mesh/vault/status/anthropic_api_key", params={"agent_id": "scoped"},
-    )
-    assert response.status_code == 403
 
 
 # ── Vault rate limiting tests ─────────────────────────────────

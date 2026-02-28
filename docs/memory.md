@@ -170,7 +170,7 @@ Session 1: User says "My timezone is PST"
   === Chat Reset ===
 
 Session 2: User asks "What timezone am I in?"
-           Agent: memory_recall("user timezone")
+           Agent: memory_search("user timezone")
            -> Returns "PST" via semantic search
 ```
 

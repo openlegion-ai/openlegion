@@ -49,9 +49,9 @@ Every agent automatically has access to built-in tools defined in
 - `read_file`, `write_file`, `list_files` — File I/O
 - `http_request` — HTTP requests
 - `browser_navigate`, `browser_screenshot`, etc. — Browser automation
-- `memory_search`, `memory_save`, `memory_recall` — Persistent memory
+- `memory_search`, `memory_save` — Persistent memory
 - `list_agents`, `spawn_agent`, `spawn_subagent`, `notify_user`, `publish_event` — Team coordination
 - `read_shared_state`, `write_shared_state`, `list_shared_state` — Shared blackboard
-- `vault_generate_secret`, `vault_capture_from_page`, `vault_list`, `vault_status` — Credential vault
+- `vault_generate_secret`, `vault_capture_from_page`, `vault_list` — Credential vault
 - `introspect` — Runtime state queries
 - `create_skill`, `reload_skills` — Self-extension

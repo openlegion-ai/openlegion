@@ -132,16 +132,3 @@ def reload_skills() -> dict:
         "reload_requested": True,
         "note": "Skills will be reloaded. New tools will be available on next turn.",
     }
-
-
-@skill(
-    name="list_custom_skills",
-    description="List all custom skills you've created in your skills directory.",
-    parameters={},
-)
-def list_custom_skills() -> dict:
-    skills_dir = Path("/data/custom_skills")
-    if not skills_dir.exists():
-        return {"skills": [], "count": 0}
-    files = [f.name for f in skills_dir.glob("*.py") if not f.name.startswith("_")]
-    return {"skills": files, "count": len(files), "directory": str(skills_dir)}

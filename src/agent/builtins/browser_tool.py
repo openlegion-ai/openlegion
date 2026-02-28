@@ -1127,9 +1127,12 @@ async def browser_evaluate(script: str, *, mesh_client=None) -> dict:
 @skill(
     name="browser_solve_captcha",
     description=(
-        "Detect and solve a CAPTCHA on the current page. Supports reCAPTCHA "
-        "v2/v3/Enterprise, hCaptcha, and Cloudflare Turnstile. Requires a "
-        "CAPTCHA API key in the vault (2captcha_key or capsolver_key)."
+        "Manually trigger CAPTCHA detection and solving on the current page. "
+        "Usually NOT needed — browser_navigate auto-detects and solves CAPTCHAs. "
+        "Use this only when a CAPTCHA appears AFTER navigation (e.g. after clicking "
+        "a button or on a lazy-loaded challenge). Supports reCAPTCHA v2/v3/Enterprise, "
+        "hCaptcha, and Cloudflare Turnstile. Requires 2captcha_key or capsolver_key "
+        "in the vault."
     ),
     parameters={},
 )

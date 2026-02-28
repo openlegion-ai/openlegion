@@ -35,7 +35,7 @@ DEFAULT_TTL = 300
 DEFAULT_MAX_ITERATIONS = 10
 
 # Skills that subagents should NOT have (they could cause recursion or contention)
-_UNSAFE_SKILLS = frozenset({"create_skill", "reload_skills", "spawn_subagent"})
+_UNSAFE_SKILLS = frozenset({"create_skill", "reload_skills", "spawn_subagent", "wait_for_subagent"})
 
 
 def register_parent_llm(agent_id: str, llm: LLMClient) -> None:
@@ -270,3 +270,47 @@ async def list_subagents(*, mesh_client=None) -> dict:
         "active": sum(1 for s in subagents if not s["done"]),
         "subagents": subagents,
     }
+
+
+@skill(
+    name="wait_for_subagent",
+    description=(
+        "Wait for a subagent to complete and return its result. "
+        "Use after spawn_subagent instead of polling read_shared_state. "
+        "Returns the subagent's result directly."
+    ),
+    parameters={
+        "subagent_id": {
+            "type": "string",
+            "description": "Subagent ID returned by spawn_subagent",
+        },
+        "timeout": {
+            "type": "integer",
+            "description": "Max seconds to wait (default 120)",
+            "default": 120,
+        },
+    },
+)
+async def wait_for_subagent(
+    subagent_id: str, timeout: int = 120, *, mesh_client=None,
+) -> dict:
+    """Wait for a subagent to complete and return its result."""
+    parent_id = getattr(mesh_client, "agent_id", "unknown") if mesh_client else "unknown"
+    parent_tasks = _active_subagents.get(parent_id, {})
+    task = parent_tasks.get(subagent_id)
+    if task is None:
+        return {"error": f"No active subagent with ID '{subagent_id}'"}
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except asyncio.TimeoutError:
+        return {"error": f"Subagent {subagent_id} did not complete within {timeout}s", "timed_out": True}
+    # Task is done — read result from blackboard
+    result_key = f"subagent_results/{parent_id}/{subagent_id}"
+    if mesh_client:
+        try:
+            bb = await mesh_client.read_blackboard(result_key)
+            if bb and bb.get("exists"):
+                return {"subagent_id": subagent_id, "completed": True, **bb.get("value", {})}
+        except Exception:
+            pass
+    return {"subagent_id": subagent_id, "completed": True, "result": "Result written to blackboard but could not be read."}

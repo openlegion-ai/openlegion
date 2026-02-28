@@ -145,10 +145,10 @@ async def write_shared_state(key: str, value: str, *, mesh_client=None) -> dict:
 @skill(
     name="list_shared_state",
     description=(
-        "List all entries on the shared blackboard matching a key prefix. "
-        "Use this to see what other agents have shared: list_shared_state(prefix='goals/') "
-        "to see all goals, or list_shared_state(prefix='context/') for shared context. "
-        "The blackboard is for agent-to-agent coordination."
+        "Discover what's on the shared blackboard by listing entries matching a key "
+        "prefix. Returns key names, authors, timestamps, and value previews — but "
+        "NOT full values (use read_shared_state for that). Use when you don't know "
+        "the exact key: prefix='tasks/' to find tasks, prefix='' to see everything."
     ),
     parameters={
         "prefix": {
@@ -362,7 +362,8 @@ async def save_artifact(
         "Schedule a recurring job for yourself. The mesh will send you the "
         "specified message on the given schedule. Use cron syntax "
         "(e.g. '0 9 * * 1-5' for weekdays at 9 AM) or natural intervals "
-        "(e.g. 'every 30m'). Returns the job ID."
+        "(e.g. 'every 30m'). Set heartbeat=true to update your autonomous "
+        "wakeup schedule instead."
     ),
     parameters={
         "schedule": {
@@ -372,55 +373,47 @@ async def save_artifact(
         "message": {
             "type": "string",
             "description": "Message the mesh will send you on each trigger",
+            "default": "",
+        },
+        "heartbeat": {
+            "type": "boolean",
+            "description": (
+                "If true, sets your autonomous heartbeat schedule (finds and "
+                "updates existing heartbeat, or creates one). Only change if "
+                "the USER explicitly asks — each heartbeat costs API credits."
+            ),
+            "default": False,
         },
     },
 )
-async def set_cron(schedule: str, message: str, *, mesh_client=None) -> dict:
+async def set_cron(
+    schedule: str, message: str = "", heartbeat: bool = False,
+    *, mesh_client=None,
+) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     try:
+        if heartbeat:
+            # Check for existing heartbeat job and update it
+            jobs = await mesh_client.list_cron()
+            existing = next((j for j in jobs if j.get("heartbeat")), None)
+            if existing:
+                result = await mesh_client.update_cron(
+                    existing["id"], schedule=schedule,
+                )
+                return {"updated": True, "type": "heartbeat", **result}
+            # No existing heartbeat — create one
+            result = await mesh_client.create_cron(
+                schedule=schedule,
+                message=message or "heartbeat",
+                heartbeat=True,
+            )
+            return {"created": True, "type": "heartbeat", **result}
+        # Regular cron job
         result = await mesh_client.create_cron(schedule=schedule, message=message)
         return {"created": True, **result}
     except Exception as e:
         return {"error": f"Failed to create cron job: {e}"}
-
-
-@skill(
-    name="set_heartbeat",
-    description=(
-        "Set or update your heartbeat schedule. You are automatically given a "
-        "heartbeat on startup — only change it if the USER explicitly asks you "
-        "to. Each heartbeat costs API credits, so NEVER increase frequency on "
-        "your own. The mesh will periodically wake you to work toward your "
-        "goals and check for pending tasks. Define your autonomous rules in "
-        "HEARTBEAT.md in your workspace."
-    ),
-    parameters={
-        "schedule": {
-            "type": "string",
-            "description": "How often to wake (e.g. 'every 15m', 'every 1h', '*/30 * * * *')",
-        },
-    },
-)
-async def set_heartbeat(schedule: str, *, mesh_client=None) -> dict:
-    if mesh_client is None:
-        return {"error": "No mesh_client available"}
-    try:
-        # Check for existing heartbeat job and update it
-        jobs = await mesh_client.list_cron()
-        existing = next((j for j in jobs if j.get("heartbeat")), None)
-        if existing:
-            result = await mesh_client.update_cron(
-                existing["id"], schedule=schedule,
-            )
-            return {"updated": True, "type": "heartbeat", **result}
-        # No existing heartbeat — create one
-        result = await mesh_client.create_cron(
-            schedule=schedule, message="heartbeat", heartbeat=True,
-        )
-        return {"created": True, "type": "heartbeat", **result}
-    except Exception as e:
-        return {"error": f"Failed to set heartbeat: {e}"}
 
 
 @skill(
@@ -502,10 +495,10 @@ async def spawn_agent(
 @skill(
     name="read_agent_history",
     description=(
-        "Read another agent's conversation history (daily logs). Use this to "
-        "understand what another agent has been doing, what it learned, and "
-        "what context it has. Permission-checked — you can only read agents "
-        "you're allowed to message."
+        "Read another agent's workspace daily logs to understand their recent "
+        "activity — tasks worked on, tools called, and facts learned. Use this "
+        "to get context before coordinating with another agent. Permission-checked: "
+        "you can only read agents you're allowed to message."
     ),
     parameters={
         "agent_id": {

@@ -18,6 +18,7 @@ from src.agent.builtins.subagent_tool import (
     list_subagents,
     register_parent_llm,
     spawn_subagent,
+    wait_for_subagent,
 )
 
 
@@ -349,5 +350,74 @@ class TestDepthTracking:
 
         assert _get_depth("new-parent") == 0
         assert _parent_llm_refs["new-parent"] is mock_llm
+
+        _cleanup()
+
+
+class TestWaitForSubagent:
+    @pytest.mark.asyncio
+    async def test_wait_for_subagent_basic(self):
+        """Wait for a completed subagent and get its result."""
+        _cleanup()
+
+        mock_mesh = AsyncMock()
+        mock_mesh.agent_id = "wait-parent"
+        mock_mesh.read_blackboard = AsyncMock(return_value={
+            "exists": True,
+            "value": {"status": "complete", "result": "done"},
+        })
+
+        # Create a task that completes immediately
+        async def instant():
+            return {"status": "complete"}
+
+        task = asyncio.create_task(instant())
+        _active_subagents["wait-parent"] = {"sub_1": task}
+
+        result = await wait_for_subagent("sub_1", timeout=5, mesh_client=mock_mesh)
+        assert result["completed"] is True
+        assert result["subagent_id"] == "sub_1"
+        assert result["status"] == "complete"
+
+        _cleanup()
+
+    @pytest.mark.asyncio
+    async def test_wait_for_subagent_timeout(self):
+        """Wait with short timeout returns timeout error."""
+        _cleanup()
+
+        mock_mesh = AsyncMock()
+        mock_mesh.agent_id = "timeout-parent"
+
+        # Create a task that never completes
+        async def slow():
+            await asyncio.sleep(100)
+
+        task = asyncio.create_task(slow())
+        _active_subagents["timeout-parent"] = {"sub_slow": task}
+
+        result = await wait_for_subagent("sub_slow", timeout=1, mesh_client=mock_mesh)
+        assert "error" in result
+        assert result["timed_out"] is True
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        _cleanup()
+
+    @pytest.mark.asyncio
+    async def test_wait_for_subagent_unknown_id(self):
+        """Wait with unknown subagent ID returns error."""
+        _cleanup()
+
+        mock_mesh = AsyncMock()
+        mock_mesh.agent_id = "unknown-parent"
+
+        result = await wait_for_subagent("nonexistent", timeout=5, mesh_client=mock_mesh)
+        assert "error" in result
+        assert "nonexistent" in result["error"]
 
         _cleanup()

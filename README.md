@@ -414,18 +414,17 @@ canonicalized parameters and results over a 15-call sliding window.
 | `save_artifact` | Save deliverable file and register on blackboard |
 | `update_workspace` | Update identity files (HEARTBEAT.md, USER.md) |
 | `notify_user` | Send notification to user across all connected channels |
-| `set_cron` | Schedule a recurring job |
-| `set_heartbeat` | Enable autonomous monitoring with probes |
+| `set_cron` | Schedule a recurring job (set `heartbeat=true` for autonomous wakeups) |
 | `list_cron` / `remove_cron` | Manage scheduled jobs |
 | `create_skill` | Write a new Python skill at runtime |
-| `list_custom_skills` | List all custom skills the agent has created |
 | `reload_skills` | Hot-reload all skills |
 | `spawn_agent` | Spawn an ephemeral sub-agent in a new container |
 | `spawn_subagent` | Spawn a lightweight in-container subagent for parallel subtasks |
 | `list_subagents` | List active subagents and their status |
+| `wait_for_subagent` | Wait for a subagent to complete and return its result |
 | `vault_generate_secret` | Generate and store a random secret (returns opaque handle) |
 | `vault_capture_from_page` | Capture text from browser element and store as credential |
-| `vault_list` / `vault_status` | List credential names or check if a credential exists |
+| `vault_list` | List credential names (names only, never values) |
 | `introspect` | Query own runtime state: permissions, budget, fleet, cron, health |
 | `read_agent_history` | Read another agent's conversation logs |
 

@@ -21,7 +21,7 @@ from src.shared.utils import setup_logging
 logger = setup_logging("agent.loop_detector")
 
 # Tools that should never be flagged (idempotent retrieval)
-_EXEMPT_TOOLS = frozenset({"memory_search", "memory_recall"})
+_EXEMPT_TOOLS = frozenset({"memory_search"})
 
 # Escalation thresholds (checked against prior completed calls in window)
 _WARN_THRESHOLD = 2       # >= 2 prior identical → warn

@@ -750,11 +750,12 @@ async def test_system_prompt_learnings_sanitized():
     assert "lesson one important" in prompt
 
 
-def test_chat_prompt_includes_memory_recall_instruction():
+def test_chat_prompt_includes_memory_search_instruction():
     """Chat system prompt instructs agent to search memory before answering."""
     loop = _make_loop()
     prompt = loop._build_chat_system_prompt()
     assert "memory_search" in prompt
+    assert "category=" in prompt
     assert "prior work" in prompt or "Before answering" in prompt
 
 

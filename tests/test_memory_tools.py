@@ -73,4 +73,4 @@ class TestMemoryToolDiscovery:
         registry = SkillRegistry(skills_dir="/nonexistent/path")
         assert "memory_search" in registry.skills
         assert "memory_save" in registry.skills
-        assert "memory_recall" in registry.skills
+        assert "category" in registry.skills["memory_search"]["parameters"]

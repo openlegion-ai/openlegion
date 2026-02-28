@@ -45,9 +45,8 @@ All agents use a single browser architecture: **Chrome + KasmVNC**. A Chromium i
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `memory_search` | `query`, `max_results` | Hybrid search across workspace files and structured DB |
+| `memory_search` | `query`, `category`, `max_results` | Hybrid search across workspace files and structured DB. Provide `category` to search only the fact database filtered to that category. |
 | `memory_save` | `content` | Save a fact to workspace daily log and structured memory |
-| `memory_recall` | `query`, `category`, `max_results` | Semantic search with optional category filtering |
 
 ### Mesh / Fleet
 
@@ -73,8 +72,7 @@ All agents use a single browser architecture: **Chrome + KasmVNC**. A Chromium i
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `set_cron` | `schedule`, `message` | Schedule a recurring job (cron expression or interval) |
-| `set_heartbeat` | `schedule` | Enable autonomous monitoring (probes run automatically) |
+| `set_cron` | `schedule`, `message`, `heartbeat` | Schedule a recurring job (cron expression or interval). Set `heartbeat=true` to update your autonomous wakeup schedule. |
 | `list_cron` | -- | List scheduled jobs |
 | `remove_cron` | `job_id` | Remove a scheduled job |
 
@@ -89,7 +87,6 @@ All agents use a single browser architecture: **Chrome + KasmVNC**. A Chromium i
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `create_skill` | `name`, `code` | Write a new Python skill at runtime |
-| `list_custom_skills` | -- | List all custom skills the agent has created |
 | `reload_skills` | -- | Hot-reload all skills from disk |
 | `spawn_agent` | `role`, `system_prompt`, `ttl` | Spawn an ephemeral sub-agent in a new container (default TTL: 3600s) |
 
@@ -103,6 +100,7 @@ Lightweight subagents that run inside the same process as the parent agent, shar
 |------|-----------|-------------|
 | `spawn_subagent` | `task`, `role`, `ttl_seconds` | Spawn a lightweight subagent for parallel subtask execution |
 | `list_subagents` | -- | List active subagents spawned by this agent and their status |
+| `wait_for_subagent` | `subagent_id`, `timeout` | Wait for a subagent to complete and return its result |
 
 ### Credential Vault
 
@@ -113,7 +111,6 @@ Agents never see credential values. All operations return opaque `$CRED{name}` h
 | `vault_generate_secret` | `name`, `length`, `charset` | Generate a random secret and store it (returns handle only) |
 | `vault_capture_from_page` | `name`, `selector` or `ref` | Read text from a browser element and store as credential |
 | `vault_list` | -- | List credential names the agent can access (names only, filtered by permissions) |
-| `vault_status` | `name` | Check if an accessible credential exists in the vault |
 
 ### System Introspection
 

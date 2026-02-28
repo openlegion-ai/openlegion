@@ -114,7 +114,7 @@ Cron tick
 
 ```
 Agent: I'll monitor the system every 30 minutes.
-→ set_heartbeat(schedule="every 30m")
+→ set_cron(schedule="every 30m", heartbeat=true)
 ```
 
 The probes (disk_usage, pending_signals, pending_tasks) run automatically -- you don't need to specify them. Define your escalation rules in `HEARTBEAT.md` instead.
@@ -294,6 +294,6 @@ The watcher polls at a configurable interval, tracks file modification times, an
 | `src/host/server.py` | Webhook endpoints, cron management API |
 | `src/host/orchestrator.py` | Workflow executor (triggered by pub/sub and webhooks) |
 | `src/host/mesh.py` | PubSub system for event-driven triggering |
-| `src/agent/builtins/mesh_tool.py` | Agent-side `set_cron`, `set_heartbeat`, `list_cron`, `remove_cron` tools |
+| `src/agent/builtins/mesh_tool.py` | Agent-side `set_cron`, `list_cron`, `remove_cron` tools |
 | `src/host/watchers.py` | Polling-based file watchers for Docker volume compatibility |
 | `config/cron.json` | Persisted job state |
