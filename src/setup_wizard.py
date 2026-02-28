@@ -403,7 +403,11 @@ class SetupWizard:
 
     def _validate_oauth_token(self, token: str) -> bool:
         """Validate an Anthropic OAuth token via a test API call."""
-        from src.host.credentials import _ANTHROPIC_OAUTH_BETAS
+        from src.host.credentials import (
+            _ANTHROPIC_OAUTH_APP_HEADER,
+            _ANTHROPIC_OAUTH_BETAS_FULL,
+            _ANTHROPIC_OAUTH_USER_AGENT,
+        )
 
         validation_model = _VALIDATION_MODELS.get("anthropic")
         if not validation_model:
@@ -421,7 +425,9 @@ class SetupWizard:
                         api_key=token,
                         extra_headers={
                             "Authorization": f"Bearer {token}",
-                            "anthropic-beta": _ANTHROPIC_OAUTH_BETAS,
+                            "user-agent": _ANTHROPIC_OAUTH_USER_AGENT,
+                            "x-app": _ANTHROPIC_OAUTH_APP_HEADER,
+                            "anthropic-beta": _ANTHROPIC_OAUTH_BETAS_FULL,
                         },
                     )
                 )
