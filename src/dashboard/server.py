@@ -1018,11 +1018,52 @@ def create_dashboard_router(
 
     # ── Cron management ──────────────────────────────────────
 
+    # ── Model health ──────────────────────────────────────
+
+    @api_router.get("/api/model-health")
+    async def api_model_health() -> dict:
+        if credential_vault is None:
+            return {"models": []}
+        return {"models": credential_vault.get_model_health()}
+
+    # ── Workflow cancel ──────────────────────────────────
+
+    @api_router.post("/api/workflows/{execution_id}/cancel")
+    async def api_workflow_cancel(execution_id: str) -> dict:
+        if orchestrator is None:
+            raise HTTPException(status_code=503, detail="Orchestrator not available")
+        if orchestrator.cancel_execution(execution_id):
+            return {"cancelled": True, "execution_id": execution_id}
+        raise HTTPException(status_code=404, detail="Execution not found or not running")
+
+    # ── Cron management ──────────────────────────────────
+
     @api_router.get("/api/cron")
     async def api_cron() -> dict:
         if cron_scheduler is None:
             return {"jobs": []}
         return {"jobs": cron_scheduler.list_jobs()}
+
+    @api_router.post("/api/cron")
+    async def api_cron_create(request: Request) -> dict:
+        if cron_scheduler is None:
+            raise HTTPException(status_code=503, detail="Cron scheduler not available")
+        body = await request.json()
+        agent = body.get("agent", "").strip()
+        schedule = body.get("schedule", "").strip()
+        message = body.get("message", "").strip()
+        if not agent or not schedule or not message:
+            raise HTTPException(status_code=400, detail="agent, schedule, and message are required")
+        if agent not in agent_registry:
+            raise HTTPException(status_code=400, detail=f"Agent '{agent}' not found")
+        error = cron_scheduler._validate_schedule(schedule)
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+        try:
+            job = cron_scheduler.add_job(agent=agent, schedule=schedule, message=message)
+            return {"created": True, "job_id": job.id}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     @api_router.post("/api/cron/{job_id}/run")
     async def api_cron_run(job_id: str) -> dict:

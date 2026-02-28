@@ -58,7 +58,10 @@
     <!-- Toast notifications -->
     <div class="fixed top-16 right-4 z-50 flex flex-col gap-2" role="status" aria-live="polite">
       <template x-for="t in toastQueue" :key="t.id">
-        <div class="toast text-gray-200" x-text="t.msg" x-transition></div>
+        <div class="toast text-gray-200 flex items-center gap-2" x-transition>
+          <span class="flex-1" x-text="t.msg"></span>
+          <button @click="dismissToast(t.id)" class="shrink-0 text-gray-400 hover:text-white transition-colors text-sm leading-none">&times;</button>
+        </div>
       </template>
     </div>
 
@@ -182,15 +185,17 @@
               class="w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors"
               :class="cmdPaletteIdx === i ? 'bg-gray-800' : 'hover:bg-gray-800/50'">
               <!-- Type badge -->
-              <span class="text-[10px] font-medium px-1.5 py-0.5 rounded shrink-0"
+              <span class="text-[10px] font-medium px-1.5 py-0.5 rounded shrink-0 flex items-center gap-1"
                 :class="{
                   'bg-indigo-900/40 text-indigo-400': result.type === 'agent',
                   'bg-cyan-900/40 text-cyan-400': result.type === 'tab',
                   'bg-amber-900/40 text-amber-400': result.type === 'blackboard',
                   'bg-emerald-900/40 text-emerald-400': result.type === 'action',
                   'bg-pink-900/40 text-pink-400': result.type === 'cron',
-                }"
-                x-text="result.type"></span>
+                }">
+                <span x-show="result.type === 'agent'" class="w-1.5 h-1.5 rounded-full" :class="agentHealthColor(result)"></span>
+                <span x-text="result.type"></span>
+              </span>
               <div class="flex-1 min-w-0">
                 <div class="text-sm text-gray-200 truncate" x-text="result.label"></div>
                 <div class="text-[10px] text-gray-500 truncate" x-text="result.desc"></div>
@@ -274,6 +279,20 @@
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
           </svg>
         </button>
+        <!-- Model health indicator -->
+        <div x-show="modelsDown > 0" x-cloak class="flex items-center gap-1.5 text-xs relative group/health cursor-default">
+          <span class="relative flex h-2 w-2">
+            <span class="bg-red-400 animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"></span>
+            <span class="bg-red-400 relative inline-flex rounded-full h-2 w-2"></span>
+          </span>
+          <span class="text-red-400" x-text="modelsDown + ' model' + (modelsDown !== 1 ? 's' : '') + ' down'"></span>
+          <!-- Tooltip -->
+          <div class="absolute top-full right-0 mt-1 w-48 bg-gray-900 border border-gray-700 rounded-lg p-2 shadow-xl hidden group-hover/health:block z-50">
+            <template x-for="m in modelHealth.filter(x => !x.available)" :key="m.model">
+              <div class="text-[10px] text-red-400 py-0.5 truncate" x-text="m.model + ' (cooldown)'"></div>
+            </template>
+          </div>
+        </div>
         <!-- Connection indicator -->
         <div class="flex items-center gap-1.5 text-xs">
           <span class="relative flex h-2 w-2">
@@ -495,7 +514,7 @@
               <div class="agent-card-accent" :class="'agent-color-' + agentColorIndex(agent.id)"></div>
 
               <!-- Header: Avatar + Name + Health -->
-              <div class="flex items-start gap-3 mb-3">
+              <div class="flex items-start gap-3 mb-3 relative">
                 <div class="agent-avatar cursor-pointer" :class="'agent-color-' + agentColorIndex(agent.id)" @click="drillDown(agent.id)" title="View agent details">
                   <span x-text="agentInitials(agent.id)"></span>
                   <!-- Activity indicator dot -->
@@ -515,7 +534,7 @@
                     <svg class="w-3 h-3 text-gray-600 group-hover:text-indigo-400 transition-colors shrink-0 cursor-pointer" @click="drillDown(agent.id)" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                   </div>
                   <div class="text-xs text-gray-500 truncate mt-0.5" x-show="agent.role" :title="agent.role" x-text="agent.role"></div>
-                  <div class="text-[10px] text-gray-600 truncate mt-0.5" x-show="agent.model" :title="agent.model" x-text="(agent.model || '').split('/').pop()"></div>
+                  <div class="text-[10px] text-gray-600 truncate mt-0.5" x-show="agent.model" :title="agent.model" x-text="(agent.model || '').length > 30 ? (agent.model || '').slice(-30) : (agent.model || '')"></div>
                   <div x-show="agent.project && !activeProject" class="mt-0.5">
                     <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800/80 text-gray-500 border border-gray-700/40"
                       x-text="agent.project"></span>
@@ -538,6 +557,12 @@
                     x-text="agent.health_status || 'unknown'"
                   ></span>
                 </div>
+                <!-- Hover-only delete button -->
+                <button @click.stop="removeAgent(agent.id)"
+                  class="absolute -top-1 -right-1 opacity-0 group-hover:opacity-100 transition-opacity w-5 h-5 flex items-center justify-center rounded-full bg-gray-800 hover:bg-red-900/60 text-gray-500 hover:text-red-400 border border-gray-700/50 hover:border-red-800/50"
+                  title="Remove agent">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>
+                </button>
               </div>
 
               <!-- Stats grid -->
@@ -573,20 +598,19 @@
                 </div>
               </div>
 
-              <!-- Agent actions: Chat, Manage, Restart, Remove -->
+              <!-- Agent actions: Chat, Restart -->
               <div class="mt-3 pt-3 border-t border-gray-800/30 flex flex-nowrap gap-1.5">
                 <button @click="openChat(agent.id)" class="action-btn action-btn-primary"
                   :class="openChats.includes(agent.id) && 'ring-1 ring-indigo-500 bg-indigo-600/20'">
                   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                   <span x-text="openChats.includes(agent.id) ? 'Chatting' : 'Chat'"></span>
                 </button>
-                <button @click="restartAgent(agent.id)" class="action-btn action-btn-warn">
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-                  Restart
-                </button>
-                <button @click="removeAgent(agent.id)" class="action-btn action-btn-danger">
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                  Delete
+                <button @click="restartAgent(agent.id)" class="action-btn action-btn-warn"
+                  :disabled="_restartingAgents[agent.id]"
+                  :class="_restartingAgents[agent.id] && 'opacity-50 cursor-not-allowed'">
+                  <svg x-show="!_restartingAgents[agent.id]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                  <svg x-show="_restartingAgents[agent.id]" x-cloak class="animate-spin" fill="none" viewBox="0 0 24 24" stroke-width="2"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                  <span x-text="_restartingAgents[agent.id] ? 'Restarting...' : 'Restart'"></span>
                 </button>
               </div>
             </div>
@@ -863,6 +887,14 @@
                 <option :value="a" x-text="a"></option>
               </template>
             </select>
+            <div class="flex items-center bg-gray-800/50 border border-gray-700/50 rounded-lg overflow-hidden">
+              <template x-for="range in ['1h', '6h', '24h', 'all']" :key="range">
+                <button @click="activityTimeRange = range"
+                  class="text-[10px] px-2 py-1.5 transition-colors"
+                  :class="activityTimeRange === range ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-gray-200'"
+                  x-text="range === 'all' ? 'All' : range"></button>
+              </template>
+            </div>
           </div>
           <div class="space-y-1 max-h-[calc(100vh-13rem)] overflow-y-auto custom-scrollbar">
             <template x-for="t in filteredTraces" :key="t.trace_id">
@@ -1647,11 +1679,14 @@
               </div>
               <div>
                 <label for="bb-new-value" class="text-xs text-gray-500 mb-1 block">Value (JSON)</label>
-                <textarea id="bb-new-value" x-model="bbNewValue" class="dash-textarea w-full" rows="2" placeholder='{"key": "value"}'></textarea>
+                <textarea id="bb-new-value" x-model="bbNewValue" class="dash-textarea w-full" rows="2" placeholder='{"key": "value"}'
+                  :class="bbNewValue && !bbJsonValid.valid ? 'border-red-500/50' : ''"></textarea>
+                <div x-show="bbNewValue && !bbJsonValid.valid" x-cloak class="text-[10px] text-red-400 mt-1" x-text="bbJsonValid.error"></div>
               </div>
             </div>
             <div class="mt-3 flex gap-2">
-              <button @click="writeBlackboard()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save</button>
+              <button @click="writeBlackboard()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                :disabled="!bbJsonValid.valid" :class="!bbJsonValid.valid && 'opacity-50 cursor-not-allowed'">Save</button>
               <button @click="bbWriteMode = false" class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Cancel</button>
             </div>
           </div>
@@ -1724,7 +1759,36 @@
 
         <!-- Automation sub-tab -->
         <div x-show="systemTab === 'automation'">
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Cron Jobs</div>
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-xs text-gray-500 uppercase tracking-wider">Cron Jobs</div>
+          <button x-show="!showCronForm" @click="showCronForm = true" class="text-xs px-2.5 py-1 rounded border border-gray-700 hover:border-indigo-500/50 text-gray-400 hover:text-indigo-300 transition-colors">+ New Job</button>
+        </div>
+        <!-- Cron creation form -->
+        <div x-show="showCronForm" x-cloak x-transition class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
+          <div class="text-xs text-gray-500 mb-2">New cron job</div>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
+            <select x-model="cronFormAgent" class="dash-select text-xs">
+              <option value="">Agent...</option>
+              <template x-for="a in agents" :key="a.id">
+                <option :value="a.id" x-text="a.id"></option>
+              </template>
+            </select>
+            <div>
+              <input type="text" x-model="cronFormSchedule" class="dash-input text-xs w-full" placeholder="every 15m">
+              <div class="flex gap-1 mt-1">
+                <button @click="cronFormSchedule = 'every 5m'" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-500">5m</button>
+                <button @click="cronFormSchedule = 'every 15m'" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-500">15m</button>
+                <button @click="cronFormSchedule = 'every 1h'" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-500">1h</button>
+                <button @click="cronFormSchedule = 'every 1d'" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-500">1d</button>
+              </div>
+            </div>
+            <textarea x-model="cronFormMessage" class="dash-textarea text-xs" rows="2" placeholder="Message to send..."></textarea>
+          </div>
+          <div class="flex justify-between">
+            <button @click="showCronForm = false; cronFormAgent = ''; cronFormSchedule = 'every 15m'; cronFormMessage = ''" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
+            <button @click="createCronJob()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Create Job</button>
+          </div>
+        </div>
         <div class="mb-6">
           <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
             <div class="overflow-x-auto">
@@ -1869,6 +1933,8 @@
                       <span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
                       <span x-text="exec.workflow || exec.execution_id"></span>
                       <span class="text-gray-600" x-text="exec.status || 'running'"></span>
+                      <button @click="cancelWorkflow(exec.execution_id)"
+                        class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-500 hover:text-red-400 transition-all ml-auto">Cancel</button>
                     </div>
                   </template>
                 </div>
@@ -1954,12 +2020,21 @@
             </div>
             <div class="space-y-1 mb-3">
               <template x-for="name in settingsData?.credentials?.names || []" :key="name">
-                <div class="flex items-center gap-2 text-xs group">
-                  <span class="w-2 h-2 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-500/50' : 'bg-amber-500/50'"></span>
-                  <span class="text-gray-300 font-mono flex-1" x-text="name"></span>
-                  <span x-show="name === 'anthropic_api_key' && settingsData.anthropic_auth_mode === 'oauth'" class="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-900/40 text-violet-400">oauth</span>
-                  <span class="text-[10px] px-1.5 py-0.5 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-900/40 text-green-400' : 'bg-amber-900/40 text-amber-400'" x-text="(settingsData.agent_credentials || []).includes(name) ? 'agent' : 'system'"></span>
-                  <button @click="deleteCredential(name)" class="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 transition-opacity text-base leading-none px-1" title="Remove credential" aria-label="Remove credential">&times;</button>
+                <div>
+                  <div class="flex items-center gap-2 text-xs group">
+                    <span class="w-2 h-2 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-500/50' : 'bg-amber-500/50'"></span>
+                    <span class="text-gray-300 font-mono flex-1" x-text="name"></span>
+                    <span x-show="name === 'anthropic_api_key' && settingsData.anthropic_auth_mode === 'oauth'" class="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-900/40 text-violet-400">oauth</span>
+                    <span class="text-[10px] px-1.5 py-0.5 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-900/40 text-green-400' : 'bg-amber-900/40 text-amber-400'" x-text="(settingsData.agent_credentials || []).includes(name) ? 'agent' : 'system'"></span>
+                    <button @click="editingCredential = editingCredential === name ? null : name; editCredKey = ''" class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-indigo-300 transition-opacity text-[10px] px-1" title="Update credential">Update</button>
+                    <button @click="deleteCredential(name)" class="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 transition-opacity text-base leading-none px-1" title="Remove credential" aria-label="Remove credential">&times;</button>
+                  </div>
+                  <!-- Inline credential update form -->
+                  <div x-show="editingCredential === name" x-cloak x-transition class="ml-4 mt-1 mb-1 flex items-center gap-2">
+                    <input type="password" x-model="editCredKey" class="dash-input text-xs flex-1" placeholder="New key value">
+                    <button @click="updateCredential(name)" class="text-[10px] px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white">Save</button>
+                    <button @click="editingCredential = null; editCredKey = ''" class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400">Cancel</button>
+                  </div>
                 </div>
               </template>
             </div>
@@ -2018,6 +2093,10 @@
                   <span class="text-gray-600">&rarr;</span>
                   <span class="text-gray-400" x-text="wh.agent"></span>
                   <span class="text-gray-700 text-[10px] font-mono truncate flex-1" x-text="wh.url || ''"></span>
+                  <button x-show="wh.url" @click.stop="copyToClipboard(wh.url)"
+                    class="opacity-0 group-hover:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all" title="Copy URL">
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  </button>
                   <button @click="testWebhook(wh.name)"
                     class="opacity-0 group-hover:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-all">Test</button>
                   <button @click="deleteWebhook(wh.name)"

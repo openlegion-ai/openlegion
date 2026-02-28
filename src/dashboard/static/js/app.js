@@ -220,6 +220,22 @@ function dashboard() {
     webhookFormAgent: '',
     webhookFormSecret: '',
 
+    // Model health
+    modelHealth: [],
+
+    // Cron creation
+    showCronForm: false,
+    cronFormAgent: '',
+    cronFormSchedule: 'every 15m',
+    cronFormMessage: '',
+
+    // Credential update
+    editingCredential: null,
+    editCredKey: '',
+
+    // Restart loading
+    _restartingAgents: {},
+
     // Onboarding
     onboardProvider: '',
     onboardKey: '',
@@ -472,6 +488,17 @@ function dashboard() {
 
     get filteredTraces() {
       let items = this.traces;
+      if (this.activityTimeRange && this.activityTimeRange !== 'all') {
+        const hoursMap = { '1h': 1, '6h': 6, '24h': 24 };
+        const hours = hoursMap[this.activityTimeRange];
+        if (hours) {
+          const cutoff = Date.now() / 1000 - hours * 3600;
+          items = items.filter(t => {
+            const ts = typeof t.started === 'string' ? new Date(t.started).getTime() / 1000 : t.started;
+            return ts >= cutoff;
+          });
+        }
+      }
       if (this.activitySearch) {
         const q = this.activitySearch.toLowerCase();
         items = items.filter(t => {
@@ -515,6 +542,19 @@ function dashboard() {
       return counts;
     },
 
+    get bbJsonValid() {
+      try {
+        JSON.parse(this.bbNewValue);
+        return { valid: true, error: '' };
+      } catch (e) {
+        return { valid: false, error: e.message };
+      }
+    },
+
+    get modelsDown() {
+      return this.modelHealth.filter(m => !m.available).length;
+    },
+
     // ── Lifecycle ─────────────────────────────────────────
 
     init() {
@@ -537,7 +577,20 @@ function dashboard() {
       this.fetchSettings();
       this.fetchProject();
       this.fetchProjects();
+      this.fetchModelHealth();
       this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
+      this._modelHealthInterval = setInterval(() => this.fetchModelHealth(), 60000);
+
+      // Restore chat history from sessionStorage
+      try {
+        const saved = sessionStorage.getItem('ol_chats');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed.histories) this.chatHistories = parsed.histories;
+          if (parsed.openChats) this.openChats = parsed.openChats;
+          if (parsed.activeChatId) this.activeChatId = parsed.activeChatId;
+        }
+      } catch (_) {}
 
       // Command palette: Cmd+K / Ctrl+K + tab shortcuts 1/2/3
       this._cmdPaletteHandler = (e) => {
@@ -662,6 +715,7 @@ function dashboard() {
       if (this._refreshInterval) clearInterval(this._refreshInterval);
       if (this._queueInterval) clearInterval(this._queueInterval);
       if (this._cronInterval) clearInterval(this._cronInterval);
+      if (this._modelHealthInterval) clearInterval(this._modelHealthInterval);
       if (this._costDebounce) clearTimeout(this._costDebounce);
       if (this._fleetDebounce) clearTimeout(this._fleetDebounce);
       if (this._activityRefresh) clearInterval(this._activityRefresh);
@@ -739,6 +793,10 @@ function dashboard() {
       }, 4000);
     },
 
+    dismissToast(id) {
+      this.toastQueue = this.toastQueue.filter(t => t.id !== id);
+    },
+
     // ── WebSocket event handler ───────────────────────────
 
     onWsEvent(evt) {
@@ -778,6 +836,11 @@ function dashboard() {
         this._debouncedFleetRefresh();
       }
 
+      // Refresh model health on health_change events
+      if (evt.type === 'health_change') {
+        this.fetchModelHealth();
+      }
+
       // Show toast for agent notifications + inject into chat panel
       if (evt.type === 'notification' && evt.agent) {
         this.showToast(`[${evt.agent}] ${(evt.data?.message || '').substring(0, 120)}`);
@@ -788,6 +851,7 @@ function dashboard() {
           streaming: false,
           tools: [],
         });
+        this._saveChatToSession();
         if (this.openChats.includes(evt.agent)) {
           if (this.chatPanelMinimized || this.activeChatId !== evt.agent) {
             this.chatUnread = { ...this.chatUnread, [evt.agent]: (this.chatUnread[evt.agent] || 0) + 1 };
@@ -1408,6 +1472,7 @@ function dashboard() {
 
     async restartAgent(agentId) {
       this.showConfirm('Restart Agent', `Restart agent "${agentId}"? This will interrupt any active work.`, async () => {
+        this._restartingAgents = { ...this._restartingAgents, [agentId]: true };
         this.showToast(`Restarting ${agentId}...`);
         try {
           const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/restart`, { method: 'POST' });
@@ -1419,6 +1484,9 @@ function dashboard() {
             this.showToast(`Restart failed`);
           }
         } catch (e) { this.showToast(`Error: ${e.message}`); }
+        const copy = { ...this._restartingAgents };
+        delete copy[agentId];
+        this._restartingAgents = copy;
       }, true);
     },
 
@@ -1583,6 +1651,118 @@ function dashboard() {
       this.workflowsLoading = false;
     },
 
+    async fetchModelHealth() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/model-health`);
+        if (resp.ok) this.modelHealth = (await resp.json()).models || [];
+      } catch (e) { console.warn('fetchModelHealth failed:', e); }
+    },
+
+    async cancelWorkflow(executionId) {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/workflows/${encodeURIComponent(executionId)}/cancel`, { method: 'POST' });
+        if (resp.ok) {
+          this.showToast(`Workflow execution cancelled`);
+          this.fetchWorkflows();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Cancel failed: ${err.detail || 'Unknown error'}`);
+        }
+      } catch (e) { this.showToast(`Cancel failed: ${e.message}`); }
+    },
+
+    async createCronJob() {
+      const agent = this.cronFormAgent.trim();
+      const schedule = this.cronFormSchedule.trim();
+      const message = this.cronFormMessage.trim();
+      if (!agent || !schedule || !message) {
+        this.showToast('Agent, schedule, and message are required');
+        return;
+      }
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/cron`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent, schedule, message }),
+        });
+        if (resp.ok) {
+          this.showToast('Cron job created');
+          this.cronFormAgent = '';
+          this.cronFormSchedule = 'every 15m';
+          this.cronFormMessage = '';
+          this.showCronForm = false;
+          this.fetchCronJobs();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Failed to create job'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
+    async updateCredential(name) {
+      if (!this.editCredKey.trim()) {
+        this.showToast('Key is required');
+        return;
+      }
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/credentials`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ service: name, key: this.editCredKey.trim() }),
+        });
+        if (resp.ok) {
+          this.showToast(`Credential updated: ${name}`);
+          this.editingCredential = null;
+          this.editCredKey = '';
+          this.fetchSettings();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
+    copyToClipboard(text) {
+      navigator.clipboard.writeText(text).then(() => {
+        this.showToast('URL copied');
+      }).catch(() => {
+        this.showToast('Failed to copy');
+      });
+    },
+
+    _saveChatToSession() {
+      try {
+        // Cap each agent's history to 50 messages to avoid storage bloat
+        const histories = {};
+        for (const [agentId, msgs] of Object.entries(this.chatHistories)) {
+          if (!Array.isArray(msgs) || msgs.length === 0) continue;
+          const capped = msgs.slice(-50).map(m => ({
+            role: m.role,
+            content: m.content,
+            streaming: false,
+            tools: [],
+          }));
+          histories[agentId] = capped;
+        }
+        sessionStorage.setItem('ol_chats', JSON.stringify({
+          histories,
+          openChats: this.openChats,
+          activeChatId: this.activeChatId,
+        }));
+      } catch (_) {}
+    },
+
+    agentHealthColor(result) {
+      if (!result || result.type !== 'agent') return '';
+      const agent = this.agents.find(a => a.id === result.label);
+      if (!agent) return 'bg-gray-500';
+      const status = agent.health_status || 'unknown';
+      if (status === 'healthy') return 'bg-green-500';
+      if (status === 'unhealthy' || status === 'restarting') return 'bg-amber-500';
+      if (status === 'failed') return 'bg-red-500';
+      return 'bg-gray-500';
+    },
+
     async runWorkflow(name) {
       try {
         const resp = await fetch(`${window.__config.apiBase}/workflows/${encodeURIComponent(name)}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
@@ -1735,6 +1915,7 @@ function dashboard() {
       this.chatHistories[agentId] = [];
       this.chatLoadingAgents[agentId] = false;
       this.chatStreamingAgents[agentId] = false;
+      this._saveChatToSession();
     },
 
     _scrollTimers: {},
@@ -2035,6 +2216,7 @@ function dashboard() {
       this.chatLoadingAgents[agentId] = false;
       this.chatStreamingAgents[agentId] = false;
       this.$nextTick(() => this._scrollChat(agentId));
+      this._saveChatToSession();
     },
 
     isAgentBusy(agentId) {
@@ -2466,6 +2648,11 @@ function dashboard() {
 
     // ── Chart.js rendering ────────────────────────────────
 
+    _AGENT_CHART_COLORS: [
+      '#6366f1', '#8b5cf6', '#06b6d4', '#10b981',
+      '#f59e0b', '#ef4444', '#ec4899', '#3b82f6',
+    ],
+
     renderCostChart() {
       const canvas = document.getElementById('costChart');
       if (!canvas) return;
@@ -2480,11 +2667,19 @@ function dashboard() {
       const costs = agents.map(a => a.cost);
       const tokens = agents.map(a => a.tokens);
 
+      const costColors = agents.map(a => this._AGENT_CHART_COLORS[this.agentColorIndex(a.agent)]);
+      const costColorsBg = costColors.map(c => c + '66');
+      const tokenColorsBg = costColors.map(c => c + '40');
+
       // Update existing chart in-place if possible
       if (this.costChart) {
         this.costChart.data.labels = labels;
         this.costChart.data.datasets[0].data = costs;
+        this.costChart.data.datasets[0].backgroundColor = costColorsBg;
+        this.costChart.data.datasets[0].borderColor = costColors;
         this.costChart.data.datasets[1].data = tokens;
+        this.costChart.data.datasets[1].backgroundColor = tokenColorsBg;
+        this.costChart.data.datasets[1].borderColor = costColors;
         this.costChart.update();
         return;
       }
@@ -2497,8 +2692,8 @@ function dashboard() {
             {
               label: 'Cost (USD)',
               data: costs,
-              backgroundColor: 'rgba(99, 102, 241, 0.4)',
-              borderColor: 'rgb(99, 102, 241)',
+              backgroundColor: costColorsBg,
+              borderColor: costColors,
               borderWidth: 1,
               borderRadius: 4,
               yAxisID: 'y',
@@ -2506,8 +2701,8 @@ function dashboard() {
             {
               label: 'Tokens',
               data: tokens,
-              backgroundColor: 'rgba(168, 85, 247, 0.25)',
-              borderColor: 'rgb(168, 85, 247)',
+              backgroundColor: tokenColorsBg,
+              borderColor: costColors,
               borderWidth: 1,
               borderRadius: 4,
               yAxisID: 'y1',
