@@ -668,7 +668,7 @@
                   ? 'bg-gray-700 text-white shadow-sm'
                   : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
               >
-                <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(chatId)" style="width:1.25rem;height:1.25rem;font-size:0.5rem;">
+                <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(chatId)" style="width:1.5rem;height:1.5rem;padding:2px;">
                   <img :src="agentAvatarUrl(chatId)" :alt="chatId">
                 </div>
                 <span class="truncate max-w-[5rem]" x-text="chatId"></span>
