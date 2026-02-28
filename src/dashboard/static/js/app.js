@@ -1724,6 +1724,11 @@ function dashboard() {
         return;
       }
       this.credentialSaving = true;
+      this.showToast('Validating API key...');
+      if (!await this._validateCredential(name, this.editCredKey.trim())) {
+        this.credentialSaving = false;
+        return;
+      }
       try {
         const resp = await fetch(`${window.__config.apiBase}/credentials`, {
           method: 'POST',
@@ -2458,9 +2463,32 @@ function dashboard() {
 
     // ── Credentials ──────────────────────────────────────
 
+    async _validateCredential(service, key, baseUrl) {
+      try {
+        const body = { service, key };
+        if (baseUrl) body.base_url = baseUrl;
+        const resp = await fetch(`${window.__config.apiBase}/credentials/validate`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (!data.valid) {
+            this.showToast(`Invalid API key: ${data.reason || 'authentication failed'}`);
+            return false;
+          }
+        }
+      } catch (e) {
+        // Validation endpoint unavailable — allow save
+      }
+      return true;
+    },
+
     async addCredential() {
       const service = this.credService === '__custom__' ? this.credCustomService.trim() : this.credService.trim();
       if (!service || !this.credKey.trim()) return;
+      this.showToast('Validating API key...');
+      if (!await this._validateCredential(service, this.credKey.trim(), this.credBaseUrl.trim())) return;
       try {
         const body = { service, key: this.credKey.trim() };
         if (this.credService === '__custom__' && this.credTier === 'system') body.tier = 'system';
@@ -2505,6 +2533,8 @@ function dashboard() {
 
     async submitOnboardCredential() {
       if (!this.onboardProvider || !this.onboardKey.trim()) return;
+      this.showToast('Validating API key...');
+      if (!await this._validateCredential(this.onboardProvider, this.onboardKey.trim(), this.onboardBaseUrl.trim())) return;
       try {
         const body = { service: this.onboardProvider, key: this.onboardKey.trim() };
         if (this.onboardBaseUrl.trim()) body.base_url = this.onboardBaseUrl.trim();

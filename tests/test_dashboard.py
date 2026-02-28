@@ -1020,6 +1020,70 @@ class TestDashboardCredentialRemove:
         assert resp.status_code == 404
 
 
+class TestDashboardCredentialValidate:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_validate_valid_key(self):
+        """Valid API key returns valid=True."""
+        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=MagicMock()):
+            resp = self.client.post("/dashboard/api/credentials/validate", json={
+                "service": "anthropic", "key": "sk-valid-key",
+            })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["valid"] is True
+        assert data["skipped"] is False
+
+    def test_validate_invalid_key(self):
+        """Invalid API key returns valid=False."""
+        import litellm
+        with patch("litellm.acompletion", new_callable=AsyncMock, side_effect=litellm.AuthenticationError(
+            message="Invalid API Key", llm_provider="anthropic",
+            model="anthropic/claude-haiku-4-5-20251001",
+        )):
+            resp = self.client.post("/dashboard/api/credentials/validate", json={
+                "service": "anthropic", "key": "sk-bad-key",
+            })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["valid"] is False
+
+    def test_validate_unknown_provider_skipped(self):
+        """Unknown provider skips validation and returns valid=True."""
+        resp = self.client.post("/dashboard/api/credentials/validate", json={
+            "service": "unknown_provider", "key": "some-key",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["valid"] is True
+        assert data["skipped"] is True
+
+    def test_validate_missing_fields(self):
+        """Missing service or key returns 400."""
+        resp = self.client.post("/dashboard/api/credentials/validate", json={
+            "service": "", "key": "",
+        })
+        assert resp.status_code == 400
+
+    def test_validate_network_error_allows_save(self):
+        """Network errors don't block — returns valid=True, skipped=True."""
+        with patch("litellm.acompletion", new_callable=AsyncMock, side_effect=TimeoutError("timeout")):
+            resp = self.client.post("/dashboard/api/credentials/validate", json={
+                "service": "anthropic", "key": "sk-some-key",
+            })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["valid"] is True
+        assert data["skipped"] is True
+
+
 # ── V2 Tests: Credential Tier ───────────────────────────────
 
 
