@@ -87,12 +87,7 @@ class TelegramChannel(Channel):
 
         # Clean up any partially-initialized app from a previous failed attempt
         if self._app is not None:
-            try:
-                await self._app.stop()
-                await self._app.shutdown()
-            except Exception as e:
-                logger.debug("Cleanup of previous app failed: %s", e)
-            self._app = None
+            await self._shutdown_app()
 
         self._app = (
             Application.builder()
@@ -129,18 +124,40 @@ class TelegramChannel(Channel):
                 logger.warning("Telegram init failed (%s), retry in %ds...", err, wait)
                 await asyncio.sleep(wait)
         await self._app.start()
-        # Terminate any stale polling session left by a previous instance
-        # (e.g. process killed without clean shutdown).  A quick getUpdates
-        # call forces Telegram to drop the old long-poll connection.
-        try:
-            await self._app.bot.get_updates(offset=-1, timeout=0)
-        except Exception as e:
-            logger.debug("Bot get_updates cleanup failed: %s", e)
-        await asyncio.sleep(0.5)
-        await self._app.updater.start_polling(
-            drop_pending_updates=True,
-            bootstrap_retries=3,
-        )
+
+        # Invalidate any stale polling session left by a previous instance
+        # (e.g. process killed without clean shutdown).  Telegram keeps the
+        # old long-poll connection alive for up to 30s; we need multiple
+        # rounds to reliably force it closed.
+        await self._clear_stale_polling()
+
+        # Start polling with retry — the stale session may outlive our
+        # cleanup window, producing a Conflict on the first attempt.
+        from telegram.error import Conflict as TgConflict
+
+        for attempt in range(3):
+            try:
+                await self._app.updater.start_polling(
+                    drop_pending_updates=True,
+                    bootstrap_retries=5,
+                    error_callback=self._on_polling_error,
+                )
+                break
+            except TgConflict:
+                if attempt == 2:
+                    logger.error(
+                        "Telegram polling conflict persists after retries. "
+                        "Another bot instance may be running with this token."
+                    )
+                    raise
+                wait = 3 * (attempt + 1)
+                logger.warning(
+                    "Telegram polling conflict (attempt %d/3), retrying in %ds...",
+                    attempt + 1, wait,
+                )
+                await asyncio.sleep(wait)
+                await self._clear_stale_polling()
+
         owner = self._pairing.owner
         if owner:
             logger.info(f"Telegram channel started (owner: {owner})")
@@ -151,20 +168,71 @@ class TelegramChannel(Channel):
 
     async def stop(self) -> None:
         if self._app:
-            try:
-                await self._app.updater.stop()
-            except Exception as e:
-                logger.debug("Error stopping Telegram updater: %s", e)
-            try:
-                await self._app.stop()
-            except Exception as e:
-                logger.debug("Error stopping Telegram app: %s", e)
-            try:
-                await self._app.shutdown()
-            except Exception as e:
-                logger.debug("Error shutting down Telegram app: %s", e)
-            self._app = None
+            await self._shutdown_app()
             logger.info("Telegram channel stopped")
+
+    async def _shutdown_app(self) -> None:
+        """Fully tear down the Application (updater → app → shutdown)."""
+        app = self._app
+        self._app = None
+        if app is None:
+            return
+        # Stop updater first — it holds the active polling connection.
+        try:
+            if app.updater and app.updater.running:
+                await app.updater.stop()
+        except Exception as e:
+            logger.debug("Error stopping Telegram updater: %s", e)
+        try:
+            await app.stop()
+        except Exception as e:
+            logger.debug("Error stopping Telegram app: %s", e)
+        try:
+            await app.shutdown()
+        except Exception as e:
+            logger.debug("Error shutting down Telegram app: %s", e)
+
+    async def _clear_stale_polling(self) -> None:
+        """Invalidate any stale long-poll session from a previous instance.
+
+        After an unclean shutdown, Telegram may keep the old polling
+        connection alive for up to 30 seconds.  We send multiple
+        ``getUpdates(offset=-1)`` calls with delays to force Telegram
+        to drop it before we start our own polling.
+        """
+        # deleteWebhook resets the bot's update-fetch mode cleanly.
+        try:
+            await self._app.bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            logger.debug("delete_webhook cleanup failed: %s", e)
+        # Multiple rounds — each getUpdates(offset=-1) terminates whatever
+        # long-poll is in flight, but the stale client may re-connect.
+        for i in range(3):
+            try:
+                await self._app.bot.get_updates(offset=-1, timeout=0)
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+
+    async def _on_polling_error(self, exc: Exception) -> None:
+        """Handle errors from the polling loop.
+
+        Registered as ``error_callback`` on ``start_polling`` so that
+        transient ``Conflict`` errors produce a single-line warning
+        instead of the library's default full traceback.
+        """
+        try:
+            from telegram.error import Conflict as TgConflict
+        except ImportError:
+            TgConflict = type(None)
+
+        if isinstance(exc, TgConflict):
+            logger.warning(
+                "Telegram polling conflict — another bot instance may be "
+                "running with the same token. Will keep retrying."
+            )
+        else:
+            logger.error("Telegram polling error: %s", exc)
 
     async def send_notification(self, text: str) -> None:
         """Push a cron/heartbeat notification to all known chat IDs."""
