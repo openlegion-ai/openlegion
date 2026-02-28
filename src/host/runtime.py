@@ -403,8 +403,8 @@ class SandboxBackend(RuntimeBackend):
         agent_id: str,
         role: str,
         skills_dir: str,
-        system_prompt: str,
-        model: str,
+        system_prompt: str = "",
+        model: str = "",
         mcp_servers: list[dict] | None = None,
         thinking: str = "",
     ) -> Path:
