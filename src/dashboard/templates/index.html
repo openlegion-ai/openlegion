@@ -1257,6 +1257,13 @@
                           <div class="text-sm text-gray-200" x-text="agentConfigs[selectedAgent]?.role || '-'"></div>
                         </div>
                         <div class="bg-gray-800/50 rounded p-3">
+                          <div class="text-xs text-gray-500 mb-1">Avatar</div>
+                          <div class="flex items-center gap-2">
+                            <img :src="agentAvatarUrl(selectedAgent)" class="w-6 h-6 rounded" :alt="'Avatar #' + agentAvatarNum(selectedAgent)">
+                            <span class="text-sm text-gray-400" x-text="'#' + agentAvatarNum(selectedAgent)"></span>
+                          </div>
+                        </div>
+                        <div class="bg-gray-800/50 rounded p-3">
                           <div class="text-xs text-gray-500 mb-1">Budget ($/day)</div>
                           <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.budget?.daily_usd ? formatCost(agentConfigs[selectedAgent].budget.daily_usd) : '-'"></div>
                         </div>
@@ -1317,8 +1324,8 @@
                             <label class="text-xs text-gray-500 mb-1 block">Avatar</label>
                             <button type="button" @click="editForm._showAvatarPicker = !editForm._showAvatarPicker"
                               class="dash-input flex items-center gap-2 cursor-pointer text-left">
-                              <img :src="`/dashboard/static/avatars/${editForm.avatar || 30}.svg?v={{ v }}`" class="w-5 h-5 rounded" :alt="'Avatar ' + editForm.avatar">
-                              <span class="text-xs text-gray-400" x-text="'#' + (editForm.avatar || 30)"></span>
+                              <img :src="`/dashboard/static/avatars/${editForm.avatar || 1}.svg?v={{ v }}`" class="w-5 h-5 rounded" :alt="'Avatar ' + editForm.avatar">
+                              <span class="text-xs text-gray-400" x-text="'#' + (editForm.avatar || 1)"></span>
                             </button>
                             <div x-show="editForm._showAvatarPicker" x-cloak @click.outside="editForm._showAvatarPicker = false"
                               class="absolute z-50 mt-1 p-2 bg-gray-800 border border-gray-700 rounded-lg shadow-xl w-[272px] max-h-[200px] overflow-y-auto custom-scrollbar">

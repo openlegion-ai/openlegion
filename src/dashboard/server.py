@@ -141,7 +141,7 @@ def create_dashboard_router(
                 "daily_tokens": c.get("tokens", 0),
                 "role": acfg.get("role", ""),
                 "model": acfg.get("model", default_model),
-                "avatar": acfg.get("avatar", 30),
+                "avatar": acfg.get("avatar", 1),
                 "project": agent_projects.get(agent_id),
             }
             if runtime:
@@ -160,7 +160,7 @@ def create_dashboard_router(
         name = body.get("name", "").strip()
         role = body.get("role", "").strip()
         model = body.get("model", "").strip()
-        avatar = body.get("avatar", 30)
+        avatar = body.get("avatar", 1)
 
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
@@ -351,7 +351,7 @@ def create_dashboard_router(
             "id": agent_id,
             "model": agent_cfg.get("model", default_model),
             "role": agent_cfg.get("role", ""),
-            "avatar": agent_cfg.get("avatar", 30),
+            "avatar": agent_cfg.get("avatar", 1),
             "budget": agent_cfg.get("budget", {}),
             "allowed_credentials": allowed_creds,
             "available_credentials": sorted(agent_cred_names),

@@ -67,7 +67,7 @@ function dashboard() {
 
     // Add agent
     addAgentMode: false,
-    addAgentForm: { name: '', role: '', model: '', avatar: 30, _showPicker: false },
+    addAgentForm: { name: '', role: '', model: '', avatar: 1, _showPicker: false },
     addAgentLoading: false,
 
     // Blackboard
@@ -1377,7 +1377,7 @@ function dashboard() {
       this.editForm = {
         model: cfg.model || '',
         role: cfg.role || '',
-        avatar: cfg.avatar || 30,
+        avatar: cfg.avatar || 1,
         _showAvatarPicker: false,
         budget_daily: cfg.budget?.daily_usd || '',
         allowed_credentials: credsStr,
@@ -1404,7 +1404,7 @@ function dashboard() {
       const cfg = this.agentConfigs[agentId] || {};
       if (this.editForm.model && this.editForm.model !== cfg.model) body.model = this.editForm.model;
       if (this.editForm.role !== undefined && this.editForm.role !== cfg.role) body.role = this.editForm.role;
-      if (this.editForm.avatar && this.editForm.avatar !== (cfg.avatar || 30)) body.avatar = this.editForm.avatar;
+      if (this.editForm.avatar && this.editForm.avatar !== (cfg.avatar || 1)) body.avatar = this.editForm.avatar;
       if (this.editForm.budget_daily && parseFloat(this.editForm.budget_daily) > 0) {
         body.budget = { daily_usd: parseFloat(this.editForm.budget_daily) };
       }
@@ -1510,14 +1510,14 @@ function dashboard() {
             name: f.name.trim(),
             role: f.role.trim(),
             model: f.model,
-            avatar: f.avatar || 30,
+            avatar: f.avatar || 1,
           }),
         });
         if (resp.ok) {
           const data = await resp.json();
           this.showToast(data.ready ? `${data.agent} added and ready` : `${data.agent} added (starting)`);
           this.addAgentMode = false;
-          this.addAgentForm = { name: '', role: '', model: '', avatar: 30, _showPicker: false };
+          this.addAgentForm = { name: '', role: '', model: '', avatar: 1, _showPicker: false };
           this.fetchAgents();
         } else {
           const err = await resp.json();
@@ -1540,7 +1540,7 @@ function dashboard() {
     closeAddAgentModal() {
       if (this.addAgentLoading) return;
       this.addAgentMode = false;
-      this.addAgentForm = { name: '', role: '', model: '', avatar: 30, _showPicker: false };
+      this.addAgentForm = { name: '', role: '', model: '', avatar: 1, _showPicker: false };
     },
 
     async removeAgent(agentId) {
@@ -3025,12 +3025,12 @@ function dashboard() {
     },
 
     agentAvatarNum(agentId) {
-      if (!agentId) return 30;
+      if (!agentId) return 1;
       const cfg = this.agentConfigs[agentId];
       if (cfg && cfg.avatar != null) return cfg.avatar;
       const agent = this.agents.find(a => a.id === agentId);
       if (agent && agent.avatar != null) return agent.avatar;
-      return 30;
+      return 1;
     },
 
     agentAvatarUrl(agentId) {
