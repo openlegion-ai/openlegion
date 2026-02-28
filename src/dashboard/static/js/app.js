@@ -219,6 +219,9 @@ function dashboard() {
     onboardKey: '',
     onboardBaseUrl: '',
 
+    // WebSocket reconnect countdown (Alpine-reactive mirror)
+    wsReconnectIn: 0,
+
     // Keyboard shortcuts modal
     shortcutsModalOpen: false,
 
@@ -513,6 +516,7 @@ function dashboard() {
         onEvent: (evt) => this.onWsEvent(evt),
         onConnect: () => { this.connected = true; },
         onDisconnect: () => { this.connected = false; },
+        onReconnectTick: (secs) => { this.wsReconnectIn = secs; },
       });
       this._ws.connect();
 
@@ -563,7 +567,7 @@ function dashboard() {
           const active = document.activeElement;
           const tag = active ? active.tagName.toLowerCase() : '';
           if (tag === 'input' || tag === 'textarea' || tag === 'select' || active?.isContentEditable) return;
-          if (this.cmdPaletteOpen || this.addAgentMode) return;
+          if (this.cmdPaletteOpen || this.addAgentMode || this.confirmModal.open) return;
           e.preventDefault();
           this.shortcutsModalOpen = !this.shortcutsModalOpen;
         }
@@ -2317,7 +2321,7 @@ function dashboard() {
 
     async testWebhook(name) {
       try {
-        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(name)}/test`, { method: 'POST' });
+        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(name)}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         if (resp.ok) {
           this.showToast(`Webhook "${name}" test sent`);
         } else {

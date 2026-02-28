@@ -281,7 +281,7 @@
             <span :class="connected ? 'bg-green-400' : 'bg-red-400'" class="relative inline-flex rounded-full h-2 w-2"></span>
           </span>
           <span x-show="connected" class="text-green-400">Live</span>
-          <span x-show="!connected" class="text-red-400" x-text="_ws?.reconnectIn > 0 ? 'Reconnecting in ' + _ws.reconnectIn + 's...' : 'Disconnected'"></span>
+          <span x-show="!connected" class="text-red-400" x-text="wsReconnectIn > 0 ? 'Reconnecting in ' + wsReconnectIn + 's...' : 'Disconnected'"></span>
         </div>
       </div>
     </nav>
@@ -1923,7 +1923,7 @@
               <div x-show="webhooks.length === 0" class="text-gray-600 text-sm py-2 text-center">No webhooks configured</div>
             </div>
             <div class="border-t border-gray-800 pt-3">
-              <button x-show="!showWebhookForm" @click="showWebhookForm = true; fetchWebhooks()" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Webhook</button>
+              <button x-show="!showWebhookForm" @click="showWebhookForm = true" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Webhook</button>
               <div x-show="showWebhookForm" x-transition>
                 <div class="text-xs text-gray-500 mb-2">New webhook</div>
                 <div class="flex gap-2 mb-2">
