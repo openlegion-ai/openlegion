@@ -405,6 +405,12 @@ def _suppress_host_logs() -> None:
         "channels.slack", "channels.whatsapp",
     ]:
         logging.getLogger(name).setLevel(logging.WARNING)
+    # Silence third-party library internal loggers — channel adapters
+    # handle all error reporting via their own loggers.  Without this,
+    # python-telegram-bot's default error callback prints full tracebacks
+    # for transient Conflict errors (duplicate polling sessions).
+    for name in ["telegram", "httpx", "httpcore"]:
+        logging.getLogger(name).setLevel(logging.CRITICAL)
 
 
 def _ensure_pairing_code(pairing_path: Path) -> str | None:
