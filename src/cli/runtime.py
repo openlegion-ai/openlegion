@@ -14,7 +14,7 @@ from pathlib import Path
 import click
 
 from src.cli.channels import ChannelManager
-from src.cli.config import PROJECT_ROOT, PROJECTS_DIR, _check_docker_running, _ensure_docker_image, _load_config
+from src.cli.config import ENV_FILE, PROJECT_ROOT, PROJECTS_DIR, _check_docker_running, _ensure_docker_image, _load_config
 from src.cli.formatting import echo_fail, echo_header, echo_ok
 
 logger = logging.getLogger("cli")
@@ -185,6 +185,13 @@ class RuntimeContext:
         if not _check_docker_running():
             click.echo("Docker is not running. Please start Docker first.", err=True)
             sys.exit(1)
+        # Warn about missing credentials (non-fatal — setup wizard handles it)
+        if ENV_FILE.exists():
+            env_content = ENV_FILE.read_text()
+            if "OPENLEGION_SYSTEM_" not in env_content and "OPENLEGION_CRED_" not in env_content:
+                click.echo("Warning: No API credentials found in .env", err=True)
+        else:
+            click.echo("Warning: No .env file found", err=True)
 
     def _select_backend(self) -> None:
         from src.host.runtime import SandboxBackend, select_backend

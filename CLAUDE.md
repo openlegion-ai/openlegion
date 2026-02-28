@@ -62,7 +62,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `src/dashboard/server.py` | Dashboard FastAPI router + API |
 | `src/dashboard/events.py` | EventBus for real-time streaming |
 | `src/cli/` | CLI package (see below) |
-| `src/cli/main.py` | Click commands and entry point |
+| `src/cli/main.py` | CLI entry point: start, stop, status, chat, version |
 | `src/cli/config.py` | Config loading, Docker helpers, agent management |
 | `src/cli/runtime.py` | RuntimeContext — full lifecycle management |
 | `src/cli/repl.py` | REPLSession — interactive command dispatch |
