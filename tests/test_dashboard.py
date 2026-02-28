@@ -213,7 +213,7 @@ class TestDashboardAgentsAPI:
         resp = self.client.get("/dashboard/api/agents")
         data = resp.json()
         alpha = next(a for a in data["agents"] if a["id"] == "alpha")
-        assert alpha["avatar"] == 30
+        assert alpha["avatar"] == 1
 
     def test_api_agents_empty_registry(self):
         self.components["agent_registry"].clear()
@@ -657,7 +657,7 @@ class TestDashboardAgentConfig:
         resp = self.client.get("/dashboard/api/agents/alpha/config")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["avatar"] == 30
+        assert data["avatar"] == 1
 
     @patch("src.cli.config._load_config")
     def test_get_config_includes_avatar_custom(self, mock_load):
