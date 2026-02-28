@@ -430,7 +430,7 @@ class CredentialVault:
             return api_key, {
                 "user-agent": _ANTHROPIC_OAUTH_USER_AGENT,
                 "x-app": _ANTHROPIC_OAUTH_APP_HEADER,
-                "anthropic-beta": _ANTHROPIC_OAUTH_BETAS,
+                "anthropic-beta": _ANTHROPIC_OAUTH_BETAS_FULL,
             }
         return api_key, {}
 
