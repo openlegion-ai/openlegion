@@ -105,6 +105,10 @@ def _remove_from_env(env_key: str, env_file: str = "") -> None:
 SYSTEM_PREFIX = "OPENLEGION_SYSTEM_"
 AGENT_PREFIX = "OPENLEGION_CRED_"
 
+# ── Anthropic OAuth constants ──────────────────────────────
+_ANTHROPIC_OAUTH_PREFIX = "sk-ant-oat"
+_ANTHROPIC_OAUTH_BETAS = "oauth-2025-04-20,claude-code-20250219"
+
 # System credential patterns — used by is_system_credential() for
 # defense-in-depth permission checks and by CLI/dashboard for
 # auto-detecting LLM provider keys.  Derived from _PROVIDER_KEY_MAP.
@@ -395,6 +399,37 @@ class CredentialVault:
                 return self.system_credentials.get(key_name)
         return None
 
+    @staticmethod
+    def _is_anthropic_oauth(credential: str) -> bool:
+        """Return True if the credential is an Anthropic OAuth setup token."""
+        return credential.startswith(_ANTHROPIC_OAUTH_PREFIX)
+
+    def _get_auth_for_model(self, model: str) -> tuple[str | None, dict[str, str]]:
+        """Resolve API key and any extra auth headers for a model.
+
+        For Anthropic OAuth tokens (``sk-ant-oat*``), returns Bearer auth
+        and required beta headers. For standard API keys, returns empty
+        extra headers.
+        """
+        api_key = self._get_api_key_for_model(model)
+        if api_key is None:
+            return None, {}
+        if model.startswith("anthropic/") and self._is_anthropic_oauth(api_key):
+            return api_key, {
+                "Authorization": f"Bearer {api_key}",
+                "anthropic-beta": _ANTHROPIC_OAUTH_BETAS,
+            }
+        return api_key, {}
+
+    def get_providers_with_credentials(self) -> set[str]:
+        """Return the set of provider names that have credentials configured."""
+        providers: set[str] = set()
+        for provider in SYSTEM_CREDENTIAL_PROVIDERS:
+            key_name = f"{provider}_api_key"
+            if key_name in self.system_credentials:
+                providers.add(provider)
+        return providers
+
     def _get_api_base_for_model(self, model: str) -> str | None:
         """Resolve a custom API base URL for a model's provider.
 
@@ -430,7 +465,7 @@ class CredentialVault:
     async def _call_llm_with_failover(
         self, requested_model: str, call_fn,
     ) -> tuple:
-        """Try *call_fn(model, api_key, api_base)* across the failover chain.
+        """Try *call_fn(model, api_key, api_base, auth_headers)* across the failover chain.
 
         Returns ``(result, used_model)`` on success.
         Raises the last exception if all models are exhausted.
@@ -439,13 +474,13 @@ class CredentialVault:
         last_error: Exception | None = None
 
         for model in models:
-            api_key = self._get_api_key_for_model(model)
+            api_key, auth_headers = self._get_auth_for_model(model)
             if not api_key:
                 logger.debug(f"No API key for failover candidate '{model}', skipping")
                 continue
             api_base = self._get_api_base_for_model(model)
             try:
-                result = await call_fn(model, api_key, api_base)
+                result = await call_fn(model, api_key, api_base, auth_headers)
                 self._health_tracker.record_success(model)
                 if model != requested_model:
                     logger.info(
@@ -476,11 +511,20 @@ class CredentialVault:
         requested_model = request.params.get("model", "")
 
         if request.action == "chat":
-            async def _chat(model: str, api_key: str, api_base: str | None = None):
+            async def _chat(
+                model: str, api_key: str,
+                api_base: str | None = None,
+                auth_headers: dict[str, str] | None = None,
+            ):
                 sanitized = sanitize_for_provider(request.params.get("messages", []), model)
                 extra = {k: v for k, v in request.params.items() if k not in ("model", "messages")}
                 if api_base:
                     extra["api_base"] = api_base
+                if auth_headers:
+                    extra["extra_headers"] = {
+                        **extra.get("extra_headers", {}),
+                        **auth_headers,
+                    }
                 return await litellm.acompletion(
                     model=model,
                     messages=sanitized,
@@ -514,7 +558,7 @@ class CredentialVault:
 
         elif request.action == "embed":
             # Embedding models produce incompatible vector spaces — no failover
-            api_key = self._get_api_key_for_model(requested_model)
+            api_key, auth_headers = self._get_auth_for_model(requested_model)
             if not api_key:
                 return APIProxyResponse(
                     success=False,
@@ -524,6 +568,8 @@ class CredentialVault:
             embed_kwargs: dict = {}
             if api_base:
                 embed_kwargs["api_base"] = api_base
+            if auth_headers:
+                embed_kwargs["extra_headers"] = auth_headers
             response = await litellm.aembedding(
                 model=request.params["model"],
                 input=request.params.get("text", ""),
@@ -561,7 +607,7 @@ class CredentialVault:
         last_error: Exception | None = None
 
         for model in models_to_try:
-            api_key = self._get_api_key_for_model(model)
+            api_key, auth_headers = self._get_auth_for_model(model)
             if not api_key:
                 continue
             api_base = self._get_api_base_for_model(model)
@@ -570,6 +616,11 @@ class CredentialVault:
                 extra = {k: v for k, v in request.params.items() if k not in ("model", "messages")}
                 if api_base:
                     extra["api_base"] = api_base
+                if auth_headers:
+                    extra["extra_headers"] = {
+                        **extra.get("extra_headers", {}),
+                        **auth_headers,
+                    }
                 response = await litellm.acompletion(
                     model=model,
                     messages=sanitized,

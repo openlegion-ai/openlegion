@@ -659,10 +659,35 @@ def _remove_agent(name: str, stop_container: bool = False) -> None:
     _save_permissions(perms)
 
 
-def _pick_model_interactive(default_model: str, label: str = "current") -> str:
-    """Show model picker for the default model's provider. Returns selected model."""
+def _pick_model_interactive(
+    default_model: str,
+    label: str = "current",
+    credential_vault: object | None = None,
+) -> str:
+    """Show model picker for the default model's provider. Returns selected model.
+
+    When *credential_vault* is provided, only shows models from providers
+    that have credentials configured.
+    """
     provider = default_model.split("/")[0] if "/" in default_model else "anthropic"
-    models = _PROVIDER_MODELS.get(provider, [default_model])
+
+    # Filter to providers with credentials if vault is available
+    active_providers: set[str] | None = None
+    if credential_vault is not None and hasattr(credential_vault, "get_providers_with_credentials"):
+        active_providers = credential_vault.get_providers_with_credentials()
+        if active_providers and provider not in active_providers:
+            # Current provider has no credentials — switch to first that does
+            for p in _PROVIDER_MODELS:
+                if p in active_providers:
+                    provider = p
+                    break
+
+    if active_providers:
+        available = {p: m for p, m in _PROVIDER_MODELS.items() if p in active_providers}
+    else:
+        available = _PROVIDER_MODELS
+
+    models = available.get(provider, [default_model])
     default_idx = 1
     for i, m in enumerate(models, 1):
         marker = f" ({label})" if m == default_model else ""
@@ -741,7 +766,10 @@ def _update_agent_field(name: str, field: str, value) -> None:
             yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
 
 
-def _edit_agent_interactive(name: str) -> str | None:
+def _edit_agent_interactive(
+    name: str,
+    credential_vault: object | None = None,
+) -> str | None:
     """Interactive property editor for an agent. Reads fresh config.
 
     Returns the field name that was changed (``"model"``, ``"role"``,
@@ -781,7 +809,10 @@ def _edit_agent_interactive(name: str) -> str | None:
     )
 
     if choice == 1:  # model
-        new_model = _pick_model_interactive(current_model, label="current")
+        new_model = _pick_model_interactive(
+            current_model, label="current",
+            credential_vault=credential_vault,
+        )
         if new_model == current_model:
             click.echo(f"Agent '{name}' already uses {current_model}.")
             return None

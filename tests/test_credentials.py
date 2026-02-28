@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.host.credentials import (
+    _ANTHROPIC_OAUTH_BETAS,
     AGENT_PREFIX,
     SYSTEM_CREDENTIAL_PROVIDERS,
     SYSTEM_PREFIX,
@@ -1104,3 +1105,102 @@ def test_agent_tier_cred_not_auto_promoted(monkeypatch):
     assert "brave_search_api_key" in v.credentials
     assert "brightdata_cdp_url" not in v.system_credentials
     assert "brave_search_api_key" not in v.system_credentials
+
+
+class TestOAuth:
+    """Tests for Anthropic OAuth setup-token support."""
+
+    def test_is_anthropic_oauth_true(self):
+        assert CredentialVault._is_anthropic_oauth("sk-ant-oat01-abc123") is True
+        assert CredentialVault._is_anthropic_oauth("sk-ant-oat-xyz") is True
+
+    def test_is_anthropic_oauth_false(self):
+        assert CredentialVault._is_anthropic_oauth("sk-ant-abc123") is False
+        assert CredentialVault._is_anthropic_oauth("sk-regular-key") is False
+        assert CredentialVault._is_anthropic_oauth("") is False
+
+    def test_get_auth_for_model_standard_key(self, monkeypatch):
+        """Standard API key returns empty auth headers."""
+        monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-regular")
+        v = CredentialVault()
+        api_key, headers = v._get_auth_for_model("anthropic/claude-sonnet-4-6")
+        assert api_key == "sk-ant-regular"
+        assert headers == {}
+
+    def test_get_auth_for_model_oauth_token(self, monkeypatch):
+        """OAuth token returns Bearer auth and beta headers."""
+        monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-token123")
+        v = CredentialVault()
+        api_key, headers = v._get_auth_for_model("anthropic/claude-sonnet-4-6")
+        assert api_key == "sk-ant-oat01-token123"
+        assert headers["Authorization"] == "Bearer sk-ant-oat01-token123"
+        assert headers["anthropic-beta"] == _ANTHROPIC_OAUTH_BETAS
+
+    def test_get_auth_for_model_non_anthropic_ignores_oauth(self, monkeypatch):
+        """OAuth prefix on a non-Anthropic model produces no auth headers."""
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-ant-oat01-fake")
+        v = CredentialVault()
+        api_key, headers = v._get_auth_for_model("openai/gpt-4.1")
+        assert api_key == "sk-ant-oat01-fake"
+        assert headers == {}
+
+    def test_get_auth_for_model_no_key(self):
+        """Missing key returns (None, {})."""
+        v = CredentialVault()
+        api_key, headers = v._get_auth_for_model("anthropic/claude-sonnet-4-6")
+        assert api_key is None
+        assert headers == {}
+
+    def test_providers_with_credentials(self, monkeypatch):
+        monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-openai")
+        v = CredentialVault()
+        providers = v.get_providers_with_credentials()
+        assert "anthropic" in providers
+        assert "openai" in providers
+        assert "gemini" not in providers
+
+    def test_providers_with_credentials_empty(self, monkeypatch):
+        for provider in ("anthropic", "openai", "gemini", "deepseek",
+                         "moonshot", "minimax", "xai", "groq", "zai"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider.upper()}_API_KEY", raising=False)
+        v = CredentialVault()
+        providers = v.get_providers_with_credentials()
+        assert providers == set()
+
+
+class TestOAuthIntegration:
+    """Integration test: OAuth headers flow through to litellm."""
+
+    async def test_handle_llm_oauth_sends_correct_headers(self, monkeypatch):
+        """Verify OAuth token results in correct extra_headers to litellm."""
+        litellm = pytest.importorskip("litellm")  # noqa: F841
+
+        monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-integration")
+        v = CredentialVault()
+
+        captured: dict = {}
+
+        async def mock_acompletion(**kwargs):
+            captured.update(kwargs)
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = "hello"
+            resp.choices[0].message.tool_calls = None
+            resp.usage = MagicMock(total_tokens=10, prompt_tokens=5, completion_tokens=5)
+            return resp
+
+        with patch("litellm.acompletion", side_effect=mock_acompletion):
+            req = APIProxyRequest(
+                service="llm", action="chat",
+                params={
+                    "model": "anthropic/claude-sonnet-4-6",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+            result = await v.execute_api_call(req)
+
+        assert result.success
+        assert "extra_headers" in captured
+        assert captured["extra_headers"]["Authorization"] == "Bearer sk-ant-oat01-integration"
+        assert captured["extra_headers"]["anthropic-beta"] == _ANTHROPIC_OAUTH_BETAS

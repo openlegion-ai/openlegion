@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import click
+import pytest
 import yaml
 
 from src.setup_wizard import InlineSetup, SetupWizard
@@ -202,8 +203,8 @@ class TestInlineSetup:
         vault.credentials = {}
         setup = InlineSetup(tmp_path, credential_vault=vault)
 
-        # Input: provider=1 (Anthropic), key, model=1
-        with patch("click.prompt", side_effect=[1, "sk-test-key", 1]):
+        # Input: provider=1 (Anthropic), auth_method=1 (API key), key, model=1
+        with patch("click.prompt", side_effect=[1, "1", "sk-test-key", 1]):
             with patch.object(SetupWizard, "_validate_api_key", return_value=True):
                 with patch("src.cli.config._set_env_key"):
                     setup.run()
@@ -218,3 +219,60 @@ class TestInlineSetup:
         assert config_file.exists()
         cfg = yaml.safe_load(config_file.read_text())
         assert "default_model" in cfg.get("llm", {})
+
+
+class TestValidateOAuthToken:
+    def test_validate_oauth_token_success(self):
+        """Valid OAuth token returns True."""
+        pytest.importorskip("litellm")
+        wizard = SetupWizard(Path("/tmp/test"))
+
+        mock_response = MagicMock()
+        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response):
+            result = wizard._validate_oauth_token("sk-ant-oat01-valid-token")
+
+        assert result is True
+
+    def test_validate_oauth_token_auth_failure(self):
+        """Authentication error returns False."""
+        litellm = pytest.importorskip("litellm")
+        wizard = SetupWizard(Path("/tmp/test"))
+
+        with patch(
+            "litellm.acompletion",
+            new_callable=AsyncMock,
+            side_effect=litellm.AuthenticationError(
+                message="Invalid token",
+                llm_provider="anthropic",
+                model="anthropic/claude-haiku-4-5-20251001",
+            ),
+        ):
+            result = wizard._validate_oauth_token("sk-ant-oat01-bad-token")
+
+        assert result is False
+
+    def test_validate_oauth_token_network_error(self):
+        """Network error returns True (don't block setup)."""
+        pytest.importorskip("litellm")
+        wizard = SetupWizard(Path("/tmp/test"))
+
+        with patch(
+            "litellm.acompletion",
+            new_callable=AsyncMock,
+            side_effect=TimeoutError("Connection timed out"),
+        ):
+            result = wizard._validate_oauth_token("sk-ant-oat01-some-token")
+
+        assert result is True
+
+    def test_prompt_oauth_rejects_bad_prefix(self):
+        """_prompt_and_validate_oauth_token rejects tokens without OAuth prefix."""
+        wizard = SetupWizard(Path("/tmp/test"))
+
+        # First two attempts: bad prefix, third: give up and save
+        inputs = iter(["sk-regular-key", "sk-bad", "sk-also-bad"])
+        with patch("click.prompt", side_effect=lambda *a, **kw: next(inputs)):
+            result = wizard._prompt_and_validate_oauth_token()
+
+        # Should save the last one anyway
+        assert result == "sk-also-bad"

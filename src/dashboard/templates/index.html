@@ -635,7 +635,7 @@
                 <span x-show="!settingsData?.has_llm_credentials">1</span>
               </div>
               <div class="flex-1">
-                <div class="text-sm font-medium text-gray-200 mb-2">Add an API key</div>
+                <div class="text-sm font-medium text-gray-200 mb-2">Add an API key or OAuth token</div>
                 <div x-show="!settingsData?.has_llm_credentials" class="space-y-2">
                   <div class="flex flex-wrap gap-2">
                     <select x-model="onboardProvider" class="dash-select text-xs w-40">
@@ -649,10 +649,11 @@
                       <option value="groq">Groq</option>
                       <option value="minimax">MiniMax</option>
                     </select>
-                    <input type="password" x-model="onboardKey" class="dash-input flex-1 min-w-[200px]" placeholder="API key">
+                    <input type="password" x-model="onboardKey" class="dash-input flex-1 min-w-[200px]" :placeholder="onboardProvider === 'anthropic' ? 'API key or OAuth token (sk-ant-oat...)' : 'API key'">
                   </div>
+                  <div x-show="onboardProvider === 'anthropic'" class="text-[10px] text-gray-500 mb-1">Claude Pro/Team: paste an OAuth token from <span class="font-mono text-gray-400">claude setup-token</span> instead of an API key.</div>
                   <div class="flex flex-wrap gap-2 items-center">
-                    <input type="text" x-model="onboardBaseUrl" class="dash-input flex-1 min-w-[200px]" placeholder="Custom API base URL (optional)">
+                    <input x-show="onboardProvider !== 'anthropic' || !onboardKey.startsWith('sk-ant-oat')" type="text" x-model="onboardBaseUrl" class="dash-input flex-1 min-w-[200px]" placeholder="Custom API base URL (optional)">
                     <button @click="submitOnboardCredential()" :disabled="!onboardProvider || !onboardKey"
                       class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">Save</button>
                   </div>
@@ -1956,6 +1957,7 @@
                 <div class="flex items-center gap-2 text-xs group">
                   <span class="w-2 h-2 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-500/50' : 'bg-amber-500/50'"></span>
                   <span class="text-gray-300 font-mono flex-1" x-text="name"></span>
+                  <span x-show="name === 'anthropic_api_key' && settingsData.anthropic_auth_mode === 'oauth'" class="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-900/40 text-violet-400">oauth</span>
                   <span class="text-[10px] px-1.5 py-0.5 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-900/40 text-green-400' : 'bg-amber-900/40 text-amber-400'" x-text="(settingsData.agent_credentials || []).includes(name) ? 'agent' : 'system'"></span>
                   <button @click="deleteCredential(name)" class="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 transition-opacity text-base leading-none px-1" title="Remove credential" aria-label="Remove credential">&times;</button>
                 </div>
@@ -1991,9 +1993,10 @@
                     <option value="agent">Agent tier</option>
                     <option value="system">System tier</option>
                   </select>
-                  <input type="password" x-model="credKey" class="dash-input flex-1" placeholder="API key or value">
+                  <input type="password" x-model="credKey" class="dash-input flex-1" :placeholder="credService === 'anthropic' ? 'API key or OAuth token (sk-ant-oat...)' : 'API key or value'">
                 </div>
-                <input type="text" x-model="credBaseUrl" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
+                <div x-show="credService === 'anthropic'" class="text-[10px] text-gray-500 mb-2">Claude Pro/Team subscribers: paste an OAuth token from <span class="font-mono text-gray-400">claude setup-token</span> instead of an API key.</div>
+                <input x-show="credService !== 'anthropic' || !credKey.startsWith('sk-ant-oat')" type="text" x-model="credBaseUrl" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
                 <div class="flex justify-between">
                   <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
                   <button @click="addCredential()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save Credential</button>

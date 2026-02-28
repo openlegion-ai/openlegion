@@ -212,11 +212,11 @@ class SetupWizard:
         if existing_key:
             click.echo(f"  API key already set for {provider}.")
             if click.confirm("  Replace it?", default=False):
-                api_key = self._prompt_and_validate_key(provider, _PROVIDERS[choice - 1]["label"])
+                api_key = self._prompt_auth_for_provider(provider, _PROVIDERS[choice - 1]["label"])
                 if api_key:
                     _set_env_key(key_name, api_key, system=True)
         else:
-            api_key = self._prompt_and_validate_key(provider, _PROVIDERS[choice - 1]["label"])
+            api_key = self._prompt_auth_for_provider(provider, _PROVIDERS[choice - 1]["label"])
             if api_key:
                 _set_env_key(key_name, api_key, system=True)
 
@@ -337,6 +337,104 @@ class SetupWizard:
                     click.echo("  Saving key anyway — you can fix it later in .env")
                     return api_key.strip()
         return ""
+
+    def _prompt_auth_for_provider(self, provider: str, label: str) -> str:
+        """Prompt for API key or OAuth token based on provider.
+
+        For Anthropic, offers a choice between standard API key and OAuth
+        setup-token. For other providers, falls through to API key prompt.
+        """
+        if provider == "anthropic":
+            click.echo("\n  Authentication method:")
+            click.echo("  1. API Key (standard, pay-per-token)")
+            click.echo("  2. OAuth Token (Claude Pro/Team subscription)")
+            raw = self._prompt_with_back("  Auth method", default="1")
+            if raw is None:
+                return ""
+            if str(raw).strip() == "2":
+                return self._prompt_and_validate_oauth_token()
+        return self._prompt_and_validate_key(provider, label)
+
+    def _prompt_and_validate_oauth_token(self) -> str:
+        """Prompt for an Anthropic OAuth setup-token with validation."""
+        from src.host.credentials import _ANTHROPIC_OAUTH_PREFIX
+
+        click.echo("\n  To get an OAuth token:")
+        click.echo("    1. Install Claude Code CLI: npm install -g @anthropic-ai/claude-code")
+        click.echo("    2. Run: claude setup-token")
+        click.echo("    3. Paste the token below")
+        click.echo("\n  Note: OAuth tokens don't support prompt caching or 1M context.")
+        click.echo("  Subscription rate limits apply.\n")
+
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            token = click.prompt("  OAuth token", hide_input=True)
+            if not token.strip():
+                click.echo("  No token provided.")
+                continue
+            token = token.strip()
+            if not token.startswith(_ANTHROPIC_OAUTH_PREFIX):
+                remaining = max_attempts - attempt - 1
+                if remaining > 0:
+                    click.echo(
+                        f"  Token must start with '{_ANTHROPIC_OAUTH_PREFIX}'."
+                        f" {remaining} attempt(s) remaining."
+                    )
+                    continue
+                else:
+                    click.echo(f"  Token must start with '{_ANTHROPIC_OAUTH_PREFIX}'.")
+                    click.echo("  Saving anyway — you can fix it later in .env")
+                    return token
+
+            click.echo("  Validating token...", nl=False)
+            valid = self._validate_oauth_token(token)
+            if valid:
+                click.echo(" valid.\n")
+                return token
+            else:
+                remaining = max_attempts - attempt - 1
+                if remaining > 0:
+                    click.echo(f" invalid. {remaining} attempt(s) remaining.")
+                else:
+                    click.echo(" invalid.")
+                    click.echo("  Saving token anyway — you can fix it later in .env")
+                    return token
+        return ""
+
+    def _validate_oauth_token(self, token: str) -> bool:
+        """Validate an Anthropic OAuth token via a test API call."""
+        from src.host.credentials import _ANTHROPIC_OAUTH_BETAS
+
+        validation_model = _VALIDATION_MODELS.get("anthropic")
+        if not validation_model:
+            return True
+
+        try:
+            import litellm
+
+            try:
+                asyncio.run(
+                    litellm.acompletion(
+                        model=validation_model,
+                        messages=[{"role": "user", "content": "hi"}],
+                        max_tokens=1,
+                        api_key=token,
+                        extra_headers={
+                            "Authorization": f"Bearer {token}",
+                            "anthropic-beta": _ANTHROPIC_OAUTH_BETAS,
+                        },
+                    )
+                )
+                return True
+            except litellm.AuthenticationError:
+                return False
+            except Exception as e:
+                # Network errors, rate limits — don't block setup
+                logger.debug("OAuth token validation skipped due to error: %s", e)
+                return True
+        except ImportError:
+            # litellm not installed — skip validation
+            return True
 
     def _validate_api_key(self, provider: str, api_key: str) -> bool:
         """Lightweight key check using litellm with minimal token usage."""
@@ -472,6 +570,27 @@ class InlineSetup:
             return True
         return not bool(credential_vault.credentials or credential_vault.system_credentials)
 
+    @staticmethod
+    def _prompt_and_validate_inline(
+        wizard: SetupWizard, provider: str, label: str,
+    ) -> str:
+        """Prompt for API key, validate, and return stripped key or empty string."""
+        try:
+            api_key = click.prompt(f"  {label} API key", hide_input=True)
+        except (EOFError, KeyboardInterrupt):
+            return ""
+        if not api_key.strip():
+            click.echo("  No key provided.")
+            return ""
+        api_key = api_key.strip()
+        click.echo("  Validating API key...", nl=False)
+        valid = wizard._validate_api_key(provider, api_key)
+        if valid:
+            click.echo(" valid.\n")
+        else:
+            click.echo(" could not validate (saved anyway).\n")
+        return api_key
+
     def run(self) -> None:
         """Run the streamlined inline setup flow.
 
@@ -497,29 +616,32 @@ class InlineSetup:
         label = _PROVIDERS[idx - 1]["label"]
         click.echo(f"  Selected: {label}\n")
 
-        # API key with validation
-        try:
-            api_key = click.prompt(f"  {label} API key", hide_input=True)
-        except (EOFError, KeyboardInterrupt):
-            return
-        if not api_key.strip():
-            click.echo("  No key provided.")
-            return
-
-        # Validate the key
+        # Auth method choice for Anthropic
         wizard = SetupWizard(self.project_root)
-        click.echo("  Validating API key...", nl=False)
-        valid = wizard._validate_api_key(provider, api_key.strip())
-        if valid:
-            click.echo(" valid.\n")
+        if provider == "anthropic":
+            click.echo("\n  1. API Key (standard)  2. OAuth Token (Claude Pro/Team)")
+            try:
+                auth_choice = click.prompt("  Auth method", default="1").strip()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if auth_choice == "2":
+                api_key = wizard._prompt_and_validate_oauth_token()
+                if not api_key:
+                    return
+            else:
+                api_key = self._prompt_and_validate_inline(wizard, provider, label)
+                if not api_key:
+                    return
         else:
-            click.echo(" could not validate (saved anyway).\n")
+            api_key = self._prompt_and_validate_inline(wizard, provider, label)
+            if not api_key:
+                return
 
         # Store the credential (system tier — LLM provider key)
         service = f"{provider}_api_key"
         if self.credential_vault:
-            self.credential_vault.add_credential(service, api_key.strip(), system=True)
-        _set_env_key(service, api_key.strip(), system=True)
+            self.credential_vault.add_credential(service, api_key, system=True)
+        _set_env_key(service, api_key, system=True)
         click.echo(f"  Credential '{service}' stored (system tier).")
 
         # Model selection

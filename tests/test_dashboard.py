@@ -69,6 +69,8 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         credential_vault.list_credential_names.return_value = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
         credential_vault.list_agent_credential_names.return_value = []
         credential_vault.list_system_credential_names.return_value = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+        credential_vault.system_credentials = {"anthropic_api_key": "sk-test", "openai_api_key": "sk-openai"}
+        credential_vault.get_providers_with_credentials.return_value = {"anthropic", "openai"}
 
         msg_router = MagicMock()
         msg_router.agent_registry = agent_registry
@@ -981,6 +983,91 @@ class TestDashboardCredentialTier:
         assert resp.status_code == 200
         data = resp.json()
         assert data["tier"] == "agent"
+
+    def test_add_anthropic_oauth_token_returns_auth_type(self):
+        """POST anthropic OAuth token returns auth_type and note."""
+        resp = self.client.post(
+            "/dashboard/api/credentials",
+            json={"service": "anthropic", "key": "sk-ant-oat01-test-token"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["auth_type"] == "oauth"
+        assert "subscription rate limits" in data["note"]
+
+    def test_add_anthropic_api_key_no_auth_type(self):
+        """POST anthropic API key does not include auth_type."""
+        resp = self.client.post(
+            "/dashboard/api/credentials",
+            json={"service": "anthropic", "key": "sk-ant-regular-key"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "auth_type" not in data
+
+    def test_add_non_anthropic_oauth_prefix_no_auth_type(self):
+        """OAuth prefix on non-Anthropic service does not trigger auth_type."""
+        resp = self.client.post(
+            "/dashboard/api/credentials",
+            json={"service": "openai", "key": "sk-ant-oat01-fake"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "auth_type" not in data
+
+
+class TestDashboardSettingsOAuth:
+    """Tests for OAuth-related fields in the settings endpoint."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_settings_returns_available_provider_models(self):
+        """Settings includes available_provider_models filtered by credentials."""
+        vault = self.components["credential_vault"]
+        vault.get_providers_with_credentials.return_value = {"anthropic"}
+        vault.system_credentials = {"anthropic_api_key": "sk-test"}
+        client = _make_client(self.components)
+        resp = client.get("/dashboard/api/settings")
+        data = resp.json()
+        assert "anthropic" in data["available_provider_models"]
+        assert "openai" not in data["available_provider_models"]
+
+    def test_settings_anthropic_auth_mode_api_key(self):
+        """anthropic_auth_mode is api_key for standard keys."""
+        vault = self.components["credential_vault"]
+        vault.system_credentials = {"anthropic_api_key": "sk-ant-regular"}
+        client = _make_client(self.components)
+        resp = client.get("/dashboard/api/settings")
+        data = resp.json()
+        assert data["anthropic_auth_mode"] == "api_key"
+
+    def test_settings_anthropic_auth_mode_oauth(self):
+        """anthropic_auth_mode is oauth for OAuth tokens."""
+        vault = self.components["credential_vault"]
+        vault.system_credentials = {"anthropic_api_key": "sk-ant-oat01-token"}
+        vault.get_providers_with_credentials.return_value = {"anthropic"}
+        client = _make_client(self.components)
+        resp = client.get("/dashboard/api/settings")
+        data = resp.json()
+        assert data["anthropic_auth_mode"] == "oauth"
+
+    def test_settings_available_provider_models_empty_when_no_creds(self):
+        """available_provider_models is empty when no credentials configured."""
+        vault = self.components["credential_vault"]
+        vault.get_providers_with_credentials.return_value = set()
+        vault.system_credentials = {}
+        client = _make_client(self.components)
+        resp = client.get("/dashboard/api/settings")
+        data = resp.json()
+        assert data["available_provider_models"] == {}
+        # Full model list is still available as fallback
+        assert len(data["provider_models"]) > 0
 
 
 # ── V2 Tests: Messages ──────────────────────────────────────
