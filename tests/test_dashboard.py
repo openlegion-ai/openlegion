@@ -985,8 +985,8 @@ class TestDashboardCredentialTier:
         assert data["tier"] == "agent"
 
 
-class TestDashboardSettings:
-    """Tests for the settings endpoint."""
+class TestDashboardSettingsProviderModels:
+    """Tests for the settings endpoint provider model filtering."""
 
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()

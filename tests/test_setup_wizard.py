@@ -4,7 +4,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import click
-import pytest
 import yaml
 
 from src.setup_wizard import InlineSetup, SetupWizard
