@@ -1353,6 +1353,16 @@ class TestDashboardSPACatchall:
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
 
+    def test_catchall_serves_html_for_activity_events(self):
+        resp = self.client.get("/activity/events")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
+    def test_catchall_serves_html_for_activity_logs(self):
+        resp = self.client.get("/activity/logs")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
     def test_catchall_serves_html_for_nested_agent_path(self):
         resp = self.client.get("/agents/alice/memory")
         assert resp.status_code == 200

@@ -1,7 +1,7 @@
 /**
  * OpenLegion Dashboard — Alpine.js application.
  *
- * Three panels: Agents, Activity (Traces / Events), System (Costs / Blackboard / Automation / Credentials).
+ * Three panels: Agents, Activity (Traces / Events / Logs), System (Costs / Blackboard / Automation / Integrations).
  * Real-time updates via WebSocket + periodic REST polling.
  */
 const _IDENTITY_TABS = [
@@ -190,8 +190,7 @@ function dashboard() {
       { id: 'costs', label: 'Costs & Budgets' },
       { id: 'blackboard', label: 'Blackboard' },
       { id: 'automation', label: 'Automation' },
-      { id: 'channels', label: 'Channels' },
-      { id: 'settings', label: 'Settings' },
+      { id: 'integrations', label: 'Integrations' },
     ],
 
     // System tab — collapsible infrastructure
@@ -280,9 +279,9 @@ function dashboard() {
           : `/agents/${this.detailAgent}/${tab}`;
       }
       if (this.activeTab === 'activity') {
-        return this.activityView === 'events'
-          ? '/activity/events'
-          : '/activity';
+        if (this.activityView === 'events') return '/activity/events';
+        if (this.activityView === 'logs') return '/activity/logs';
+        return '/activity';
       }
       if (this.activeTab === 'system') return '/system';
       return '/';
@@ -294,9 +293,9 @@ function dashboard() {
         return `${this.detailAgent} \u00b7 ${tabLabel} \u2014 OpenLegion`;
       }
       if (this.activeTab === 'activity') {
-        return this.activityView === 'events'
-          ? 'Events \u2014 OpenLegion'
-          : 'Traces \u2014 OpenLegion';
+        if (this.activityView === 'events') return 'Events \u2014 OpenLegion';
+        if (this.activityView === 'logs') return 'Logs \u2014 OpenLegion';
+        return 'Traces \u2014 OpenLegion';
       }
       if (this.activeTab === 'system') return 'System \u2014 OpenLegion';
       return 'Agents \u2014 OpenLegion';
@@ -316,6 +315,7 @@ function dashboard() {
       }
 
       if (clean === 'activity/events') { route.tab = 'activity'; route.activityView = 'events'; }
+      else if (clean === 'activity/logs') { route.tab = 'activity'; route.activityView = 'logs'; }
       else if (clean === 'activity') { route.tab = 'activity'; }
       else if (clean === 'system') { route.tab = 'system'; }
       return route;
@@ -642,6 +642,9 @@ function dashboard() {
             this.fetchTraces();
             this._startActivityRefresh();
           }
+          if (this.activeTab === 'activity' && this.activityView === 'logs') {
+            this.fetchSystemLogs();
+          }
           if (this.activeTab === 'system') {
             this.fetchCronJobs();
             this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
@@ -686,6 +689,8 @@ function dashboard() {
         if (this.activityView === 'traces') {
           this.fetchTraces();
           this._startActivityRefresh();
+        } else if (this.activityView === 'logs') {
+          this.fetchSystemLogs();
         }
       }
       if (tab === 'fleet') {
@@ -702,8 +707,10 @@ function dashboard() {
         this.fetchBlackboard();
         this.fetchCronJobs();
         this.fetchWorkflows();
-        this.fetchWebhooks();
-        this.fetchChannels();
+        if (this.systemTab === 'integrations') {
+          this.fetchWebhooks();
+          this.fetchChannels();
+        }
         this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
       }
       if (!this._skipPush) this._pushUrl(false);
@@ -850,6 +857,9 @@ function dashboard() {
       if (view === 'traces') {
         this.fetchTraces();
         this._startActivityRefresh();
+      }
+      if (view === 'logs') {
+        this.fetchSystemLogs();
       }
       if (!this._skipPush) this._pushUrl(false);
     },
@@ -1275,6 +1285,7 @@ function dashboard() {
         const params = new URLSearchParams({ lines: this.systemLogsMaxLines });
         if (this.systemLogsLevel) params.set('level', this.systemLogsLevel);
         const r = await fetch(`${window.__config.apiBase}/logs?${params}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
         this.systemLogs = data.lines || [];
       } catch (e) {
@@ -2107,8 +2118,8 @@ function dashboard() {
       // Match tabs with keywords
       const tabKeywords = {
         fleet: ['agents', 'fleet', 'cards', 'project'],
-        activity: ['activity', 'traces', 'events', 'logs'],
-        system: ['system', 'costs', 'cron', 'automation', 'credentials', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'workflows'],
+        activity: ['activity', 'traces', 'events', 'logs', 'runtime'],
+        system: ['system', 'costs', 'cron', 'automation', 'credentials', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'workflows'],
       };
       for (const [tabId, keywords] of Object.entries(tabKeywords)) {
         const tab = this.tabs.find(t => t.id === tabId);
@@ -2165,15 +2176,15 @@ function dashboard() {
       // Match credentials
       for (const name of this.settingsData?.credentials?.names || []) {
         if (name.toLowerCase().includes(q)) {
-          results.push({ type: 'action', label: name, desc: 'Credential', action: () => { this.switchTab('system'); this.systemTab = 'settings'; } });
+          results.push({ type: 'action', label: name, desc: 'Credential', action: () => { this.switchTab('system'); this.systemTab = 'integrations'; } });
         }
       }
       // System quick actions
       const sysActions = [
-        { label: 'View Logs', desc: 'Open runtime logs', keywords: ['logs', 'runtime', 'debug'], action: () => { this.switchTab('system'); this.systemTab = 'settings'; this.fetchSystemLogs(); } },
-        { label: 'Add Credential', desc: 'Add new API key', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.switchTab('system'); this.systemTab = 'settings'; this.showCredForm = true; } },
-        { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.switchTab('system'); this.systemTab = 'settings'; this.fetchWebhooks(); } },
-        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.switchTab('system'); this.systemTab = 'channels'; this.fetchChannels(); } },
+        { label: 'View Logs', desc: 'Open runtime logs', keywords: ['logs', 'runtime', 'debug'], action: () => { this.switchTab('activity'); this.setActivityView('logs'); } },
+        { label: 'Add Credential', desc: 'Add new API key', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.switchTab('system'); this.systemTab = 'integrations'; this.showCredForm = true; } },
+        { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.switchTab('system'); this.systemTab = 'integrations'; this.fetchWebhooks(); } },
+        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.switchTab('system'); this.systemTab = 'integrations'; this.fetchChannels(); } },
       ];
       for (const act of sysActions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
