@@ -58,8 +58,8 @@ class _REPLCompleter:
             # Complete command names
             return [c + " " for c in self._session._commands if c.startswith(text)]
 
-        if line.startswith("/use "):
-            # Complete agent names after /use
+        if line.startswith("/use ") or line.startswith("/restart "):
+            # Complete agent names after /use or /restart
             return [n + " " for n in self._session.ctx.agents if n.startswith(text)]
 
         if line.startswith("/blackboard "):
