@@ -542,3 +542,267 @@ class TestResetNotAvailable:
         ch = _make_channel(reset_fn=None)
         result = await ch.handle_message("u1", "/reset")
         assert "not available" in result.lower()
+
+
+# ── TelegramChannel unit tests ──────────────────────────────────
+
+import tempfile
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from src.channels.telegram import TelegramChannel
+
+
+def _make_tg_channel(tmp_path: Path | None = None, **overrides) -> TelegramChannel:
+    """Create a TelegramChannel with stubbed callbacks for unit testing."""
+    async def dispatch_fn(agent: str, message: str) -> str:
+        return f"reply from {agent}"
+
+    def list_agents_fn():
+        return {"alpha": {}}
+
+    defaults = {
+        "token": "fake-token",
+        "default_agent": "alpha",
+        "dispatch_fn": dispatch_fn,
+        "list_agents_fn": list_agents_fn,
+    }
+    defaults.update(overrides)
+    ch = TelegramChannel(**defaults)
+    if tmp_path is None:
+        tmp_path = Path(tempfile.mkdtemp())
+    from src.channels.base import PairingManager
+    ch._pairing = PairingManager(tmp_path / "telegram_paired.json")
+    return ch
+
+
+class TestTelegramShutdownApp:
+    """Test _shutdown_app handles all lifecycle states."""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_clears_app_reference(self):
+        ch = _make_tg_channel()
+        app = MagicMock()
+        app.updater = MagicMock(running=True)
+        app.updater.stop = AsyncMock()
+        app.stop = AsyncMock()
+        app.shutdown = AsyncMock()
+        ch._app = app
+        await ch._shutdown_app()
+        assert ch._app is None
+        app.updater.stop.assert_awaited_once()
+        app.stop.assert_awaited_once()
+        app.shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_skips_updater_when_not_running(self):
+        ch = _make_tg_channel()
+        app = MagicMock()
+        app.updater = MagicMock(running=False)
+        app.updater.stop = AsyncMock()
+        app.stop = AsyncMock()
+        app.shutdown = AsyncMock()
+        ch._app = app
+        await ch._shutdown_app()
+        app.updater.stop.assert_not_awaited()
+        app.stop.assert_awaited_once()
+        app.shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_skips_updater_when_none(self):
+        ch = _make_tg_channel()
+        app = MagicMock()
+        app.updater = None
+        app.stop = AsyncMock()
+        app.shutdown = AsyncMock()
+        ch._app = app
+        await ch._shutdown_app()
+        assert ch._app is None
+        app.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_survives_errors_in_every_stage(self):
+        """Errors in updater.stop / app.stop / app.shutdown must not propagate."""
+        ch = _make_tg_channel()
+        app = MagicMock()
+        app.updater = MagicMock(running=True)
+        app.updater.stop = AsyncMock(side_effect=RuntimeError("boom"))
+        app.stop = AsyncMock(side_effect=RuntimeError("boom"))
+        app.shutdown = AsyncMock(side_effect=RuntimeError("boom"))
+        ch._app = app
+        await ch._shutdown_app()  # must not raise
+        assert ch._app is None
+
+    @pytest.mark.asyncio
+    async def test_shutdown_noop_when_app_already_none(self):
+        ch = _make_tg_channel()
+        ch._app = None
+        await ch._shutdown_app()  # must not raise
+        assert ch._app is None
+
+
+class TestTelegramClearStalePolling:
+    """Test _clear_stale_polling invalidation rounds."""
+
+    @pytest.mark.asyncio
+    async def test_calls_delete_webhook_and_get_updates(self):
+        ch = _make_tg_channel()
+        bot = AsyncMock()
+        app = MagicMock()
+        app.bot = bot
+        ch._app = app
+        await ch._clear_stale_polling()
+        bot.delete_webhook.assert_awaited_once_with(drop_pending_updates=True)
+        assert bot.get_updates.await_count == 3
+        for call in bot.get_updates.await_args_list:
+            assert call.kwargs == {"offset": -1, "timeout": 0}
+
+    @pytest.mark.asyncio
+    async def test_survives_delete_webhook_error(self):
+        ch = _make_tg_channel()
+        bot = AsyncMock()
+        bot.delete_webhook = AsyncMock(side_effect=RuntimeError("net error"))
+        app = MagicMock()
+        app.bot = bot
+        ch._app = app
+        await ch._clear_stale_polling()  # must not raise
+        assert bot.get_updates.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_survives_get_updates_errors(self):
+        ch = _make_tg_channel()
+        bot = AsyncMock()
+        bot.get_updates = AsyncMock(side_effect=RuntimeError("conflict"))
+        app = MagicMock()
+        app.bot = bot
+        ch._app = app
+        await ch._clear_stale_polling()  # must not raise
+        assert bot.get_updates.await_count == 3
+
+
+class TestTelegramPollingErrorCallback:
+    """Test _on_polling_error — MUST be sync (not async)."""
+
+    def test_is_sync_function(self):
+        """The callback MUST be sync — python-telegram-bot calls it without await."""
+        import asyncio
+        ch = _make_tg_channel()
+        assert not asyncio.iscoroutinefunction(ch._on_polling_error)
+
+    def test_conflict_logs_warning(self, caplog):
+        from telegram.error import Conflict
+        ch = _make_tg_channel()
+        import logging
+        with caplog.at_level(logging.WARNING):
+            ch._on_polling_error(Conflict("terminated by other getUpdates"))
+        assert "polling conflict" in caplog.text.lower()
+
+    def test_other_error_logs_error(self, caplog):
+        from telegram.error import TelegramError
+        ch = _make_tg_channel()
+        import logging
+        with caplog.at_level(logging.ERROR):
+            ch._on_polling_error(TelegramError("something else"))
+        assert "something else" in caplog.text
+
+
+class TestTelegramStartConflictRetry:
+    """Test the Conflict retry loop in start()."""
+
+    @pytest.mark.asyncio
+    async def test_start_retries_on_conflict(self):
+        """start() retries start_polling up to 3 times on Conflict."""
+        from telegram.error import Conflict
+
+        ch = _make_tg_channel()
+
+        # Mock the Application and its lifecycle
+        app = MagicMock()
+        app.bot = AsyncMock()
+        app.add_handler = MagicMock()
+        app.initialize = AsyncMock()
+        app.start = AsyncMock()
+        updater = MagicMock()
+        # Fail twice with Conflict, succeed on third
+        updater.start_polling = AsyncMock(
+            side_effect=[Conflict("conflict"), Conflict("conflict"), None]
+        )
+        app.updater = updater
+
+        with patch("src.channels.telegram.TelegramChannel._clear_stale_polling", new_callable=AsyncMock):
+            # Inject the pre-built app so start() doesn't try to build a real one
+            ch._app = app
+
+            # Patch imports and the builder path so start() uses our mock app
+            mock_app_builder = MagicMock()
+            mock_app_builder.token.return_value = mock_app_builder
+            mock_app_builder.connect_timeout.return_value = mock_app_builder
+            mock_app_builder.read_timeout.return_value = mock_app_builder
+            mock_app_builder.build.return_value = app
+
+            with patch("telegram.ext.Application.builder", return_value=mock_app_builder):
+                # Patch asyncio.sleep to avoid real delays in tests
+                with patch("asyncio.sleep", new_callable=AsyncMock):
+                    await ch.start()
+
+        assert updater.start_polling.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_start_raises_after_max_conflict_retries(self):
+        """start() raises Conflict after 3 failed attempts."""
+        from telegram.error import Conflict
+
+        ch = _make_tg_channel()
+
+        app = MagicMock()
+        app.bot = AsyncMock()
+        app.add_handler = MagicMock()
+        app.initialize = AsyncMock()
+        app.start = AsyncMock()
+        updater = MagicMock()
+        updater.start_polling = AsyncMock(side_effect=Conflict("persistent conflict"))
+        app.updater = updater
+
+        with patch("src.channels.telegram.TelegramChannel._clear_stale_polling", new_callable=AsyncMock):
+            ch._app = app
+
+            mock_app_builder = MagicMock()
+            mock_app_builder.token.return_value = mock_app_builder
+            mock_app_builder.connect_timeout.return_value = mock_app_builder
+            mock_app_builder.read_timeout.return_value = mock_app_builder
+            mock_app_builder.build.return_value = app
+
+            with patch("telegram.ext.Application.builder", return_value=mock_app_builder):
+                with patch("asyncio.sleep", new_callable=AsyncMock):
+                    with pytest.raises(Conflict):
+                        await ch.start()
+
+        assert updater.start_polling.await_count == 3
+
+
+class TestTelegramStop:
+    """Test stop() delegates to _shutdown_app and logs."""
+
+    @pytest.mark.asyncio
+    async def test_stop_calls_shutdown_and_logs(self, caplog):
+        import logging
+        ch = _make_tg_channel()
+        app = MagicMock()
+        app.updater = MagicMock(running=True)
+        app.updater.stop = AsyncMock()
+        app.stop = AsyncMock()
+        app.shutdown = AsyncMock()
+        ch._app = app
+        with caplog.at_level(logging.INFO):
+            await ch.stop()
+        assert ch._app is None
+        assert "stopped" in caplog.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_stop_noop_when_no_app(self, caplog):
+        import logging
+        ch = _make_tg_channel()
+        ch._app = None
+        with caplog.at_level(logging.INFO):
+            await ch.stop()
+        assert "stopped" not in caplog.text.lower()
