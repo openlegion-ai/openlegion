@@ -28,12 +28,13 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
         memory = MemoryStore(db_path=":memory:")
     else:
         memory = MagicMock()
-        memory.get_high_salience_facts = MagicMock(return_value=[])
+        memory.get_high_salience_facts = AsyncMock(return_value=[])
+        memory.decay_all = AsyncMock()
         memory.search = AsyncMock(return_value=[])
         memory.search_hierarchical = AsyncMock(return_value=[])
         memory.store_fact = AsyncMock(return_value="fact_123")
         memory.log_action = AsyncMock()
-        memory.store_tool_outcome = MagicMock()
+        memory.store_tool_outcome = AsyncMock()
         memory.get_tool_history = MagicMock(return_value=[])
 
     skills = MagicMock()
@@ -546,7 +547,7 @@ class TestToolMemory:
     async def test_record_failure_stores_tool_outcome(self):
         """_record_failure() stores a failed outcome in memory."""
         loop = _make_loop(real_memory=True)
-        loop._record_failure("exec", "command not found", arguments={"command": "bad"})
+        await loop._record_failure("exec", "command not found", arguments={"command": "bad"})
         history = loop.memory.get_tool_history("exec")
         assert len(history) == 1
         assert history[0]["success"] is False
@@ -576,20 +577,22 @@ class TestToolMemory:
         loop = _make_loop(real_memory=True)
         assert loop._build_tool_history_context() == ""
 
-    def test_build_tool_history_context_with_data(self):
+    @pytest.mark.asyncio
+    async def test_build_tool_history_context_with_data(self):
         """Returns formatted section when tool history exists."""
         loop = _make_loop(real_memory=True)
-        loop.memory.store_tool_outcome("exec", {"cmd": "ls"}, "file.txt", success=True)
-        loop.memory.store_tool_outcome("exec", {"cmd": "bad"}, "error", success=False)
+        await loop.memory.store_tool_outcome("exec", {"cmd": "ls"}, "file.txt", success=True)
+        await loop.memory.store_tool_outcome("exec", {"cmd": "bad"}, "error", success=False)
         ctx = loop._build_tool_history_context()
         assert "## Recent Tool History" in ctx
         assert "exec [OK]" in ctx
         assert "exec [FAILED]" in ctx
 
-    def test_tool_history_in_chat_system_prompt(self):
+    @pytest.mark.asyncio
+    async def test_tool_history_in_chat_system_prompt(self):
         """Chat system prompt includes tool history when present."""
         loop = _make_loop(real_memory=True)
-        loop.memory.store_tool_outcome("exec", {}, "ok", success=True)
+        await loop.memory.store_tool_outcome("exec", {}, "ok", success=True)
         prompt = loop._build_chat_system_prompt()
         assert "Recent Tool History" in prompt
 

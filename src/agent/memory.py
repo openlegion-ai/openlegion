@@ -12,13 +12,15 @@ Embeddings are generated via mesh proxy (embed_fn).
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import hashlib
 import json
 import math
 import sqlite3
 import struct
 from datetime import UTC, datetime
-from typing import Any, Callable, Coroutine, Optional
+from typing import Any, Callable, Coroutine, Optional, TypeVar
 
 import sqlite_vec
 
@@ -39,6 +41,8 @@ _CATEGORY_SIM_THRESHOLD = 0.7
 # Recompute category embedding every N new members
 _CATEGORY_RECOMPUTE_INTERVAL = 10
 
+_T = TypeVar("_T")
+
 
 class MemoryStore:
     """Per-agent memory with vector search, salience tracking, and hierarchical categories."""
@@ -49,7 +53,7 @@ class MemoryStore:
         embed_fn: Optional[EmbedFn] = None,
         categorize_fn: Optional[CategorizeFn] = None,
     ):
-        self.db = sqlite3.connect(db_path)
+        self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=30000")
         self.db.enable_load_extension(True)
@@ -123,30 +127,23 @@ class MemoryStore:
             pass  # Column already exists
         self.db.commit()
 
+    async def _run_db(self, fn: Callable[..., _T], *args: Any) -> _T:
+        """Run a blocking DB function in the default thread pool."""
+        return await asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(fn, *args),
+        )
+
     @staticmethod
     def _compute_boost(access_count: int, days_since_last_access: float = 0.0) -> float:
         """Continuous reinforcement boost: increases with access, decays with time."""
         recency_factor = max(0.1, 1.0 - days_since_last_access * 0.05)
         return 1.0 + math.log(1 + access_count) * recency_factor
 
-    async def store_fact(
-        self,
-        key: str,
-        value: str,
-        category: str = "general",
-        source: str = "agent",
-        confidence: float = 1.0,
+    def _store_fact_sync(
+        self, key: str, value: str, category: str, source: str,
+        confidence: float, embedding: list[float] | None,
     ) -> str:
-        """Store or update a fact. Returns the fact ID."""
-        # Compute embedding BEFORE starting DB transaction to avoid
-        # yielding control (await) with uncommitted writes.
-        embedding = None
-        if self.embed_fn:
-            try:
-                embedding = await self.embed_fn(f"{key}: {value}")
-            except Exception as e:
-                logger.warning(f"Embedding failed for {key}: {e}")
-
+        """Sync DB portion of store_fact. Returns the fact ID."""
         existing = self.db.execute("SELECT id, access_count FROM facts WHERE key = ?", (key,)).fetchone()
 
         if existing:
@@ -177,13 +174,45 @@ class MemoryStore:
 
         if embedding is not None:
             self._store_embedding(fact_id, embedding)
-            # Auto-categorize (assigns category_id, recomputes category embeddings)
-            cat_id = await self._auto_categorize(key, value, category, embedding)
-            if cat_id is not None:
-                self.db.execute("UPDATE facts SET category_id = ? WHERE id = ?", (cat_id, fact_id))
 
         self.db.commit()
         return fact_id
+
+    async def store_fact(
+        self,
+        key: str,
+        value: str,
+        category: str = "general",
+        source: str = "agent",
+        confidence: float = 1.0,
+    ) -> str:
+        """Store or update a fact. Returns the fact ID."""
+        # Compute embedding BEFORE starting DB transaction to avoid
+        # yielding control (await) with uncommitted writes.
+        embedding = None
+        if self.embed_fn:
+            try:
+                embedding = await self.embed_fn(f"{key}: {value}")
+            except Exception as e:
+                logger.warning(f"Embedding failed for {key}: {e}")
+
+        # Run all DB writes in executor to avoid blocking the event loop
+        fact_id = await self._run_db(
+            self._store_fact_sync, key, value, category, source, confidence, embedding,
+        )
+
+        if embedding is not None:
+            # Auto-categorize (mixes async LLM call with sync DB)
+            cat_id = await self._auto_categorize(key, value, category, embedding)
+            if cat_id is not None:
+                await self._run_db(self._set_category_id, fact_id, cat_id)
+
+        return fact_id
+
+    def _set_category_id(self, fact_id: str, cat_id: int) -> None:
+        """Set category_id on a fact and commit."""
+        self.db.execute("UPDATE facts SET category_id = ? WHERE id = ?", (cat_id, fact_id))
+        self.db.commit()
 
     def _store_embedding(self, fact_id: str, embedding: list[float]) -> None:
         from sqlite_vec import serialize_float32
@@ -192,18 +221,16 @@ class MemoryStore:
         self.db.execute("DELETE FROM facts_vec WHERE id = ?", (fact_id,))
         self.db.execute("INSERT INTO facts_vec (id, embedding) VALUES (?, ?)", (fact_id, blob))
 
-    async def search(self, query: str, top_k: int = 10) -> list[MemoryFact]:
-        """Search facts using combined vector + keyword retrieval."""
+    def _search_sync(
+        self, query: str, query_embedding: list[float] | None, top_k: int,
+    ) -> list[MemoryFact]:
+        """Sync DB portion of search. Runs in executor."""
         results: dict[str, dict[str, float]] = {}
 
-        if self.embed_fn:
-            try:
-                query_embedding = await self.embed_fn(query)
-                for fact_id, distance in self._vector_search(query_embedding, top_k * 2):
-                    similarity = 1.0 / (1.0 + distance)
-                    results[fact_id] = {"vector_score": similarity, "keyword_score": 0.0}
-            except Exception as e:
-                logger.warning("Vector search failed, falling back to keyword only: %s", e)
+        if query_embedding is not None:
+            for fact_id, distance in self._vector_search(query_embedding, top_k * 2):
+                similarity = 1.0 / (1.0 + distance)
+                results[fact_id] = {"vector_score": similarity, "keyword_score": 0.0}
 
         for fact_id, rank in self._keyword_search(query, top_k * 2):
             if fact_id in results:
@@ -226,6 +253,17 @@ class MemoryStore:
 
         scored_facts.sort(key=lambda x: x[0], reverse=True)
         return [fact for _, fact in scored_facts[:top_k]]
+
+    async def search(self, query: str, top_k: int = 10) -> list[MemoryFact]:
+        """Search facts using combined vector + keyword retrieval."""
+        query_embedding = None
+        if self.embed_fn:
+            try:
+                query_embedding = await self.embed_fn(query)
+            except Exception as e:
+                logger.warning("Vector search failed, falling back to keyword only: %s", e)
+
+        return await self._run_db(self._search_sync, query, query_embedding, top_k)
 
     def _vector_search(self, embedding: list[float], top_k: int) -> list[tuple]:
         from sqlite_vec import serialize_float32
@@ -346,17 +384,23 @@ class MemoryStore:
             (new_count, boost, fact_id),
         )
 
-    def decay_all(self) -> None:
-        """Apply decay to all facts. Call periodically between tasks."""
+    def _decay_all_sync(self) -> None:
         self.db.execute("UPDATE facts SET decay_score = MAX(decay_score * ?, 0.01)", (SALIENCE_DECAY_RATE,))
         self.db.commit()
 
-    def get_high_salience_facts(self, top_k: int = 20) -> list[MemoryFact]:
-        """Return facts with highest salience scores."""
+    async def decay_all(self) -> None:
+        """Apply decay to all facts. Call periodically between tasks."""
+        await self._run_db(self._decay_all_sync)
+
+    def _get_high_salience_facts_sync(self, top_k: int) -> list[MemoryFact]:
         rows = self.db.execute("SELECT id FROM facts ORDER BY decay_score DESC LIMIT ?", (top_k,)).fetchall()
         fact_ids = [r[0] for r in rows]
         facts_map = self._get_facts_batch(fact_ids)
         return [facts_map[fid] for fid in fact_ids if fid in facts_map]
+
+    async def get_high_salience_facts(self, top_k: int = 20) -> list[MemoryFact]:
+        """Return facts with highest salience scores."""
+        return await self._run_db(self._get_high_salience_facts_sync, top_k)
 
     async def store_facts_batch(self, facts: list[dict]) -> int:
         """Store multiple structured facts at once.
@@ -378,6 +422,17 @@ class MemoryStore:
                 logger.warning(f"Failed to store fact '{key}': {e}")
         return stored
 
+    def _log_action_sync(
+        self, action: str, input_summary: str, output_summary: str,
+        task_id: str | None, tokens_used: int, duration_ms: int,
+    ) -> None:
+        self.db.execute(
+            "INSERT INTO logs (id, action, input_summary, output_summary, task_id, tokens_used, duration_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (generate_id("log"), action, input_summary, output_summary, task_id, tokens_used, duration_ms),
+        )
+        self.db.commit()
+
     async def log_action(
         self,
         action: str,
@@ -388,12 +443,10 @@ class MemoryStore:
         duration_ms: int = 0,
     ) -> None:
         """Log an action to the action history."""
-        self.db.execute(
-            "INSERT INTO logs (id, action, input_summary, output_summary, task_id, tokens_used, duration_ms) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (generate_id("log"), action, input_summary, output_summary, task_id, tokens_used, duration_ms),
+        await self._run_db(
+            self._log_action_sync, action, input_summary, output_summary,
+            task_id, tokens_used, duration_ms,
         )
-        self.db.commit()
 
     def get_recent_logs(self, limit: int = 50) -> list[MemoryLog]:
         """Return recent action log entries."""
@@ -424,15 +477,9 @@ class MemoryStore:
         raw = json.dumps(arguments or {}, sort_keys=True, default=str)
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-    def store_tool_outcome(
-        self,
-        tool_name: str,
-        arguments: dict | None,
-        outcome: str,
-        success: bool = True,
+    def _store_tool_outcome_sync(
+        self, tool_name: str, params_hash: str, outcome: str, success: bool,
     ) -> None:
-        """Record a tool execution outcome. Auto-prunes to 50 per tool."""
-        params_hash = self._compute_params_hash(arguments)
         self.db.execute(
             "INSERT INTO tool_outcomes (tool_name, params_hash, outcome, success) "
             "VALUES (?, ?, ?, ?)",
@@ -445,6 +492,17 @@ class MemoryStore:
             (tool_name, tool_name),
         )
         self.db.commit()
+
+    async def store_tool_outcome(
+        self,
+        tool_name: str,
+        arguments: dict | None,
+        outcome: str,
+        success: bool = True,
+    ) -> None:
+        """Record a tool execution outcome. Auto-prunes to 50 per tool."""
+        params_hash = self._compute_params_hash(arguments)
+        await self._run_db(self._store_tool_outcome_sync, tool_name, params_hash, outcome, success)
 
     def get_tool_history(
         self,
@@ -480,6 +538,16 @@ class MemoryStore:
 
     # ── Hierarchical category system ────────────────────────────
 
+    def _check_category_match_sync(self, embedding: list[float]) -> int | None:
+        """Check existing categories by vector similarity. Returns cat_id or None."""
+        cat_matches = self._search_categories(embedding, top_k=3)
+        if cat_matches:
+            best_id, best_sim = cat_matches[0]
+            if best_sim > _CATEGORY_SIM_THRESHOLD:
+                self._increment_category_count(best_id)
+                return best_id
+        return None
+
     async def _auto_categorize(
         self, key: str, value: str, category: str, embedding: list[float],
     ) -> int | None:
@@ -489,15 +557,12 @@ class MemoryStore:
         Gracefully degrades: if no categorize_fn is set, uses the fact's text
         category field (e.g. "preference", "tool:web_search") as the name.
         """
-        # Check existing categories by vector similarity
-        cat_matches = self._search_categories(embedding, top_k=3)
-        if cat_matches:
-            best_id, best_sim = cat_matches[0]
-            if best_sim > _CATEGORY_SIM_THRESHOLD:
-                self._increment_category_count(best_id)
-                return best_id
+        # Phase 1: Check existing categories by vector similarity (sync → executor)
+        match = await self._run_db(self._check_category_match_sync, embedding)
+        if match is not None:
+            return match
 
-        # Ask LLM for category name if callback is available
+        # Phase 2: Ask LLM for category name if callback is available (async)
         if self.categorize_fn:
             try:
                 cat_name = await self.categorize_fn(key, value)
@@ -511,7 +576,8 @@ class MemoryStore:
             # No categorize_fn — use the fact's existing category field
             cat_name = category.strip().lower()[:100] or "general"
 
-        return self._get_or_create_category(cat_name, embedding)
+        # Phase 3: Get/create category (sync → executor)
+        return await self._run_db(self._get_or_create_category, cat_name, embedding)
 
     def _get_or_create_category(self, name: str, fact_embedding: list[float]) -> int:
         """Get existing category by name or create a new one. Returns category ID."""
@@ -591,6 +657,16 @@ class MemoryStore:
         ).fetchall()
         return [(row[0], 1.0 / (1.0 + row[1])) for row in rows]
 
+    def _hierarchical_tier12_sync(
+        self, query: str, query_embedding: list[float], top_k: int,
+    ) -> list[MemoryFact]:
+        """Tier 1+2 of hierarchical search (sync, runs in executor)."""
+        cat_matches = self._search_categories(query_embedding, top_k=3)
+        if not cat_matches:
+            return []
+        cat_ids = [cid for cid, _ in cat_matches]
+        return self._search_within_categories(query, query_embedding, cat_ids, top_k)
+
     async def search_hierarchical(self, query: str, top_k: int = 10) -> list[MemoryFact]:
         """Search facts using tiered category-first strategy.
 
@@ -605,26 +681,22 @@ class MemoryStore:
             try:
                 query_embedding = await self.embed_fn(query)
 
-                # Tier 1: Find relevant categories
-                cat_matches = self._search_categories(query_embedding, top_k=3)
-                if cat_matches:
-                    cat_ids = [cid for cid, _ in cat_matches]
-                    # Tier 2: Scoped search within matched categories
-                    scoped = self._search_within_categories(
-                        query, query_embedding, cat_ids, top_k,
-                    )
-                    for fact in scoped:
-                        if fact.id not in seen_ids:
-                            results.append(fact)
-                            seen_ids.add(fact.id)
+                # Tier 1+2: Category search + scoped search (sync → executor)
+                scoped = await self._run_db(
+                    self._hierarchical_tier12_sync, query, query_embedding, top_k,
+                )
+                for fact in scoped:
+                    if fact.id not in seen_ids:
+                        results.append(fact)
+                        seen_ids.add(fact.id)
 
-                    # Sufficiency check
-                    if len(results) >= top_k:
-                        return results[:top_k]
+                # Sufficiency check
+                if len(results) >= top_k:
+                    return results[:top_k]
             except Exception as e:
                 logger.warning("Hierarchical search tier 1/2 failed, falling back to flat: %s", e)
 
-        # Tier 3: Flat fallback
+        # Tier 3: Flat fallback (already async with executor)
         flat_results = await self.search(query, top_k=top_k)
         for fact in flat_results:
             if fact.id not in seen_ids:

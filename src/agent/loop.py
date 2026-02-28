@@ -322,7 +322,7 @@ class AgentLoop:
 
         # Decay salience scores so old facts don't dominate forever
         if self.memory:
-            self.memory.decay_all()
+            await self.memory.decay_all()
 
         try:
             for iteration in range(self.MAX_ITERATIONS):
@@ -529,7 +529,7 @@ class AgentLoop:
 
         parts.append(f"## Task: {assignment.task_type}\n\n## Input\n{format_dict(assignment.input_data)}")
 
-        high_salience = self.memory.get_high_salience_facts(top_k=10)
+        high_salience = await self.memory.get_high_salience_facts(top_k=10)
         if high_salience:
             memory_text = "\n".join(f"- {f.key}: {f.value}" for f in high_salience)
             parts.append(f"## Your Memory (most relevant)\n{sanitize_for_prompt(memory_text)}")
@@ -608,7 +608,7 @@ class AgentLoop:
             output_summary=truncate(str(tool_output), 200),
         )
         # Record structured tool outcome
-        self.memory.store_tool_outcome(
+        await self.memory.store_tool_outcome(
             tool_name=tool_name,
             arguments=tool_input,
             outcome=truncate(str(tool_output), 500),
@@ -624,11 +624,11 @@ class AgentLoop:
                         source=f"tool:{tool_name}",
                     )
 
-    def _record_failure(self, tool_name: str, error: str, context: str = "", arguments: dict | None = None) -> None:
+    async def _record_failure(self, tool_name: str, error: str, context: str = "", arguments: dict | None = None) -> None:
         """Record a tool failure so the agent can avoid repeating mistakes."""
         if self.workspace:
             self.workspace.record_error(tool_name, error, context)
-        self.memory.store_tool_outcome(
+        await self.memory.store_tool_outcome(
             tool_name=tool_name,
             arguments=arguments,
             outcome=truncate(error, 500),
@@ -866,7 +866,7 @@ class AgentLoop:
             self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
             result = {"error": f"Timed out after {_TOOL_TIMEOUT}s"}
             logger.error(f"Tool {tool_call.name} timed out after {_TOOL_TIMEOUT}s")
-            self._record_failure(
+            await self._record_failure(
                 tool_call.name, f"Timed out after {_TOOL_TIMEOUT}s",
                 truncate(str(tool_call.arguments), 200),
                 arguments=tool_call.arguments,
@@ -878,7 +878,7 @@ class AgentLoop:
             self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
             result = {"error": str(e)}
             logger.error(f"Tool {tool_call.name} failed: {e}")
-            self._record_failure(
+            await self._record_failure(
                 tool_call.name, str(e),
                 truncate(str(tool_call.arguments), 200),
                 arguments=tool_call.arguments,
