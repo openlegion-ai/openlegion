@@ -48,7 +48,7 @@ agents:
 | `skills_dir` | string | No | Path to custom skills directory |
 | `system_prompt` | string | No | Custom system prompt. Auto-generated if omitted. Also accepted as `instructions` |
 | `resources.memory_limit` | string | No | Docker memory limit (default: `1g`) |
-| `resources.cpu_limit` | float | No | CPU quota, 0.5 = 50% (default: `0.5`) |
+| `resources.cpu_limit` | float | No | CPU quota as fraction of one core (default: `0.5`). Note: runtime currently uses a hardcoded 1 CPU quota; this field is accepted but not yet enforced |
 | `budget.daily_usd` | float | No | Daily spend cap in USD |
 | `budget.monthly_usd` | float | No | Monthly spend cap in USD |
 | `initial_instructions` | string | No | Seeds `AGENTS.md` on first boot. Distinct from `system_prompt` — this sets the agent's operating instructions file |

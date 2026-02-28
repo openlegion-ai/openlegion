@@ -401,7 +401,7 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 
 ### Browser & Network
 
-**Residential IP Rotation** — Add proxy support to the browser backend so agents can route traffic through rotating residential IPs. Playwright's `chromium.launch()` already accepts a `proxy` parameter (`--proxy-server`). Implementation: configure proxy in `agents.yaml` per agent (`proxy: {type: "socks5", url: "..."}`) with credentials resolved via vault. Support HTTP/HTTPS/SOCKS5 proxy protocols. Compatible with all browser backends (basic, persistent, stealth, advanced). When self-hosting on cloud, server region handles geo; residential proxies handle IP reputation for sites that block datacenter ranges. Proxy services (Smartproxy, IPRoyal, etc.) or self-hosted Squid for datacenter rotation. Priority: low — add when scraping at scale or when datacenter IPs get blocked.
+**Residential IP Rotation** — Add proxy support to the browser backend so agents can route traffic through rotating residential IPs. Patchright's `chromium.launch()` already accepts a `proxy` parameter (`--proxy-server`). Implementation: configure proxy in `agents.yaml` per agent (`proxy: {type: "socks5", url: "..."}`) with credentials resolved via vault. Support HTTP/HTTPS/SOCKS5 proxy protocols. Compatible with all browser backends (basic, persistent, stealth, advanced). When self-hosting on cloud, server region handles geo; residential proxies handle IP reputation for sites that block datacenter ranges. Proxy services (Smartproxy, IPRoyal, etc.) or self-hosted Squid for datacenter rotation. Priority: low — add when scraping at scale or when datacenter IPs get blocked.
 
 ---
 

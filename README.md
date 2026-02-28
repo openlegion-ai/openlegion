@@ -220,7 +220,7 @@ connections.
 │ :8401   │ │ :8402   │ │ :8403   │       │ :840N   │
 └─────────┘ └─────────┘ └─────────┘       └─────────┘
   Each agent: isolated Docker container, own /data volume,
-  own memory DB, own workspace, 1GB RAM, 0.5 CPU cap
+  own memory DB, own workspace, 1GB RAM, 1 CPU cap
 ```
 
 ### Trust Zones
@@ -316,7 +316,7 @@ Each agent runs in an isolated Docker container with:
 - **Image**: `openlegion-agent:latest` (Python 3.12, system tools, Patchright, Chromium, KasmVNC)
 - **Network**: Bridge with port mapping (macOS/Windows) or host network (Linux)
 - **Volume**: `openlegion_data_{agent_id}` mounted at `/data` (agent names with spaces/special chars are sanitized)
-- **Resources**: 1GB RAM limit (includes Chrome + KasmVNC), 50% CPU quota
+- **Resources**: 1GB RAM limit (includes Chrome + KasmVNC), 1 CPU quota
 - **Security**: `no-new-privileges`, runs as non-root `agent` user (UID 1000)
 - **Ports**: 8400 (FastAPI), 6080 (KasmVNC for persistent browser)
 
@@ -597,7 +597,7 @@ OpenLegion supports two isolation levels:
 | **Requirements** | Any Docker install | Docker Desktop 4.58+ |
 | **Enable** | `openlegion start` | `openlegion start --sandbox` |
 
-**Docker containers** (default) run agents as non-root with `no-new-privileges`, 1GB memory limit (includes Chrome + KasmVNC), 50% CPU cap, and no host filesystem access. This is secure for most use cases.
+**Docker containers** (default) run agents as non-root with `no-new-privileges`, 1GB memory limit (includes Chrome + KasmVNC), 1 CPU cap, and no host filesystem access. This is secure for most use cases.
 
 **Docker Sandbox microVMs** give each agent its own Linux kernel via Apple Virtualization.framework (macOS) or Hyper-V (Windows). Even if an agent achieves code execution, it's trapped inside a lightweight VM with no visibility into other agents or the host. Use this when running untrusted code or when compliance requires hypervisor isolation.
 
