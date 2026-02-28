@@ -76,6 +76,13 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         msg_router.unregister_agent.side_effect = lambda aid: agent_registry.pop(aid, None)
         msg_router.message_log = []
 
+        channel_manager = MagicMock()
+        channel_manager.get_channel_status.return_value = [
+            {"type": t, "connected": False, "paired": False, "pairing_code": None}
+            for t in ("telegram", "discord", "slack", "whatsapp")
+        ]
+        channel_manager.start_channel.return_value = []
+
         result.update({
             "lane_manager": lane_manager,
             "cron_scheduler": cron_scheduler,
@@ -86,6 +93,7 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
             "transport": transport_mock,
             "runtime": runtime_mock,
             "router": msg_router,
+            "channel_manager": channel_manager,
         })
 
     return result
@@ -1893,3 +1901,131 @@ class TestLogsEndpoint:
             assert data["lines"] == []
             assert data["total"] == 0
         _teardown(components)
+
+
+class TestDashboardChannels:
+    """Tests for channel management endpoints."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_channels_list(self):
+        resp = self.client.get("/dashboard/api/channels")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["channels"]) == 4
+        types = {ch["type"] for ch in data["channels"]}
+        assert types == {"telegram", "discord", "slack", "whatsapp"}
+        assert all(not ch["connected"] for ch in data["channels"])
+
+    def test_channel_connect_invalid_type(self):
+        resp = self.client.post(
+            "/dashboard/api/channels/irc/connect",
+            json={"tokens": {"token": "abc"}},
+        )
+        assert resp.status_code == 400
+        assert "Unknown" in resp.json()["detail"]
+
+    def test_channel_connect_missing_tokens(self):
+        resp = self.client.post(
+            "/dashboard/api/channels/telegram/connect",
+            json={"tokens": {}},
+        )
+        assert resp.status_code == 400
+        assert "Missing" in resp.json()["detail"]
+
+    def test_channel_connect_success(self):
+        resp = self.client.post(
+            "/dashboard/api/channels/telegram/connect",
+            json={"tokens": {"token": "123:ABC"}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["connected"] is True
+        assert data["type"] == "telegram"
+        self.components["channel_manager"].start_channel.assert_called_once_with(
+            "telegram", {"token": "123:ABC"},
+        )
+
+    def test_channel_connect_already_connected(self):
+        self.components["channel_manager"].start_channel.side_effect = ValueError("telegram is already connected")
+        resp = self.client.post(
+            "/dashboard/api/channels/telegram/connect",
+            json={"tokens": {"token": "123:ABC"}},
+        )
+        assert resp.status_code == 400
+        assert "already connected" in resp.json()["detail"]
+
+    def test_channel_connect_persists_credentials(self):
+        resp = self.client.post(
+            "/dashboard/api/channels/telegram/connect",
+            json={"tokens": {"token": "123:ABC"}},
+        )
+        assert resp.status_code == 200
+        self.components["credential_vault"].add_credential.assert_called_once_with(
+            "TELEGRAM_BOT_TOKEN", "123:ABC", system=True,
+        )
+
+    def test_channel_connect_slack_multi_token(self):
+        resp = self.client.post(
+            "/dashboard/api/channels/slack/connect",
+            json={"tokens": {"bot_token": "xoxb-123"}},
+        )
+        assert resp.status_code == 400
+        assert "app_token" in resp.json()["detail"]
+
+    def test_channel_connect_rollback_on_failure(self):
+        self.components["channel_manager"].start_channel.side_effect = ValueError("bad token")
+        resp = self.client.post(
+            "/dashboard/api/channels/telegram/connect",
+            json={"tokens": {"token": "123:ABC"}},
+        )
+        assert resp.status_code == 400
+        # Credential should have been added then rolled back
+        self.components["credential_vault"].add_credential.assert_called_once()
+        self.components["credential_vault"].remove_credential.assert_called_once_with(
+            "TELEGRAM_BOT_TOKEN",
+        )
+
+    def test_channel_disconnect_invalid_type(self):
+        resp = self.client.post(
+            "/dashboard/api/channels/irc/disconnect",
+            json={},
+        )
+        assert resp.status_code == 400
+        assert "Unknown" in resp.json()["detail"]
+
+    def test_channel_disconnect_removes_credentials(self):
+        resp = self.client.post(
+            "/dashboard/api/channels/telegram/disconnect",
+            json={},
+        )
+        assert resp.status_code == 200
+        self.components["credential_vault"].remove_credential.assert_called_once_with(
+            "TELEGRAM_BOT_TOKEN",
+        )
+
+    def test_channel_disconnect_not_connected(self):
+        self.components["channel_manager"].stop_channel.side_effect = ValueError("telegram is not connected")
+        resp = self.client.post(
+            "/dashboard/api/channels/telegram/disconnect",
+            json={},
+        )
+        assert resp.status_code == 400
+        assert "not connected" in resp.json()["detail"]
+
+    def test_channel_disconnect_success(self):
+        resp = self.client.post(
+            "/dashboard/api/channels/telegram/disconnect",
+            json={},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["disconnected"] is True
+        self.components["channel_manager"].stop_channel.assert_called_once_with("telegram")

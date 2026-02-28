@@ -463,6 +463,8 @@ class RuntimeContext:
         app.include_router(create_webhook_router(self.orchestrator))
         app.include_router(webhook_manager.create_router())
 
+        self._init_channel_manager()
+
         from src.dashboard.server import create_dashboard_router, create_spa_catchall_router
 
         dashboard_router = create_dashboard_router(
@@ -482,6 +484,8 @@ class RuntimeContext:
             transport=self.transport,
             runtime=self.runtime,
             router=self.router,
+            webhook_manager=webhook_manager,
+            channel_manager=self.channel_manager,
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking
@@ -616,7 +620,8 @@ class RuntimeContext:
         health_thread = threading.Thread(target=run_health, daemon=True)
         health_thread.start()
 
-    def _start_channels(self) -> None:
+    def _init_channel_manager(self) -> None:
+        """Create the ChannelManager with callbacks (but don't start channels yet)."""
         # Channel callback helpers
         def _channel_status(agent_name: str) -> dict | None:
             try:
@@ -693,6 +698,8 @@ class RuntimeContext:
             steer_fn=_channel_steer,
             debug_fn=_channel_debug,
         )
+
+    def _start_channels(self) -> None:
         channel_routers = self.channel_manager.start_all()
         for ch_router in channel_routers:
             self._app.include_router(ch_router)

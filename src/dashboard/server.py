@@ -50,6 +50,7 @@ def create_dashboard_router(
     runtime: Any = None,
     router: Any = None,
     webhook_manager: Any = None,
+    channel_manager: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     api_router = APIRouter(prefix="/dashboard")
@@ -1142,6 +1143,84 @@ def create_dashboard_router(
             result = await webhook_manager.test_hook(name, payload=body)
             return {"tested": True, "name": name, "result": result}
         raise HTTPException(status_code=404, detail=f"Webhook '{name}' not found")
+
+    # ── Channels ──────────────────────────────────────────────
+
+    _CHANNEL_TOKEN_KEYS: dict[str, list[tuple[str, str]]] = {
+        "telegram": [("token", "TELEGRAM_BOT_TOKEN")],
+        "discord": [("token", "DISCORD_BOT_TOKEN")],
+        "slack": [("bot_token", "SLACK_BOT_TOKEN"), ("app_token", "SLACK_APP_TOKEN")],
+        "whatsapp": [("access_token", "WHATSAPP_ACCESS_TOKEN"), ("phone_number_id", "WHATSAPP_PHONE_NUMBER_ID")],
+    }
+
+    @api_router.get("/api/channels")
+    async def api_channels_list() -> dict:
+        if channel_manager is None:
+            return {"channels": []}
+        return {"channels": channel_manager.get_channel_status()}
+
+    @api_router.post("/api/channels/{channel_type}/connect")
+    async def api_channel_connect(channel_type: str, request: Request) -> dict:
+        if channel_manager is None:
+            raise HTTPException(status_code=503, detail="Channel manager not available")
+        if channel_type not in _CHANNEL_TOKEN_KEYS:
+            raise HTTPException(status_code=400, detail=f"Unknown channel type: {channel_type}")
+        body = await request.json()
+        tokens = body.get("tokens", {})
+        # Validate required token fields
+        required = _CHANNEL_TOKEN_KEYS[channel_type]
+        missing = [key for key, _env in required if not tokens.get(key)]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Missing required tokens: {', '.join(missing)}")
+        # Persist tokens to credential vault before starting
+        persisted_env_names: list[str] = []
+        if credential_vault is not None:
+            for token_key, env_name in required:
+                val = tokens.get(token_key, "")
+                if val:
+                    credential_vault.add_credential(env_name, val, system=True)
+                    persisted_env_names.append(env_name)
+        try:
+            routers = channel_manager.start_channel(channel_type, tokens)
+            if routers:
+                for ch_router in routers:
+                    request.app.include_router(ch_router)
+            return {"connected": True, "type": channel_type}
+        except ValueError as e:
+            # Rollback persisted credentials on validation/startup failure
+            for env_name in persisted_env_names:
+                try:
+                    credential_vault.remove_credential(env_name)
+                except Exception:
+                    pass
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            for env_name in persisted_env_names:
+                try:
+                    credential_vault.remove_credential(env_name)
+                except Exception:
+                    pass
+            logger.error("Failed to connect channel %s: %s", channel_type, e)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @api_router.post("/api/channels/{channel_type}/disconnect")
+    async def api_channel_disconnect(channel_type: str) -> dict:
+        if channel_manager is None:
+            raise HTTPException(status_code=503, detail="Channel manager not available")
+        if channel_type not in _CHANNEL_TOKEN_KEYS:
+            raise HTTPException(status_code=400, detail=f"Unknown channel type: {channel_type}")
+        try:
+            channel_manager.stop_channel(channel_type)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # Remove tokens from credential vault
+        if credential_vault is not None:
+            for _token_key, env_name in _CHANNEL_TOKEN_KEYS[channel_type]:
+                try:
+                    credential_vault.remove_credential(env_name)
+                except Exception:
+                    pass
+        return {"disconnected": True, "type": channel_type}
 
     # ── Agent Workspace (proxy to agent) ─────────────────────
 

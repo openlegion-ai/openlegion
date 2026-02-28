@@ -16,6 +16,8 @@ logger = logging.getLogger("cli")
 class ChannelManager:
     """Manages the lifecycle of messaging channels (Telegram, Discord, etc.)."""
 
+    CHANNEL_TYPES = ("telegram", "discord", "slack", "whatsapp")
+
     def __init__(self, cfg: dict, dispatch_fn, agent_registry, **callbacks):
         self.cfg = cfg
         self.dispatch_fn = dispatch_fn
@@ -24,6 +26,7 @@ class ChannelManager:
         self.active: list = []
         self.channel_status: list[tuple[str, bool]] = []  # (message, needs_pairing)
         self.pairing_instructions: list[str] = []
+        self._channel_map: dict[str, object] = {}  # "telegram" -> Channel instance
 
     def start_all(self) -> list:
         """Start all configured channels. Returns webhook routers."""
@@ -59,6 +62,7 @@ class ChannelManager:
                 **common,
             )
             self._start_async_channel(tg)
+            self._channel_map["telegram"] = tg
             self._record_pairing("Telegram", "send to your bot \u2192  /start", tg_code)
 
         # Discord
@@ -79,6 +83,7 @@ class ChannelManager:
                 **common,
             )
             self._start_async_channel(dc)
+            self._channel_map["discord"] = dc
             self._record_pairing("Discord", "DM your bot \u2192  /start", dc_code)
 
         # Slack
@@ -105,6 +110,7 @@ class ChannelManager:
                 **common,
             )
             self._start_async_channel(sl)
+            self._channel_map["slack"] = sl
             self._record_pairing("Slack", "message your bot \u2192  /start", sl_code)
 
         # WhatsApp
@@ -140,6 +146,7 @@ class ChannelManager:
             asyncio.run(wa.start())
             webhook_routers.append(wa.create_router())
             self.active.append(wa)
+            self._channel_map["whatsapp"] = wa
             self._record_pairing("WhatsApp", "send to your number \u2192  /start", wa_code)
 
         return webhook_routers
@@ -194,6 +201,114 @@ class ChannelManager:
         t = threading.Thread(target=_run, daemon=True)
         t.start()
         self.active.append(channel)
+
+    def get_channel_status(self) -> list[dict]:
+        """Return status for all 4 channel types."""
+        result = []
+        for ch_type in self.CHANNEL_TYPES:
+            ch = self._channel_map.get(ch_type)
+            entry: dict = {"type": ch_type, "connected": False, "paired": False, "pairing_code": None}
+            if ch is not None:
+                entry["connected"] = True
+                pairing = getattr(ch, "_pairing", None)
+                if pairing is not None:
+                    if pairing.owner:
+                        entry["paired"] = True
+                    else:
+                        entry["pairing_code"] = pairing.pairing_code or None
+            result.append(entry)
+        return result
+
+    def start_channel(self, channel_type: str, tokens: dict) -> list:
+        """Start a single channel dynamically. Returns webhook routers (for WhatsApp)."""
+        if channel_type not in self.CHANNEL_TYPES:
+            raise ValueError(f"Unknown channel type: {channel_type}")
+        if channel_type in self._channel_map:
+            raise ValueError(f"{channel_type} is already connected")
+
+        all_agents = self.cfg.get("agents", {})
+        first_agent = next(iter(all_agents), "")
+        webhook_routers: list = []
+
+        def list_agents_fn():
+            return dict(self.agent_registry)
+
+        common = {
+            "dispatch_fn": self.dispatch_fn,
+            "list_agents_fn": list_agents_fn,
+            **self.callbacks,
+        }
+
+        if channel_type == "telegram":
+            token = tokens.get("token", "")
+            if not token:
+                raise ValueError("token is required for Telegram")
+            _ensure_pairing_code(PROJECT_ROOT / "config" / "telegram_paired.json")
+            from src.channels.telegram import TelegramChannel
+            ch = TelegramChannel(token=token, default_agent=first_agent, **common)
+            self._start_async_channel(ch)
+            self._channel_map["telegram"] = ch
+
+        elif channel_type == "discord":
+            token = tokens.get("token", "")
+            if not token:
+                raise ValueError("token is required for Discord")
+            _ensure_pairing_code(PROJECT_ROOT / "config" / "discord_paired.json")
+            from src.channels.discord import DiscordChannel
+            ch = DiscordChannel(token=token, default_agent=first_agent, **common)
+            self._start_async_channel(ch)
+            self._channel_map["discord"] = ch
+
+        elif channel_type == "slack":
+            bot_token = tokens.get("bot_token", "")
+            app_token = tokens.get("app_token", "")
+            if not bot_token or not app_token:
+                raise ValueError("bot_token and app_token are required for Slack")
+            _ensure_pairing_code(PROJECT_ROOT / "config" / "slack_paired.json")
+            from src.channels.slack import SlackChannel
+            ch = SlackChannel(bot_token=bot_token, app_token=app_token, default_agent=first_agent, **common)
+            self._start_async_channel(ch)
+            self._channel_map["slack"] = ch
+
+        elif channel_type == "whatsapp":
+            access_token = tokens.get("access_token", "")
+            phone_number_id = tokens.get("phone_number_id", "")
+            if not access_token or not phone_number_id:
+                raise ValueError("access_token and phone_number_id are required for WhatsApp")
+            _ensure_pairing_code(PROJECT_ROOT / "config" / "whatsapp_paired.json")
+            verify_token = tokens.get("verify_token") or secrets.token_hex(16)
+            from src.channels.whatsapp import WhatsAppChannel
+            ch = WhatsAppChannel(
+                access_token=access_token, phone_number_id=phone_number_id,
+                verify_token=verify_token, default_agent=first_agent, **common,
+            )
+            asyncio.run(ch.start())
+            webhook_routers.append(ch.create_router())
+            self.active.append(ch)
+            self._channel_map["whatsapp"] = ch
+
+        return webhook_routers
+
+    def stop_channel(self, channel_type: str) -> None:
+        """Stop a single channel."""
+        ch = self._channel_map.get(channel_type)
+        if ch is None:
+            raise ValueError(f"{channel_type} is not connected")
+        try:
+            loop = getattr(ch, "_channel_loop", None)
+            if loop and loop.is_running():
+                try:
+                    future = asyncio.run_coroutine_threadsafe(ch.stop(), loop)
+                    future.result(timeout=10)
+                finally:
+                    loop.call_soon_threadsafe(loop.stop)
+            else:
+                asyncio.run(ch.stop())
+        except Exception as e:
+            logger.debug("Error stopping channel %s: %s", channel_type, e)
+        if ch in self.active:
+            self.active.remove(ch)
+        del self._channel_map[channel_type]
 
     def _record_pairing(self, label: str, instruction: str, code: str | None) -> None:
         """Record pairing status for a channel (deferred display)."""

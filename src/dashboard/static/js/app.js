@@ -190,6 +190,7 @@ function dashboard() {
       { id: 'costs', label: 'Costs & Budgets' },
       { id: 'blackboard', label: 'Blackboard' },
       { id: 'automation', label: 'Automation' },
+      { id: 'channels', label: 'Channels' },
       { id: 'settings', label: 'Settings' },
     ],
 
@@ -206,6 +207,12 @@ function dashboard() {
     credKey: '',
     credBaseUrl: '',
     credTier: 'agent',
+
+    // Channels
+    channels: [],
+    channelConnectType: '',
+    channelTokens: {},
+
 
     // Webhooks
     webhooks: [],
@@ -696,6 +703,7 @@ function dashboard() {
         this.fetchCronJobs();
         this.fetchWorkflows();
         this.fetchWebhooks();
+        this.fetchChannels();
         this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
       }
       if (!this._skipPush) this._pushUrl(false);
@@ -2165,6 +2173,7 @@ function dashboard() {
         { label: 'View Logs', desc: 'Open runtime logs', keywords: ['logs', 'runtime', 'debug'], action: () => { this.switchTab('system'); this.systemTab = 'settings'; this.fetchSystemLogs(); } },
         { label: 'Add Credential', desc: 'Add new API key', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.switchTab('system'); this.systemTab = 'settings'; this.showCredForm = true; } },
         { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.switchTab('system'); this.systemTab = 'settings'; this.fetchWebhooks(); } },
+        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.switchTab('system'); this.systemTab = 'channels'; this.fetchChannels(); } },
       ];
       for (const act of sysActions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
@@ -2267,6 +2276,86 @@ function dashboard() {
           this.showToast(`Error: ${err.detail}`);
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
+    // ── Channels ──────────────────────────────────────────
+
+    async fetchChannels() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/channels`);
+        if (resp.ok) this.channels = (await resp.json()).channels || [];
+      } catch (e) { console.warn('fetchChannels failed:', e); }
+    },
+
+    _channelFields(type) {
+      const fields = {
+        telegram: [{ key: 'token', label: 'Bot Token', placeholder: '123456:ABC-DEF...' }],
+        discord: [{ key: 'token', label: 'Bot Token', placeholder: 'MTIz...' }],
+        slack: [
+          { key: 'bot_token', label: 'Bot Token', placeholder: 'xoxb-...' },
+          { key: 'app_token', label: 'App Token', placeholder: 'xapp-...' },
+        ],
+        whatsapp: [
+          { key: 'access_token', label: 'Access Token', placeholder: 'EAAx...' },
+          { key: 'phone_number_id', label: 'Phone Number ID', placeholder: '1234567890' },
+        ],
+      };
+      return fields[type] || [];
+    },
+
+    startChannelConnect(type) {
+      this.channelConnectType = type;
+      this.channelTokens = {};
+    },
+
+    cancelChannelConnect() {
+      this.channelConnectType = '';
+      this.channelTokens = {};
+    },
+
+    async connectChannel() {
+      const type = this.channelConnectType;
+      const fields = this._channelFields(type);
+      const missing = fields.filter(f => !this.channelTokens[f.key]?.trim());
+      if (missing.length) {
+        this.showToast(`Missing: ${missing.map(f => f.label).join(', ')}`);
+        return;
+      }
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/channels/${type}/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tokens: this.channelTokens }),
+        });
+        if (resp.ok) {
+          this.showToast(`${type.charAt(0).toUpperCase() + type.slice(1)} connected`);
+          this.cancelChannelConnect();
+          this.fetchChannels();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Failed to connect'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
+    disconnectChannel(type) {
+      const label = type.charAt(0).toUpperCase() + type.slice(1);
+      this.showConfirm(`Disconnect ${label}`, `Stop the ${label} channel?`, async () => {
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/channels/${type}/disconnect`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+          });
+          if (resp.ok) {
+            this.showToast(`${label} disconnected`);
+            this.fetchChannels();
+          } else {
+            const err = await resp.json().catch(() => ({}));
+            this.showToast(`Error: ${err.detail || 'Disconnect failed'}`);
+          }
+        } catch (e) { this.showToast(`Error: ${e.message}`); }
+      }, true);
     },
 
     // ── Webhooks ──────────────────────────────────────────

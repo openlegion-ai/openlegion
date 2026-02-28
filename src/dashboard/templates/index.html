@@ -1841,6 +1841,72 @@
         </div>
         </div><!-- /automation sub-tab -->
 
+        <!-- Channels sub-tab -->
+        <div x-show="systemTab === 'channels'">
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Messaging Channels</div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <template x-for="ch in channels" :key="ch.type">
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <!-- Header -->
+              <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2">
+                  <div class="w-2 h-2 rounded-full" :class="ch.connected ? 'bg-emerald-400' : 'bg-gray-600'"></div>
+                  <span class="text-sm font-medium text-white capitalize" x-text="ch.type"></span>
+                </div>
+                <button x-show="ch.connected" @click="disconnectChannel(ch.type)"
+                  class="text-xs text-red-400 hover:text-red-300 transition-colors">Disconnect</button>
+              </div>
+              <!-- Connected state -->
+              <template x-if="ch.connected && channelConnectType !== ch.type">
+                <div>
+                  <template x-if="ch.paired">
+                    <div class="text-xs text-emerald-400">Paired &amp; active</div>
+                  </template>
+                  <template x-if="!ch.paired">
+                    <div>
+                      <div class="text-xs text-amber-400 mb-1">Awaiting pairing</div>
+                      <div x-show="ch.pairing_code" class="text-xs text-gray-400">
+                        Code: <span class="font-mono text-white select-all" x-text="ch.pairing_code"></span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <!-- Not connected (and not being connected) -->
+              <template x-if="!ch.connected && channelConnectType !== ch.type">
+                <div>
+                  <div class="text-xs text-gray-500 mb-2">Not connected</div>
+                  <button @click="startChannelConnect(ch.type)"
+                    class="text-xs px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors">
+                    Connect
+                  </button>
+                </div>
+              </template>
+              <!-- Connect form -->
+              <template x-if="channelConnectType === ch.type">
+                <div class="space-y-2 mt-1">
+                  <template x-for="field in _channelFields(ch.type)" :key="field.key">
+                    <div>
+                      <label class="block text-xs text-gray-400 mb-1" x-text="field.label"></label>
+                      <input type="password" :placeholder="field.placeholder"
+                        class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                        x-model="channelTokens[field.key]">
+                    </div>
+                  </template>
+                  <div class="flex gap-2 pt-1">
+                    <button @click="cancelChannelConnect()"
+                      class="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors">Cancel</button>
+                    <button @click="connectChannel()"
+                      class="text-xs px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors">Connect</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+        <div x-show="channels.length === 0" class="text-sm text-gray-500 py-4">No channel data available</div>
+        </div><!-- /channels sub-tab -->
+
         <!-- Settings sub-tab -->
         <div x-show="systemTab === 'settings'">
         <!-- Credentials -->
