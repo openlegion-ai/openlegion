@@ -757,50 +757,23 @@ def create_dashboard_router(
         validation_model = _VALIDATION_MODELS.get(provider)
         if not validation_model:
             return {"valid": True, "skipped": True, "reason": "unknown provider"}
-        import os
-        env_mapping = {
-            "anthropic": "ANTHROPIC_API_KEY",
-            "openai": "OPENAI_API_KEY",
-            "gemini": "GEMINI_API_KEY",
-            "deepseek": "DEEPSEEK_API_KEY",
-            "moonshot": "MOONSHOT_API_KEY",
-            "xai": "XAI_API_KEY",
-            "groq": "GROQ_API_KEY",
-            "minimax": "MINIMAX_API_KEY",
-        }
-        env_var = env_mapping.get(provider)
-        old_val = os.environ.get(env_var, "") if env_var else ""
-        base_env = f"{provider.upper()}_API_BASE"
-        old_base = os.environ.get(base_env, "")
         try:
             import litellm
-            if env_var:
-                os.environ[env_var] = key
+            kwargs: dict = {
+                "model": validation_model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+                "api_key": key,
+            }
             if base_url:
-                os.environ[base_env] = base_url
-            await litellm.acompletion(
-                model=validation_model,
-                messages=[{"role": "user", "content": "hi"}],
-                max_tokens=1,
-            )
+                kwargs["api_base"] = base_url
+            await litellm.acompletion(**kwargs)
             return {"valid": True, "skipped": False}
         except Exception as e:
-            import litellm as _lt
-            if isinstance(e, _lt.AuthenticationError):
+            if isinstance(e, litellm.AuthenticationError):
                 return {"valid": False, "skipped": False, "reason": "Invalid API key"}
             # Network, rate limit, etc. — don't block
             return {"valid": True, "skipped": True, "reason": str(e)[:200]}
-        finally:
-            if env_var:
-                if old_val:
-                    os.environ[env_var] = old_val
-                else:
-                    os.environ.pop(env_var, None)
-            if base_url:
-                if old_base:
-                    os.environ[base_env] = old_base
-                else:
-                    os.environ.pop(base_env, None)
 
     @api_router.post("/api/credentials")
     async def api_add_credential(request: Request) -> dict:

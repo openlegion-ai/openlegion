@@ -1072,6 +1072,17 @@ class TestDashboardCredentialValidate:
         })
         assert resp.status_code == 400
 
+    def test_validate_with_api_key_suffix(self):
+        """Service name with _api_key suffix still validates correctly."""
+        with patch("litellm.acompletion", new_callable=AsyncMock, return_value=MagicMock()):
+            resp = self.client.post("/dashboard/api/credentials/validate", json={
+                "service": "anthropic_api_key", "key": "sk-valid-key",
+            })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["valid"] is True
+        assert data["skipped"] is False
+
     def test_validate_network_error_allows_save(self):
         """Network errors don't block — returns valid=True, skipped=True."""
         with patch("litellm.acompletion", new_callable=AsyncMock, side_effect=TimeoutError("timeout")):
