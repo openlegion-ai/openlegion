@@ -214,17 +214,17 @@ class TelegramChannel(Channel):
                 pass
             await asyncio.sleep(0.5)
 
-    async def _on_polling_error(self, exc: Exception) -> None:
+    def _on_polling_error(self, exc: Exception) -> None:
         """Handle errors from the polling loop.
 
         Registered as ``error_callback`` on ``start_polling`` so that
         transient ``Conflict`` errors produce a single-line warning
         instead of the library's default full traceback.
+
+        NOTE: This MUST be a sync function — python-telegram-bot's
+        ``network_retry_loop`` calls ``on_err_cb(exc)`` without await.
         """
-        try:
-            from telegram.error import Conflict as TgConflict
-        except ImportError:
-            TgConflict = type(None)
+        from telegram.error import Conflict as TgConflict
 
         if isinstance(exc, TgConflict):
             logger.warning(
