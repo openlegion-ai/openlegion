@@ -1241,9 +1241,8 @@ function dashboard() {
           body: JSON.stringify({ name, description: this.newProjectDesc.trim(), members: [] }),
         });
         if (resp.ok) {
-          this.newProjectName = '';
-          this.newProjectDesc = '';
-          this.showProjectForm = false;
+          this.projectFormLoading = false;
+          this.closeProjectModal();
           await this.fetchProjects();
           this.switchProject(name);
           this.showToast(`Project "${name}" created`);

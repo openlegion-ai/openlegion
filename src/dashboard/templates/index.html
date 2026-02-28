@@ -56,9 +56,9 @@
   <div x-data="dashboard()" x-init="init()" class="flex flex-col h-screen">
 
     <!-- Toast notifications -->
-    <div class="fixed top-16 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center" role="status" aria-live="polite">
+    <div class="fixed top-16 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center pointer-events-none max-w-sm w-full" role="status" aria-live="polite">
       <template x-for="t in toastQueue" :key="t.id">
-        <div class="toast text-gray-200 flex items-center gap-2" x-transition>
+        <div class="toast text-gray-200 flex items-center gap-2 pointer-events-auto" x-transition>
           <span class="flex-1" x-text="t.msg"></span>
           <button @click="dismissToast(t.id)" aria-label="Dismiss notification" class="shrink-0 text-gray-400 hover:text-white transition-colors text-sm leading-none">&times;</button>
         </div>
@@ -318,7 +318,6 @@
             <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-gray-600 inline-block"></span><span x-text="fleetHealthCounts.unknown + ' unknown'"></span></span>
           </template>
         </div>
-        <!-- Create project form (inline removed — see modal below) -->
         <!-- Project management row (when a project is selected) -->
         <div x-show="activeProject && activeProjectData" x-cloak class="flex items-center gap-3 mb-3 text-xs">
           <span x-show="activeProjectData?.description" class="text-gray-500 truncate max-w-xs" :title="activeProjectData?.description" x-text="activeProjectData?.description"></span>
