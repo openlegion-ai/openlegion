@@ -14,13 +14,13 @@ const _IDENTITY_TABS = [
 
 const _IDENTITY_FILE_MAP = {
   identity: [
-    { file: 'SOUL.md', label: 'Soul', cap: 4000, access: 'both', desc: 'Core personality and behavioral guidelines.' },
-    { file: 'INSTRUCTIONS.md', label: 'Instructions', cap: 8000, access: 'both', desc: 'Operating procedures, workflow rules, domain knowledge.' },
+    { file: 'SOUL.md', label: 'Soul', cap: 4000, access: 'both', desc: 'Personality, tone, and communication style. Shapes how the agent speaks and approaches problems.' },
+    { file: 'INSTRUCTIONS.md', label: 'Instructions', cap: 8000, access: 'both', desc: 'Step-by-step procedures, workflow rules, tool patterns, and domain knowledge. The agent\'s operating manual.' },
   ],
   memory: [
-    { file: 'MEMORY.md', label: 'Memory', cap: 16000, access: 'auto', desc: 'Long-term facts from conversations (auto-managed).' },
-    { file: 'USER.md', label: 'Preferences', cap: 4000, access: 'both', desc: 'Your preferences and working style.' },
-    { file: 'HEARTBEAT.md', label: 'Heartbeat', cap: null, access: 'both', desc: 'Rules for autonomous operation.' },
+    { file: 'MEMORY.md', label: 'Memory', cap: 16000, access: 'auto', desc: 'Facts and context the agent remembers across sessions. Auto-updated during conversations — you can also edit directly.' },
+    { file: 'USER.md', label: 'Preferences', cap: 4000, access: 'both', desc: 'Your preferences, communication style, and project context. Helps the agent serve you better over time.' },
+    { file: 'HEARTBEAT.md', label: 'Heartbeat', cap: null, access: 'both', desc: 'Rules for what the agent does during periodic autonomous wakeups — what to check, what to work on, when to notify you.' },
   ],
 };
 
@@ -249,9 +249,6 @@ function dashboard() {
     // WebSocket reconnect countdown (Alpine-reactive mirror)
     wsReconnectIn: 0,
 
-    // Keyboard shortcuts modal
-    shortcutsModalOpen: false,
-
     // Confirm modal
     confirmModal: { open: false, title: '', message: '', action: null, destructive: false },
 
@@ -274,21 +271,9 @@ function dashboard() {
     _cronInterval: null,
     _seenEventIds: new Set(),
 
-    // Theme
-    darkMode: localStorage.getItem('ol_theme') !== 'light',
-
     // URL routing
     _skipPush: false,
     _popstateHandler: null,
-
-    // ── Theme ──────────────────────────────────────────
-
-    toggleTheme() {
-      this.darkMode = !this.darkMode;
-      localStorage.setItem('ol_theme', this.darkMode ? 'dark' : 'light');
-      document.body.classList.toggle('light', !this.darkMode);
-      document.documentElement.classList.toggle('dark', this.darkMode);
-    },
 
     // ── URL Routing ──────────────────────────────────────────
 
@@ -581,12 +566,6 @@ function dashboard() {
       });
       this._ws.connect();
 
-      // Restore theme preference
-      if (!this.darkMode) {
-        document.body.classList.add('light');
-        document.documentElement.classList.remove('dark');
-      }
-
       this.fetchAgents();
       this.fetchSettings();
       this.fetchProject();
@@ -625,25 +604,6 @@ function dashboard() {
           e.stopPropagation();
           e.preventDefault();
           this.cmdPaletteOpen = false;
-        }
-        // Tab switching: 1/2/3 when no input focused and no modal open
-        if (!e.metaKey && !e.ctrlKey && !e.altKey && ['1', '2', '3'].includes(e.key)) {
-          const active = document.activeElement;
-          const tag = active ? active.tagName.toLowerCase() : '';
-          if (tag === 'input' || tag === 'textarea' || tag === 'select' || active?.isContentEditable) return;
-          if (this.cmdPaletteOpen || this.detailAgent || this.addAgentMode) return;
-          e.preventDefault();
-          const tabMap = { '1': 'fleet', '2': 'activity', '3': 'system' };
-          this.switchTab(tabMap[e.key]);
-        }
-        // ? key for shortcuts help (when no input focused and no modal open)
-        if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-          const active = document.activeElement;
-          const tag = active ? active.tagName.toLowerCase() : '';
-          if (tag === 'input' || tag === 'textarea' || tag === 'select' || active?.isContentEditable) return;
-          if (this.cmdPaletteOpen || this.addAgentMode || this.confirmModal.open) return;
-          e.preventDefault();
-          this.shortcutsModalOpen = !this.shortcutsModalOpen;
         }
       };
       document.addEventListener('keydown', this._cmdPaletteHandler);
@@ -3033,6 +2993,13 @@ function dashboard() {
       if (usd === 0 || usd == null) return '$0.00';
       if (usd < 0.01) return '$' + usd.toFixed(4);
       return '$' + usd.toFixed(2);
+    },
+
+    formatModelName(model) {
+      if (!model) return '';
+      // Strip provider prefix (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6")
+      const parts = model.split('/');
+      return parts.length > 1 ? parts.slice(1).join('/') : model;
     },
 
     agentColorIndex(agentId) {

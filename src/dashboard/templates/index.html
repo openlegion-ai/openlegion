@@ -14,7 +14,6 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
-      darkMode: 'class',
       theme: {
         extend: {
           colors: {
@@ -88,62 +87,6 @@
             class="px-4 py-2 text-sm rounded-lg transition-colors font-medium"
             :class="confirmModal.destructive ? 'bg-red-600 hover:bg-red-500 text-white' : 'bg-indigo-600 hover:bg-indigo-500 text-white'">
             Confirm
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Keyboard shortcuts modal -->
-    <div x-show="shortcutsModalOpen" x-cloak
-      class="fixed inset-0 z-[70] flex items-center justify-center"
-      @keydown.escape.window="shortcutsModalOpen = false"
-      x-transition:enter="transition ease-out duration-150"
-      x-transition:enter-start="opacity-0"
-      x-transition:enter-end="opacity-100"
-      x-transition:leave="transition ease-in duration-100"
-      x-transition:leave-start="opacity-100"
-      x-transition:leave-end="opacity-0">
-      <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="shortcutsModalOpen = false"></div>
-      <div class="relative bg-gray-900 border border-gray-700 rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl">
-        <h3 class="text-lg font-semibold text-white mb-4">Keyboard Shortcuts</h3>
-        <div class="space-y-2.5">
-          <div class="flex items-center justify-between text-sm">
-            <span class="text-gray-300">Command palette</span>
-            <div class="flex gap-1">
-              <kbd class="text-[10px] text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700 font-mono">&#8984;K</kbd>
-              <span class="text-gray-600 text-xs">/</span>
-              <kbd class="text-[10px] text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700 font-mono">Ctrl+K</kbd>
-            </div>
-          </div>
-          <div class="flex items-center justify-between text-sm">
-            <span class="text-gray-300">Switch tabs</span>
-            <div class="flex gap-1">
-              <kbd class="text-[10px] text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700 font-mono">1</kbd>
-              <kbd class="text-[10px] text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700 font-mono">2</kbd>
-              <kbd class="text-[10px] text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700 font-mono">3</kbd>
-            </div>
-          </div>
-          <div class="flex items-center justify-between text-sm">
-            <span class="text-gray-300">Close panel / modal</span>
-            <kbd class="text-[10px] text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700 font-mono">Esc</kbd>
-          </div>
-          <div class="flex items-center justify-between text-sm">
-            <span class="text-gray-300">Save while editing</span>
-            <div class="flex gap-1">
-              <kbd class="text-[10px] text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700 font-mono">&#8984;S</kbd>
-              <span class="text-gray-600 text-xs">/</span>
-              <kbd class="text-[10px] text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700 font-mono">Ctrl+S</kbd>
-            </div>
-          </div>
-          <div class="flex items-center justify-between text-sm">
-            <span class="text-gray-300">This help</span>
-            <kbd class="text-[10px] text-gray-400 bg-gray-800 px-1.5 py-0.5 rounded border border-gray-700 font-mono">?</kbd>
-          </div>
-        </div>
-        <div class="mt-5 flex justify-end">
-          <button @click="shortcutsModalOpen = false"
-            class="px-4 py-2 text-sm bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors">
-            Close
           </button>
         </div>
       </div>
@@ -267,17 +210,6 @@
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
           <span>Search</span>
           <kbd class="text-[10px] text-gray-600 bg-gray-900 px-1 py-0.5 rounded border border-gray-700 ml-1">&#8984;K</kbd>
-        </button>
-        <!-- Keyboard shortcuts help -->
-        <button @click="shortcutsModalOpen = true" class="text-gray-500 hover:text-gray-300 transition-colors text-sm font-mono w-5 h-5 flex items-center justify-center rounded border border-gray-700/50 hover:border-gray-600" title="Keyboard shortcuts (?)">?</button>
-        <!-- Theme toggle -->
-        <button @click="toggleTheme()" class="text-gray-500 hover:text-gray-300 transition-colors" title="Toggle theme">
-          <svg x-show="darkMode" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-            <circle cx="12" cy="12" r="5"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.73 12.73l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
-          </svg>
-          <svg x-show="!darkMode" x-cloak class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-          </svg>
         </button>
         <!-- Model health indicator -->
         <div x-show="modelsDown > 0" x-cloak class="flex items-center gap-1.5 text-xs relative group/health cursor-default" tabindex="0" role="status" aria-label="Model health status">
@@ -534,7 +466,7 @@
                     <svg class="w-3 h-3 text-gray-600 group-hover:text-indigo-400 transition-colors shrink-0 cursor-pointer" @click="drillDown(agent.id)" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                   </div>
                   <div class="text-xs text-gray-500 truncate mt-0.5" x-show="agent.role" :title="agent.role" x-text="agent.role"></div>
-                  <div class="text-[10px] text-gray-600 truncate mt-0.5" x-show="agent.model" :title="agent.model" x-text="(agent.model || '').length > 30 ? (agent.model || '').slice(-30) : (agent.model || '')"></div>
+                  <div class="text-[10px] text-gray-600 truncate mt-0.5" x-show="agent.model" :title="agent.model" x-text="formatModelName(agent.model)"></div>
                   <div x-show="agent.project && !activeProject" class="mt-0.5">
                     <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800/80 text-gray-500 border border-gray-700/40"
                       x-text="agent.project"></span>
@@ -1102,7 +1034,7 @@
                       x-text="agentDetail.health?.status || 'unknown'"
                     ></span>
                   </div>
-                  <span class="text-xs text-gray-500" x-text="agentConfigs[selectedAgent]?.role || agentConfigs[selectedAgent]?.model || ''"></span>
+                  <span class="text-xs text-gray-500" x-text="agentConfigs[selectedAgent]?.role || formatModelName(agentConfigs[selectedAgent]?.model) || ''"></span>
                 </div>
               </div>
               <div class="flex items-center gap-2">
@@ -1125,9 +1057,9 @@
                   Restart
                 </button>
                 <button @click="resetAgent(selectedAgent)" class="action-btn action-btn-danger px-3 py-1.5"
-                  title="Clear conversation history">
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
-                  Reset
+                  title="Clear conversation history — does not restart the agent">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/></svg>
+                  Clear Chat
                 </button>
               </div>
             </div>
@@ -1206,9 +1138,9 @@
                             class="text-xs px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
                             x-text="isFileDefault(section.file) ? 'Customize' : 'Edit'"></button>
                         </div>
-                        <div x-show="!isFileDefault(section.file)" class="text-[10px] text-gray-500 mb-2 hidden sm:block" x-text="section.desc"></div>
-                        <!-- Budget bar (for files with cap; hidden for default content unless editing) -->
-                        <div x-show="section.cap && (!isFileDefault(section.file) || (identityEditing && identityEditingFile === section.file))" class="mb-2">
+                        <div class="text-[10px] text-gray-500 mb-2 hidden sm:block" x-text="section.desc"></div>
+                        <!-- Budget bar (for files with cap) -->
+                        <div x-show="section.cap && !(identityEditing && identityEditingFile === section.file)" class="mb-2">
                           <div class="flex justify-between items-center text-[10px] text-gray-500 mb-1">
                             <span x-text="fileCharCount(section.file).toLocaleString() + ' / ' + section.cap.toLocaleString() + ' chars'"></span>
                             <span x-text="Math.round(fileBudgetPct(section.file, section.cap)) + '%'"></span>
@@ -1219,19 +1151,13 @@
                               :style="'width:' + fileBudgetPct(section.file, section.cap) + '%'"></div>
                           </div>
                         </div>
-                        <!-- Char count only (files without cap; hidden for default content unless editing) -->
-                        <div x-show="!section.cap && (!isFileDefault(section.file) || (identityEditing && identityEditingFile === section.file))" class="mb-2">
+                        <!-- Char count only (files without cap) -->
+                        <div x-show="!section.cap && !(identityEditing && identityEditingFile === section.file)" class="mb-2">
                           <div class="text-[10px] text-gray-500" x-text="fileCharCount(section.file).toLocaleString() + ' chars'"></div>
                         </div>
                         <!-- Read-only view -->
                         <div x-show="!(identityEditing && identityEditingFile === section.file)">
-                          <div x-show="isFileDefault(section.file)" class="bg-gray-800/30 border border-dashed border-gray-700/50 rounded p-4 text-center">
-                            <div class="text-sm text-gray-500" x-text="section.desc"></div>
-                            <button @click="startIdentityEdit(section.file)"
-                              class="mt-2 text-xs text-indigo-400 hover:text-indigo-300 transition-colors">Click to customize &rarr;</button>
-                          </div>
-                          <pre x-show="!isFileDefault(section.file)"
-                            class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar"
+                          <pre class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar"
                             x-text="identityContent[section.file] || '(empty)'"></pre>
                         </div>
                         <!-- Edit mode -->
