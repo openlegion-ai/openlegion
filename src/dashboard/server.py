@@ -1340,7 +1340,11 @@ def create_dashboard_router(
         if not str(full).startswith(str(_STATIC_DIR)) or not full.is_file():
             raise HTTPException(status_code=404, detail="Not found")
         suffix = full.suffix.lower()
-        return FileResponse(str(full), media_type=_MEDIA_TYPES.get(suffix))
+        return FileResponse(
+            str(full),
+            media_type=_MEDIA_TYPES.get(suffix),
+            headers={"Cache-Control": "no-cache"},
+        )
 
     return api_router
 
