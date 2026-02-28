@@ -78,25 +78,26 @@ async def memory_search(
     results = []
 
     # Category-filtered search: only the structured fact DB
-    if category and memory_store is not None:
+    if category:
+        if memory_store is None:
+            return {"error": "No memory_store available for category search", "results": []}
         # Over-fetch when filtering by category since post-fetch filtering
         # may discard many results
         fetch_k = max_results * 3
         facts = await _search_with_fallback(memory_store, query, fetch_k)
-        if facts:
-            for fact in facts:
-                if fact.category.lower() != category.lower():
-                    continue
-                results.append({
-                    "key": fact.key,
-                    "value": fact.value,
-                    "category": fact.category,
-                    "confidence": fact.confidence,
-                    "access_count": fact.access_count,
-                    "source": "memory_db",
-                })
-        if not results and not facts:
+        if facts is None:
             return {"error": "Memory search failed", "results": []}
+        for fact in facts:
+            if fact.category.lower() != category.lower():
+                continue
+            results.append({
+                "key": fact.key,
+                "value": fact.value,
+                "category": fact.category,
+                "confidence": fact.confidence,
+                "access_count": fact.access_count,
+                "source": "memory_db",
+            })
         return {"results": results, "count": len(results)}
 
     # Default: search both workspace and DB

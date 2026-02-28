@@ -410,6 +410,8 @@ async def set_cron(
             )
             return {"created": True, "type": "heartbeat", **result}
         # Regular cron job
+        if not message:
+            return {"error": "message is required for non-heartbeat cron jobs"}
         result = await mesh_client.create_cron(schedule=schedule, message=message)
         return {"created": True, **result}
     except Exception as e:

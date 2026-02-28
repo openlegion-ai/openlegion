@@ -1,7 +1,7 @@
 """Credential-blind vault tools for agents.
 
-Agents can generate, capture, list, and check credentials without ever
-seeing the actual secret values. Values are stored in the mesh vault and
+Agents can generate, capture, and list credentials without ever seeing
+the actual secret values. Values are stored in the mesh vault and
 referenced via opaque ``$CRED{name}`` handles.
 """
 

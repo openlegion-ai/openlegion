@@ -309,12 +309,16 @@ async def wait_for_subagent(
     if mesh_client:
         try:
             bb = await mesh_client.read_blackboard(result_key)
-            if bb and bb.get("exists"):
-                return {"subagent_id": subagent_id, "completed": True, **bb.get("value", {})}
+            if bb is not None:
+                return {
+                    "subagent_id": subagent_id,
+                    "completed": True,
+                    **bb.get("value", {}),
+                }
         except Exception:
             pass
     return {
         "subagent_id": subagent_id,
         "completed": True,
-        "result": "Result written to blackboard but could not be read.",
+        "result": "Subagent completed but result could not be read.",
     }

@@ -217,7 +217,7 @@ class TestCloneSkillRegistry:
         SkillRegistry(skills_dir="/nonexistent")
 
     def test_clone_has_skills_minus_unsafe(self):
-        """Clone has same skills but without create_skill, reload_skills, spawn_subagent."""
+        """Clone has same skills but without unsafe skills."""
         _cleanup()
 
         clone = _clone_skill_registry()
@@ -230,6 +230,7 @@ class TestCloneSkillRegistry:
         assert "create_skill" not in clone.skills
         assert "reload_skills" not in clone.skills
         assert "spawn_subagent" not in clone.skills
+        assert "wait_for_subagent" not in clone.skills
 
     def test_clone_reload_is_noop(self):
         """reload() on clone returns skill count without re-discovering."""
@@ -357,14 +358,17 @@ class TestDepthTracking:
 class TestWaitForSubagent:
     @pytest.mark.asyncio
     async def test_wait_for_subagent_basic(self):
-        """Wait for a completed subagent and get its result."""
+        """Wait for a completed subagent and get its result from blackboard."""
         _cleanup()
 
         mock_mesh = AsyncMock()
         mock_mesh.agent_id = "wait-parent"
+        # read_blackboard returns raw BlackboardEntry dict (no "exists" field)
         mock_mesh.read_blackboard = AsyncMock(return_value={
-            "exists": True,
+            "key": "subagent_results/wait-parent/sub_1",
             "value": {"status": "complete", "result": "done"},
+            "written_by": "sub_1",
+            "version": 1,
         })
 
         # Create a task that completes immediately
@@ -378,6 +382,7 @@ class TestWaitForSubagent:
         assert result["completed"] is True
         assert result["subagent_id"] == "sub_1"
         assert result["status"] == "complete"
+        assert result["result"] == "done"
 
         _cleanup()
 
@@ -419,5 +424,65 @@ class TestWaitForSubagent:
         result = await wait_for_subagent("nonexistent", timeout=5, mesh_client=mock_mesh)
         assert "error" in result
         assert "nonexistent" in result["error"]
+
+        _cleanup()
+
+    @pytest.mark.asyncio
+    async def test_wait_for_subagent_no_mesh_client(self):
+        """Wait without mesh_client returns fallback result after task completes."""
+        _cleanup()
+
+        async def instant():
+            return {}
+
+        task = asyncio.create_task(instant())
+        # mesh_client=None → parent_id="unknown"
+        _active_subagents["unknown"] = {"sub_no_mesh": task}
+
+        result = await wait_for_subagent("sub_no_mesh", timeout=5, mesh_client=None)
+        assert result["completed"] is True
+        assert "could not be read" in result["result"]
+
+        _cleanup()
+
+    @pytest.mark.asyncio
+    async def test_wait_for_subagent_blackboard_read_fails(self):
+        """Wait succeeds with fallback when blackboard read raises."""
+        _cleanup()
+
+        mock_mesh = AsyncMock()
+        mock_mesh.agent_id = "bb-fail-parent"
+        mock_mesh.read_blackboard = AsyncMock(side_effect=Exception("connection lost"))
+
+        async def instant():
+            return {}
+
+        task = asyncio.create_task(instant())
+        _active_subagents["bb-fail-parent"] = {"sub_bbfail": task}
+
+        result = await wait_for_subagent("sub_bbfail", timeout=5, mesh_client=mock_mesh)
+        assert result["completed"] is True
+        assert "could not be read" in result["result"]
+
+        _cleanup()
+
+    @pytest.mark.asyncio
+    async def test_wait_for_subagent_blackboard_returns_none(self):
+        """Wait succeeds with fallback when blackboard key not found (404)."""
+        _cleanup()
+
+        mock_mesh = AsyncMock()
+        mock_mesh.agent_id = "bb-none-parent"
+        mock_mesh.read_blackboard = AsyncMock(return_value=None)
+
+        async def instant():
+            return {}
+
+        task = asyncio.create_task(instant())
+        _active_subagents["bb-none-parent"] = {"sub_bbnone": task}
+
+        result = await wait_for_subagent("sub_bbnone", timeout=5, mesh_client=mock_mesh)
+        assert result["completed"] is True
+        assert "could not be read" in result["result"]
 
         _cleanup()
