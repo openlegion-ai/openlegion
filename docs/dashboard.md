@@ -93,31 +93,31 @@ From the agent detail view (click an agent in Agents), budget bars show current 
 
 ## Agent Identity Panel
 
-The agent detail view features a tabbed **Agent Identity** panel for viewing and editing an agent's identity, instructions, and behavioral context. The panel appears above budget and cost sections since identity is the primary concern when drilling into an agent.
+The agent detail view features a tabbed **Agent Identity** panel for viewing and editing an agent's identity, instructions, and behavioral context. The panel appears above the spend and budget sidebar since identity is the primary concern when drilling into an agent.
 
 ### Tabs
 
-| Tab | File | Cap | Description |
-|-----|------|-----|-------------|
-| **Soul** | `SOUL.md` | 4,000 chars | Personality, tone, and behavioral guidelines |
-| **Instructions** | `INSTRUCTIONS.md` | 8,000 chars | Operating procedures, workflow rules, domain knowledge |
-| **Preferences** | `USER.md` | 4,000 chars | User preferences, background, and working style |
-| **Heartbeat** | `HEARTBEAT.md` | No cap | Autonomous monitoring and heartbeat rules |
-| **Memory** | `MEMORY.md` | 16,000 chars | Curated long-term facts and important information |
-| **Activity** | (read-only) | — | Daily session logs from the last 3 days |
-| **Learnings** | (read-only) | — | Recorded errors and user corrections |
+| Tab | Contents | Description |
+|-----|----------|-------------|
+| **Identity** | `SOUL.md` (4K cap), `INSTRUCTIONS.md` (8K cap) | Personality, tone, operating procedures, domain knowledge |
+| **Memory** | `MEMORY.md` (16K cap), `USER.md` (4K cap), `HEARTBEAT.md` (no cap) | Long-term facts, user preferences, autonomous heartbeat rules |
+| **Config** | Model, role, budget, credential access | Agent configuration (model changes trigger restart) |
+| **Logs** | Activity + Learnings (read-only) | Daily session logs and recorded errors/corrections |
+| **Tools** | Capabilities list (read-only) | Available tools and skill definitions |
+
+Files in the Identity tab (`SOUL.md`, `INSTRUCTIONS.md`) are shared — both you and the agent can edit them. Files in the Memory tab are agent-managed.
 
 ### Usage
 
 1. Click an agent card to open the detail view
-2. The **Agent Identity** panel shows 7 tabs at the top
-3. Tabs with default/scaffold content show a "default" pill — customize them to shape the agent
-4. A character budget bar shows usage against the cap (color transitions: indigo → amber at 80% → red at 95%)
-5. Click **Edit** on any file tab to open the inline editor
-6. Edit the content in the monospace textarea — the budget bar updates live
+2. The **Agent Identity** panel shows 5 tabs — Identity is selected by default
+3. File cards with default/scaffold content show a "default" pill and a "Customize" button with a friendly prompt
+4. Once customized, a character budget bar shows usage against the cap (indigo → amber at 80% → red at 95%)
+5. Click **Edit** (or **Customize** for default files) to open the inline editor
+6. Edit the content in the monospace textarea — the budget bar updates live. Save with **Ctrl+S** / **⌘S** or the Save button
 7. Click **Save** to write changes (content is sanitized for invisible Unicode)
-8. The **Activity** tab shows daily logs (read-only) with a Refresh button
-9. The **Learnings** tab shows errors (red) and corrections (amber), both read-only
+8. The **Logs** tab shows daily activity logs and learnings (errors in red, corrections in amber), both read-only
+9. The **Config** tab shows model, role, budget, and credential access — click Edit to modify
 
 The dashboard proxies workspace operations through the mesh transport layer to the agent's container — files are read from and written to the agent's `/data/workspace` volume.
 

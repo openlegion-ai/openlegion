@@ -1217,8 +1217,8 @@
                             class="text-xs px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
                             x-text="isFileDefault(section.file) ? 'Customize' : 'Edit'"></button>
                         </div>
-                        <!-- Budget bar (for files with cap) -->
-                        <div x-show="section.cap" class="mb-2">
+                        <!-- Budget bar (for files with cap; hidden for default content unless editing) -->
+                        <div x-show="section.cap && (!isFileDefault(section.file) || (identityEditing && identityEditingFile === section.file))" class="mb-2">
                           <div class="flex justify-between items-center text-[10px] text-gray-500 mb-1">
                             <span x-text="fileCharCount(section.file).toLocaleString() + ' / ' + section.cap.toLocaleString() + ' chars'"></span>
                             <span x-text="Math.round(fileBudgetPct(section.file, section.cap)) + '%'"></span>
@@ -1229,8 +1229,8 @@
                               :style="'width:' + fileBudgetPct(section.file, section.cap) + '%'"></div>
                           </div>
                         </div>
-                        <!-- Char count only (files without cap, e.g. HEARTBEAT.md) -->
-                        <div x-show="!section.cap" class="mb-2">
+                        <!-- Char count only (files without cap; hidden for default content unless editing) -->
+                        <div x-show="!section.cap && (!isFileDefault(section.file) || (identityEditing && identityEditingFile === section.file))" class="mb-2">
                           <div class="text-[10px] text-gray-500" x-text="fileCharCount(section.file).toLocaleString() + ' chars'"></div>
                         </div>
                         <!-- Read-only view -->
@@ -1252,7 +1252,7 @@
                             class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
                             rows="12" spellcheck="false"></textarea>
                           <div class="flex items-center gap-2 mt-2 justify-end">
-                            <span class="text-[10px] text-gray-600 mr-1" x-text="navigator.platform.includes('Mac') ? '⌘S' : 'Ctrl+S'"></span>
+                            <span class="text-[10px] text-gray-600 mr-1" x-text="isMac ? '⌘S' : 'Ctrl+S'"></span>
                             <button @click="saveIdentityFile(selectedAgent, section.file)"
                               :disabled="identitySaving"
                               class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-50 transition-colors">

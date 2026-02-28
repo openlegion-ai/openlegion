@@ -473,6 +473,10 @@ function dashboard() {
       return _IDENTITY_TABS.find(t => t.id === this.identityTab) || _IDENTITY_TABS[0];
     },
 
+    get isMac() {
+      return /mac/i.test(navigator.userAgentData?.platform || navigator.platform || '');
+    },
+
     isFileDefault(file) {
       const info = this.identityFiles.find(f => f.name === file);
       return info ? info.is_default : true;
