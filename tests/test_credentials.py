@@ -1160,7 +1160,10 @@ class TestOAuth:
         assert "openai" in providers
         assert "gemini" not in providers
 
-    def test_providers_with_credentials_empty(self):
+    def test_providers_with_credentials_empty(self, monkeypatch):
+        for provider in ("anthropic", "openai", "gemini", "deepseek",
+                         "moonshot", "minimax", "xai", "groq", "zai"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider.upper()}_API_KEY", raising=False)
         v = CredentialVault()
         providers = v.get_providers_with_credentials()
         assert providers == set()

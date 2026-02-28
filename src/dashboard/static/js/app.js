@@ -1674,7 +1674,8 @@ function dashboard() {
         if (resp.ok) {
           this.settingsData = await resp.json();
           // Extract models for agent edit forms
-          const pm = this.settingsData.available_provider_models || this.settingsData.provider_models;
+          const apm = this.settingsData.available_provider_models;
+          const pm = (apm && Object.keys(apm).length > 0) ? apm : this.settingsData.provider_models;
           if (pm) {
             this.availableModels = Object.values(pm).flat();
           }

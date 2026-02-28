@@ -965,8 +965,11 @@ class REPLSession:
         if not key_value:
             click.echo("No key provided.")
             return
-        # Detect OAuth setup-token
-        is_oauth = key_value.startswith(_ANTHROPIC_OAUTH_PREFIX)
+        # Detect OAuth setup-token (only for Anthropic credentials)
+        is_oauth = (
+            service.lower() in ("anthropic_api_key", "anthropic")
+            and key_value.startswith(_ANTHROPIC_OAUTH_PREFIX)
+        )
         # Detect known LLM providers → store as system tier
         is_llm_provider = is_system_credential(service)
         if is_llm_provider or is_oauth:

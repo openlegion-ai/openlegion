@@ -412,25 +412,28 @@ class SetupWizard:
         try:
             import litellm
 
-            asyncio.run(
-                litellm.acompletion(
-                    model=validation_model,
-                    messages=[{"role": "user", "content": "hi"}],
-                    max_tokens=1,
-                    api_key=token,
-                    extra_headers={
-                        "Authorization": f"Bearer {token}",
-                        "anthropic-beta": _ANTHROPIC_OAUTH_BETAS,
-                    },
+            try:
+                asyncio.run(
+                    litellm.acompletion(
+                        model=validation_model,
+                        messages=[{"role": "user", "content": "hi"}],
+                        max_tokens=1,
+                        api_key=token,
+                        extra_headers={
+                            "Authorization": f"Bearer {token}",
+                            "anthropic-beta": _ANTHROPIC_OAUTH_BETAS,
+                        },
+                    )
                 )
-            )
-            return True
-        except Exception as e:
-            err_name = type(e).__name__
-            if "AuthenticationError" in err_name:
+                return True
+            except litellm.AuthenticationError:
                 return False
-            # Network errors, rate limits — don't block setup
-            logger.debug("OAuth token validation skipped due to error: %s", e)
+            except Exception as e:
+                # Network errors, rate limits — don't block setup
+                logger.debug("OAuth token validation skipped due to error: %s", e)
+                return True
+        except ImportError:
+            # litellm not installed — skip validation
             return True
 
     def _validate_api_key(self, provider: str, api_key: str) -> bool:
@@ -567,6 +570,27 @@ class InlineSetup:
             return True
         return not bool(credential_vault.credentials or credential_vault.system_credentials)
 
+    @staticmethod
+    def _prompt_and_validate_inline(
+        wizard: SetupWizard, provider: str, label: str,
+    ) -> str:
+        """Prompt for API key, validate, and return stripped key or empty string."""
+        try:
+            api_key = click.prompt(f"  {label} API key", hide_input=True)
+        except (EOFError, KeyboardInterrupt):
+            return ""
+        if not api_key.strip():
+            click.echo("  No key provided.")
+            return ""
+        api_key = api_key.strip()
+        click.echo("  Validating API key...", nl=False)
+        valid = wizard._validate_api_key(provider, api_key)
+        if valid:
+            click.echo(" valid.\n")
+        else:
+            click.echo(" could not validate (saved anyway).\n")
+        return api_key
+
     def run(self) -> None:
         """Run the streamlined inline setup flow.
 
@@ -605,41 +629,19 @@ class InlineSetup:
                 if not api_key:
                     return
             else:
-                try:
-                    api_key = click.prompt(f"  {label} API key", hide_input=True)
-                except (EOFError, KeyboardInterrupt):
+                api_key = self._prompt_and_validate_inline(wizard, provider, label)
+                if not api_key:
                     return
-                if not api_key.strip():
-                    click.echo("  No key provided.")
-                    return
-                api_key = api_key.strip()
-                click.echo("  Validating API key...", nl=False)
-                valid = wizard._validate_api_key(provider, api_key)
-                if valid:
-                    click.echo(" valid.\n")
-                else:
-                    click.echo(" could not validate (saved anyway).\n")
         else:
-            try:
-                api_key = click.prompt(f"  {label} API key", hide_input=True)
-            except (EOFError, KeyboardInterrupt):
+            api_key = self._prompt_and_validate_inline(wizard, provider, label)
+            if not api_key:
                 return
-            if not api_key.strip():
-                click.echo("  No key provided.")
-                return
-            api_key = api_key.strip()
-            click.echo("  Validating API key...", nl=False)
-            valid = wizard._validate_api_key(provider, api_key)
-            if valid:
-                click.echo(" valid.\n")
-            else:
-                click.echo(" could not validate (saved anyway).\n")
 
         # Store the credential (system tier — LLM provider key)
         service = f"{provider}_api_key"
         if self.credential_vault:
-            self.credential_vault.add_credential(service, api_key.strip(), system=True)
-        _set_env_key(service, api_key.strip(), system=True)
+            self.credential_vault.add_credential(service, api_key, system=True)
+        _set_env_key(service, api_key, system=True)
         click.echo(f"  Credential '{service}' stored (system tier).")
 
         # Model selection
