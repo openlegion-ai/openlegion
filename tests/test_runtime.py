@@ -365,8 +365,8 @@ class TestDockerBackendVNCPort:
         # Memory should be 1g for all agents (Chrome + VNC)
         assert run_call.kwargs.get("mem_limit") == "1g"
 
-        # CPU quota should be 100000 for all agents (1 core)
-        assert run_call.kwargs.get("cpu_quota") == 100000
+        # CPU quota should be 50000 for all agents (0.5 core)
+        assert run_call.kwargs.get("cpu_quota") == 50000
 
         # shm_size should be 256m for all agents
         assert run_call.kwargs.get("shm_size") == "256m"
