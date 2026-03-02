@@ -8,6 +8,7 @@ objects — no HTTP round-trips through mesh endpoints.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -72,6 +73,12 @@ def create_dashboard_router(
     channel_manager: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
+    # Plan limits — read once at startup; provisioner restarts engine after updating .env
+    # 0 = unlimited (self-hosted / open-source) unless env var is explicitly set to 0
+    _max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
+    _max_projects = int(os.environ.get("OPENLEGION_MAX_PROJECTS", "0"))
+    _projects_disabled = _max_projects == 0 and "OPENLEGION_MAX_PROJECTS" in os.environ
+
     api_router = APIRouter(prefix="/dashboard")
 
     jinja_env = Environment(
@@ -175,6 +182,13 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="name must match ^[a-z][a-z0-9_]{0,29}$")
         if name in agent_registry:
             raise HTTPException(status_code=409, detail=f"Agent '{name}' already exists")
+        # Limit based on running agents (resource usage), not config definitions.
+        # A stopped agent frees a slot.
+        if _max_agents > 0 and len(agent_registry) >= _max_agents:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Agent limit reached ({_max_agents}). Upgrade your plan for more agents.",
+            )
 
         if model and not _is_valid_model(model):
             raise HTTPException(status_code=400, detail=f"Invalid model: {model}")
@@ -916,6 +930,19 @@ def create_dashboard_router(
     @api_router.post("/api/projects")
     async def api_projects_create(request: Request) -> dict:
         """Create a new project."""
+        if _projects_disabled:
+            raise HTTPException(
+                status_code=403,
+                detail="Projects are not available on your current plan. Upgrade to enable projects.",
+            )
+        if _max_projects > 0:
+            from src.cli.config import _load_projects
+            current_count = len(_load_projects())
+            if current_count >= _max_projects:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Project limit reached ({_max_projects}). Upgrade your plan for more projects.",
+                )
         from src.cli.config import _create_project, _load_config
         body = await request.json()
         name = body.get("name", "").strip()
@@ -1248,6 +1275,11 @@ def create_dashboard_router(
             "model_costs": {k: {"input_per_1k": v[0], "output_per_1k": v[1]} for k, v in all_costs.items()},
             "provider_models": dict(_PROVIDER_MODELS.items()),
             "available_provider_models": available_provider_models,
+            "plan_limits": {
+                "max_agents": _max_agents,
+                "max_projects": _max_projects,
+                "projects_enabled": not _projects_disabled,
+            },
         }
 
     # ── Messages log ─────────────────────────────────────────

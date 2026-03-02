@@ -406,6 +406,28 @@ function dashboard() {
       return /^[a-z][a-z0-9_]{0,29}$/.test(name);
     },
 
+    get maxAgents() {
+      return this.settingsData?.plan_limits?.max_agents ?? 0;
+    },
+    get maxProjects() {
+      return this.settingsData?.plan_limits?.max_projects ?? 0;
+    },
+    get atAgentLimit() {
+      if (this.maxAgents === 0) return false;
+      return this.agents.length >= this.maxAgents;
+    },
+    get projectsEnabled() {
+      const limits = this.settingsData?.plan_limits;
+      if (!limits) return true; // no limits loaded yet, allow everything
+      return limits.projects_enabled !== false;
+    },
+    get atProjectLimit() {
+      if (!this.projectsEnabled) return true;
+      if (this.maxProjects === 0) return false; // unlimited
+      const projectCount = this.projects?.length ?? 0;
+      return projectCount >= this.maxProjects;
+    },
+
     get filteredEvents() {
       if (this.eventFilters.length === 0) {
         return this.events.filter(e =>
@@ -1227,6 +1249,14 @@ function dashboard() {
     },
 
     async createProject() {
+      if (!this.projectsEnabled) {
+        this.showToast('Projects are not available on your current plan.');
+        return;
+      }
+      if (this.atProjectLimit) {
+        this.showToast('Project limit reached. Upgrade your plan for more projects.');
+        return;
+      }
       const name = this.newProjectName.trim();
       if (!name) return;
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) {
@@ -1248,7 +1278,12 @@ function dashboard() {
           this.showToast(`Project "${name}" created`);
         } else {
           const err = await resp.json().catch(() => ({}));
-          this.showToast(`Create failed: ${err.detail || 'Unknown error'}`);
+          if (resp.status === 403) {
+            this.showToast(err.detail || 'Upgrade your plan.');
+            this.fetchSettings(); // refresh limits so UI updates
+          } else {
+            this.showToast(`Create failed: ${err.detail || 'Unknown error'}`);
+          }
         }
       } catch (e) { this.showToast(`Create failed: ${e.message}`); }
       this.projectFormLoading = false;
@@ -1513,6 +1548,10 @@ function dashboard() {
     // ── Add / Remove agents ──────────────────────────────
 
     async addAgent() {
+      if (this.atAgentLimit) {
+        this.showToast('Agent limit reached. Upgrade your plan for more agents.');
+        return;
+      }
       const f = this.addAgentForm;
       if (!f.name.trim()) { this.showToast('Name is required'); return; }
       if (!this.addAgentNameValid) { this.showToast('Invalid name: lowercase letters, numbers, underscores only. Max 30 chars.'); return; }
@@ -1535,7 +1574,12 @@ function dashboard() {
           this.fetchAgents();
         } else {
           const err = await resp.json();
-          this.showToast(`Error: ${err.detail || 'Failed to add agent'}`);
+          if (resp.status === 403) {
+            this.showToast(err.detail || 'Upgrade your plan.');
+            this.fetchSettings(); // refresh limits so UI updates
+          } else {
+            this.showToast(`Error: ${err.detail || 'Failed to add agent'}`);
+          }
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
       this.addAgentLoading = false;
