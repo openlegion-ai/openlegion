@@ -1234,6 +1234,7 @@ function dashboard() {
     },
 
     openProjectModal() {
+      if (this.atProjectLimit) return;
       this.showProjectForm = true;
       this.$nextTick(() => {
         const el = document.getElementById('project-name-input');
@@ -1586,6 +1587,7 @@ function dashboard() {
     },
 
     openAddAgentModal(defaultName = '') {
+      if (this.atAgentLimit) return;
       this.addAgentMode = true;
       if (defaultName) this.addAgentForm.name = defaultName;
       this.fetchSettings();
