@@ -286,10 +286,10 @@
                 New Project
               </button>
               <div x-show="atProjectLimit" x-cloak
-                class="hidden group-hover/proj:block absolute top-full mt-1.5 left-1/2 -translate-x-1/2 z-50 w-52 px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 shadow-xl text-xs text-gray-300 whitespace-normal pointer-events-none">
+                class="hidden group-hover/proj:block absolute top-full mt-1.5 left-0 z-50 w-52 px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 shadow-xl text-xs text-gray-300 whitespace-normal pointer-events-none">
                 <span x-text="!projectsEnabled ? 'Projects aren\'t available on your current plan.' : 'Project limit reached.'"></span>
                 <span class="text-indigo-400 ml-0.5">Upgrade to add more.</span>
-                <div class="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-gray-900 border-l border-t border-gray-700 rotate-45"></div>
+                <div class="absolute -top-1 left-4 w-2 h-2 bg-gray-900 border-l border-t border-gray-700 rotate-45"></div>
               </div>
             </div>
           </div>
@@ -306,10 +306,10 @@
               Add Agent
             </button>
             <div x-show="atAgentLimit" x-cloak
-              class="hidden group-hover/agent:block absolute top-full mt-1.5 left-1/2 -translate-x-1/2 z-50 w-56 px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 shadow-xl text-xs text-gray-300 whitespace-normal pointer-events-none">
+              class="hidden group-hover/agent:block absolute top-full mt-1.5 right-0 z-50 w-56 px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 shadow-xl text-xs text-gray-300 whitespace-normal pointer-events-none">
               Agent limit reached.
               <span class="text-indigo-400 ml-0.5">Upgrade your plan to add more.</span>
-              <div class="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-gray-900 border-l border-t border-gray-700 rotate-45"></div>
+              <div class="absolute -top-1 right-4 w-2 h-2 bg-gray-900 border-l border-t border-gray-700 rotate-45"></div>
             </div>
           </div>
         </div>
