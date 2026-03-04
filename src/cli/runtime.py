@@ -74,6 +74,8 @@ class RuntimeContext:
         self._server = None
         self._active_channels: list = []
         self._start_time: float | None = None
+        self._agent_results: list = []
+        self._cron_job_count: int = 0
 
     def start(self) -> None:
         """Initialize and start all components. Called once."""
@@ -286,7 +288,6 @@ class RuntimeContext:
         if isinstance(self.runtime, DockerBackend):
             try:
                 self.runtime.start_browser_service()
-                echo_ok("Browser service started")
             except Exception as e:
                 logger.warning("Failed to start browser service: %s", e)
 
@@ -301,6 +302,16 @@ class RuntimeContext:
         )
         mesh_port = self.cfg["mesh"]["port"]
         agent_projects = self.cfg.get("_agent_projects", {})
+
+        # Respect plan limits on startup — only start up to max_agents.
+        # Prevents OOM on downsized servers after a plan downgrade.
+        max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
+        if max_agents > 0 and len(agents_cfg) > max_agents:
+            logger.warning(
+                "Agent limit is %d but %d agents configured — only starting first %d",
+                max_agents, len(agents_cfg), max_agents,
+            )
+            agents_cfg = dict(list(agents_cfg.items())[:max_agents])
 
         self.runtime.extra_env["EMBEDDING_MODEL"] = embedding_model
 
@@ -525,7 +536,6 @@ class RuntimeContext:
         import httpx
 
         mesh_port = self.cfg["mesh"]["port"]
-        agents_cfg = self.cfg.get("agents", {})
 
         # Wait for mesh
         mesh_ready = False
@@ -546,39 +556,16 @@ class RuntimeContext:
             self.runtime.stop_all()
             sys.exit(1)
 
-        echo_header("OpenLegion")
-        click.echo()
-        echo_ok(f"Mesh host on port {mesh_port}")
-        echo_ok(f"Isolation: {self._backend_label}")
-        echo_ok(f"Dashboard: http://localhost:{mesh_port}/dashboard")
-        if hasattr(self.runtime, 'browser_vnc_url') and self.runtime.browser_vnc_url:
-            echo_ok(f"Browser VNC: {self.runtime.browser_vnc_url}")
-
+        # Wait for agents (results displayed later in _print_ready)
+        agents_cfg = self.cfg.get("agents", {})
         if agents_cfg:
-            click.echo(f"  Starting {len(agents_cfg)} agent(s)...", nl=False)
-
-            # Wait for agents
             async def _wait_all_agents():
                 async def _wait_one(aid):
                     ready = await self.runtime.wait_for_agent(aid, timeout=60)
                     return aid, ready
                 return await asyncio.gather(*[_wait_one(aid) for aid in agents_cfg])
 
-            agent_results = asyncio.run(_wait_all_agents())
-            click.echo(" ready.")
-
-            echo_header("Agents")
-            default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-            for agent_id, ready in agent_results:
-                agent_cfg = agents_cfg.get(agent_id, {})
-                model = agent_cfg.get("model", default_model)
-                if ready:
-                    echo_ok(f"{agent_id:<20} ready     model: {model}")
-                else:
-                    logs = self.runtime.get_logs(agent_id, tail=15)
-                    echo_fail(f"{agent_id:<20} failed to start")
-                    if logs:
-                        click.echo(logs, err=True)
+            self._agent_results = asyncio.run(_wait_all_agents())
 
     def _create_cron_scheduler(self) -> None:
         from src.host.cron import CronScheduler
@@ -608,8 +595,7 @@ class RuntimeContext:
             trace_store=self.trace_store,
             context_fn=fetch_heartbeat_context,
         )
-        if self.cron_scheduler.jobs:
-            echo_ok(f"Cron scheduler: {len(self.cron_scheduler.jobs)} jobs loaded")
+        self._cron_job_count = len(self.cron_scheduler.jobs)
 
     def _reconcile_heartbeats(self) -> None:
         """Ensure every agent in config has a heartbeat cron job."""
@@ -734,17 +720,38 @@ class RuntimeContext:
         active_agents = list(agents_cfg.keys())
         agent_projects = self.cfg.get("_agent_projects", {})
         projects = self.cfg.get("projects", {})
+        mesh_port = self.cfg["mesh"]["port"]
 
-        # Show channel status
+        # ── Services ──
+        echo_header("OpenLegion")
+        echo_ok(f"Dashboard: http://localhost:{mesh_port}")
+        if hasattr(self.runtime, 'browser_vnc_url') and self.runtime.browser_vnc_url:
+            echo_ok(f"Browser VNC: {self.runtime.browser_vnc_url}")
+        if self._cron_job_count:
+            echo_ok(f"Cron: {self._cron_job_count} job{'s' if self._cron_job_count != 1 else ''}")
         if self.channel_manager and self.channel_manager.active:
-            echo_header("Channels")
             for label, paired in self.channel_manager.channel_status:
                 if paired:
                     echo_ok(f"{label} (paired)")
             for instruction in self.channel_manager.pairing_instructions:
                 click.echo(click.style("  \u26a0 ", fg="yellow") + instruction.strip())
 
-        # Show project groupings if projects exist
+        # ── Agents ──
+        if self._agent_results:
+            echo_header("Agents")
+            default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+            for agent_id, ready in self._agent_results:
+                agent_cfg = agents_cfg.get(agent_id, {})
+                model = agent_cfg.get("model", default_model)
+                if ready:
+                    echo_ok(f"{agent_id:<20} {model}")
+                else:
+                    logs = self.runtime.get_logs(agent_id, tail=15)
+                    echo_fail(f"{agent_id:<20} failed to start")
+                    if logs:
+                        click.echo(logs, err=True)
+
+        # ── Projects ──
         if projects:
             assigned = set(agent_projects.keys())
             standalone = [a for a in active_agents if a not in assigned]
@@ -757,6 +764,7 @@ class RuntimeContext:
             if standalone:
                 click.echo(f"\n  Standalone: {', '.join(standalone)}")
 
+        # ── Footer ──
         if active_agents:
             active_agent = active_agents[0]
             click.echo(f"\nChatting with '{active_agent}'.", nl=False)
@@ -765,12 +773,11 @@ class RuntimeContext:
             else:
                 click.echo(" /help for commands.")
         else:
-            mesh_port = self.cfg["mesh"]["port"]
             click.echo("\nNo agents running. Add one with /add or via the dashboard:")
-            click.echo(f"  http://localhost:{mesh_port}/dashboard")
+            click.echo(f"  http://localhost:{mesh_port}")
 
         if self._start_time:
             elapsed = time.time() - self._start_time
             click.echo(f"  Started in {elapsed:.1f}s\n")
         else:
-            click.echo("")
+            click.echo()

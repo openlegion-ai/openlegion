@@ -162,6 +162,8 @@ def create_dashboard_router(
             entry = {
                 "id": agent_id,
                 "url": url,
+                "running": True,
+                "over_limit": False,
                 "health_status": h.get("status", "unknown"),
                 "failures": h.get("failures", 0),
                 "restarts": h.get("restarts", 0),
@@ -178,6 +180,29 @@ def create_dashboard_router(
             if vnc_url:
                 entry["vnc_url"] = vnc_url
             agents.append(entry)
+
+        # Append over-limit agents from config that are not running
+        for agent_id, acfg in agents_cfg.items():
+            if agent_id not in agent_registry:
+                entry = {
+                    "id": agent_id,
+                    "url": None,
+                    "running": False,
+                    "over_limit": True,
+                    "health_status": "stopped",
+                    "failures": 0,
+                    "restarts": 0,
+                    "last_check": 0,
+                    "last_healthy": 0,
+                    "daily_cost": 0,
+                    "daily_tokens": 0,
+                    "role": acfg.get("role", ""),
+                    "model": acfg.get("model", default_model),
+                    "avatar": acfg.get("avatar", 1),
+                    "project": agent_projects.get(agent_id),
+                }
+                agents.append(entry)
+
         return {"agents": agents}
 
     import httpx as _httpx
@@ -951,12 +976,15 @@ def create_dashboard_router(
         from src.cli.config import _load_projects
         projects = _load_projects()
         result = []
-        for pname, pdata in projects.items():
+        sorted_projects = sorted(projects.items(), key=lambda x: x[1].get("created_at") or "")
+        for i, (pname, pdata) in enumerate(sorted_projects):
+            is_over = _projects_disabled or (_max_projects > 0 and i >= _max_projects)
             result.append({
                 "name": pname,
                 "description": pdata.get("description", ""),
                 "members": pdata.get("members", []),
                 "created_at": pdata.get("created_at", ""),
+                "over_limit": is_over,
             })
         return {"projects": result}
 

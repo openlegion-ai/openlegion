@@ -188,7 +188,7 @@
               <template x-if="tab.id === 'system'">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
               </template>
-              <span x-text="tab.id === 'fleet' && agents.length ? 'Agents (' + agents.length + ')' : tab.label"></span>
+              <span x-text="tab.id === 'fleet' && agents.length ? 'Agents (' + runningAgents.length + ')' : tab.label"></span>
               <!-- Unread event count badge -->
               <span
                 x-show="tab.id === 'activity' && unreadEvents > 0 && activeTab !== 'activity'"
@@ -267,12 +267,16 @@
               </button>
               <template x-for="proj in projects" :key="proj.name">
                 <button @click="switchProject(proj.name)"
-                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                  :class="activeProject === proj.name
-                    ? 'bg-gray-700 text-white shadow-sm'
-                    : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-                  :title="(proj.members || []).length + ' member' + ((proj.members || []).length !== 1 ? 's' : '')">
+                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all inline-flex items-center gap-1"
+                  :class="[
+                    activeProject === proj.name
+                      ? 'bg-gray-700 text-white shadow-sm'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70',
+                    proj.over_limit ? 'opacity-50' : ''
+                  ].join(' ')"
+                  :title="proj.over_limit ? 'Project over plan limit' : (proj.members || []).length + ' member' + ((proj.members || []).length !== 1 ? 's' : '')">
                   <span x-text="proj.name"></span>
+                  <svg x-show="proj.over_limit" x-cloak class="w-3 h-3 text-gray-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                   <span class="opacity-60 ml-0.5" x-text="'(' + agents.filter(a => a.project === proj.name).length + ')'"></span>
                 </button>
               </template>
@@ -340,6 +344,12 @@
           <template x-if="fleetHealthCounts.unknown > 0">
             <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-gray-600 inline-block"></span><span x-text="fleetHealthCounts.unknown + ' unknown'"></span></span>
           </template>
+          <template x-if="fleetHealthCounts.stopped > 0">
+            <span class="flex items-center gap-1">
+              <svg class="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              <span x-text="fleetHealthCounts.stopped + ' locked'"></span>
+            </span>
+          </template>
         </div>
         <!-- Project management row (when a project is selected) -->
         <div x-show="activeProject && activeProjectData" x-cloak class="flex items-center gap-3 mb-3 text-xs">
@@ -348,7 +358,9 @@
           <span class="text-gray-500" x-text="(activeProjectData?.members || []).length + ' member' + ((activeProjectData?.members || []).length !== 1 ? 's' : '')"></span>
           <!-- Add member dropdown -->
           <div class="relative" x-data="{ open: false }">
-            <button @click="open = !open" class="text-gray-400 hover:text-white transition-colors">+ Add member</button>
+            <button @click="open = !open" class="text-gray-400 hover:text-white transition-colors"
+              :disabled="activeProjectData?.over_limit"
+              :class="activeProjectData?.over_limit ? 'opacity-50 cursor-not-allowed' : ''">+ Add member</button>
             <div x-show="open" @click.outside="open = false" x-cloak
               class="absolute left-0 top-6 z-20 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[160px]">
               <template x-for="a in unassignedAgents" :key="a.id">
@@ -450,7 +462,10 @@
               role="article"
               :aria-label="'Agent ' + agent.id"
               class="agent-card p-4 group relative"
-              :class="['thinking', 'tool', 'streaming'].includes(agentStates[agent.id]) ? 'pulse-border' : ''"
+              :class="[
+                agent.over_limit ? 'opacity-40 pointer-events-none' : '',
+                ['thinking', 'tool', 'streaming'].includes(agentStates[agent.id]) ? 'pulse-border' : ''
+              ].filter(Boolean).join(' ')"
             >
               <!-- Top accent stripe -->
               <div class="agent-card-accent" :class="'agent-color-' + agentColorIndex(agent.id)"></div>
@@ -489,15 +504,23 @@
                     x-text="queueStatus[agent.id]?.queued + ' queued'"
                   ></span>
                   <!-- Health badge -->
-                  <span class="health-badge"
-                    :class="{
-                      'health-healthy': agent.health_status === 'healthy',
-                      'health-unhealthy': agent.health_status === 'unhealthy' || agent.health_status === 'restarting',
-                      'health-failed': agent.health_status === 'failed',
-                      'health-unknown': agent.health_status === 'unknown' || !agent.health_status,
-                    }"
-                    x-text="agent.health_status || 'unknown'"
-                  ></span>
+                  <template x-if="agent.over_limit">
+                    <span class="health-badge health-unknown flex items-center gap-1">
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                      Locked
+                    </span>
+                  </template>
+                  <template x-if="!agent.over_limit">
+                    <span class="health-badge"
+                      :class="{
+                        'health-healthy': agent.health_status === 'healthy',
+                        'health-unhealthy': agent.health_status === 'unhealthy' || agent.health_status === 'restarting',
+                        'health-failed': agent.health_status === 'failed',
+                        'health-unknown': agent.health_status === 'unknown' || !agent.health_status,
+                      }"
+                      x-text="agent.health_status || 'unknown'"
+                    ></span>
+                  </template>
                 </div>
               </div>
 
@@ -534,21 +557,29 @@
                 </div>
               </div>
 
-              <!-- Agent actions: Chat, Restart -->
-              <div class="mt-3 pt-3 border-t border-gray-800/30 flex flex-nowrap gap-1.5">
-                <button @click="openChat(agent.id)" class="action-btn action-btn-primary flex-1 justify-center"
-                  :class="openChats.includes(agent.id) && 'ring-1 ring-indigo-500 bg-indigo-600/20'">
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                  <span x-text="openChats.includes(agent.id) ? 'Chatting' : 'Chat'"></span>
-                </button>
-                <button @click="restartAgent(agent.id)" class="action-btn action-btn-warn"
-                  :disabled="_restartingAgents[agent.id]"
-                  :class="_restartingAgents[agent.id] && 'opacity-50 cursor-not-allowed'">
-                  <svg x-show="!_restartingAgents[agent.id]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-                  <svg x-show="_restartingAgents[agent.id]" x-cloak class="animate-spin" fill="none" viewBox="0 0 24 24" stroke-width="2"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                  <span x-text="_restartingAgents[agent.id] ? 'Restarting...' : 'Restart'"></span>
-                </button>
-              </div>
+              <!-- Agent actions: Chat, Restart (hidden when locked) -->
+              <template x-if="!agent.over_limit">
+                <div class="mt-3 pt-3 border-t border-gray-800/30 flex flex-nowrap gap-1.5">
+                  <button @click="openChat(agent.id)" class="action-btn action-btn-primary flex-1 justify-center"
+                    :class="openChats.includes(agent.id) && 'ring-1 ring-indigo-500 bg-indigo-600/20'">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    <span x-text="openChats.includes(agent.id) ? 'Chatting' : 'Chat'"></span>
+                  </button>
+                  <button @click="restartAgent(agent.id)" class="action-btn action-btn-warn"
+                    :disabled="_restartingAgents[agent.id]"
+                    :class="_restartingAgents[agent.id] && 'opacity-50 cursor-not-allowed'">
+                    <svg x-show="!_restartingAgents[agent.id]" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                    <svg x-show="_restartingAgents[agent.id]" x-cloak class="animate-spin" fill="none" viewBox="0 0 24 24" stroke-width="2"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                    <span x-text="_restartingAgents[agent.id] ? 'Restarting...' : 'Restart'"></span>
+                  </button>
+                </div>
+              </template>
+              <template x-if="agent.over_limit">
+                <div class="mt-3 pt-3 border-t border-gray-800/30 flex items-center justify-center gap-1.5 text-xs text-gray-500">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                  Upgrade to unlock
+                </div>
+              </template>
             </div>
           </template>
         </div>

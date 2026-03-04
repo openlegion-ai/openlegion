@@ -434,9 +434,12 @@ function dashboard() {
     get maxProjects() {
       return this.settingsData?.plan_limits?.max_projects ?? 0;
     },
+    get runningAgents() {
+      return this.agents.filter(a => a.running !== false);
+    },
     get atAgentLimit() {
       if (this.maxAgents === 0) return false;
-      return this.agents.length >= this.maxAgents;
+      return this.runningAgents.length >= this.maxAgents;
     },
     get projectsEnabled() {
       const limits = this.settingsData?.plan_limits;
@@ -483,10 +486,11 @@ function dashboard() {
     },
 
     get fleetHealthCounts() {
-      const counts = { healthy: 0, unhealthy: 0, failed: 0, unknown: 0 };
+      const counts = { healthy: 0, unhealthy: 0, failed: 0, unknown: 0, stopped: 0 };
       for (const a of this.filteredAgents) {
         const s = a.health_status || 'unknown';
-        if (s === 'healthy') counts.healthy++;
+        if (s === 'stopped') counts.stopped++;
+        else if (s === 'healthy') counts.healthy++;
         else if (s === 'unhealthy' || s === 'restarting') counts.unhealthy++;
         else if (s === 'failed') counts.failed++;
         else counts.unknown++;
@@ -2389,7 +2393,9 @@ function dashboard() {
 
     get broadcastTargets() {
       // Project selected → project members; no project → all agents
-      return this.activeProject ? this.filteredAgents : this.agents;
+      // Exclude over-limit (locked) agents — they aren't running
+      const base = this.activeProject ? this.filteredAgents : this.agents;
+      return base.filter(a => !a.over_limit);
     },
 
     sendBroadcast() {
