@@ -897,11 +897,12 @@ function dashboard() {
         if (this.activeTab === 'system') this.fetchBlackboard();
       }
 
-      // Re-fetch identity/memory content when workspace files change
+      // Re-fetch identity/memory content when workspace files change (debounced, skip if editing)
       if (evt.type === 'workspace_updated' && evt.agent) {
         const viewing = this.selectedAgent || this.detailAgent;
-        if (viewing === evt.agent) {
-          this.loadIdentityTabContent(viewing);
+        if (viewing === evt.agent && !this.identityEditing) {
+          if (this._wsUpdateDebounce) clearTimeout(this._wsUpdateDebounce);
+          this._wsUpdateDebounce = setTimeout(() => this.loadIdentityTabContent(viewing), 1000);
         }
       }
 

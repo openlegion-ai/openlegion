@@ -651,6 +651,7 @@ def create_mesh_app(
     # === Agent Notifications ===
 
     _NOTIFY_MAX_LEN = 2000
+    _WS_FILE_NAMES = ("SOUL.md", "INSTRUCTIONS.md", "USER.md", "HEARTBEAT.md", "MEMORY.md")
 
     @app.post("/mesh/notify")
     async def notify_user(body: NotifyRequest, request: Request) -> dict:
@@ -669,8 +670,7 @@ def create_mesh_app(
             event_bus.emit("notification", agent=body.agent_id,
                            data={"message": message})
             # Emit workspace_updated when the notification is about identity file changes
-            _ws_files = (".md", "SOUL", "INSTRUCTIONS", "USER", "HEARTBEAT", "MEMORY")
-            if any(f in message for f in _ws_files):
+            if any(f in message for f in _WS_FILE_NAMES):
                 event_bus.emit("workspace_updated", agent=body.agent_id,
                                data={"message": message})
         return {"sent": True}
