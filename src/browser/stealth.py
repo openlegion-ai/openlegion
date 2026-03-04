@@ -46,7 +46,15 @@ def build_launch_options(
         "headless": False,
         "humanize": True,
         "os": "linux",
+        # Pin window to match Xvnc display so the browser fills the viewport
+        "window": (1920, 1080),
     }
+    # Constrain BrowserForge fingerprint screen size to match Xvnc display
+    try:
+        from browserforge.fingerprints import Screen
+        options["screen"] = Screen(max_width=1920, max_height=1080)
+    except ImportError:
+        pass  # browserforge only available in browser container
     if proxy:
         options["proxy"] = proxy
         options["geoip"] = True
