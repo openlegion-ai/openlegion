@@ -1076,7 +1076,7 @@
               <div class="flex items-center justify-between px-4 py-2 border-b border-gray-800">
                 <span class="text-xs text-gray-400 uppercase tracking-wider">Live Browser</span>
                 <div class="flex items-center gap-2">
-                  <a :href="agentDetail?.vnc_url + '&password=' + (agentDetail?.vnc_password || '')"
+                  <a :href="agentDetail?.vnc_url"
                     target="_blank" rel="noopener"
                     @click="focusBrowser(selectedAgent)"
                     class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
@@ -1087,7 +1087,7 @@
                 </div>
               </div>
               <iframe
-                :src="showBrowserViewer ? (agentDetail?.vnc_url + '&password=' + (agentDetail?.vnc_password || '')) : ''"
+                :src="showBrowserViewer ? agentDetail?.vnc_url : ''"
                 class="w-full border-0"
                 style="max-width: 1280px; aspect-ratio: 16/9;"
                 allow="clipboard-read; clipboard-write"

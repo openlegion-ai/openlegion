@@ -53,6 +53,9 @@ def _start_kasmvnc() -> subprocess.Popen:
         "-disableBasicAuth",
         "-AlwaysShared",
         "-interface", "0.0.0.0",
+        # Allow iframe embedding from dashboard (different port = different origin)
+        "-http-header", "X-Frame-Options=ALLOWALL",
+        "-http-header", "Access-Control-Allow-Origin=*",
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
