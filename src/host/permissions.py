@@ -55,6 +55,7 @@ class PermissionMatrix:
                 blackboard_write=default.blackboard_write,
                 allowed_apis=default.allowed_apis,
                 allowed_credentials=default.allowed_credentials,
+                can_use_browser=default.can_use_browser,
             )
         return AgentPermissions(agent_id=agent_id)
 
@@ -87,6 +88,13 @@ class PermissionMatrix:
             return True
         perms = self.get_permissions(agent_id)
         return any(fnmatch.fnmatch(key, pattern) for pattern in perms.blackboard_write)
+
+    def can_use_browser(self, agent_id: str) -> bool:
+        """Check if agent has browser access."""
+        if agent_id in ("mesh", "orchestrator"):
+            return True
+        perms = self.get_permissions(agent_id)
+        return perms.can_use_browser
 
     def can_use_api(self, agent_id: str, service: str) -> bool:
         if agent_id in ("mesh", "orchestrator"):

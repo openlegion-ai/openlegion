@@ -7,7 +7,9 @@ import logging
 import os
 import unicodedata
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+UTC = timezone.utc
 
 
 def generate_id(prefix: str = "id") -> str:

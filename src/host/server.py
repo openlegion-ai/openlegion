@@ -930,6 +930,58 @@ def create_mesh_app(
             return []
         return trace_store.get_trace(trace_id)
 
+    # === Browser Service Proxy ===
+
+    import httpx as _httpx
+    _browser_proxy_client = _httpx.AsyncClient(timeout=60)
+
+    @app.post("/mesh/browser/command")
+    async def browser_command(request: Request) -> dict:
+        """Proxy a browser command to the shared browser service.
+
+        Agents never talk to the browser service directly — the mesh
+        enforces authentication and permission checks.
+        """
+        agent_id = _extract_verified_agent_id(request)
+        body = await request.json()
+        req_agent_id = body.get("agent_id", agent_id)
+        # Use verified identity, not the claimed one
+        req_agent_id = _resolve_agent_id(req_agent_id, request)
+
+        if not permissions.can_use_browser(req_agent_id):
+            raise HTTPException(403, "Browser access denied")
+
+        action = body.get("action", "")
+        params = body.get("params", {})
+
+        if not action:
+            raise HTTPException(400, "action is required")
+
+        # Proxy to browser service
+        browser_service_url = None
+        if container_manager:
+            browser_service_url = getattr(container_manager, "browser_service_url", None)
+        if not browser_service_url:
+            raise HTTPException(503, "Browser service not available")
+
+        try:
+            browser_auth = getattr(container_manager, "browser_auth_token", "")
+            headers = {}
+            if browser_auth:
+                headers["Authorization"] = f"Bearer {browser_auth}"
+            resp = await _browser_proxy_client.post(
+                f"{browser_service_url}/browser/{req_agent_id}/{action}",
+                json=params,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except _httpx.HTTPStatusError as e:
+            raise HTTPException(e.response.status_code, e.response.text)
+        except Exception as e:
+            _server_logger.warning("Browser proxy error: %s", e)
+            raise HTTPException(502, f"Browser service error: {e}")
+
     # === Event Bus ===
 
     @app.websocket("/ws/events")

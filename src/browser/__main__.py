@@ -1,0 +1,114 @@
+"""Browser service entry point.
+
+Starts KasmVNC (Xvnc + web client), Openbox WM, and the FastAPI
+browser command server.
+
+KasmVNC's vncserver starts its own Xvnc process which serves as both
+the X server and VNC server. No separate Xvfb is needed.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+import sys
+import time
+from contextlib import asynccontextmanager
+
+import uvicorn
+from fastapi import FastAPI
+
+from src.browser.server import create_browser_app
+from src.browser.service import BrowserManager
+from src.shared.utils import setup_logging
+
+logger = setup_logging("browser.main")
+
+_DISPLAY = ":99"
+_VNC_PORT = int(os.environ.get("VNC_PORT", "6080"))
+_API_PORT = int(os.environ.get("API_PORT", "8500"))
+_MAX_BROWSERS = int(os.environ.get("MAX_BROWSERS", "5"))
+_IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT_MINUTES", "30"))
+
+
+def _start_kasmvnc() -> subprocess.Popen:
+    """Start KasmVNC (Xvnc + web client) on the configured display.
+
+    KasmVNC's vncserver starts its own Xvnc process which handles both
+    the X11 display and VNC serving. No separate Xvfb needed.
+    """
+    passwd_dir = os.path.expanduser("~/.vnc")
+    os.makedirs(passwd_dir, exist_ok=True)
+    passwd_proc = subprocess.run(
+        ["bash", "-c", "echo -e 'password\\npassword\\nn' | vncpasswd"],
+        capture_output=True,
+    )
+    if passwd_proc.returncode != 0:
+        logger.warning("vncpasswd setup may have failed: %s", passwd_proc.stderr.decode(errors="replace"))
+
+    cmd = [
+        "vncserver", _DISPLAY,
+        "-websocketPort", str(_VNC_PORT),
+        "-geometry", "1920x1080",
+        "-depth", "24",
+        "-SecurityTypes", "None",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    os.environ["DISPLAY"] = _DISPLAY
+    time.sleep(1)
+    logger.info("KasmVNC started on display %s, port %d (pid=%d)", _DISPLAY, _VNC_PORT, proc.pid)
+    return proc
+
+
+def _start_openbox() -> subprocess.Popen:
+    """Start Openbox window manager on the KasmVNC display."""
+    proc = subprocess.Popen(
+        ["openbox"],
+        env={**os.environ, "DISPLAY": _DISPLAY},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(0.3)
+    logger.info("Openbox started (pid=%d)", proc.pid)
+    return proc
+
+
+def main() -> None:
+    """Start all services and run the FastAPI server."""
+    kasmvnc_proc = _start_kasmvnc()
+    openbox_proc = _start_openbox()
+
+    manager = BrowserManager(
+        profiles_dir="/data/profiles",
+        max_concurrent=_MAX_BROWSERS,
+        idle_timeout_minutes=_IDLE_TIMEOUT,
+        display=_DISPLAY,
+    )
+
+    app = create_browser_app(manager)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await manager.start_cleanup_loop()
+        logger.info("Browser service ready (max=%d, idle_timeout=%dm)", _MAX_BROWSERS, _IDLE_TIMEOUT)
+        yield
+        await manager.stop_all()
+        for proc in (openbox_proc, kasmvnc_proc):
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+        logger.info("Browser service shut down")
+
+    app.router.lifespan_context = lifespan
+    uvicorn.run(app, host="0.0.0.0", port=_API_PORT)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        logger.error("Browser service failed to start: %s", e)
+        sys.exit(1)

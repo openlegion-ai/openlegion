@@ -117,15 +117,6 @@ def main() -> None:
             except Exception as e:
                 logger.error(f"Failed to start MCP servers: {e}")
 
-        # Start browser + KasmVNC before mesh registration
-        # so the VNC web client is accessible before the agent is marked healthy.
-        from src.agent.builtins.browser_tool import start_browser
-        try:
-            await start_browser()
-            logger.info("Browser + VNC stack started")
-        except Exception as e:
-            logger.error(f"Failed to start browser: {e}")
-
         registered = False
         for attempt in range(1, _MAX_REGISTRATION_ATTEMPTS + 1):
             try:
@@ -174,8 +165,6 @@ def main() -> None:
                             pass
         if mcp_client:
             await mcp_client.stop()
-        from src.agent.builtins.browser_tool import browser_cleanup
-        await browser_cleanup()
         await mesh_client.close()
         await llm.close()
         memory.close()

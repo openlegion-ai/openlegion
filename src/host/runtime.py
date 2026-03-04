@@ -126,6 +126,7 @@ class DockerBackend(RuntimeBackend):
     """Runs agents in standard Docker containers (shared host kernel)."""
 
     BASE_IMAGE = "openlegion-agent:latest"
+    BROWSER_IMAGE = "openlegion-browser:latest"
 
     def __init__(
         self,
@@ -139,6 +140,10 @@ class DockerBackend(RuntimeBackend):
         self.use_host_network = use_host_network
         self._next_port = 8401
         self._port_lock = threading.Lock()
+        self.browser_service_url: str | None = None
+        self.browser_vnc_url: str | None = None
+        self.browser_auth_token: str = ""
+        self._browser_container = None
         self._cleanup_stale()
 
     @staticmethod
@@ -171,9 +176,6 @@ class DockerBackend(RuntimeBackend):
         with self._port_lock:
             port = self._next_port
             self._next_port += 1
-            # Every agent gets a VNC port for browser access
-            vnc_port = self._next_port
-            self._next_port += 1
 
         # Generate per-agent auth token for mesh request verification
         auth_token = secrets.token_urlsafe(32)
@@ -194,8 +196,6 @@ class DockerBackend(RuntimeBackend):
             environment["LLM_MODEL"] = model
         if mcp_servers:
             environment["MCP_SERVERS"] = json.dumps(mcp_servers)
-        if self.use_host_network:
-            environment["VNC_PORT"] = str(vnc_port)
         if thinking:
             environment["THINKING"] = thinking
         environment.update(self.extra_env)
@@ -228,25 +228,23 @@ class DockerBackend(RuntimeBackend):
                 mp_path = marketplace_dir.as_posix()
             volumes[mp_path] = {"bind": "/app/marketplace_skills", "mode": "ro"}
 
-        # Every agent gets Chrome + VNC.  1GB / 0.5 CPU / 256MB shm.
-        # Chrome with memory-saving flags idles at ~500MB.
-        # JS-heavy sites spike briefly but fit within 1GB headroom.
-        # 0.5 CPU is sufficient — agents are mostly I/O-bound (waiting on LLM APIs).
+        # Slim agent containers (no browser). 384MB / 0.15 CPU.
+        # Agents are mostly I/O-bound (waiting on LLM APIs).
+        # Browser ops are handled by the shared browser service container.
         run_kwargs: dict[str, Any] = {
             "detach": True,
             "name": f"openlegion_{safe_name}",
             "environment": environment,
             "volumes": volumes,
-            "mem_limit": "1g",
-            "cpu_quota": 50000,
-            "shm_size": "256m",
+            "mem_limit": "384m",
+            "cpu_quota": 15000,
             "security_opt": ["no-new-privileges"],
         }
 
         if self.use_host_network:
             run_kwargs["network_mode"] = "host"
         else:
-            ports = {"8400/tcp": port, "6080/tcp": vnc_port}
+            ports = {"8400/tcp": port}
             run_kwargs["ports"] = ports
             # On Linux Docker Engine, host.docker.internal isn't automatic
             if platform.system() == "Linux":
@@ -263,7 +261,6 @@ class DockerBackend(RuntimeBackend):
 
         container = self.client.containers.run(self.BASE_IMAGE, **run_kwargs)
         url = f"http://127.0.0.1:{port}"
-        vnc_url = f"http://127.0.0.1:{vnc_port}/index.html?autoconnect=true&path=&resize=scale"
         agent_info: dict[str, Any] = {
             "container": container,
             "url": url,
@@ -273,12 +270,75 @@ class DockerBackend(RuntimeBackend):
             "model": model,
             "mcp_servers": mcp_servers,
             "thinking": thinking,
-            "vnc_port": vnc_port,
-            "vnc_url": vnc_url,
         }
         self.agents[agent_id] = agent_info
         logger.info(f"Started agent '{agent_id}' (role={role}) at {url}")
         return url
+
+    def start_browser_service(self) -> None:
+        """Start the shared browser service container."""
+        import docker as _docker
+
+        self.browser_auth_token = secrets.token_urlsafe(32)
+        mesh_host = "127.0.0.1" if self.use_host_network else "host.docker.internal"
+
+        environment = {
+            "BROWSER_AUTH_TOKEN": self.browser_auth_token,
+            "MESH_URL": f"http://{mesh_host}:{self.mesh_host_port}",
+            "MAX_BROWSERS": "5",
+            "IDLE_TIMEOUT_MINUTES": "30",
+        }
+
+        with self._port_lock:
+            api_port = self._next_port
+            self._next_port += 1
+            vnc_port = self._next_port
+            self._next_port += 1
+
+        run_kwargs: dict[str, Any] = {
+            "detach": True,
+            "name": "openlegion_browser",
+            "environment": environment,
+            "volumes": {"openlegion_browser_data": {"bind": "/data", "mode": "rw"}},
+            "mem_limit": "2g",
+            "cpu_quota": 100000,
+            "shm_size": "512m",
+            "security_opt": ["no-new-privileges"],
+        }
+
+        if self.use_host_network:
+            run_kwargs["network_mode"] = "host"
+            environment["API_PORT"] = str(api_port)
+            environment["VNC_PORT"] = str(vnc_port)
+        else:
+            run_kwargs["ports"] = {"8500/tcp": api_port, "6080/tcp": vnc_port}
+            if platform.system() == "Linux":
+                run_kwargs["extra_hosts"] = {"host.docker.internal": "host-gateway"}
+
+        # Remove stale browser container
+        try:
+            stale = self.client.containers.get("openlegion_browser")
+            stale.remove(force=True)
+        except _docker.errors.NotFound:
+            pass
+
+        self._browser_container = self.client.containers.run(self.BROWSER_IMAGE, **run_kwargs)
+        self.browser_service_url = f"http://127.0.0.1:{api_port}"
+        self.browser_vnc_url = f"http://127.0.0.1:{vnc_port}/index.html?autoconnect=true&path=&resize=scale"
+        logger.info("Started browser service at %s (VNC: %s)", self.browser_service_url, self.browser_vnc_url)
+
+    def stop_browser_service(self) -> None:
+        """Stop the browser service container."""
+        if self._browser_container:
+            try:
+                self._browser_container.stop(timeout=10)
+                self._browser_container.remove()
+                logger.info("Stopped browser service")
+            except Exception as e:
+                logger.warning("Error stopping browser service: %s", e)
+            self._browser_container = None
+            self.browser_service_url = None
+            self.browser_vnc_url = None
 
     def stop_agent(self, agent_id: str) -> None:
         if agent_id in self.agents:

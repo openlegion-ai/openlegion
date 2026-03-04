@@ -1,17 +1,11 @@
-# Force amd64: sqlite-vec and Chromium have broken ARM wheels/binaries.
+# Force amd64: sqlite-vec has broken ARM wheels.
 # Docker Desktop uses Rosetta 2 on Apple Silicon — fast and reliable.
 FROM --platform=linux/amd64 python:3.12-slim
 
 # System tools useful for agent operations
-# tini: proper init process that reaps zombie children — Chrome forks many
-# subprocesses (network service, GPU, renderer) that become zombies under
-# Python-as-PID-1, killing Chrome's navigation layer.
+# tini: proper init process that reaps zombie children.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl wget git jq vim-tiny procps xvfb tini openbox \
-    && curl -fSL -o /tmp/kasmvnc.deb \
-       https://github.com/kasmtech/KasmVNC/releases/download/v1.4.0/kasmvncserver_bookworm_1.4.0_amd64.deb \
-    && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb \
-    && rm /tmp/kasmvnc.deb \
+    curl wget git jq vim-tiny procps tini \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user (created early so /data ownership is correct)
@@ -22,60 +16,24 @@ WORKDIR /app
 # Python dependencies — only what agents actually import
 # (litellm, pyyaml, click, docker are host-only — not needed here)
 # sqlite-vec requires amd64 (ARM wheels have broken 32-bit .so files)
+# No browser deps — browsing is handled by the shared browser service
 COPY pyproject.toml .
 RUN pip install --no-cache-dir \
-    fastapi uvicorn httpx pydantic patchright sqlite-vec mcp Pillow
-
-# Install Google Chrome stable — authentic TLS fingerprint (JA3/JA4) that
-# matches the User-Agent string.  Playwright's "Chrome for Testing" has a
-# different TLS fingerprint that anti-bot systems (Reddit, X) detect and block.
-RUN curl -fSL -o /tmp/chrome.deb \
-       https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && apt-get update && apt-get install -y /tmp/chrome.deb \
-    && rm /tmp/chrome.deb \
-    && rm -rf /var/lib/apt/lists/*
-
-# Force Chrome to use the system DNS resolver (glibc getaddrinfo).
-# Chrome's built-in async DNS client bypasses Docker Desktop's DNS forwarder
-# (192.168.65.7), causing ERR_NAME_NOT_RESOLVED in containers.
-# DnsOverHttpsMode=off is also required — newer Chrome falls back to the
-# built-in client for DoH even when BuiltInDnsClientEnabled is false.
-RUN mkdir -p /etc/opt/chrome/policies/managed \
-    && printf '{"BuiltInDnsClientEnabled": false, "DnsOverHttpsMode": "off"}\n' \
-       > /etc/opt/chrome/policies/managed/dns_policy.json
-
-# Install Patchright Chromium (for agent programmatic control via CDP).
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN patchright install chromium --with-deps \
-    && chmod -R o+rx /opt/pw-browsers
+    fastapi uvicorn httpx pydantic sqlite-vec mcp
 
 # Application code
 COPY src/agent/ /app/src/agent/
 COPY src/shared/ /app/src/shared/
 COPY src/__init__.py /app/src/__init__.py
 
-# X11 socket directory — Xvnc cannot create this as non-root
-RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
-
 # Data volume mount point -- owned by agent user
 RUN mkdir -p /data && chown agent:agent /data
 VOLUME /data
-
-# Openbox config: single desktop, no scroll-to-switch, no decorations.
-# Without this, openbox defaults to 4 virtual desktops and scroll on the
-# root window switches between them — causing a black screen in VNC.
-RUN mkdir -p /home/agent/.config/openbox \
-    && printf '<?xml version="1.0" encoding="UTF-8"?>\n\
-<openbox_config xmlns="http://openbox.org/3.4/rc">\n\
-  <desktops><number>1</number></desktops>\n\
-  <applications><application class="*"><decor>no</decor><maximized>true</maximized></application></applications>\n\
-</openbox_config>\n' > /home/agent/.config/openbox/rc.xml \
-    && chown -R agent:agent /home/agent/.config
 
 RUN chown -R agent:agent /app
 
 USER agent
 
-EXPOSE 8400 6080
+EXPOSE 8400
 ENTRYPOINT ["tini", "--"]
 CMD ["python", "-m", "src.agent"]
