@@ -1479,6 +1479,26 @@ class REPLSession:
             click.echo(f"Agent '{target}' not found.")
             return
 
+        # Auto-steer if the agent is currently busy
+        if self.ctx.lane_manager:
+            status = self.ctx.lane_manager.get_status().get(target, {})
+            if status.get("busy", False):
+                from src.shared.trace import new_trace_id as _new_trace_id
+
+                steer_trace = trace_id or _new_trace_id()
+                future = asyncio.run_coroutine_threadsafe(
+                    self.ctx.lane_manager.enqueue(
+                        target, message, mode="steer", trace_id=steer_trace,
+                    ),
+                    self.ctx.dispatch_loop,
+                )
+                try:
+                    result = future.result(timeout=10)
+                    click.echo(f"[auto-steer] {result}")
+                except Exception as e:
+                    click.echo(f"Steer error: {e}")
+                return
+
         def _steer_poll(timeout: float) -> None:
             """Poll stdin during streaming; dispatch /steer commands inline."""
             import select

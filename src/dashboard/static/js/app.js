@@ -280,7 +280,7 @@ function dashboard() {
     _ws: null,
     _refreshInterval: null,
     _fleetDebounce: null,
-    _queueInterval: null,
+    _queuePollInterval: null,
     _cronInterval: null,
     _seenEventIds: new Set(),
 
@@ -619,8 +619,10 @@ function dashboard() {
       this.fetchProject();
       this.fetchProjects();
       this.fetchModelHealth();
+      this.fetchQueues();
       this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
       this._modelHealthInterval = setInterval(() => this.fetchModelHealth(), 60000);
+      this._queuePollInterval = setInterval(() => this.fetchQueues(), 2000);
 
       // Restore chat history from sessionStorage
       try {
@@ -700,7 +702,7 @@ function dashboard() {
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
           if (this._refreshInterval) { clearInterval(this._refreshInterval); this._refreshInterval = null; }
-          if (this._queueInterval) { clearInterval(this._queueInterval); this._queueInterval = null; }
+          if (this._queuePollInterval) { clearInterval(this._queuePollInterval); this._queuePollInterval = null; }
           if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
           if (this._modelHealthInterval) { clearInterval(this._modelHealthInterval); this._modelHealthInterval = null; }
           this._stopActivityRefresh();
@@ -710,10 +712,6 @@ function dashboard() {
           // Resume polling — restore intervals without navigating (switchTab clears detailAgent)
           this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
           this.fetchAgents();
-          if (this.activeTab === 'fleet') {
-            this.fetchQueues();
-            this._queueInterval = setInterval(() => this.fetchQueues(), 5000);
-          }
           if (this.activeTab === 'activity' && this.activityView === 'traces') {
             this.fetchTraces();
             this._startActivityRefresh();
@@ -725,9 +723,11 @@ function dashboard() {
             this.fetchCronJobs();
             this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
           }
-          // Resume model health polling
+          // Resume model health + queue polling
           this.fetchModelHealth();
           this._modelHealthInterval = setInterval(() => this.fetchModelHealth(), 60000);
+          this.fetchQueues();
+          this._queuePollInterval = setInterval(() => this.fetchQueues(), 2000);
           // Refresh agent detail if we're viewing one
           if (this.detailAgent) {
             this.fetchAgentDetail(this.detailAgent);
@@ -739,7 +739,7 @@ function dashboard() {
     destroy() {
       if (this._ws) this._ws.disconnect();
       if (this._refreshInterval) clearInterval(this._refreshInterval);
-      if (this._queueInterval) clearInterval(this._queueInterval);
+      if (this._queuePollInterval) clearInterval(this._queuePollInterval);
       if (this._cronInterval) clearInterval(this._cronInterval);
       if (this._modelHealthInterval) clearInterval(this._modelHealthInterval);
       if (this._costDebounce) clearTimeout(this._costDebounce);
@@ -760,7 +760,6 @@ function dashboard() {
       this.activeTab = tab;
       this.detailAgent = null;
       // Clear tab-specific auto-refresh intervals
-      if (this._queueInterval) { clearInterval(this._queueInterval); this._queueInterval = null; }
       if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
       this._stopActivityRefresh();
       if (tab === 'activity') {
@@ -779,7 +778,6 @@ function dashboard() {
         this.fetchSettings();
         this.fetchProject();
         this.fetchProjects();
-        this._queueInterval = setInterval(() => this.fetchQueues(), 5000);
       }
       if (tab === 'system') {
         this.fetchSettings();
@@ -1055,12 +1053,11 @@ function dashboard() {
         if (!this.agentConfigs[agentId]) await this.fetchAgentConfig(agentId);
         return;
       }
-      // Composite tabs — load all mapped files
+      // Composite tabs — load all mapped files (always refetch for freshness)
       const fileMap = _IDENTITY_FILE_MAP[tab.id];
       if (fileMap) {
         this.identityContentLoading = true;
         for (const entry of fileMap) {
-          if (this.identityContent[entry.file] !== undefined) continue;
           try {
             const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${entry.file}`);
             if (resp.ok) {
@@ -1073,8 +1070,8 @@ function dashboard() {
         return;
       }
       if (tab.id === 'logs') {
-        if (this.identityLogs === null) await this.fetchIdentityLogs(agentId);
-        if (this.identityLearnings === null) await this.fetchIdentityLearnings(agentId);
+        await this.fetchIdentityLogs(agentId);
+        await this.fetchIdentityLearnings(agentId);
       }
       if (tab.id === 'capabilities') {
         await this.fetchAgentCapabilities(agentId);
@@ -2371,10 +2368,12 @@ function dashboard() {
       this.chatStreamingAgents[agentId] = false;
       this.$nextTick(() => this._scrollChat(agentId));
       this._saveChatToSession();
+      this.fetchQueues();
     },
 
     isAgentBusy(agentId) {
-      return !!this.chatStreamingAgents[agentId];
+      if (this.chatStreamingAgents[agentId]) return true;
+      return this.queueStatus?.[agentId]?.busy === true;
     },
 
     async steerAgent(agentId, message) {
@@ -2391,6 +2390,7 @@ function dashboard() {
       } catch (e) {
         this.showToast(`Steer failed: ${e.message}`);
       }
+      this.fetchQueues();
     },
 
     // ── Broadcast ────────────────────────────────────────

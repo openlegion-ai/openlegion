@@ -103,12 +103,41 @@ async def test_steer_falls_back_without_steer_fn():
 
 @pytest.mark.asyncio
 async def test_steer_to_idle_agent():
-    """Steer to idle agent returns queued message."""
+    """Steer to idle agent returns queued message and calls steer_fn."""
     steer = AsyncMock(return_value={"injected": False})
     lm = LaneManager(dispatch_fn=AsyncMock(return_value="ok"), steer_fn=steer)
 
     result = await lm.enqueue("agent1", "hey", mode="steer")
     assert "idle" in result.lower() or "queued" in result.lower()
+    steer.assert_awaited_once_with("agent1", "hey")
+
+
+@pytest.mark.asyncio
+async def test_steer_busy_agent_returns_injected_message():
+    """Steer to a busy agent returns 'injected' confirmation."""
+    steer = AsyncMock(return_value={"injected": True})
+    dispatch_event = asyncio.Event()
+    dispatch_done = asyncio.Event()
+
+    async def blocking_dispatch(agent: str, message: str) -> str:
+        dispatch_event.set()
+        await dispatch_done.wait()
+        return "ok"
+
+    lm = LaneManager(dispatch_fn=blocking_dispatch, steer_fn=steer)
+
+    # Make agent busy
+    task1 = asyncio.create_task(lm.enqueue("agent1", "work"))
+    await dispatch_event.wait()
+    assert lm.get_status()["agent1"]["busy"] is True
+
+    # Steer while busy
+    result = await lm.enqueue("agent1", "redirect", mode="steer")
+    assert "injected" in result.lower()
+    steer.assert_awaited_once_with("agent1", "redirect")
+
+    dispatch_done.set()
+    await task1
 
 
 # ── Collect mode ─────────────────────────────────────────────
