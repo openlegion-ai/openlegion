@@ -1124,12 +1124,24 @@
                     title="Close" aria-label="Close">&times;</button>
                 </div>
               </div>
-              <iframe
-                :src="showBrowserViewer ? agentDetail?.vnc_url : ''"
-                class="w-full border-0"
-                style="max-width: 1280px; aspect-ratio: 16/9;"
-                allow="clipboard-read; clipboard-write"
-              ></iframe>
+              <div class="relative" style="max-width: 1280px; aspect-ratio: 16/9;">
+                <!-- Loading overlay -->
+                <div x-ref="vncLoading"
+                  class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 z-10 transition-opacity duration-500"
+                  style="pointer-events: none;">
+                  <svg class="animate-spin h-8 w-8 text-indigo-400 mb-3" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                  </svg>
+                  <span class="text-sm text-gray-400">Connecting to browser...</span>
+                </div>
+                <iframe
+                  :src="showBrowserViewer ? agentDetail?.vnc_url : ''"
+                  class="w-full h-full border-0"
+                  allow="clipboard-read; clipboard-write"
+                  @load="$refs.vncLoading && ($refs.vncLoading.style.opacity = '0')"
+                ></iframe>
+              </div>
             </div>
             <!-- 2-column detail layout -->
             <div class="grid grid-cols-1 lg:grid-cols-5 gap-5 mb-5">

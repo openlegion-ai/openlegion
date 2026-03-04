@@ -2573,8 +2573,16 @@ function dashboard() {
 
     toggleBrowser() {
       this.showBrowserViewer = !this.showBrowserViewer;
-      if (this.showBrowserViewer && this.selectedAgent) {
-        this.focusBrowser(this.selectedAgent);
+      if (this.showBrowserViewer) {
+        // Reset loading overlay for fresh connection
+        this.$nextTick(() => {
+          if (this.$refs.vncLoading) {
+            this.$refs.vncLoading.style.opacity = '1';
+          }
+        });
+        if (this.selectedAgent) {
+          this.focusBrowser(this.selectedAgent);
+        }
       }
     },
 

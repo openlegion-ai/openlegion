@@ -7,7 +7,7 @@ Agent containers and the host process share only these types.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -30,7 +30,7 @@ class AgentMessage(BaseModel):
     payload: dict[str, Any]
     workflow_id: Optional[str] = None
     reply_to: Optional[str] = None
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     ttl: int = 300
     priority: Literal["low", "normal", "high", "urgent"] = "normal"
 
@@ -105,8 +105,8 @@ class BlackboardEntry(BaseModel):
     value: dict[str, Any]
     written_by: str
     workflow_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     ttl: Optional[int] = None
     version: int = 1
 
@@ -118,7 +118,7 @@ class MeshEvent(BaseModel):
     topic: str
     source: str
     payload: dict[str, Any] = {}
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # === Workflow Definitions (parsed from YAML) ===
@@ -216,7 +216,7 @@ class MemoryFact(BaseModel):
     embedding: Optional[list[float]] = None
     access_count: int = 0
     last_accessed: Optional[datetime] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     decay_score: float = 1.0
 
 
@@ -230,7 +230,7 @@ class MemoryLog(BaseModel):
     task_id: Optional[str] = None
     tokens_used: int = 0
     duration_ms: int = 0
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # === API Proxy (agent -> mesh -> external service) ===
@@ -340,5 +340,5 @@ class DashboardEvent(BaseModel):
         "notification",
     ]
     agent: str = ""
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     data: dict[str, Any] = {}

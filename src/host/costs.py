@@ -9,7 +9,7 @@ Storage: SQLite (lightweight, no external services).
 from __future__ import annotations
 
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.shared.models import get_model_cost
@@ -251,7 +251,7 @@ class CostTracker:
 
 
 def _period_to_since(period: str) -> str:
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     if period == "today":
         return now.strftime("%Y-%m-%d 00:00:00")
     if period == "month":

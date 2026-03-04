@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -125,13 +125,13 @@ class TestCronIntervalDue:
     def test_interval_due_first_time(self):
         sched = CronScheduler(config_path=self.config_path)
         job = sched.add_job(agent="test", schedule="every 30m", message="ping")
-        assert sched._is_due(job, datetime.now(UTC))
+        assert sched._is_due(job, datetime.now(timezone.utc))
 
     def test_interval_not_due_too_soon(self):
         sched = CronScheduler(config_path=self.config_path)
         job = sched.add_job(agent="test", schedule="every 30m", message="ping")
-        job.last_run = datetime.now(UTC).isoformat()
-        assert not sched._is_due(job, datetime.now(UTC))
+        job.last_run = datetime.now(timezone.utc).isoformat()
+        assert not sched._is_due(job, datetime.now(timezone.utc))
 
 
 class TestCronDispatch:

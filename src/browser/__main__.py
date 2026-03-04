@@ -64,6 +64,17 @@ def _start_kasmvnc() -> subprocess.Popen:
             f"Xvnc exited immediately (code {proc.returncode})"
         )
     os.environ["DISPLAY"] = _DISPLAY
+    # Set X root window to a dark color matching Firefox's dark theme so the
+    # toolbar area doesn't show harsh black while the browser is loading.
+    try:
+        subprocess.run(
+            ["xsetroot", "-solid", "#1e1e2e"],
+            env={**os.environ, "DISPLAY": _DISPLAY},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        logger.debug("xsetroot not found, skipping root window color")
     logger.info("KasmVNC Xvnc started on display %s, web on :%d", _DISPLAY, _VNC_PORT)
     return proc
 

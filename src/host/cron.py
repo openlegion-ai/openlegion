@@ -24,7 +24,7 @@ import shutil
 import tempfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -234,7 +234,7 @@ class CronScheduler:
         self._running = False
 
     async def _tick(self) -> None:
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         for job in list(self.jobs.values()):
             if not job.enabled:
                 continue
@@ -248,7 +248,7 @@ class CronScheduler:
             return None
         async with lock:
             try:
-                job.last_run = datetime.now(UTC).isoformat()
+                job.last_run = datetime.now(timezone.utc).isoformat()
                 job.run_count += 1
                 self._save()
                 if self._trace_store:
@@ -262,7 +262,7 @@ class CronScheduler:
                 response = None
                 if job.workflow and self.workflow_trigger_fn:
                     payload = json.loads(job.workflow_payload) if job.workflow_payload else {}
-                    payload.setdefault("date", datetime.now(UTC).strftime("%Y-%m-%d"))
+                    payload.setdefault("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
                     response = await self.workflow_trigger_fn(job.workflow, payload)
                     logger.info(f"Cron {job.id} triggered workflow '{job.workflow}'")
                 elif self.dispatch_fn:
@@ -472,7 +472,7 @@ class CronScheduler:
             if job.last_run:
                 last = datetime.fromisoformat(job.last_run)
                 if last.tzinfo is None:
-                    last = last.replace(tzinfo=UTC)
+                    last = last.replace(tzinfo=timezone.utc)
                 return (now - last).total_seconds() >= seconds
             return True
 
@@ -508,7 +508,7 @@ class CronScheduler:
         if job.last_run:
             last = datetime.fromisoformat(job.last_run)
             if last.tzinfo is None:
-                last = last.replace(tzinfo=UTC)
+                last = last.replace(tzinfo=timezone.utc)
             if (now - last).total_seconds() < 60:
                 return False
 

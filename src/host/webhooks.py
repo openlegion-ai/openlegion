@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import json
 import secrets
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -54,7 +54,7 @@ class WebhookManager:
             "id": hook_id,
             "agent": agent,
             "name": name,
-            "created_at": datetime.now(UTC).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "call_count": 0,
         }
         if require_signature:

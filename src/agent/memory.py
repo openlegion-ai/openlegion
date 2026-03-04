@@ -20,7 +20,7 @@ import math
 import sqlite3
 import struct
 import threading
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Optional, TypeVar
 
 import sqlite_vec
@@ -375,7 +375,7 @@ class MemoryStore:
         if row[1]:
             try:
                 last = datetime.fromisoformat(row[1].replace("Z", "+00:00"))
-                days_since = (datetime.now(UTC) - last).total_seconds() / 86400
+                days_since = (datetime.now(timezone.utc) - last).total_seconds() / 86400
             except (ValueError, TypeError) as e:
                 logger.debug("Failed to parse last_accessed timestamp: %s", e)
         boost = self._compute_boost(new_count, days_since)
