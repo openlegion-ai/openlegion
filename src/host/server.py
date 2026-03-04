@@ -1048,18 +1048,19 @@ def create_mesh_app(
     @app.get("/vnc/{path:path}")
     async def vnc_http_proxy(path: str, request: Request):
         """Reverse-proxy HTTP requests to KasmVNC (static files)."""
+        import httpx
+
         port = _get_vnc_port()
         if port is None:
             raise HTTPException(502, "Browser service not available")
-        import httpx
         query = str(request.url.query)
         target = f"http://127.0.0.1:{port}/{path}"
         if query:
             target += f"?{query}"
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(target, timeout=10.0)
-        except httpx.ConnectError:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(target)
+        except (httpx.ConnectError, httpx.TimeoutException):
             raise HTTPException(502, "Browser VNC not reachable")
         headers = {}
         ct = resp.headers.get("content-type")
@@ -1085,12 +1086,17 @@ def create_mesh_app(
         await websocket.accept()
         try:
             import websockets
+
             async with websockets.connect(target) as upstream:
+
                 async def client_to_upstream():
                     try:
                         while True:
-                            data = await websocket.receive_bytes()
-                            await upstream.send(data)
+                            msg = await websocket.receive()
+                            if "bytes" in msg and msg["bytes"]:
+                                await upstream.send(msg["bytes"])
+                            elif "text" in msg and msg["text"]:
+                                await upstream.send(msg["text"])
                     except Exception:
                         pass
 
@@ -1104,10 +1110,12 @@ def create_mesh_app(
                     except Exception:
                         pass
 
-                done, pending = await asyncio.wait(
-                    [asyncio.ensure_future(client_to_upstream()),
-                     asyncio.ensure_future(upstream_to_client())],
-                    return_when=asyncio.FIRST_COMPLETED,
+                tasks = [
+                    asyncio.create_task(client_to_upstream()),
+                    asyncio.create_task(upstream_to_client()),
+                ]
+                _done, pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED,
                 )
                 for task in pending:
                     task.cancel()

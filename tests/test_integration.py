@@ -1408,8 +1408,110 @@ def test_vnc_http_proxy(tmp_path):
     # Verify the target URL includes the path and query
     call_args = mock_client.get.call_args
     target_url = call_args[0][0]
-    assert "127.0.0.1:9999" in target_url
-    assert "index.html" in target_url
+    assert target_url == "http://127.0.0.1:9999/index.html?autoconnect=true"
+
+    bb.close()
+
+
+def test_vnc_proxy_connect_error(tmp_path):
+    """VNC proxy returns 502 when KasmVNC port is unreachable."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import httpx
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    cm = MagicMock()
+    cm.browser_vnc_url = "http://127.0.0.1:9999/index.html"
+
+    app = create_mesh_app(bb, pubsub, router, perms, credential_vault=None, container_manager=cm)
+    client = TestClient(app)
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        resp = client.get("/vnc/index.html")
+
+    assert resp.status_code == 502
+    assert "not reachable" in resp.json()["detail"]
+
+    bb.close()
+
+
+def test_vnc_proxy_timeout_error(tmp_path):
+    """VNC proxy returns 502 on timeout."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import httpx
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    cm = MagicMock()
+    cm.browser_vnc_url = "http://127.0.0.1:9999/index.html"
+
+    app = create_mesh_app(bb, pubsub, router, perms, credential_vault=None, container_manager=cm)
+    client = TestClient(app)
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ReadTimeout("timed out"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        resp = client.get("/vnc/index.html")
+
+    assert resp.status_code == 502
+
+    bb.close()
+
+
+def test_vnc_proxy_no_query_string(tmp_path):
+    """VNC proxy works without query string."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    cm = MagicMock()
+    cm.browser_vnc_url = "http://127.0.0.1:9999/index.html"
+
+    app = create_mesh_app(bb, pubsub, router, perms, credential_vault=None, container_manager=cm)
+    client = TestClient(app)
+
+    fake_resp = MagicMock()
+    fake_resp.content = b"body"
+    fake_resp.status_code = 200
+    fake_resp.headers = {}
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=fake_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        resp = client.get("/vnc/somefile.js")
+
+    assert resp.status_code == 200
+    target_url = mock_client.get.call_args[0][0]
+    assert target_url == "http://127.0.0.1:9999/somefile.js"
+    assert "?" not in target_url
 
     bb.close()
 
