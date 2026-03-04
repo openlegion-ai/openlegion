@@ -398,6 +398,7 @@ function dashboard() {
     },
 
     cancelConfirm() {
+      if (this.confirmLoading) return;
       this.confirmModal = { open: false, title: '', message: '', action: null, destructive: false };
     },
 
@@ -1127,6 +1128,7 @@ function dashboard() {
     },
 
     async saveIdentityFile(agentId, file) {
+      if (this.identitySaving) return;
       if (!file) file = this.identityEditingFile;
       if (!file) return;
       this.identitySaving = true;
@@ -1196,6 +1198,7 @@ function dashboard() {
     },
 
     async saveProject() {
+      if (this.projectSaving) return;
       if (!this.activeProject) return;
       this.projectSaving = true;
       try {
@@ -1463,6 +1466,7 @@ function dashboard() {
     },
 
     async saveConfigFromDetail(agentId) {
+      if (this.configSaving) return;
       this.configSaving = true;
       await this.saveAgentConfig(agentId);
       // saveAgentConfig already calls cancelConfigEdit + fetchAgentConfig
