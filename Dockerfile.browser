@@ -22,9 +22,6 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir \
     "camoufox[geoip]" fastapi uvicorn httpx pydantic Pillow python_ghost_cursor
 
-# Download patched Firefox binary (Camoufox)
-RUN python -m camoufox fetch
-
 # Application code
 COPY src/browser/ /app/src/browser/
 COPY src/shared/ /app/src/shared/
@@ -49,6 +46,10 @@ RUN mkdir -p /home/browser/.config/openbox \
 RUN chown -R browser:browser /app
 
 USER browser
+
+# Download patched Firefox binary as the browser user so it's cached
+# in /home/browser/.cache/camoufox/ (must run AFTER USER browser)
+RUN python -m camoufox fetch
 
 # 8500: browser command API, 6080: KasmVNC web client
 EXPOSE 8500 6080
