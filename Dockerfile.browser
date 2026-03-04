@@ -45,10 +45,13 @@ RUN mkdir -p /home/browser/.config/openbox \
 
 RUN chown -R browser:browser /app
 
+# Allow browser user to write GeoIP mmdb into the camoufox package dir
+RUN chown -R browser:browser /usr/local/lib/python3.12/site-packages/camoufox/
+
 USER browser
 
-# Download patched Firefox binary as the browser user so it's cached
-# in /home/browser/.cache/camoufox/ (must run AFTER USER browser)
+# Download patched Firefox binary + GeoIP database as the browser user
+# Firefox goes to ~/.cache/camoufox/, GeoIP mmdb to the package dir
 RUN python -m camoufox fetch
 
 # 8500: browser command API, 6080: KasmVNC web client
