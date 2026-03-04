@@ -919,7 +919,10 @@ def create_dashboard_router(
         if not service or not key:
             raise HTTPException(status_code=400, detail="service and key are required")
         if not re.match(r"^[a-zA-Z0-9_.-]{1,128}$", service):
-            raise HTTPException(status_code=400, detail="Invalid service name (alphanumeric, _, ., - only, max 128 chars)")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid service name (alphanumeric, _, ., - only, max 128 chars)",
+            )
         if len(key) > 10_000:
             raise HTTPException(status_code=400, detail="Key value too long (max 10000 chars)")
         if "\n" in key or "\r" in key:
