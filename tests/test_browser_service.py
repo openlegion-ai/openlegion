@@ -762,7 +762,7 @@ class TestSnapshot:
     @pytest.mark.asyncio
     async def test_snapshot_element_limit(self):
         """Snapshot should stop adding refs after _MAX_SNAPSHOT_ELEMENTS."""
-        from src.browser.service import BrowserManager, CamoufoxInstance, _MAX_SNAPSHOT_ELEMENTS
+        from src.browser.service import _MAX_SNAPSHOT_ELEMENTS, BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
         mock_page = AsyncMock()
