@@ -56,7 +56,7 @@
   <div x-data="dashboard()" x-init="init()" class="flex flex-col h-screen">
 
     <!-- Toast notifications -->
-    <div class="fixed top-16 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center pointer-events-none max-w-sm w-full" role="status" aria-live="polite">
+    <div class="fixed top-16 left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-2 items-center pointer-events-none max-w-sm w-full" role="status" aria-live="polite">
       <template x-for="t in toastQueue" :key="t.id">
         <div class="toast text-gray-200 flex items-center gap-2 pointer-events-auto" x-transition>
           <span class="flex-1" x-text="t.msg"></span>
