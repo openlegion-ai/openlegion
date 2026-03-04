@@ -216,6 +216,24 @@ def create_mesh_app(
             return _extract_verified_agent_id(request)
         return agent_id
 
+    def _require_any_auth(request: Request) -> None:
+        """Require any valid auth token (identity-agnostic).
+
+        Used for endpoints that should be restricted in production but
+        don't need a specific agent identity (traces, model-health, etc.).
+        No-op in dev/test mode (no auth tokens configured).
+        """
+        if not _auth_tokens:
+            return
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(401, "Missing authentication token")
+        token = auth_header[7:]
+        for expected in _auth_tokens.values():
+            if hmac.compare_digest(token, expected):
+                return
+        raise HTTPException(401, "Invalid authentication token")
+
     # === System Messaging (orchestrator/mesh → agent) ===
 
     @app.post("/mesh/message")
@@ -522,8 +540,9 @@ def create_mesh_app(
     # === Model Health Diagnostic ===
 
     @app.get("/mesh/model-health")
-    async def model_health() -> list[dict]:
+    async def model_health(request: Request) -> list[dict]:
         """Return model failover health status. Mesh-internal diagnostic."""
+        _require_any_auth(request)
         if credential_vault is None:
             return []
         return credential_vault.get_model_health()
@@ -645,6 +664,15 @@ def create_mesh_app(
         except Exception as e:
             _server_logger.warning("notify_user failed: %s", e)
             raise HTTPException(500, f"Notification failed: {e}")
+        # Emit to dashboard event bus so WebSocket clients see notifications
+        if event_bus:
+            event_bus.emit("notification", agent=body.agent_id,
+                           data={"message": message})
+            # Emit workspace_updated when the notification is about identity file changes
+            _ws_files = (".md", "SOUL", "INSTRUCTIONS", "USER", "HEARTBEAT", "MEMORY")
+            if any(f in message for f in _ws_files):
+                event_bus.emit("workspace_updated", agent=body.agent_id,
+                               data={"message": message})
         return {"sent": True}
 
     @app.get("/mesh/agents")
@@ -657,6 +685,8 @@ def create_mesh_app(
         """
         if agent_id:
             _verify_auth(agent_id, request)
+        else:
+            _require_any_auth(request)
         def _agent_entry(aid: str, url: str) -> dict:
             return {"url": url, "role": router.agent_roles.get(aid, "")}
 
@@ -755,8 +785,9 @@ def create_mesh_app(
     # === Project Costs ===
 
     @app.get("/mesh/costs/project/{project}")
-    async def get_project_costs(project: str, period: str = "today") -> dict:
+    async def get_project_costs(project: str, request: Request, period: str = "today") -> dict:
         """Return aggregated cost data for a project."""
+        _require_any_auth(request)
         if cost_tracker is None:
             raise HTTPException(503, "Cost tracker not available")
         if not hasattr(cost_tracker, "get_project_spend"):
@@ -789,8 +820,9 @@ def create_mesh_app(
         return {"id": job.id, "agent": job.agent, "schedule": job.schedule, "heartbeat": job.heartbeat}
 
     @app.get("/mesh/cron")
-    async def list_cron_jobs(agent_id: str | None = None) -> list[dict]:
+    async def list_cron_jobs(request: Request, agent_id: str | None = None) -> list[dict]:
         """List cron jobs, optionally filtered by agent_id."""
+        _require_any_auth(request)
         if cron_scheduler is None:
             raise HTTPException(503, "Cron scheduler not available")
         jobs = cron_scheduler.list_jobs()
@@ -891,9 +923,8 @@ def create_mesh_app(
             if not permissions.can_message(requesting_agent, agent_id):
                 raise HTTPException(403, f"Agent {requesting_agent} cannot read history of {agent_id}")
         else:
-            # Internal/mesh callers must provide a requesting_agent for audit.
-            # Allow mesh-internal calls (from dashboard, health monitor, etc.)
-            # but log the unauthenticated access.
+            # Internal/dashboard callers: require any valid auth token.
+            _require_any_auth(request)
             _server_logger.debug("History access for %s without requesting_agent (mesh-internal)", agent_id)
         agent_entry = router.agent_registry.get(agent_id)
         if not agent_entry:
@@ -917,15 +948,17 @@ def create_mesh_app(
     # === Request Traces ===
 
     @app.get("/mesh/traces")
-    async def list_traces(limit: int = 50) -> list[dict]:
+    async def list_traces(request: Request, limit: int = 50) -> list[dict]:
         """Return recent trace events."""
+        _require_any_auth(request)
         if trace_store is None:
             return []
         return trace_store.list_recent(limit=limit)
 
     @app.get("/mesh/traces/{trace_id}")
-    async def get_trace(trace_id: str) -> list[dict]:
+    async def get_trace(trace_id: str, request: Request) -> list[dict]:
         """Return all events for a specific trace."""
+        _require_any_auth(request)
         if trace_store is None:
             return []
         return trace_store.get_trace(trace_id)
@@ -1048,6 +1081,7 @@ def create_mesh_app(
     @app.get("/vnc/{path:path}")
     async def vnc_http_proxy(path: str, request: Request):
         """Reverse-proxy HTTP requests to KasmVNC (static files)."""
+        _require_any_auth(request)
         import httpx
 
         port = _get_vnc_port()
@@ -1075,6 +1109,17 @@ def create_mesh_app(
     @app.websocket("/vnc/{path:path}")
     async def vnc_ws_proxy(websocket: WebSocket, path: str):
         """Reverse-proxy WebSocket connections to KasmVNC."""
+        # WebSocket auth: check token query param when auth is configured.
+        # In production, Caddy's forward_auth validates the session cookie on
+        # the HTTP upgrade request, but this adds defense-in-depth against
+        # direct mesh port access (e.g. from agent containers with host networking).
+        if _auth_tokens:
+            token = websocket.query_params.get("token", "")
+            if not token or not any(
+                hmac.compare_digest(token, exp) for exp in _auth_tokens.values()
+            ):
+                await websocket.close(code=1008, reason="Authentication required")
+                return
         port = _get_vnc_port()
         if port is None:
             await websocket.close(code=1011, reason="Browser service not available")

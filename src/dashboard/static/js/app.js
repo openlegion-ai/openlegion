@@ -897,6 +897,14 @@ function dashboard() {
         if (this.activeTab === 'system') this.fetchBlackboard();
       }
 
+      // Re-fetch identity/memory content when workspace files change
+      if (evt.type === 'workspace_updated' && evt.agent) {
+        const viewing = this.selectedAgent || this.detailAgent;
+        if (viewing === evt.agent) {
+          this.loadIdentityTabContent(viewing);
+        }
+      }
+
       // Debounced cost panel refresh on llm_call events
       if (evt.type === 'llm_call' && this.activeTab === 'system') {
         if (this._costDebounce) clearTimeout(this._costDebounce);
