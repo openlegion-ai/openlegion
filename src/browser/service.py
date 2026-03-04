@@ -78,6 +78,7 @@ class BrowserManager:
         self._instances: dict[str, CamoufoxInstance] = {}
         self._lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task | None = None
+        self._playwright = None
         self.redactor = CredentialRedactor()
 
     async def start_cleanup_loop(self):
@@ -123,9 +124,19 @@ class BrowserManager:
             self._instances[agent_id] = instance
             return instance
 
+    async def _ensure_playwright(self):
+        """Start the shared Playwright instance if not running."""
+        if self._playwright is None:
+            from playwright.async_api import async_playwright
+            self._pw_context = async_playwright()
+            self._playwright = await self._pw_context.start()
+        return self._playwright
+
     async def _start_browser(self, agent_id: str) -> CamoufoxInstance:
         """Launch a Camoufox browser for an agent."""
         from camoufox.async_api import AsyncNewBrowser
+
+        pw = await self._ensure_playwright()
 
         profile_dir = str(self.profiles_dir / agent_id)
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
@@ -133,9 +144,8 @@ class BrowserManager:
         options = build_launch_options(agent_id, profile_dir, self.display)
         logger.info("Starting Camoufox for '%s' (profile=%s)", agent_id, profile_dir)
 
-        # AsyncNewBrowser returns a context manager yielding (browser, context, page)
-        # For persistent context, we get a BrowserContext directly
-        browser = await AsyncNewBrowser(**options)
+        # persistent_context=True → returns a BrowserContext directly
+        browser = await AsyncNewBrowser(pw, **options)
         context = browser
         pages = context.pages
         page = pages[0] if pages else await context.new_page()
@@ -160,12 +170,18 @@ class BrowserManager:
         logger.info("Stopped browser for '%s'", agent_id)
 
     async def stop_all(self) -> None:
-        """Stop all browser instances."""
+        """Stop all browser instances and clean up Playwright."""
         if self._cleanup_task:
             self._cleanup_task.cancel()
         async with self._lock:
             for agent_id in list(self._instances.keys()):
                 await self._stop_instance(agent_id)
+        if self._playwright:
+            try:
+                await self._pw_context.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._playwright = None
 
     async def reset(self, agent_id: str) -> None:
         """Reset browser session — close and reopen (preserves profile)."""
