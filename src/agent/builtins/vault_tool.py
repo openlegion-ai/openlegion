@@ -109,11 +109,6 @@ async def vault_capture_from_page(
     try:
         # Use browser service to extract text from the element
         if ref:
-            js = f"""() => {{
-                // Refs are resolved by the browser service via get_by_role,
-                // but for capture we use evaluate with a selector fallback
-                return '';
-            }}"""
             # For ref-based capture, first get a snapshot to find the element
             snap = await mesh_client.browser_command("snapshot", {})
             ref_info = snap.get("data", {}).get("refs", {}).get(ref)

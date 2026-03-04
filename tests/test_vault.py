@@ -1,6 +1,6 @@
 """Tests for vault tools (credential-blind agent tools)."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
