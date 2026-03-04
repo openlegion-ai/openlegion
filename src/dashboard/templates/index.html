@@ -2213,8 +2213,8 @@
               <span x-show="!projectFormLoading">Create Project</span>
               <span x-show="projectFormLoading">Creating...</span>
             </button>
-            <button @click="closeProjectModal()"
-              class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">Cancel</button>
+            <button @click="closeProjectModal()" :disabled="projectFormLoading"
+              class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 disabled:opacity-50 transition-colors">Cancel</button>
           </div>
         </div>
       </div>

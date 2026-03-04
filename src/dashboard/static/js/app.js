@@ -1468,10 +1468,12 @@ function dashboard() {
     async saveConfigFromDetail(agentId) {
       if (this.configSaving) return;
       this.configSaving = true;
-      await this.saveAgentConfig(agentId);
-      // saveAgentConfig already calls cancelConfigEdit + fetchAgentConfig
-      this.configSaving = false;
-      await this.fetchAgentDetail(agentId);
+      try {
+        await this.saveAgentConfig(agentId);
+        // saveAgentConfig already calls cancelConfigEdit + fetchAgentConfig
+        await this.fetchAgentDetail(agentId);
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+      finally { this.configSaving = false; }
     },
 
     async saveAgentConfig(agentId) {
