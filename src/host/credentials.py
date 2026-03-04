@@ -59,7 +59,15 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
 
     If *env_file* is empty, defaults to ``PROJECT_ROOT / ".env"``.
     """
+    import re
     from pathlib import Path
+
+    # Reject newlines/carriage returns to prevent env injection
+    if re.search(r"[\r\n]", env_key) or re.search(r"[\r\n]", value):
+        raise ValueError("env key and value must not contain newline characters")
+    # Validate env key format
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", env_key):
+        raise ValueError(f"Invalid env key name: {env_key}")
 
     if not env_file:
         env_file = str(Path(__file__).resolve().parent.parent.parent / ".env")
@@ -80,6 +88,7 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
         lines.append(f"{env_key}={value}")
 
     env_path.write_text("\n".join(lines) + "\n")
+    os.chmod(env_file, 0o600)
     os.environ[env_key] = value
 
 
@@ -97,6 +106,7 @@ def _remove_from_env(env_key: str, env_file: str = "") -> None:
             if not line.startswith(f"{env_key}=")
         ]
         env_path.write_text("\n".join(lines) + "\n")
+        os.chmod(env_file, 0o600)
 
     os.environ.pop(env_key, None)
 

@@ -910,6 +910,7 @@ def create_dashboard_router(
 
     @api_router.post("/api/credentials")
     async def api_add_credential(request: Request) -> dict:
+        import re
         if credential_vault is None:
             raise HTTPException(status_code=503, detail="Credential vault not available")
         body = await request.json()
@@ -917,6 +918,12 @@ def create_dashboard_router(
         key = body.get("key", "").strip()
         if not service or not key:
             raise HTTPException(status_code=400, detail="service and key are required")
+        if not re.match(r"^[a-zA-Z0-9_.-]{1,128}$", service):
+            raise HTTPException(status_code=400, detail="Invalid service name (alphanumeric, _, ., - only, max 128 chars)")
+        if len(key) > 10_000:
+            raise HTTPException(status_code=400, detail="Key value too long (max 10000 chars)")
+        if "\n" in key or "\r" in key:
+            raise HTTPException(status_code=400, detail="Key value must not contain newline characters")
         # Normalize bare provider names
         from src.host.credentials import (
             SYSTEM_CREDENTIAL_PROVIDERS,
