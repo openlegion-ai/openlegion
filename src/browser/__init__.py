@@ -1,1 +1,1 @@
-"""Shared browser service — Camoufox + KasmVNC for all agents."""
+"""Shared browser service — Camoufox (stealth Firefox) + KasmVNC for all agents."""
