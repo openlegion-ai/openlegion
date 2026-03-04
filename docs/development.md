@@ -280,8 +280,8 @@ openlegion/
 │   │       ├── exec_tool.py     # Shell execution
 │   │       ├── file_tool.py     # File operations
 │   │       ├── http_tool.py     # HTTP requests
-│   │       ├── browser_tool.py  # Patchright browser
-│   │       ├── memory_tool.py   # Memory search/save/recall
+│   │       ├── browser_tool.py  # Browser automation via shared Camoufox service
+│   │       ├── memory_tool.py   # Memory search/save
 │   │       ├── mesh_tool.py     # Blackboard, pub/sub, artifacts, cron
 │   │       ├── vault_tool.py    # Credential vault (blind storage)
 │   │       ├── introspect_tool.py # Live runtime state queries
@@ -369,7 +369,7 @@ openlegion/
 | `pydantic` | Type validation |
 | `sqlite-vec` | Vector search for memory |
 | `mcp` | Model Context Protocol client |
-| `patchright` | Browser automation (Chromium via CDP) |
+| `camoufox` | Stealth browser automation (in browser service container) |
 
 ### Optional
 

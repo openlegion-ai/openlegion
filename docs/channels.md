@@ -52,11 +52,7 @@ The CLI REPL supports the full command set above plus additional management comm
 
 ### Setup
 
-```bash
-openlegion channels add telegram
-```
-
-This prompts for your bot token. Alternatively, set it in `.env`:
+Set your bot token in `.env`:
 
 ```bash
 OPENLEGION_CRED_TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
@@ -105,11 +101,7 @@ Pairing state is stored in `config/telegram_paired.json`.
 
 ### Setup
 
-```bash
-openlegion channels add discord
-```
-
-This prompts for your bot token. Alternatively, set it in `.env`:
+Set your bot token in `.env`:
 
 ```bash
 OPENLEGION_CRED_DISCORD_BOT_TOKEN=MTIz...
@@ -171,11 +163,7 @@ Pairing state is stored in `config/discord_paired.json`.
 
 ### Setup
 
-```bash
-openlegion channels add slack
-```
-
-This prompts for a bot token and app-level token. Alternatively, set them in `.env`:
+Set your tokens in `.env`:
 
 ```bash
 OPENLEGION_CRED_SLACK_BOT_TOKEN=xoxb-...
@@ -225,11 +213,7 @@ After pairing, the bot sends a help summary with all available commands. Unautho
 
 ### Setup
 
-```bash
-openlegion channels add whatsapp
-```
-
-This prompts for your access token and phone number ID. Alternatively, set them in `.env`:
+Set your tokens in `.env`:
 
 ```bash
 OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN=EAAx...

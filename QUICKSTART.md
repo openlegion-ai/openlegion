@@ -229,18 +229,20 @@ The Docker image builds automatically on your first `openlegion start` (~2 min).
 ## After Setup
 
 ```bash
-openlegion agent add analyst    # add an agent
 openlegion start -d             # run in background
 openlegion chat researcher      # connect from another terminal
 openlegion stop                 # shut down
 ```
 
+Use `/add` in the REPL to add more agents to a running system.
+
 ### Telegram / Discord (optional)
 
+Add channel tokens to `.env`:
+
 ```bash
-openlegion channels add telegram   # prompts for bot token
-openlegion channels add discord    # prompts for bot token
-openlegion channels list           # check what's connected
+OPENLEGION_CRED_TELEGRAM_BOT_TOKEN=123456:ABC...
+OPENLEGION_CRED_DISCORD_BOT_TOKEN=MTIz...
 ```
 
 On next `openlegion start`, a pairing code appears — send it to your bot to link.

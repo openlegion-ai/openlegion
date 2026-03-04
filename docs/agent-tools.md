@@ -28,18 +28,18 @@ All file operations are scoped to `/data` inside the container. Path traversal i
 
 ### Browser Automation
 
-All agents use a single browser architecture: **Chrome + KasmVNC**. A Chromium instance runs with a persistent profile at `/data/browser_profile`, and KasmVNC serves a live browser view on port 6080 (accessible via the dashboard). Patchright (a Playwright fork) connects to Chrome via CDP on-demand when browser tools are called and disconnects after each operation. This maintains login sessions and cookies across restarts while keeping the browser viewable in real-time.
+All agents share a single **browser service container** running Camoufox (a stealth Firefox fork) with KasmVNC. The browser service runs separately from agent containers — agents send browser commands via HTTP to the shared service. KasmVNC serves a live browser view on port 6080 (accessible via the dashboard). Browser profiles are preserved across sessions, maintaining login sessions and cookies.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `browser_navigate` | `url`, `wait_ms` | Open URL, wait, extract page text (default wait: 1000ms). Auto-recovers from dead CDP sessions. |
+| `browser_navigate` | `url`, `wait_ms` | Open URL, wait, extract page text (default wait: 1000ms). |
 | `browser_snapshot` | -- | Accessibility tree snapshot with element refs (e1, e2, ...) |
-| `browser_screenshot` | `filename`, `full_page`, `labeled` | Save screenshot to /data (default: screenshot.png). `labeled` overlays numbered labels on interactive elements (default: false). |
+| `browser_screenshot` | `full_page` | Take screenshot, return base64 PNG. |
 | `browser_click` | `ref` or `selector` | Click element by accessibility ref or CSS selector |
 | `browser_type` | `ref` or `selector`, `text` | Type into input field (supports `$CRED{name}` handles) |
 | `browser_evaluate` | `script` | Run JavaScript in page context |
-| `browser_reset` | -- | Force-close browser session and reconnect fresh |
-| `browser_solve_captcha` | -- | Detect and solve CAPTCHAs (reCAPTCHA v2/v3/Enterprise, hCaptcha, Turnstile). Requires `2captcha_key` or `capsolver_key` in vault. |
+| `browser_reset` | -- | Reset browser session (profile preserved) |
+| `browser_solve_captcha` | -- | Manual CAPTCHA detection and solving. Usually not needed — `browser_navigate` auto-detects CAPTCHAs. |
 
 ### Memory
 

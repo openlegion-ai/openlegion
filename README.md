@@ -8,7 +8,7 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 1607](https://img.shields.io/badge/tests-1607%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 1635](https://img.shields.io/badge/tests-1635%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -80,11 +80,8 @@ openlegion start
 > **Need help?** See the **[full setup guide](QUICKSTART.md)** for platform-specific instructions and troubleshooting.
 
 ```bash
-# Add more agents later
-openlegion agent add researcher
-
-# Check status
-openlegion status
+# Add more agents from the REPL
+/add
 
 # Run in background
 openlegion start -d
@@ -116,7 +113,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 1607 tests including full Docker E2E |
+| **Test coverage** | Minimal | 1635 tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~25,000 lines — auditable in a day |
 
 ---
@@ -131,7 +128,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**1607 tests passing** across **~25,000 lines** of application code.
+**1635 tests passing** across **~25,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
@@ -156,7 +153,7 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
 7. **Multi-channel** — connect agents to Telegram, Discord, Slack, and WhatsApp. Also accessible via CLI and API.
 
-8. **Real-time dashboard** — web-based fleet observability at `/dashboard` with consolidated navigation, slide-over chat panels, keyboard command palette, grouped request traces, live event streaming, streaming broadcast with real-time per-agent responses, LLM prompt/response previews, agent management, agent identity editor (personality, instructions, preferences, heartbeat rules, memory, activity logs, learnings), cost charts, cron management, and embedded KasmVNC viewer for persistent browser agents.
+8. **Real-time dashboard** — web-based fleet observability with consolidated navigation, slide-over chat panels, keyboard command palette, grouped request traces, live event streaming, streaming broadcast with real-time per-agent responses, LLM prompt/response previews, agent management, agent identity editor (personality, instructions, preferences, heartbeat rules, memory, activity logs, learnings), cost charts, cron management, and embedded KasmVNC viewer for persistent browser agents.
 
 9. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly budget enforcement.
 
@@ -184,7 +181,7 @@ connections.
 │   - setup              - POST /webhook/    - "0 9 * * 1-5"             │
 │   - start (REPL)         hook/{id}         - "every 30m"               │
 │   - stop / status      - Trigger agents    - Heartbeat pattern          │
-│   - agent add/list                                                      │
+│   - chat / status                                                       │
 └──────────────┬──────────────────┬──────────────────┬────────────────────┘
                │                  │                  │
                ▼                  ▼                  ▼
@@ -220,7 +217,7 @@ connections.
 │ :8401   │ │ :8402   │ │ :8403   │       │ :840N   │
 └─────────┘ └─────────┘ └─────────┘       └─────────┘
   Each agent: isolated Docker container, own /data volume,
-  own memory DB, own workspace, 1GB RAM, 1 CPU cap
+  own memory DB, own workspace, 384MB RAM, 0.15 CPU
 ```
 
 ### Trust Zones
@@ -312,13 +309,21 @@ steps:
 
 ### Container Manager
 
-Each agent runs in an isolated Docker container with:
-- **Image**: `openlegion-agent:latest` (Python 3.12, system tools, Patchright, Chromium, KasmVNC)
+Agent containers are slim — no browser. Browsing is handled by a shared browser service container (Camoufox + KasmVNC).
+
+**Agent container:**
+- **Image**: `openlegion-agent:latest` (Python 3.12, system tools — no browser)
 - **Network**: Bridge with port mapping (macOS/Windows) or host network (Linux)
 - **Volume**: `openlegion_data_{agent_id}` mounted at `/data` (agent names with spaces/special chars are sanitized)
-- **Resources**: 1GB RAM limit (includes Chrome + KasmVNC), 1 CPU quota
+- **Resources**: 384MB RAM, 0.15 CPU (agents are I/O-bound — waiting on LLM APIs)
 - **Security**: `no-new-privileges`, runs as non-root `agent` user (UID 1000)
-- **Ports**: 8400 (FastAPI), 6080 (KasmVNC for persistent browser)
+- **Port**: 8400 (FastAPI)
+
+**Browser service container** (shared across all agents):
+- **Image**: `openlegion-browser:latest` (Camoufox stealth browser + KasmVNC)
+- **Resources**: 2GB RAM, 1 CPU, 512MB shared memory
+- **Ports**: 8500 (browser API), 6080 (KasmVNC web client)
+- **Capacity**: up to 5 concurrent browser sessions
 
 ---
 
@@ -382,8 +387,7 @@ escalates through three levels:
 | **Block** | 4th identical call | Tool skipped, error returned to agent |
 | **Terminate** | 9th call with same params | Loop terminated with failure status |
 
-Memory retrieval tools (`memory_search`, `memory_recall`) are exempt since
-repeated searches are legitimate. Detection uses SHA-256 hashes of
+`memory_search` is exempt since repeated searches are legitimate. Detection uses SHA-256 hashes of
 canonicalized parameters and results over a 15-call sliding window.
 
 ### Built-in Tools
@@ -395,25 +399,28 @@ canonicalized parameters and results over a 15-call sliding window.
 | `write_file` | Write/append file in `/data` |
 | `list_files` | List/glob files in `/data` |
 | `http_request` | HTTP GET/POST/PUT/DELETE/PATCH |
-| `browser_navigate` | Open URL, extract page text (auto-recovers from dead CDP sessions) |
+| `browser_navigate` | Open URL, extract page text via shared browser service |
 | `browser_snapshot` | Accessibility tree snapshot with element refs (e1, e2, ...) |
 | `browser_screenshot` | Capture page screenshot |
 | `browser_click` | Click element by ref or CSS selector |
-| `browser_type` | Fill input by ref or CSS selector |
+| `browser_type` | Fill input by ref or CSS selector (supports `$CRED{}` handles) |
 | `browser_evaluate` | Run JavaScript in page |
-| `browser_reset` | Force-close browser and reconnect fresh (new IP for Bright Data) |
+| `browser_reset` | Reset browser session (profile preserved) |
+| `browser_solve_captcha` | Manual CAPTCHA detection and solving |
 | `memory_search` | Hybrid search across workspace files and structured DB |
 | `memory_save` | Save fact to workspace and structured memory DB |
-| `memory_recall` | Semantic search over structured facts with category filtering |
 | `web_search` | Search the web via DuckDuckGo (no API key) |
+| `notify_user` | Send notification to user across all connected channels |
 | `list_agents` | Discover agents in your project (standalone agents see only themselves) |
 | `read_shared_state` | Read from the shared blackboard |
 | `write_shared_state` | Write to the shared blackboard |
 | `list_shared_state` | Browse blackboard entries by prefix |
 | `publish_event` | Publish event to mesh pub/sub |
+| `subscribe_event` | Subscribe to a pub/sub topic at runtime |
+| `watch_blackboard` | Watch blackboard keys matching a glob pattern |
+| `claim_task` | Atomically claim a task from the shared blackboard |
 | `save_artifact` | Save deliverable file and register on blackboard |
-| `update_workspace` | Update identity files (HEARTBEAT.md, USER.md) |
-| `notify_user` | Send notification to user across all connected channels |
+| `update_workspace` | Update identity files (SOUL.md, INSTRUCTIONS.md, USER.md, HEARTBEAT.md) |
 | `set_cron` | Schedule a recurring job (set `heartbeat=true` for autonomous wakeups) |
 | `list_cron` / `remove_cron` | Manage scheduled jobs |
 | `create_skill` | Write a new Python skill at runtime |
@@ -488,8 +495,8 @@ Nothing is permanently lost during compaction.
 ### Cross-Session Memory
 
 Facts saved with `memory_save` are stored in both the workspace (daily log)
-and the structured SQLite database. After a reset or restart, `memory_recall`
-retrieves them via semantic search:
+and the structured SQLite database. After a reset or restart, `memory_search`
+retrieves them via hybrid search:
 
 ```
 Session 1: User says "My cat's name is Whiskerino"
@@ -498,7 +505,7 @@ Session 1: User says "My cat's name is Whiskerino"
   ═══ Chat Reset ═══
 
 Session 2: User asks "What is my cat's name?"
-           Agent recalls "Whiskerino" via memory_recall
+           Agent recalls "Whiskerino" via memory_search
 ```
 
 ---
@@ -582,7 +589,7 @@ Defense-in-depth with six layers:
 | Credential separation | Vault holds keys, agents call via proxy | Key leakage, unauthorized API use |
 | Permission enforcement | Per-agent ACLs for messaging, blackboard, pub/sub, APIs | Unauthorized data access |
 | Input validation | Path traversal prevention, SSRF blocking, safe condition eval (no `eval()`), token budgets, iteration limits, rate limiting | Injection, runaway loops, network abuse |
-| Unicode sanitization | Invisible character stripping at three choke points | Prompt injection via hidden Unicode |
+| Unicode sanitization | Invisible character stripping at five choke points (user input, tool results, workspace, mesh tools, dashboard) | Prompt injection via hidden Unicode |
 
 ### Dual Runtime Backend
 
@@ -596,7 +603,7 @@ OpenLegion supports two isolation levels:
 | **Requirements** | Any Docker install | Docker Desktop 4.58+ |
 | **Enable** | `openlegion start` | `openlegion start --sandbox` |
 
-**Docker containers** (default) run agents as non-root with `no-new-privileges`, 1GB memory limit (includes Chrome + KasmVNC), 1 CPU cap, and no host filesystem access. This is secure for most use cases.
+**Docker containers** (default) run agents as non-root with `no-new-privileges`, 384MB memory limit, 0.15 CPU cap, and no host filesystem access. Browser operations are handled by a shared browser service container (2GB RAM, 1 CPU). This is secure for most use cases.
 
 **Docker Sandbox microVMs** give each agent its own Linux kernel via Apple Virtualization.framework (macOS) or Hyper-V (Windows). Even if an agent achieves code execution, it's trapped inside a lightweight VM with no visibility into other agents or the host. Use this when running untrusted code or when compliance requires hypervisor isolation.
 
@@ -615,77 +622,17 @@ openlegion start --sandbox
 ## CLI Reference
 
 ```
-openlegion [--verbose/-v] [--quiet/-q] [--config PATH]
-├── start [--config PATH] [-d] [--sandbox]  # Start runtime + interactive REPL (inline setup on first run)
-├── stop                                 # Stop all containers
-├── chat <name> [--port PORT]            # Connect to a running agent
-├── status [--port PORT]                 # Show agent status
-├── version [--verbose]                  # Show version and environment info
-├── health [--port PORT]                 # Run pre-flight health checks
-├── logs [-n LINES] [-f] [--level LEVEL] # View runtime and agent logs
-├── queue [--port PORT] [--json]         # Show agent task queues
-├── debug [TRACE_ID] [--port PORT]       # View request traces for debugging
-│
-├── agent
-│   ├── add [name]                       # Add a new agent
-│   ├── edit <name>                      # Edit agent settings (model, browser, budget)
-│   ├── list                             # List configured agents
-│   ├── remove <name> [--yes]            # Remove an agent
-│   └── restart [NAMES...] [--all]       # Restart one or more agents
-│
-├── credential
-│   ├── add [SERVICE] [--key] [--tier]   # Add a new credential
-│   ├── list [--json]                    # List stored credentials (masked)
-│   └── remove <name> [--yes]            # Remove a credential
-│
-├── webhook
-│   ├── add <name> --agent <name>        # Create a webhook endpoint
-│   ├── list [--json]                    # List configured webhooks
-│   ├── remove <name> [--yes]            # Remove a webhook
-│   └── test <name> [--payload JSON]     # Send a test payload
-│
-├── blackboard
-│   ├── list [--prefix] [--json]         # List blackboard entries
-│   ├── get <key>                        # Get a blackboard entry
-│   ├── set <key> <value>                # Set a blackboard entry
-│   └── delete <key> [--yes]             # Delete a blackboard entry
-│
-├── cron
-│   ├── list [--json]                    # List cron jobs
-│   ├── delete <job_id> [--yes]          # Delete a cron job
-│   ├── pause <job_id>                   # Pause a cron job
-│   ├── resume <job_id>                  # Resume a paused cron job
-│   └── run <job_id>                     # Trigger a cron job immediately
-│
-├── workflow
-│   ├── list [--json]                    # List configured workflows
-│   └── run <name> [--payload JSON]      # Trigger a workflow
-│
-├── config
-│   ├── show [--json]                    # Show effective configuration
-│   ├── validate                         # Check configuration for errors
-│   ├── path                             # Show config file locations
-│   ├── export [OUTPUT]                  # Export configuration as tarball
-│   └── import <archive> [--yes]         # Import configuration from tarball
-│
-├── skill
-│   ├── install <repo_url> [--ref TAG]         # Install skill from git repo
-│   ├── list                                    # List installed marketplace skills
-│   └── remove <name> [--yes]                   # Remove an installed skill
-│
-├── project
-│   ├── create <name>                          # Create a new project
-│   ├── list                                    # List all projects and members
-│   ├── delete <name> [--yes]                  # Delete a project
-│   ├── add-agent <project> <agent>            # Add an agent to a project
-│   ├── remove-agent <project> <agent>         # Remove an agent from a project
-│   └── edit <name>                            # Edit project description
-│
-└── channels
-    ├── add [telegram|discord|slack|whatsapp]  # Connect a messaging channel
-    ├── list                                    # Show configured channels
-    └── remove <name>                           # Disconnect a channel
+openlegion [--verbose/-v] [--quiet/-q] [--json]
+├── start [--config PATH] [-d] [--sandbox]     # Start runtime + interactive REPL (inline setup on first run)
+├── stop                                       # Stop all containers
+├── chat [name] [--port PORT]                  # Connect to a running agent
+├── status [--port PORT] [--wide/-w] [--watch N] [--json]  # Show agent status
+└── version [--verbose/-v]                     # Show version and environment info
 ```
+
+> Agent management, credentials, blackboard, cron, workflows, projects, and channels
+> are managed via **REPL commands** (below) inside a running session, or via the
+> **web dashboard** at `http://localhost:8420`.
 
 ### Interactive REPL Commands
 
@@ -706,7 +653,7 @@ openlegion [--verbose/-v] [--quiet/-q] [--config PATH]
 /queue                               Show agent task queue status
 /workflow [list|run]                 List or trigger workflows
 /cron [list|del|pause|resume|run]    Manage cron jobs
-/project [list|create|delete|...]    Manage multi-project namespaces
+/project [list|use|info]              Manage multi-project namespaces
 /credential [add|list|remove]        Manage API credentials
 /debug [trace]                       Show recent request traces
 /logs [--level LEVEL]                Show recent runtime logs
@@ -762,20 +709,22 @@ mesh:
 
 llm:
   default_model: "openai/gpt-4o-mini"
-  embedding_model: "text-embedding-3-small"
+  embedding_model: "text-embedding-3-small"   # "none" to disable vector search
+
+collaboration: true                           # allow agents to message each other (default: true for new agents)
 ```
 
 ### `config/agents.yaml` — Agent Definitions
 
-Created automatically by `openlegion start` (inline setup) or `openlegion agent add`.
+Created automatically by `openlegion start` (inline setup) or the `/add` REPL command.
 
 ```yaml
 agents:
   researcher:
     role: "research"
     model: "openai/gpt-4.1-mini"
-    skills_dir: "./skills/research"
-    instructions: "You are a research specialist..."
+    skills_dir: "./skills/researcher"
+    initial_instructions: "You are a research specialist..."
     thinking: "medium"                   # off (default), low, medium, or high
     budget:
       daily_usd: 5.00
@@ -794,7 +743,7 @@ retry policies, and failure handlers.
 
 ### `.env` — API Keys
 
-Managed automatically by `openlegion start` and `openlegion channels add`. You can also edit directly. Uses a two-tier prefix system:
+Managed automatically by `openlegion start` (setup wizard) and the `/addkey` REPL command. You can also edit directly. Uses a two-tier prefix system:
 
 ```bash
 # System tier — LLM provider keys (never accessible by agents)
@@ -819,13 +768,23 @@ OPENLEGION_LOG_FORMAT=text
 
 ### Connecting Channels
 
+Channels are configured via the setup wizard during `openlegion start`, or by
+adding the appropriate tokens to `.env` directly:
+
 ```bash
-openlegion channels add telegram    # prompts for bot token from @BotFather
-openlegion channels add discord     # prompts for bot token
-openlegion channels add slack       # prompts for bot + app tokens
-openlegion channels add whatsapp    # prompts for access token + phone ID
-openlegion channels list            # check what's connected
-openlegion channels remove telegram # disconnect
+# Telegram
+OPENLEGION_CRED_TELEGRAM_BOT_TOKEN=123456:ABC...
+
+# Discord
+OPENLEGION_CRED_DISCORD_BOT_TOKEN=MTIz...
+
+# Slack (both required)
+OPENLEGION_CRED_SLACK_BOT_TOKEN=xoxb-...
+OPENLEGION_CRED_SLACK_APP_TOKEN=xapp-...
+
+# WhatsApp (both required)
+OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN=EAAx...
+OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
 ```
 
 On next `openlegion start`, a pairing code appears — send it to your bot to link.
@@ -903,7 +862,7 @@ pytest tests/
 
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
-| Built-in Tools | 145 | exec, file, browser (Chrome + KasmVNC, screenshots, reset/recovery), memory, mesh, vault, introspect, path traversal, discovery |
+| Built-in Tools | 145 | exec, file, browser (Camoufox, screenshots, reset/recovery), memory, mesh, vault, introspect, path traversal, discovery |
 | Dashboard | 104 | Fleet management, blackboard, costs, traces, queues, cron, settings, config, streaming broadcast, workspace proxy |
 | Workspace | 68 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files, SYSTEM.md |
 | Agent Loop | 67 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
@@ -945,10 +904,10 @@ pytest tests/
 | MCP E2E | 7 | Real MCP protocol with live server subprocess |
 | Webhooks | 7 | Add/remove, persistence, dispatch |
 | File Watchers | 7 | Polling, dispatch, pattern matching |
-| Memory Tools | 6 | memory_search, memory_save, memory_recall |
+| Memory Tools | 6 | memory_search, memory_save |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **1607** | |
+| **Total** | **1635** | |
 
 ---
 
@@ -956,7 +915,7 @@ pytest tests/
 
 | Package | Purpose |
 |---------|---------|
-| fastapi | HTTP servers (mesh + agent) |
+| fastapi | HTTP servers (mesh + agent + browser service) |
 | uvicorn | ASGI server |
 | httpx | Async HTTP client |
 | pydantic | Data validation |
@@ -966,13 +925,13 @@ pytest tests/
 | click | CLI framework |
 | docker | Docker API client |
 | python-dotenv | `.env` file loading |
-| patchright | Browser automation via CDP (Playwright fork, in container only) |
-| mcp | MCP tool server client (in container only, optional) |
+| camoufox | Stealth browser automation (in browser service container only) |
+| mcp | MCP tool server client (in agent container only, optional) |
 | slack-bolt | Slack channel adapter (optional) |
 
 Dev: pytest, pytest-asyncio, pytest-cov, ruff.
 
-No LangChain. No Redis. No Kubernetes. Real-time web dashboard at `/dashboard`. Optional channels: `python-telegram-bot`, `discord.py`, `slack-bolt`.
+No LangChain. No Redis. No Kubernetes. Real-time web dashboard. Optional channels: `python-telegram-bot`, `discord.py`, `slack-bolt`.
 
 ---
 
@@ -1003,9 +962,9 @@ src/
 │       ├── exec_tool.py                # Shell execution
 │       ├── file_tool.py                # File I/O (read, write, list)
 │       ├── http_tool.py                # HTTP requests
-│       ├── browser_tool.py             # Patchright automation (Chrome + KasmVNC with on-demand CDP)
+│       ├── browser_tool.py             # Browser automation via shared Camoufox service
 │       ├── web_search_tool.py          # Web search via DuckDuckGo
-│       ├── memory_tool.py              # Memory search, save, recall
+│       ├── memory_tool.py              # Memory search and save
 │       ├── mesh_tool.py                # Shared state, fleet awareness, artifacts
 │       ├── vault_tool.py               # Credential vault operations
 │       ├── skill_tool.py               # Runtime skill creation + hot-reload
@@ -1033,6 +992,11 @@ src/
 │   ├── types.py                        # All Pydantic models (the contract)
 │   ├── utils.py                        # ID generation, logging, sanitization
 │   └── trace.py                        # Trace ID generation + correlation
+├── browser/
+│   ├── server.py                       # Browser service FastAPI server
+│   ├── service.py                      # Camoufox session management
+│   ├── stealth.py                      # Anti-detection configuration
+│   └── redaction.py                    # Credential redaction for browser content
 ├── channels/
 │   ├── base.py                         # Abstract channel with unified UX
 │   ├── telegram.py                     # Telegram adapter

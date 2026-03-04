@@ -90,7 +90,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 
 4. **Path traversal protection in agent file tools.** Agent file operations are confined to `/data` inside the container. The `file_tool.py` tools must validate paths. Never expose host filesystem paths to agents.
 
-5. **Container hardening is not optional.** Agents run as non-root (UID 1000), with `no-new-privileges`, memory limits (1GB — all agents include Chrome + KasmVNC), and CPU quotas. Don't weaken these defaults.
+5. **Container hardening is not optional.** Agents run as non-root (UID 1000), with `no-new-privileges`, memory limits (384MB), and CPU quotas (0.15 CPU). Browser operations are handled by a shared browser service container (2GB RAM, 1 CPU). Don't weaken these defaults.
 
 6. **All untrusted text is sanitized before reaching LLM context.** `sanitize_for_prompt()` in `src/shared/utils.py` strips invisible Unicode (bidi overrides, tag chars, zero-width chars, variation selectors, etc.) at multiple choke points: user input (`src/agent/server.py`), tool results and system prompt context (`src/agent/loop.py`), workspace loading (`src/agent/workspace.py`), mesh tools (`src/agent/builtins/mesh_tool.py`), and dashboard input (`src/dashboard/server.py`). New paths from untrusted text to LLM context must call `sanitize_for_prompt()`. Never bypass these layers.
 

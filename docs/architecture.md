@@ -81,9 +81,9 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `exec_tool.py` | Shell command execution |
 | `file_tool.py` | File read/write/list scoped to /data |
 | `http_tool.py` | HTTP requests |
-| `browser_tool.py` | Browser automation: Chrome + KasmVNC with Patchright connecting via CDP on-demand |
+| `browser_tool.py` | Browser automation via shared Camoufox browser service |
 | `mesh_tool.py` | Blackboard, PubSub, fleet awareness, artifacts, cron, heartbeat, spawn |
-| `memory_tool.py` | Memory search, save, recall |
+| `memory_tool.py` | Memory search and save |
 | `vault_tool.py` | Credential-blind vault operations |
 | `introspect_tool.py` | Runtime self-inspection (permissions, budget, fleet, cron, health) |
 | `skill_tool.py` | Runtime skill creation and hot-reload |
