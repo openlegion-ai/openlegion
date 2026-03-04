@@ -112,12 +112,24 @@ def create_dashboard_router(
     def _browser_vnc_url_for_request(request: Request) -> str | None:
         """Build shared browser VNC URL using the request host.
 
-        The browser service VNC is shared across all agents. Each agent's
-        browser window is brought to foreground via the focus endpoint.
+        Supports two modes:
+        - **Behind reverse proxy** (Caddy/nginx): detected via x-forwarded-proto
+          header. Routes VNC through /vnc/ path on the same origin so it works
+          through HTTPS without exposing extra ports.
+        - **Direct access** (local dev): uses the VNC port directly.
         """
         if not runtime or not hasattr(runtime, 'browser_vnc_url') or not runtime.browser_vnc_url:
             return None
-        # Parse the port from the stored URL and rebuild with request host
+
+        forwarded_proto = request.headers.get("x-forwarded-proto")
+        if forwarded_proto:
+            # Behind a reverse proxy (Caddy, nginx, etc.)
+            # Route through /vnc/ path — proxy must forward to the VNC port
+            scheme = forwarded_proto
+            host = request.headers.get("host", "127.0.0.1:8420")
+            return f"{scheme}://{host}/vnc/index.html?autoconnect=true&path=vnc/&resize=scale"
+
+        # Direct access (local dev) — use the VNC port directly
         import re as _url_re
         match = _url_re.search(r":(\d+)/", runtime.browser_vnc_url)
         if not match:
