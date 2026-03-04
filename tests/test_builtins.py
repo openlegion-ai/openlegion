@@ -6,7 +6,6 @@ import shutil
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 
 
@@ -929,8 +928,9 @@ class TestCredentialRedaction:
     def test_browser_command_redacts_response(self):
         """_browser_command applies _deep_redact to the response."""
         import asyncio
-        from src.agent.builtins.browser_tool import _browser_command
+
         import src.agent.builtins.browser_tool as bt
+        from src.agent.builtins.browser_tool import _browser_command
 
         bt._resolved_credential_values = {"leaked-secret"}
 
@@ -948,8 +948,9 @@ class TestCredentialRedaction:
     def test_browser_command_redacts_error(self):
         """_browser_command redacts errors too."""
         import asyncio
-        from src.agent.builtins.browser_tool import _browser_command
+
         import src.agent.builtins.browser_tool as bt
+        from src.agent.builtins.browser_tool import _browser_command
 
         bt._resolved_credential_values = {"my-secret"}
 

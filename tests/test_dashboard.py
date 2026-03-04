@@ -30,6 +30,9 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
 
     # Minimal health monitor with mocked runtime/transport/router
     runtime_mock = MagicMock()
+    runtime_mock.browser_vnc_url = None
+    runtime_mock.browser_service_url = None
+    runtime_mock.browser_auth_token = ""
     transport_mock = MagicMock()
     router_mock = MagicMock()
     health_monitor = HealthMonitor(

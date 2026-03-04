@@ -9,7 +9,6 @@ the X server and VNC server. No separate Xvfb is needed.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import subprocess
 import sys

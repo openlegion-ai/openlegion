@@ -222,7 +222,11 @@ def _check_docker_image() -> bool:
         return False
 
 
-def _docker_image_is_stale(image_name: str = DOCKER_IMAGE, src_dirs: list | None = None, dockerfile_name: str = "Dockerfile.agent") -> bool:
+def _docker_image_is_stale(
+    image_name: str = DOCKER_IMAGE,
+    src_dirs: list | None = None,
+    dockerfile_name: str = "Dockerfile.agent",
+) -> bool:
     """Check if source files are newer than a Docker image."""
     try:
         from datetime import datetime, timezone

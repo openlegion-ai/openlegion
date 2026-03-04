@@ -193,7 +193,7 @@ class TestBrowserManagerRefResolution:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.refs = {"e0": {"role": "textbox", "name": ""}}
 
-        locator = mgr._locator_from_ref(inst, "e0")
+        mgr._locator_from_ref(inst, "e0")
         mock_page.get_by_role.assert_called_once_with("textbox")
 
     @pytest.mark.asyncio
@@ -263,7 +263,7 @@ class TestStealthConfig:
         assert "proxy" not in opts
 
     def test_build_launch_options_with_proxy(self):
-        from src.browser.stealth import build_launch_options
+        from src.browser.stealth import build_launch_options  # noqa: F401
         env = {
             "BROWSER_PROXY_URL": "http://proxy.example.com:8080",
             "BROWSER_PROXY_USER": "user",
