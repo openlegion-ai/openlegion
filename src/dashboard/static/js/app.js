@@ -407,7 +407,7 @@ function dashboard() {
       this.confirmLoading = true;
       try {
         if (this.confirmModal.action) await this.confirmModal.action();
-        this.cancelConfirm();
+        this.confirmModal = { open: false, title: '', message: '', action: null, destructive: false };
       } catch (e) {
         this.showToast(`Error: ${e.message}`);
       } finally {
