@@ -300,7 +300,6 @@ def _build_browser_image() -> None:
     proc = subprocess.Popen(
         [
             "docker", "build",
-            "--platform", "linux/amd64",
             "-t", BROWSER_IMAGE,
             "-f", "Dockerfile.browser", ".",
         ],
@@ -318,7 +317,7 @@ def _build_browser_image() -> None:
     proc.wait()
     if proc.returncode != 0:
         click.echo("Browser image build failed. Run manually for full output:", err=True)
-        click.echo(f"  docker build --platform linux/amd64 -t {BROWSER_IMAGE} -f Dockerfile.browser .", err=True)
+        click.echo(f"  docker build -t {BROWSER_IMAGE} -f Dockerfile.browser .", err=True)
         sys.exit(1)
     click.echo("\n  Browser Docker image built successfully.")
 
@@ -330,7 +329,6 @@ def _build_docker_image() -> None:
     proc = subprocess.Popen(
         [
             "docker", "build",
-            "--platform", "linux/amd64",
             "-t", DOCKER_IMAGE,
             "-f", "Dockerfile.agent", ".",
         ],
@@ -348,7 +346,7 @@ def _build_docker_image() -> None:
     proc.wait()
     if proc.returncode != 0:
         click.echo("Docker build failed. Run manually for full output:", err=True)
-        click.echo(f"  docker build --platform linux/amd64 -t {DOCKER_IMAGE} -f Dockerfile.agent .", err=True)
+        click.echo(f"  docker build -t {DOCKER_IMAGE} -f Dockerfile.agent .", err=True)
         sys.exit(1)
     click.echo("\n  Docker image built successfully.")
 

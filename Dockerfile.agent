@@ -1,6 +1,4 @@
-# Force amd64: sqlite-vec has broken ARM wheels.
-# Docker Desktop uses Rosetta 2 on Apple Silicon — fast and reliable.
-FROM --platform=linux/amd64 python:3.12-slim
+FROM python:3.12-slim
 
 # System tools useful for agent operations
 # tini: proper init process that reaps zombie children.
@@ -15,11 +13,12 @@ WORKDIR /app
 
 # Python dependencies — only what agents actually import
 # (litellm, pyyaml, click, docker are host-only — not needed here)
-# sqlite-vec requires amd64 (ARM wheels have broken 32-bit .so files)
+# sqlite-vec --pre: v0.1.7-alpha fixes broken ARM64 wheels
 # No browser deps — browsing is handled by the shared browser service
 COPY pyproject.toml .
 RUN pip install --no-cache-dir \
-    fastapi uvicorn httpx pydantic sqlite-vec mcp
+    fastapi uvicorn httpx pydantic mcp \
+    && pip install --no-cache-dir --pre sqlite-vec
 
 # Application code
 COPY src/agent/ /app/src/agent/

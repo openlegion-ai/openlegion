@@ -1,6 +1,6 @@
 # Shared browser service: Camoufox (stealth Firefox) + KasmVNC.
 # One container serves all agents via per-agent browser instances.
-FROM --platform=linux/amd64 python:3.12-slim
+FROM python:3.12-slim
 
 # System packages: Openbox WM, tini, curl, plus GTK3/X11 libs for Camoufox (Firefox)
 # KasmVNC provides Xvnc (X server + VNC server) so no separate Xvfb needed
@@ -9,8 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgtk-3-0 libatk1.0-0 libasound2 \
     libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libgbm1 \
     libpango-1.0-0 libcairo2 libdbus-glib-1-2 \
+    && ARCH=$(dpkg --print-architecture) \
     && curl -fSL -o /tmp/kasmvnc.deb \
-       https://github.com/kasmtech/KasmVNC/releases/download/v1.4.0/kasmvncserver_bookworm_1.4.0_amd64.deb \
+       "https://github.com/kasmtech/KasmVNC/releases/download/v1.4.0/kasmvncserver_bookworm_1.4.0_${ARCH}.deb" \
     && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb \
     && rm /tmp/kasmvnc.deb \
     && rm -rf /var/lib/apt/lists/*
