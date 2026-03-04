@@ -23,7 +23,7 @@ WORKDIR /app
 # Python dependencies
 COPY pyproject.toml .
 RUN pip install --no-cache-dir \
-    "camoufox[geoip]" fastapi uvicorn httpx pydantic Pillow python_ghost_cursor
+    "camoufox[geoip]" fastapi uvicorn pydantic
 
 # Application code
 COPY src/browser/ /app/src/browser/

@@ -90,10 +90,7 @@ def main() -> None:
         profiles_dir="/data/profiles",
         max_concurrent=_MAX_BROWSERS,
         idle_timeout_minutes=_IDLE_TIMEOUT,
-        display=_DISPLAY,
     )
-
-    app = create_browser_app(manager)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -109,7 +106,7 @@ def main() -> None:
                 proc.kill()
         logger.info("Browser service shut down")
 
-    app.router.lifespan_context = lifespan
+    app = create_browser_app(manager, lifespan=lifespan)
     uvicorn.run(app, host="0.0.0.0", port=_API_PORT)
 
 

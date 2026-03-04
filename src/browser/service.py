@@ -30,13 +30,9 @@ _CONTEXT_ROLES = frozenset({
 
 _MAX_SNAPSHOT_ELEMENTS = 200
 
-_ARIA_LINE_RE = re.compile(
-    r"^\s*-\s+"
-    r"(?P<role>\w+)"
-    r'(?:\s+"(?P<name>[^"]*)")?'
-    r"(?:\s+\[(?P<attrs>[^\]]*)\])?"
-    r"\s*$"
-)
+_BLOCKED_URL_SCHEMES = frozenset({"file", "javascript", "data", "blob"})
+_MAX_WAIT_MS = 10000  # 10 seconds max wait after navigation
+_AGENT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
 
 class CamoufoxInstance:
@@ -68,13 +64,11 @@ class BrowserManager:
         profiles_dir: str = "/data/profiles",
         max_concurrent: int = 5,
         idle_timeout_minutes: int = 30,
-        display: str = ":99",
     ):
         self.profiles_dir = Path(profiles_dir)
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
         self.max_concurrent = max_concurrent
         self.idle_timeout = idle_timeout_minutes * 60
-        self.display = display
         self._instances: dict[str, CamoufoxInstance] = {}
         self._lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task | None = None
@@ -95,17 +89,19 @@ class BrowserManager:
 
     async def _cleanup_idle(self):
         now = time.time()
-        to_stop = []
         async with self._lock:
-            for agent_id, inst in self._instances.items():
-                if now - inst.last_activity > self.idle_timeout:
-                    to_stop.append(agent_id)
-        for agent_id in to_stop:
-            logger.info("Stopping idle browser for '%s'", agent_id)
-            await self.stop(agent_id)
+            to_stop = [
+                agent_id for agent_id, inst in self._instances.items()
+                if now - inst.last_activity > self.idle_timeout
+            ]
+            for agent_id in to_stop:
+                logger.info("Stopping idle browser for '%s'", agent_id)
+                await self._stop_instance(agent_id)
 
     async def get_or_start(self, agent_id: str) -> CamoufoxInstance:
         """Get existing browser or start a new one for the agent."""
+        if not _AGENT_ID_RE.match(agent_id):
+            raise ValueError(f"Invalid agent_id: {agent_id!r}")
         async with self._lock:
             if agent_id in self._instances:
                 inst = self._instances[agent_id]
@@ -141,7 +137,7 @@ class BrowserManager:
         profile_dir = str(self.profiles_dir / agent_id)
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
-        options = build_launch_options(agent_id, profile_dir, self.display)
+        options = build_launch_options(agent_id, profile_dir)
         logger.info("Starting Camoufox for '%s' (profile=%s)", agent_id, profile_dir)
 
         # persistent_context=True → returns a BrowserContext directly
@@ -230,6 +226,17 @@ class BrowserManager:
 
     async def navigate(self, agent_id: str, url: str, wait_ms: int = 1000) -> dict:
         """Navigate to URL and return page text."""
+        # Validate URL scheme
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return {"success": False, "error": "Invalid URL"}
+        if parsed.scheme.lower() in _BLOCKED_URL_SCHEMES:
+            return {"success": False, "error": f"URL scheme '{parsed.scheme}' is not allowed"}
+        # Cap wait_ms
+        wait_ms = max(0, min(wait_ms, _MAX_WAIT_MS))
+
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:

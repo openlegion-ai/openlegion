@@ -36,7 +36,6 @@ def get_proxy_config() -> dict | None:
 def build_launch_options(
     agent_id: str,
     profile_dir: str,
-    display: str = ":99",
 ) -> dict:
     """Build Camoufox AsyncNewBrowser kwargs for an agent.
 
@@ -55,8 +54,5 @@ def build_launch_options(
     # Persistent profile for cookies/sessions
     options["persistent_context"] = True
     options["user_data_dir"] = profile_dir
-
-    # Set DISPLAY for Xvnc rendering
-    os.environ["DISPLAY"] = display
 
     return options

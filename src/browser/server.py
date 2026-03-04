@@ -17,9 +17,12 @@ from src.shared.utils import setup_logging
 logger = setup_logging("browser.server")
 
 
-def create_browser_app(manager: BrowserManager) -> FastAPI:
+def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     """Create the browser service FastAPI application."""
-    app = FastAPI(title="OpenLegion Browser Service")
+    kwargs = {"title": "OpenLegion Browser Service"}
+    if lifespan:
+        kwargs["lifespan"] = lifespan
+    app = FastAPI(**kwargs)
     auth_token = os.environ.get("BROWSER_AUTH_TOKEN", "")
 
     def _verify_auth(request: Request) -> None:

@@ -328,6 +328,7 @@ class DockerBackend(RuntimeBackend):
 
         # Wait for browser service API to be ready
         import httpx as _httpx
+        browser_ready = False
         for attempt in range(15):
             try:
                 resp = _httpx.get(
@@ -336,12 +337,16 @@ class DockerBackend(RuntimeBackend):
                     timeout=2,
                 )
                 if resp.status_code == 200:
+                    browser_ready = True
                     break
             except Exception:
                 pass
             time.sleep(1)
 
-        logger.info("Started browser service at %s (VNC: %s)", self.browser_service_url, self.browser_vnc_url)
+        if not browser_ready:
+            logger.warning("Browser service failed to become ready after 15 attempts")
+        else:
+            logger.info("Started browser service at %s (VNC: %s)", self.browser_service_url, self.browser_vnc_url)
 
     def stop_browser_service(self) -> None:
         """Stop the browser service container."""
