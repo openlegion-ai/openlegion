@@ -2507,6 +2507,21 @@ function dashboard() {
       }, true);
     },
 
+    // ── Browser ────────────────────────────────────────
+
+    async focusBrowser(agentId) {
+      try {
+        await fetch(`${window.__config.apiBase}/browser/${agentId}/focus`, { method: 'POST' });
+      } catch (e) { console.warn('focusBrowser failed:', e); }
+    },
+
+    toggleBrowser() {
+      this.showBrowserViewer = !this.showBrowserViewer;
+      if (this.showBrowserViewer && this.selectedAgent) {
+        this.focusBrowser(this.selectedAgent);
+      }
+    },
+
     // ── Credentials ──────────────────────────────────────
 
     async _validateCredential(service, key, baseUrl) {

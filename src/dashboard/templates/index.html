@@ -1051,7 +1051,7 @@
                   <span x-text="openChats.includes(selectedAgent) ? 'Chatting' : 'Chat'"></span>
                 </button>
                 <button x-show="agentDetail?.vnc_url"
-                  @click="showBrowserViewer = !showBrowserViewer"
+                  @click="toggleBrowser()"
                   class="action-btn action-btn-primary px-3 py-1.5"
                   :class="showBrowserViewer && 'ring-1 ring-indigo-500 bg-indigo-600/20'"
                   x-cloak>
@@ -1078,6 +1078,7 @@
                 <div class="flex items-center gap-2">
                   <a :href="agentDetail?.vnc_url + '&password=' + (agentDetail?.vnc_password || '')"
                     target="_blank" rel="noopener"
+                    @click="focusBrowser(selectedAgent)"
                     class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
                     title="Open in new tab">&#x2197; Pop out</a>
                   <button @click="showBrowserViewer = false"
