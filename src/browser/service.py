@@ -195,11 +195,12 @@ class BrowserManager:
             }
 
     async def focus(self, agent_id: str) -> bool:
-        """Bring an agent's browser window to VNC foreground."""
-        async with self._lock:
-            inst = self._instances.get(agent_id)
-            if not inst:
-                return False
+        """Bring an agent's browser window to VNC foreground.
+
+        Auto-starts the browser if it isn't running yet, so the user
+        always sees a window when they click "Browser" in the dashboard.
+        """
+        inst = await self.get_or_start(agent_id)
         async with inst.lock:
             try:
                 await inst.page.bring_to_front()

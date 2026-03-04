@@ -111,11 +111,18 @@ class TestBrowserManagerLifecycle:
         assert len(mgr._instances) == 0
 
     @pytest.mark.asyncio
-    async def test_focus_nonexistent_returns_false(self):
-        from src.browser.service import BrowserManager
+    async def test_focus_auto_starts_browser(self):
+        """Focus auto-starts a browser if one isn't running."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        result = await mgr.focus("nonexistent")
-        assert result is False
+        mock_page = AsyncMock()
+        mock_page.bring_to_front = AsyncMock()
+        inst = CamoufoxInstance("agent1", MagicMock(), AsyncMock(), mock_page)
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        result = await mgr.focus("agent1")
+        assert result is True
+        mgr.get_or_start.assert_awaited_once_with("agent1")
+        mock_page.bring_to_front.assert_awaited_once()
 
 
 class TestBrowserServer:

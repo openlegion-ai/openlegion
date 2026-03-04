@@ -330,7 +330,11 @@ class DockerBackend(RuntimeBackend):
         import httpx as _httpx
         for attempt in range(15):
             try:
-                resp = _httpx.get(f"{self.browser_service_url}/browser/status", timeout=2)
+                resp = _httpx.get(
+                    f"{self.browser_service_url}/browser/status",
+                    headers={"Authorization": f"Bearer {self.browser_auth_token}"},
+                    timeout=2,
+                )
                 if resp.status_code == 200:
                     break
             except Exception:
