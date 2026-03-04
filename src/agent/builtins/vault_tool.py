@@ -107,18 +107,28 @@ async def vault_capture_from_page(
         return {"error": "Provide either 'ref' (from browser_snapshot) or 'selector' (CSS)"}
 
     try:
-        from src.agent.builtins.browser_tool import _get_page, _page_refs
-
-        page = await _get_page(mesh_client=mesh_client)
+        # Use browser service to extract text from the element
         if ref:
-            locator = _page_refs.get(ref)
-            if not locator:
+            # For ref-based capture, first get a snapshot to find the element
+            snap = await mesh_client.browser_command("snapshot", {})
+            ref_info = snap.get("data", {}).get("refs", {}).get(ref)
+            if not ref_info:
                 return {"error": f"Unknown ref '{ref}'. Call browser_snapshot first."}
-            value = await locator.inner_text(timeout=10000)
+            # Use evaluate to get inner text by role+name
+            role = ref_info["role"]
+            ename = ref_info.get("name", "")
+            if ename:
+                js = f'() => document.querySelector(\'[role="{role}"][aria-label="{ename}"]\')?.innerText || ""'
+            else:
+                js = f'() => document.querySelector(\'[role="{role}"]\')?.innerText || ""'
         else:
-            value = await page.inner_text(selector, timeout=10000)
+            js = f'() => document.querySelector({selector!r})?.innerText || ""'
 
-        value = value.strip()
+        eval_result = await mesh_client.browser_command("evaluate", {"expression": js})
+        if not eval_result.get("success"):
+            return {"error": eval_result.get("error", "Failed to read element")}
+
+        value = str(eval_result.get("data", {}).get("result", "")).strip()
         if not value:
             return {"error": "Element is empty — no text to capture"}
 

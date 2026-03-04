@@ -84,6 +84,7 @@ class RuntimeContext:
         self._validate_prereqs()
         self._select_backend()
         self._create_components()
+        self._start_browser_service()
         self._start_agents()
         self._setup_dispatch()
         self._create_cron_scheduler()
@@ -104,6 +105,8 @@ class RuntimeContext:
             self.cron_scheduler.stop()
         if self.runtime:
             self.runtime.stop_all()
+            if hasattr(self.runtime, 'stop_browser_service'):
+                self.runtime.stop_browser_service()
         if self.cost_tracker:
             self.cost_tracker.close()
         if self.trace_store:
@@ -276,6 +279,16 @@ class RuntimeContext:
             runtime=self.runtime, transport=self.transport, router=self.router,
             event_bus=self.event_bus,
         )
+
+    def _start_browser_service(self) -> None:
+        """Start the shared browser service container."""
+        from src.host.runtime import DockerBackend
+        if isinstance(self.runtime, DockerBackend):
+            try:
+                self.runtime.start_browser_service()
+                echo_ok("Browser service started")
+            except Exception as e:
+                logger.warning("Failed to start browser service: %s", e)
 
     def _start_agents(self) -> None:
         from src.host.runtime import DockerBackend, SandboxBackend
@@ -538,6 +551,8 @@ class RuntimeContext:
         echo_ok(f"Mesh host on port {mesh_port}")
         echo_ok(f"Isolation: {self._backend_label}")
         echo_ok(f"Dashboard: http://localhost:{mesh_port}/dashboard")
+        if hasattr(self.runtime, 'browser_vnc_url') and self.runtime.browser_vnc_url:
+            echo_ok(f"Browser VNC: {self.runtime.browser_vnc_url}")
 
         if agents_cfg:
             click.echo(f"  Starting {len(agents_cfg)} agent(s)...", nl=False)
@@ -559,9 +574,6 @@ class RuntimeContext:
                 model = agent_cfg.get("model", default_model)
                 if ready:
                     echo_ok(f"{agent_id:<20} ready     model: {model}")
-                    agent_info = self.runtime.agents.get(agent_id, {})
-                    if agent_info.get("vnc_url"):
-                        click.echo(f"    Browser: {agent_info['vnc_url']}")
                 else:
                     logs = self.runtime.get_logs(agent_id, tail=15)
                     echo_fail(f"{agent_id:<20} failed to start")

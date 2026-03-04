@@ -316,10 +316,10 @@ class TestDockerSafeName:
         assert result == "agente_espanol"
 
 
-# ── DockerBackend VNC port allocation ────────────────────────
+# ── DockerBackend slim agent resources & browser service ─────
 
 
-class TestDockerBackendVNCPort:
+class TestDockerBackendSlimResources:
     def _make_backend(self):
         """Create a DockerBackend without calling __init__ (avoids Docker)."""
         backend = DockerBackend.__new__(DockerBackend)
@@ -332,10 +332,14 @@ class TestDockerBackendVNCPort:
         import threading
         backend._port_lock = threading.Lock()
         backend.project_root = __import__("pathlib").Path("/tmp")
+        backend.browser_service_url = None
+        backend.browser_vnc_url = None
+        backend.browser_auth_token = ""
+        backend._browser_container = None
         return backend
 
-    def test_all_agents_get_vnc_port(self):
-        """Every agent gets a VNC port and URL in agent info."""
+    def test_slim_agent_resources(self):
+        """Agent containers use slim resources (384m, 0.15 CPU, no shm)."""
         import docker as _docker
 
         backend = self._make_backend()
@@ -351,51 +355,35 @@ class TestDockerBackendVNCPort:
             skills_dir="",
         )
 
-        agent_info = backend.agents["test-agent"]
-        assert "vnc_port" in agent_info
-        assert "vnc_url" in agent_info
-        assert str(agent_info["vnc_port"]) in agent_info["vnc_url"]
+        run_call = mock_client.containers.run.call_args
+        assert run_call.kwargs.get("mem_limit") == "384m"
+        assert run_call.kwargs.get("cpu_quota") == 15000
+        assert "shm_size" not in run_call.kwargs
 
-        # Verify port mapping includes 6080/tcp
+    def test_agent_gets_single_port(self):
+        """Agents get only one port (API), no VNC port."""
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
+
+        agent_info = backend.agents["test-agent"]
+        assert "vnc_port" not in agent_info
+        assert "vnc_url" not in agent_info
+
         run_call = mock_client.containers.run.call_args
         ports = run_call.kwargs.get("ports", {})
-        assert "6080/tcp" in ports
-        assert ports["6080/tcp"] == agent_info["vnc_port"]
+        assert "8400/tcp" in ports
+        assert "6080/tcp" not in ports
 
-        # Memory should be 1g for all agents (Chrome + VNC)
-        assert run_call.kwargs.get("mem_limit") == "1g"
-
-        # CPU quota should be 50000 for all agents (0.5 core)
-        assert run_call.kwargs.get("cpu_quota") == 50000
-
-        # shm_size should be 256m for all agents
-        assert run_call.kwargs.get("shm_size") == "256m"
-
-    def test_host_network_sets_vnc_port_env(self):
-        """In host-network mode, VNC_PORT env var is set for all agents."""
-        import docker as _docker
-
-        backend = self._make_backend()
-        backend.use_host_network = True
-        mock_container = MagicMock()
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_container
-        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
-        backend.client = mock_client
-
-        backend.start_agent(
-            agent_id="test-host-vnc",
-            role="test",
-            skills_dir="",
-        )
-
-        run_call = mock_client.containers.run.call_args
-        env = run_call.kwargs.get("environment", {})
-        assert "VNC_PORT" in env
-        assert env["VNC_PORT"] == str(backend.agents["test-host-vnc"]["vnc_port"])
-
-    def test_bridge_network_no_vnc_port_env(self):
-        """In bridge mode (default), VNC_PORT env var is NOT set."""
+    def test_browser_service_lifecycle(self):
+        """start_browser_service creates container, stop removes it."""
         import docker as _docker
 
         backend = self._make_backend()
@@ -405,15 +393,23 @@ class TestDockerBackendVNCPort:
         mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
         backend.client = mock_client
 
-        backend.start_agent(
-            agent_id="test-bridge-vnc",
-            role="test",
-            skills_dir="",
-        )
+        backend.start_browser_service()
 
+        assert backend.browser_service_url is not None
+        assert backend.browser_vnc_url is not None
+        assert backend.browser_auth_token != ""
+        assert backend._browser_container is mock_container
+
+        # Verify browser service resource limits
         run_call = mock_client.containers.run.call_args
-        env = run_call.kwargs.get("environment", {})
-        assert "VNC_PORT" not in env
+        assert run_call.kwargs.get("mem_limit") == "2g"
+        assert run_call.kwargs.get("cpu_quota") == 100000
+        assert run_call.kwargs.get("shm_size") == "512m"
+
+        backend.stop_browser_service()
+        mock_container.stop.assert_called_once()
+        mock_container.remove.assert_called_once()
+        assert backend.browser_service_url is None
 
     def test_containers_no_docker_init(self):
         """Docker init=True must NOT be set — Dockerfile ENTRYPOINT tini handles it.

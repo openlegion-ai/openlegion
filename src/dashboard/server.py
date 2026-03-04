@@ -109,16 +109,20 @@ def create_dashboard_router(
         )
         return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
-    def _vnc_url_for_request(request: Request, agent_info: dict) -> str | None:
-        """Build VNC URL using the request host so the iframe connects correctly.
+    def _browser_vnc_url_for_request(request: Request) -> str | None:
+        """Build shared browser VNC URL using the request host.
 
-        The runtime stores ``vnc_url`` with ``127.0.0.1`` which only works
-        from the same machine.  Rewriting with the request's ``Host`` header
-        lets the KasmVNC iframe work from any browser that can reach the mesh.
+        The browser service VNC is shared across all agents. Each agent's
+        browser window is brought to foreground via the focus endpoint.
         """
-        vnc_port = agent_info.get("vnc_port")
-        if not vnc_port:
+        if not runtime or not hasattr(runtime, 'browser_vnc_url') or not runtime.browser_vnc_url:
             return None
+        # Parse the port from the stored URL and rebuild with request host
+        import re as _url_re
+        match = _url_re.search(r":(\d+)/", runtime.browser_vnc_url)
+        if not match:
+            return runtime.browser_vnc_url
+        vnc_port = match.group(1)
         host = request.headers.get("host", "127.0.0.1:8420").split(":")[0]
         return f"http://{host}:{vnc_port}/index.html?autoconnect=true&path=&resize=scale"
 
@@ -158,13 +162,34 @@ def create_dashboard_router(
                 "avatar": acfg.get("avatar", 1),
                 "project": agent_projects.get(agent_id),
             }
-            if runtime:
-                agent_info = runtime.agents.get(agent_id, {})
-                vnc_url = _vnc_url_for_request(request, agent_info)
-                if vnc_url:
-                    entry["vnc_url"] = vnc_url
+            vnc_url = _browser_vnc_url_for_request(request)
+            if vnc_url:
+                entry["vnc_url"] = vnc_url
             agents.append(entry)
         return {"agents": agents}
+
+    import httpx as _httpx
+    _dashboard_browser_client = _httpx.AsyncClient(timeout=10)
+
+    @api_router.post("/api/browser/{agent_id}/focus")
+    async def api_browser_focus(agent_id: str, request: Request) -> dict:
+        """Tell the browser service to bring this agent's browser to foreground."""
+        if not runtime or not hasattr(runtime, 'browser_service_url') or not runtime.browser_service_url:
+            raise HTTPException(503, "Browser service not available")
+        try:
+            browser_auth = getattr(runtime, 'browser_auth_token', '')
+            headers = {}
+            if browser_auth:
+                headers["Authorization"] = f"Bearer {browser_auth}"
+            resp = await _dashboard_browser_client.post(
+                f"{runtime.browser_service_url}/browser/{agent_id}/focus",
+                json={},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     @api_router.post("/api/agents")
     async def api_add_agent(request: Request) -> dict:
@@ -347,12 +372,10 @@ def create_dashboard_router(
             "spend_week": spend_week,
             "budget": budget,
         }
-        # Include VNC info if available
-        if runtime:
-            agent_info = runtime.agents.get(agent_id, {})
-            vnc_url = _vnc_url_for_request(request, agent_info)
-            if vnc_url:
-                result["vnc_url"] = vnc_url
+        # Include shared browser VNC info
+        vnc_url = _browser_vnc_url_for_request(request)
+        if vnc_url:
+            result["vnc_url"] = vnc_url
         return result
 
     # ── Agent config CRUD ────────────────────────────────────
@@ -394,11 +417,9 @@ def create_dashboard_router(
             "system_credentials": system_cred_names,
             "resolved_credentials": resolved,
         }
-        if runtime:
-            agent_info = runtime.agents.get(agent_id, {})
-            vnc_url = _vnc_url_for_request(request, agent_info)
-            if vnc_url:
-                cfg_result["vnc_url"] = vnc_url
+        vnc_url = _browser_vnc_url_for_request(request)
+        if vnc_url:
+            cfg_result["vnc_url"] = vnc_url
         return cfg_result
 
     @api_router.put("/api/agents/{agent_id}/config")

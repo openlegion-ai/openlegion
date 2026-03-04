@@ -46,6 +46,7 @@ PERMISSIONS_FILE = PROJECT_ROOT / "config" / "permissions.json"
 PROJECTS_DIR = PROJECT_ROOT / "config" / "projects"
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 DOCKER_IMAGE = "openlegion-agent:latest"
+BROWSER_IMAGE = "openlegion-browser:latest"
 
 MARKETPLACE_DIR = PROJECT_ROOT / "skills" / "_marketplace"
 
@@ -221,21 +222,25 @@ def _check_docker_image() -> bool:
         return False
 
 
-def _docker_image_is_stale() -> bool:
-    """Check if source files are newer than the Docker image."""
+def _docker_image_is_stale(
+    image_name: str = DOCKER_IMAGE,
+    src_dirs: list | None = None,
+    dockerfile_name: str = "Dockerfile.agent",
+) -> bool:
+    """Check if source files are newer than a Docker image."""
     try:
         from datetime import datetime, timezone
 
         import docker
         client = docker.from_env()
-        image = client.images.get(DOCKER_IMAGE)
+        image = client.images.get(image_name)
         created_str = image.attrs.get("Created", "")
         if not created_str:
             return True
         image_time = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
 
-        src_dirs = [PROJECT_ROOT / "src" / "agent", PROJECT_ROOT / "src" / "shared"]
-        for src_dir in src_dirs:
+        check_dirs = src_dirs or [PROJECT_ROOT / "src" / "agent", PROJECT_ROOT / "src" / "shared"]
+        for src_dir in check_dirs:
             if not src_dir.exists():
                 continue
             for py_file in src_dir.rglob("*.py"):
@@ -243,7 +248,7 @@ def _docker_image_is_stale() -> bool:
                 if file_mtime > image_time:
                     return True
 
-        dockerfile = PROJECT_ROOT / "Dockerfile.agent"
+        dockerfile = PROJECT_ROOT / dockerfile_name
         if dockerfile.exists():
             df_mtime = datetime.fromtimestamp(dockerfile.stat().st_mtime, tz=timezone.utc)
             if df_mtime > image_time:
@@ -255,18 +260,73 @@ def _docker_image_is_stale() -> bool:
 
 
 def _ensure_docker_image() -> None:
-    """Build the Docker image if missing or stale."""
+    """Build the agent and browser Docker images if missing or stale."""
     if not _check_docker_image():
         _build_docker_image()
     elif _docker_image_is_stale():
         click.echo("Source code changed since last Docker build.")
         _build_docker_image()
+    _ensure_browser_image()
+
+
+def _check_browser_image() -> bool:
+    """Check if the browser Docker image exists."""
+    try:
+        import docker
+        client = docker.from_env()
+        client.images.get(BROWSER_IMAGE)
+        return True
+    except Exception:
+        return False
+
+
+def _ensure_browser_image() -> None:
+    """Build the browser Docker image if missing or stale."""
+    if not _check_browser_image():
+        _build_browser_image()
+    elif _docker_image_is_stale(
+        image_name=BROWSER_IMAGE,
+        src_dirs=[PROJECT_ROOT / "src" / "browser", PROJECT_ROOT / "src" / "shared"],
+        dockerfile_name="Dockerfile.browser",
+    ):
+        click.echo("Browser source changed since last build.")
+        _build_browser_image()
+
+
+def _build_browser_image() -> None:
+    """Build the browser Docker image with visible progress."""
+    click.echo("Building browser service Docker image...")
+    click.echo("  First build downloads Camoufox + KasmVNC (~3 min). Rebuilds are fast.\n")
+    proc = subprocess.Popen(
+        [
+            "docker", "build",
+            "--platform", "linux/amd64",
+            "-t", BROWSER_IMAGE,
+            "-f", "Dockerfile.browser", ".",
+        ],
+        cwd=str(PROJECT_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    for line in proc.stdout:
+        line = line.rstrip()
+        if not line:
+            continue
+        if line.startswith("Step ") or line.startswith("#") or "Downloading" in line or "Installing" in line:
+            click.echo(f"  {line}")
+    proc.wait()
+    if proc.returncode != 0:
+        click.echo("Browser image build failed. Run manually for full output:", err=True)
+        click.echo(f"  docker build --platform linux/amd64 -t {BROWSER_IMAGE} -f Dockerfile.browser .", err=True)
+        sys.exit(1)
+    click.echo("\n  Browser Docker image built successfully.")
 
 
 def _build_docker_image() -> None:
     """Build the agent Docker image with visible progress."""
-    click.echo("Building Docker image...")
-    click.echo("  First build downloads base image + Chromium (~2 min). Rebuilds are fast.\n")
+    click.echo("Building agent Docker image...")
+    click.echo("  First build downloads base image (~1 min). Rebuilds are fast.\n")
     proc = subprocess.Popen(
         [
             "docker", "build",

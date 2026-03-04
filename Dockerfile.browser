@@ -1,0 +1,56 @@
+# Shared browser service: Camoufox (stealth Firefox) + KasmVNC.
+# One container serves all agents via per-agent browser instances.
+FROM --platform=linux/amd64 python:3.12-slim
+
+# System packages: Openbox WM, tini for PID 1, curl for downloads
+# KasmVNC provides Xvnc (X server + VNC server) so no separate Xvfb needed
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tini openbox wmctrl xdotool procps curl \
+    && curl -fSL -o /tmp/kasmvnc.deb \
+       https://github.com/kasmtech/KasmVNC/releases/download/v1.4.0/kasmvncserver_bookworm_1.4.0_amd64.deb \
+    && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb \
+    && rm /tmp/kasmvnc.deb \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user
+RUN useradd --create-home --uid 1000 --shell /bin/bash browser
+
+WORKDIR /app
+
+# Python dependencies
+COPY pyproject.toml .
+RUN pip install --no-cache-dir \
+    "camoufox[geoip]" fastapi uvicorn httpx pydantic Pillow python_ghost_cursor
+
+# Download patched Firefox binary (Camoufox)
+RUN python -m camoufox fetch
+
+# Application code
+COPY src/browser/ /app/src/browser/
+COPY src/shared/ /app/src/shared/
+COPY src/__init__.py /app/src/__init__.py
+
+# X11 socket directory
+RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+
+# Data volume for persistent per-agent browser profiles
+RUN mkdir -p /data/profiles && chown -R browser:browser /data
+VOLUME /data
+
+# Openbox config: single desktop, no scroll-to-switch, no decorations
+RUN mkdir -p /home/browser/.config/openbox \
+    && printf '<?xml version="1.0" encoding="UTF-8"?>\n\
+<openbox_config xmlns="http://openbox.org/3.4/rc">\n\
+  <desktops><number>1</number></desktops>\n\
+  <applications><application class="*"><decor>no</decor><maximized>true</maximized></application></applications>\n\
+</openbox_config>\n' > /home/browser/.config/openbox/rc.xml \
+    && chown -R browser:browser /home/browser/.config
+
+RUN chown -R browser:browser /app
+
+USER browser
+
+# 8500: browser command API, 6080: KasmVNC web client
+EXPOSE 8500 6080
+ENTRYPOINT ["tini", "--"]
+CMD ["python", "-m", "src.browser"]

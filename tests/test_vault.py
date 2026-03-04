@@ -1,6 +1,6 @@
 """Tests for vault tools (credential-blind agent tools)."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -106,14 +106,13 @@ class TestVaultCaptureFromPage:
 
         mock_client = AsyncMock()
         mock_client.vault_store.return_value = {"stored": True, "handle": "$CRED{api_key}"}
+        mock_client.browser_command = AsyncMock(return_value={
+            "success": True, "data": {"result": "sk-secret-12345"},
+        })
 
-        mock_page = AsyncMock()
-        mock_page.inner_text = AsyncMock(return_value="sk-secret-12345")
-
-        with patch("src.agent.builtins.browser_tool._get_page", return_value=mock_page):
-            result = await vault_capture_from_page(
-                name="api_key", selector="#key-display", mesh_client=mock_client,
-            )
+        result = await vault_capture_from_page(
+            name="api_key", selector="#key-display", mesh_client=mock_client,
+        )
 
         assert result["captured"] is True
         assert result["handle"] == "$CRED{api_key}"
@@ -122,22 +121,19 @@ class TestVaultCaptureFromPage:
 
     @pytest.mark.asyncio
     async def test_capture_with_ref(self):
-        import src.agent.builtins.browser_tool as bt
         from src.agent.builtins.vault_tool import vault_capture_from_page
 
         mock_client = AsyncMock()
         mock_client.vault_store.return_value = {"stored": True, "handle": "$CRED{token}"}
+        # First call: snapshot to get ref info; second call: evaluate to get text
+        mock_client.browser_command = AsyncMock(side_effect=[
+            {"data": {"refs": {"e5": {"role": "textbox", "name": "Token"}}}},
+            {"success": True, "data": {"result": "secret-token-value"}},
+        ])
 
-        mock_locator = AsyncMock()
-        mock_locator.inner_text.return_value = "secret-token-value"
-        bt._page_refs["e5"] = mock_locator
-
-        mock_page = AsyncMock()
-
-        with patch("src.agent.builtins.browser_tool._get_page", return_value=mock_page):
-            result = await vault_capture_from_page(
-                name="token", ref="e5", mesh_client=mock_client,
-            )
+        result = await vault_capture_from_page(
+            name="token", ref="e5", mesh_client=mock_client,
+        )
 
         assert result["captured"] is True
         assert "value" not in result
@@ -147,13 +143,13 @@ class TestVaultCaptureFromPage:
         from src.agent.builtins.vault_tool import vault_capture_from_page
 
         mock_client = AsyncMock()
-        mock_page = AsyncMock()
-        mock_page.inner_text = AsyncMock(return_value="   ")
+        mock_client.browser_command = AsyncMock(return_value={
+            "success": True, "data": {"result": "   "},
+        })
 
-        with patch("src.agent.builtins.browser_tool._get_page", return_value=mock_page):
-            result = await vault_capture_from_page(
-                name="empty", selector="#key", mesh_client=mock_client,
-            )
+        result = await vault_capture_from_page(
+            name="empty", selector="#key", mesh_client=mock_client,
+        )
 
         assert "error" in result
         assert "empty" in result["error"].lower()

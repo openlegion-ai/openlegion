@@ -385,6 +385,24 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    # === Browser (shared browser service via mesh proxy) ===
+
+    async def browser_command(self, action: str, params: dict | None = None) -> dict:
+        """Send a browser command through the mesh to the shared browser service."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/browser/command",
+            json={
+                "agent_id": self.agent_id,
+                "action": action,
+                "params": params or {},
+            },
+            timeout=60,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def api_call(
         self, service: str, action: str, params: dict | None = None, timeout: int = 30
     ) -> APIProxyResponse:

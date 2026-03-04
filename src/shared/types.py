@@ -166,6 +166,7 @@ class AgentPermissions(BaseModel):
     blackboard_write: list[str] = []
     allowed_apis: list[str] = []
     allowed_credentials: list[str] = []
+    can_use_browser: bool = True
 
 
 # === Projects ===
@@ -289,6 +290,22 @@ class ChatResponse(BaseModel):
     response: str
     tool_outputs: list[dict[str, Any]] = []
     tokens_used: int = 0
+
+
+class BrowserCommand(BaseModel):
+    """Browser command sent from agent through mesh to browser service."""
+
+    agent_id: str
+    action: str  # navigate, snapshot, click, type, evaluate, screenshot, reset, focus, status, solve_captcha
+    params: dict[str, Any] = {}
+
+
+class BrowserResult(BaseModel):
+    """Result from browser service back to agent."""
+
+    success: bool
+    data: dict[str, Any] = {}
+    error: str | None = None
 
 
 class SteerMessage(BaseModel):
