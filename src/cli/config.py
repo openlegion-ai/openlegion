@@ -556,14 +556,14 @@ def _create_project(
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "workflows").mkdir(exist_ok=True)
 
-    from datetime import UTC, datetime
+    from datetime import datetime, timezone
 
     from src.shared.types import ProjectMetadata
 
     pm = ProjectMetadata(
         name=name,
         description=description,
-        created_at=datetime.now(UTC).isoformat(),
+        created_at=datetime.now(timezone.utc).isoformat(),
         members=[],  # members added via _add_agent_to_project below
     )
     with open(project_dir / "metadata.yaml", "w") as f:

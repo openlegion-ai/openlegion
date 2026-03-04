@@ -5,7 +5,7 @@ FROM python:3.12-slim
 # System packages: Openbox WM, tini, curl, plus GTK3/X11 libs for Camoufox (Firefox)
 # KasmVNC provides Xvnc (X server + VNC server) so no separate Xvfb needed
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tini openbox wmctrl xdotool procps curl \
+    tini openbox wmctrl xdotool x11-xserver-utils procps curl \
     libgtk-3-0 libatk1.0-0 libasound2 \
     libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libgbm1 \
     libpango-1.0-0 libcairo2 libdbus-glib-1-2 \

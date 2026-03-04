@@ -1159,7 +1159,7 @@ async def test_budget_lock_timeout_returns_error():
     }
     v.cost_tracker = cost_tracker
 
-    # Simulate the lock timeout by patching asyncio.timeout to fire immediately
+    # Simulate the lock timeout by patching asyncio.wait_for to raise TimeoutError
     req = APIProxyRequest(
         service="llm", action="chat",
         params={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
@@ -1168,11 +1168,9 @@ async def test_budget_lock_timeout_returns_error():
     lock = asyncio.Lock()
     v._budget_locks = {"agent1": lock}
 
-    # Hold the lock in background so execute_api_call cannot acquire it
-    async with lock:
-        # Patch the timeout to 0 so it fires instantly
-        with patch("src.host.credentials.asyncio.timeout", return_value=asyncio.timeout(0)):
-            result = await v.execute_api_call(req, agent_id="agent1")
+    # Patch wait_for to immediately raise TimeoutError
+    with patch("src.host.credentials.asyncio.wait_for", side_effect=asyncio.TimeoutError):
+        result = await v.execute_api_call(req, agent_id="agent1")
 
     assert result.success is False
     assert "Budget lock contention" in result.error

@@ -390,5 +390,5 @@ class ContextManager:
 
 
 def _now_str() -> str:
-    from datetime import UTC, datetime
-    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")

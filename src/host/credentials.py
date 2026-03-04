@@ -357,15 +357,17 @@ class CredentialVault:
 
         if lock is not None:
             try:
-                async with asyncio.timeout(120):
-                    async with lock:
-                        return await _execute()
-            except TimeoutError:
+                await asyncio.wait_for(lock.acquire(), timeout=120)
+            except (TimeoutError, asyncio.TimeoutError):
                 logger.warning("Budget lock timed out for agent '%s'", agent_id)
                 return APIProxyResponse(
                     success=False,
                     error="Budget lock contention — too many concurrent LLM calls. Retry shortly.",
                 )
+            try:
+                return await _execute()
+            finally:
+                lock.release()
         return await _execute()
 
     # Provider prefix → credential key mapping (shared by key + base lookups)

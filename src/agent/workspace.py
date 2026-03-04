@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.shared.utils import setup_logging
@@ -190,7 +190,7 @@ class WorkspaceManager:
     def load_daily_logs(self, days: int = 2) -> str:
         """Load today's + yesterday's daily logs (most recent first)."""
         parts: list[str] = []
-        today = datetime.now(UTC).date()
+        today = datetime.now(timezone.utc).date()
         for offset in range(days):
             date = today - timedelta(days=offset)
             filename = f"{self.DAILY_DIR}/{date.isoformat()}.md"
@@ -262,9 +262,9 @@ class WorkspaceManager:
 
     def append_daily_log(self, entry: str) -> None:
         """Append an entry to today's daily log file."""
-        today = datetime.now(UTC).date().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         path = self.root / self.DAILY_DIR / f"{today}.md"
-        timestamp = datetime.now(UTC).strftime("%H:%M")
+        timestamp = datetime.now(timezone.utc).strftime("%H:%M")
         line = f"- [{timestamp}] {entry}\n"
         with path.open("a") as f:
             f.write(line)
@@ -304,7 +304,7 @@ class WorkspaceManager:
         # Back up existing content
         if path.exists():
             old_content = path.read_text(errors="replace")
-            timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
             backup_path = backup_dir / f"{filename}.{timestamp}.bak"
             backup_path.write_text(old_content)
             self._rotate_backups(backup_dir, filename)
@@ -382,7 +382,7 @@ class WorkspaceManager:
         """Record a tool or task failure for future avoidance."""
         path = self.root / self.ERRORS_FILE
         self._rotate_if_large(path)
-        timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         entry = f"- [{timestamp}] **{tool}**: {error}"
         if context:
             entry += f"\n  Context: {context}"
@@ -393,7 +393,7 @@ class WorkspaceManager:
         """Record a user correction for learning."""
         path = self.root / self.CORRECTIONS_FILE
         self._rotate_if_large(path)
-        timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         entry = (
             f"- [{timestamp}] Original: {original[:200]}\n"
             f"  Correction: {correction[:500]}\n"

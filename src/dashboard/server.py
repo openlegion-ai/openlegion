@@ -127,16 +127,15 @@ def create_dashboard_router(
             # Route through /vnc/ path — proxy must forward to the VNC port
             scheme = forwarded_proto
             host = request.headers.get("host", "127.0.0.1:8420")
-            return f"{scheme}://{host}/vnc/index.html?autoconnect=true&path=vnc/&resize=scale"
+            return f"{scheme}://{host}/vnc/index.html?autoconnect=true&path=vnc/&resize=scale&quality=7&enable_perf_stats=0"
 
         # Direct access (local dev) — use the VNC port directly
-        import re as _url_re
-        match = _url_re.search(r":(\d+)/", runtime.browser_vnc_url)
+        match = re.search(r":(\d+)/", runtime.browser_vnc_url)
         if not match:
             return runtime.browser_vnc_url
         vnc_port = match.group(1)
         host = request.headers.get("host", "127.0.0.1:8420").split(":")[0]
-        return f"http://{host}:{vnc_port}/index.html?autoconnect=true&path=&resize=scale"
+        return f"http://{host}:{vnc_port}/index.html?autoconnect=true&path=&resize=scale&quality=7&enable_perf_stats=0"
 
     # ── Fleet overview ───────────────────────────────────────
 

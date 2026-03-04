@@ -66,4 +66,12 @@ def build_launch_options(
     options["persistent_context"] = True
     options["user_data_dir"] = profile_dir
 
+    # Cosmetic Firefox prefs — dark theme to blend with VNC background,
+    # compact UI density, and tabs-in-titlebar to save vertical space.
+    options["firefox_user_prefs"] = {
+        "extensions.activeThemeID": "firefox-compact-dark@mozilla.org",
+        "browser.uidensity": 1,  # compact
+        "browser.tabs.inTitlebar": 1,
+    }
+
     return options

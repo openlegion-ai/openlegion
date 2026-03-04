@@ -14,7 +14,7 @@ import os
 import sys
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -96,7 +96,7 @@ def main() -> int:
 
     needed_agents = sorted({a for wf in runnable for a in wf["agents"]})
     default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     bb = Blackboard()
     pubsub = PubSub()
