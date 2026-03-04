@@ -1552,3 +1552,79 @@ def test_vnc_proxy_no_vnc_url(tmp_path):
     assert resp.status_code == 502
 
     bb.close()
+
+
+def test_vnc_proxy_rejects_agent_token(tmp_path):
+    """VNC proxy rejects requests carrying agent auth tokens."""
+    from unittest.mock import MagicMock
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    cm = MagicMock()
+    cm.browser_vnc_url = "http://127.0.0.1:9999/index.html"
+
+    agent_token = "secret-agent-token-123"
+    app = create_mesh_app(
+        bb, pubsub, router, perms,
+        credential_vault=None,
+        container_manager=cm,
+        auth_tokens={"agent1": agent_token},
+    )
+    client = TestClient(app)
+
+    # Request with agent Bearer token should be rejected
+    resp = client.get(
+        "/vnc/index.html",
+        headers={"Authorization": f"Bearer {agent_token}"},
+    )
+    assert resp.status_code == 403
+    assert "Agent access denied" in resp.json()["detail"]
+
+    bb.close()
+
+
+def test_vnc_proxy_allows_dashboard_user(tmp_path):
+    """VNC proxy allows requests without Bearer tokens (dashboard via Caddy)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    cm = MagicMock()
+    cm.browser_vnc_url = "http://127.0.0.1:9999/index.html"
+
+    # Auth tokens configured (production mode) but request has no Bearer
+    app = create_mesh_app(
+        bb, pubsub, router, perms,
+        credential_vault=None,
+        container_manager=cm,
+        auth_tokens={"agent1": "secret-token"},
+    )
+    client = TestClient(app)
+
+    fake_resp = MagicMock()
+    fake_resp.content = b"<html>VNC</html>"
+    fake_resp.status_code = 200
+    fake_resp.headers = {"content-type": "text/html"}
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=fake_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        # No auth header — dashboard user authenticated by Caddy session cookie
+        resp = client.get("/vnc/index.html")
+
+    assert resp.status_code == 200
+    assert b"VNC" in resp.content
+
+    bb.close()
