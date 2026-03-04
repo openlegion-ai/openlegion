@@ -1368,3 +1368,85 @@ def test_cleanup_removes_watchers(tmp_path):
     assert "agent1" not in bb.get_watchers_for_key("tasks/foo")
 
     bb.close()
+
+
+# ── VNC reverse proxy tests ─────────────────────────────────────────
+
+
+def test_vnc_http_proxy(tmp_path):
+    """VNC HTTP proxy forwards requests to the browser container's KasmVNC port."""
+    from unittest.mock import AsyncMock, patch, MagicMock
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    cm = MagicMock()
+    cm.browser_vnc_url = "http://127.0.0.1:9999/index.html?autoconnect=true"
+
+    app = create_mesh_app(bb, pubsub, router, perms, credential_vault=None, container_manager=cm)
+    client = TestClient(app)
+
+    fake_resp = MagicMock()
+    fake_resp.content = b"<html>KasmVNC</html>"
+    fake_resp.status_code = 200
+    fake_resp.headers = {"content-type": "text/html"}
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=fake_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        resp = client.get("/vnc/index.html?autoconnect=true")
+
+    assert resp.status_code == 200
+    assert b"KasmVNC" in resp.content
+    # Verify the target URL includes the path and query
+    call_args = mock_client.get.call_args
+    target_url = call_args[0][0]
+    assert "127.0.0.1:9999" in target_url
+    assert "index.html" in target_url
+
+    bb.close()
+
+
+def test_vnc_proxy_no_browser(tmp_path):
+    """VNC proxy returns 502 when browser service is not running."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    # No container_manager at all
+    app = create_mesh_app(bb, pubsub, router, perms, credential_vault=None)
+    client = TestClient(app)
+    resp = client.get("/vnc/index.html")
+    assert resp.status_code == 502
+
+    bb.close()
+
+
+def test_vnc_proxy_no_vnc_url(tmp_path):
+    """VNC proxy returns 502 when browser_vnc_url is not set."""
+    from unittest.mock import MagicMock
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    cm = MagicMock()
+    cm.browser_vnc_url = None
+
+    app = create_mesh_app(bb, pubsub, router, perms, credential_vault=None, container_manager=cm)
+    client = TestClient(app)
+    resp = client.get("/vnc/index.html")
+    assert resp.status_code == 502
+
+    bb.close()

@@ -1026,4 +1026,97 @@ def create_mesh_app(
         finally:
             event_bus.unsubscribe(websocket)
 
+    # ── VNC reverse proxy ────────────────────────────────────────────────
+    # Proxies HTTP (static files) and WebSocket (VNC stream) requests from
+    # /vnc/{path} to the browser container's KasmVNC port.  This lets VNC
+    # work out-of-the-box behind a reverse proxy without exposing extra
+    # ports or dealing with mixed-content issues.
+
+    def _get_vnc_port() -> int | None:
+        """Extract KasmVNC port from browser_vnc_url, or None."""
+        if container_manager is None:
+            return None
+        url = getattr(container_manager, "browser_vnc_url", None)
+        if not url:
+            return None
+        try:
+            from urllib.parse import urlparse
+            return urlparse(url).port
+        except Exception:
+            return None
+
+    @app.get("/vnc/{path:path}")
+    async def vnc_http_proxy(path: str, request: Request):
+        """Reverse-proxy HTTP requests to KasmVNC (static files)."""
+        port = _get_vnc_port()
+        if port is None:
+            raise HTTPException(502, "Browser service not available")
+        import httpx
+        query = str(request.url.query)
+        target = f"http://127.0.0.1:{port}/{path}"
+        if query:
+            target += f"?{query}"
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(target, timeout=10.0)
+        except httpx.ConnectError:
+            raise HTTPException(502, "Browser VNC not reachable")
+        headers = {}
+        ct = resp.headers.get("content-type")
+        if ct:
+            headers["content-type"] = ct
+        return StreamingResponse(
+            iter([resp.content]),
+            status_code=resp.status_code,
+            headers=headers,
+        )
+
+    @app.websocket("/vnc/{path:path}")
+    async def vnc_ws_proxy(websocket: WebSocket, path: str):
+        """Reverse-proxy WebSocket connections to KasmVNC."""
+        port = _get_vnc_port()
+        if port is None:
+            await websocket.close(code=1011, reason="Browser service not available")
+            return
+        query = str(websocket.url.query)
+        target = f"ws://127.0.0.1:{port}/{path}"
+        if query:
+            target += f"?{query}"
+        await websocket.accept()
+        try:
+            import websockets
+            async with websockets.connect(target) as upstream:
+                async def client_to_upstream():
+                    try:
+                        while True:
+                            data = await websocket.receive_bytes()
+                            await upstream.send(data)
+                    except Exception:
+                        pass
+
+                async def upstream_to_client():
+                    try:
+                        async for msg in upstream:
+                            if isinstance(msg, bytes):
+                                await websocket.send_bytes(msg)
+                            else:
+                                await websocket.send_text(msg)
+                    except Exception:
+                        pass
+
+                done, pending = await asyncio.wait(
+                    [asyncio.ensure_future(client_to_upstream()),
+                     asyncio.ensure_future(upstream_to_client())],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+        except Exception as exc:
+            _server_logger.debug("VNC WebSocket proxy error: %s", exc)
+        finally:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+
     return app
