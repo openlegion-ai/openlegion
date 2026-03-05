@@ -139,13 +139,10 @@ def create_dashboard_router(
             host = request.headers.get("host", "127.0.0.1:8420")
             return f"{scheme}://{host}/vnc/index.html?autoconnect=true&path=vnc/&resize=scale&quality=7&enable_perf_stats=0"
 
-        # Direct access (local dev) — use the VNC port directly
-        match = re.search(r":(\d+)/", runtime.browser_vnc_url)
-        if not match:
-            return runtime.browser_vnc_url
-        vnc_port = match.group(1)
-        host = request.headers.get("host", "127.0.0.1:8420").split(":")[0]
-        return f"http://{host}:{vnc_port}/index.html?autoconnect=true&path=&resize=scale&quality=7&enable_perf_stats=0"
+        # Direct access (local dev) — route through mesh proxy too so the
+        # server-side KasmVNC token fetch works (KasmVNC 1.4.0 requires it).
+        host = request.headers.get("host", "127.0.0.1:8420")
+        return f"http://{host}/vnc/index.html?autoconnect=true&path=vnc/&resize=scale&quality=7&enable_perf_stats=0"
 
     # ── Fleet overview ───────────────────────────────────────
 

@@ -1137,6 +1137,27 @@ def create_mesh_app(
             headers=headers,
         )
 
+    # KasmVNC 1.4.0 credentials — matches .kasmpasswd created in browser __main__.py
+    _KASM_USER = "browser"
+    _KASM_PASS = "openlegion"
+
+    async def _get_kasm_token(port: int) -> str | None:
+        """Fetch a session token from KasmVNC's API using Basic Auth."""
+        import httpx
+        import base64
+        creds = base64.b64encode(f"{_KASM_USER}:{_KASM_PASS}".encode()).decode()
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(
+                    f"http://127.0.0.1:{port}/api/get_token",
+                    headers={"Authorization": f"Basic {creds}"},
+                )
+                if resp.status_code == 200:
+                    return resp.text.strip()
+        except Exception as e:
+            _server_logger.debug("Failed to get KasmVNC token: %s", e)
+        return None
+
     @app.websocket("/vnc/{path:path}")
     async def vnc_ws_proxy(websocket: WebSocket, path: str):
         """Reverse-proxy WebSocket connections to KasmVNC."""
@@ -1157,15 +1178,24 @@ def create_mesh_app(
         if port is None:
             await websocket.close(code=1011, reason="Browser service not available")
             return
-        query = str(websocket.url.query)
-        target = f"ws://127.0.0.1:{port}/{path}"
-        if query:
-            target += f"?{query}"
+
+        # KasmVNC 1.4.0 only accepts WebSocket at /api/ws with a token.
+        # Fetch token server-side so the web client doesn't need to authenticate.
+        kasm_token = await _get_kasm_token(port)
+        if kasm_token:
+            target = f"ws://127.0.0.1:{port}/api/ws?token={kasm_token}"
+        else:
+            # Fallback: try direct path (older KasmVNC or non-API mode)
+            query = str(websocket.url.query)
+            target = f"ws://127.0.0.1:{port}/{path}"
+            if query:
+                target += f"?{query}"
+
         await websocket.accept()
         try:
             import websockets
 
-            async with websockets.connect(target) as upstream:
+            async with websockets.connect(target, subprotocols=["binary"]) as upstream:
 
                 async def client_to_upstream():
                     try:
