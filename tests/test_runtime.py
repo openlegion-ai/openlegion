@@ -391,6 +391,8 @@ class TestDockerBackendSlimResources:
         backend.browser_vnc_url = None
         backend.browser_auth_token = ""
         backend._browser_container = None
+        backend._network_name = "openlegion_agents"
+        backend._network = MagicMock()
         return backend
 
     def test_slim_agent_resources(self):

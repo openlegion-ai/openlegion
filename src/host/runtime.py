@@ -147,6 +147,20 @@ class DockerBackend(RuntimeBackend):
         self._browser_container = None
         self._cleanup_stale()
 
+        # Create internal network for agent isolation (blocks external egress).
+        # Only needed when not using host networking.
+        self._network_name = "openlegion_agents"
+        self._network = None
+        if not use_host_network:
+            try:
+                self._network = self.client.networks.get(self._network_name)
+            except docker.errors.NotFound:
+                self._network = self.client.networks.create(
+                    self._network_name,
+                    driver="bridge",
+                    internal=True,
+                )
+
     @staticmethod
     def backend_name() -> str:
         return "docker"
@@ -240,18 +254,24 @@ class DockerBackend(RuntimeBackend):
             "mem_limit": "384m",
             "cpu_quota": 15000,
             "security_opt": ["no-new-privileges"],
+            "cap_drop": ["ALL"],
+            "cap_add": ["NET_BIND_SERVICE"],
+            "read_only": True,
+            "tmpfs": {"/tmp": "size=100m,noexec,nosuid"},
         }
 
         if self.use_host_network:
             run_kwargs["network_mode"] = "host"
         else:
-            ports = {"8400/tcp": port}
-            run_kwargs["ports"] = ports
-            # On Linux Docker Engine, host.docker.internal isn't automatic
+            # Connect to internal network (no external egress)
+            run_kwargs["network"] = self._network_name
+            # On Linux, expose host.docker.internal so agents can reach mesh
             if platform.system() == "Linux":
                 run_kwargs["extra_hosts"] = {
                     "host.docker.internal": "host-gateway",
                 }
+            ports = {"8400/tcp": port}
+            run_kwargs["ports"] = ports
 
         container_name = f"openlegion_{safe_name}"
         try:
@@ -428,6 +448,14 @@ class DockerBackend(RuntimeBackend):
             f"URL: {url}, last error: {last_error}"
         )
         return False
+
+    def stop_all(self) -> None:
+        super().stop_all()
+        if self._network is not None:
+            try:
+                self._network.remove()
+            except Exception:
+                pass
 
 
 # ── Docker Sandbox (MicroVM) Backend ─────────────────────────
