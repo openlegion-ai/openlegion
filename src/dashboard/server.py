@@ -1589,12 +1589,16 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="content must be a string")
         content = sanitize_for_prompt(content)
         try:
-            return await transport.request(
+            result = await transport.request(
                 agent_id, "PUT", f"/workspace/{filename}",
                 json={"content": content}, timeout=10,
             )
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
+        if event_bus is not None:
+            event_bus.emit("workspace_updated", agent=agent_id,
+                           data={"message": f"Dashboard updated {filename}"})
+        return result
 
     # ── Agent Workspace Logs + Learnings (proxy to agent) ─────
 
