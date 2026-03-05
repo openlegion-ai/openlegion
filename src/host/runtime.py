@@ -147,8 +147,10 @@ class DockerBackend(RuntimeBackend):
         self._browser_container = None
         self._cleanup_stale()
 
-        # Create internal network for agent isolation (blocks external egress).
-        # Only needed when not using host networking.
+        # Create a bridge network for agent containers.
+        # Bridge mode isolates agents from the host network (NAT only) while
+        # still allowing them to reach the mesh via host.docker.internal.
+        # The mesh proxy enforces the "mesh is the only door" policy.
         self._network_name = "openlegion_agents"
         self._network = None
         if not use_host_network:
@@ -158,7 +160,6 @@ class DockerBackend(RuntimeBackend):
                 self._network = self.client.networks.create(
                     self._network_name,
                     driver="bridge",
-                    internal=True,
                 )
 
     @staticmethod
