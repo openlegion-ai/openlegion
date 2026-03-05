@@ -1182,8 +1182,8 @@ def create_mesh_app(
                                 await upstream.send(msg["bytes"])
                             elif "text" in msg and msg["text"]:
                                 await upstream.send(msg["text"])
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _server_logger.warning("VNC client→upstream error: %s", e)
 
                 async def upstream_to_client():
                     try:
@@ -1192,8 +1192,8 @@ def create_mesh_app(
                                 await websocket.send_bytes(msg)
                             else:
                                 await websocket.send_text(msg)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _server_logger.warning("VNC upstream→client error: %s", e)
 
                 tasks = [
                     asyncio.create_task(client_to_upstream()),
@@ -1205,7 +1205,7 @@ def create_mesh_app(
                 for task in pending:
                     task.cancel()
         except Exception as exc:
-            _server_logger.debug("VNC WebSocket proxy error: %s", exc)
+            _server_logger.warning("VNC WebSocket proxy error: %s", exc)
         finally:
             try:
                 await websocket.close()
