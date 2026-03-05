@@ -110,7 +110,6 @@ async def _run_subagent(
         skills=skills,
         llm=llm,
         mesh_client=mesh_client,
-        system_prompt=f"You are a subagent. Your task: {task_text}",
         workspace=workspace,
     )
     loop.MAX_ITERATIONS = max_iterations
@@ -315,8 +314,8 @@ async def wait_for_subagent(
                     "completed": True,
                     **bb.get("value", {}),
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to read subagent result from blackboard: %s", e)
     return {
         "subagent_id": subagent_id,
         "completed": True,

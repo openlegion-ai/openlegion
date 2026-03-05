@@ -160,7 +160,7 @@ class DockerBackend(RuntimeBackend):
                 except Exception as e:
                     logger.debug("Could not remove stale container %s: %s", c.name, e)
         except Exception as e:
-            logger.debug("Could not list stale containers: %s", e)
+            logger.debug("Stale container cleanup failed: %s", e)
 
     def start_agent(
         self,
@@ -340,8 +340,8 @@ class DockerBackend(RuntimeBackend):
                 if resp.status_code == 200:
                     browser_ready = True
                     break
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Browser service not ready (attempt %d): %s", attempt + 1, e)
             time.sleep(1)
 
         if not browser_ready:

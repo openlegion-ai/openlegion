@@ -17,6 +17,7 @@ Uses Socket Mode (no public URL needed).
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 from src.channels.base import Channel, PairingManager, chunk_text
@@ -25,6 +26,8 @@ from src.shared.utils import setup_logging
 logger = setup_logging("channels.slack")
 
 MAX_SLACK_LEN = 3000
+
+_AT_MENTION_RE = re.compile(r"^@(\w+)\s+(.+)$", re.DOTALL)
 
 
 def _get_user_key(user_id: str, thread_ts: str | None) -> str:
@@ -256,8 +259,7 @@ class SlackChannel(Channel):
         current = self._get_active_agent(user_key)
         target = current
 
-        import re as _re
-        match = _re.match(r"^@(\w+)\s+(.+)$", text, _re.DOTALL)
+        match = _AT_MENTION_RE.match(text)
         if match:
             agents = self._get_agent_names()
             if match.group(1) in agents:

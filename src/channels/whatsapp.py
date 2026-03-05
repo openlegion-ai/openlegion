@@ -126,7 +126,8 @@ class WhatsAppChannel(Channel):
             """Receive incoming WhatsApp messages."""
             try:
                 body = await request.json()
-            except Exception:
+            except Exception as e:
+                logger.warning("WhatsApp webhook: failed to parse payload: %s", e)
                 return {"status": "ok"}
 
             # Extract messages from the webhook payload

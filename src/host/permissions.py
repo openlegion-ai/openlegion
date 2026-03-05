@@ -59,52 +59,57 @@ class PermissionMatrix:
             )
         return AgentPermissions(agent_id=agent_id)
 
+    @staticmethod
+    def _is_trusted(agent_id: str) -> bool:
+        """Check if an agent ID is a trusted internal component."""
+        return agent_id in ("mesh", "orchestrator")
+
     def can_message(self, from_agent: str, to_agent: str) -> bool:
-        if from_agent in ("mesh", "orchestrator"):
+        if self._is_trusted(from_agent):
             return True
         perms = self.get_permissions(from_agent)
         return "*" in perms.can_message or to_agent in perms.can_message
 
     def can_publish(self, agent_id: str, topic: str) -> bool:
-        if agent_id in ("mesh", "orchestrator"):
+        if self._is_trusted(agent_id):
             return True
         perms = self.get_permissions(agent_id)
         return "*" in perms.can_publish or topic in perms.can_publish
 
     def can_subscribe(self, agent_id: str, topic: str) -> bool:
-        if agent_id in ("mesh", "orchestrator"):
+        if self._is_trusted(agent_id):
             return True
         perms = self.get_permissions(agent_id)
         return "*" in perms.can_subscribe or topic in perms.can_subscribe
 
     def can_read_blackboard(self, agent_id: str, key: str) -> bool:
-        if agent_id in ("mesh", "orchestrator"):
+        if self._is_trusted(agent_id):
             return True
         perms = self.get_permissions(agent_id)
         return any(fnmatch.fnmatch(key, pattern) for pattern in perms.blackboard_read)
 
     def can_write_blackboard(self, agent_id: str, key: str) -> bool:
-        if agent_id in ("mesh", "orchestrator"):
+        if self._is_trusted(agent_id):
             return True
         perms = self.get_permissions(agent_id)
         return any(fnmatch.fnmatch(key, pattern) for pattern in perms.blackboard_write)
 
     def can_use_browser(self, agent_id: str) -> bool:
         """Check if agent has browser access."""
-        if agent_id in ("mesh", "orchestrator"):
+        if self._is_trusted(agent_id):
             return True
         perms = self.get_permissions(agent_id)
         return perms.can_use_browser
 
     def can_use_api(self, agent_id: str, service: str) -> bool:
-        if agent_id in ("mesh", "orchestrator"):
+        if self._is_trusted(agent_id):
             return True
         perms = self.get_permissions(agent_id)
         return service in perms.allowed_apis
 
     def can_manage_vault(self, agent_id: str) -> bool:
         """Check if agent has any vault access (has allowed_credentials patterns)."""
-        if agent_id in ("mesh", "orchestrator"):
+        if self._is_trusted(agent_id):
             return True
         perms = self.get_permissions(agent_id)
         return bool(perms.allowed_credentials)
@@ -124,7 +129,7 @@ class PermissionMatrix:
         provider-key name might appear in the agent-tier dict (e.g. via
         ``add_credential()`` without ``system=True``).
         """
-        if agent_id in ("mesh", "orchestrator"):
+        if self._is_trusted(agent_id):
             return True
         if is_system_credential(credential_name):
             return False

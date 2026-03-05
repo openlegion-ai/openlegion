@@ -53,8 +53,9 @@ class TraceStore:
         ]:
             try:
                 self._conn.execute(f"ALTER TABLE traces ADD COLUMN {col} {typedef}")
-            except sqlite3.OperationalError:
-                pass  # column already exists
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    logger.warning("ALTER TABLE traces ADD COLUMN %s failed: %s", col, e)
         self._conn.commit()
 
     def record(

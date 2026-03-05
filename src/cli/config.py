@@ -699,8 +699,8 @@ def _remove_agent(name: str, stop_container: bool = False) -> None:
             container = client.containers.get(f"openlegion_{name}")
             container.stop(timeout=10)
             container.remove()
-        except Exception:
-            pass  # Docker unavailable or container already gone
+        except Exception as e:
+            logger.warning("Failed to stop/remove container for '%s': %s", name, e)
 
     # Remove from project if member
     project = _get_agent_project(name)

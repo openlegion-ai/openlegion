@@ -122,11 +122,7 @@ class LaneManager:
     async def _handle_collect(self, agent: str, message: str) -> str:
         """Batch messages when agent is busy, dispatch immediately when idle."""
         async with self._state_locks[agent]:
-            if not self._busy.get(agent, False):
-                # Agent is idle — dispatch immediately (release lock first
-                # since _handle_followup may await)
-                pass
-            else:
+            if self._busy.get(agent, False):
                 # Agent is busy — buffer the message
                 self._collect_buffers[agent].append(message)
                 logger.debug(

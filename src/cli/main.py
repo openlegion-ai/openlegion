@@ -52,7 +52,8 @@ def _complete_agent_names(ctx, param, incomplete):
         cfg = _load_config()
         names = sorted(cfg.get("agents", {}).keys())
         return [n for n in names if n.startswith(incomplete)]
-    except Exception:
+    except Exception as e:
+        logger.debug("Shell completion failed: %s", e)
         return []
 
 

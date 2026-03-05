@@ -16,6 +16,7 @@ Config: TELEGRAM_BOT_TOKEN in .env, channels.telegram in mesh.yaml
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 from src.channels.base import Channel, PairingManager, chunk_text
@@ -25,6 +26,8 @@ logger = setup_logging("channels.telegram")
 
 MAX_TG_LEN = 4000
 
+_AT_MENTION_RE = re.compile(r"^@(\w+)\s+(.+)$", re.DOTALL)
+
 
 def _md_to_html(text: str) -> str:
     """Best-effort conversion of common Markdown to Telegram-safe HTML.
@@ -32,23 +35,21 @@ def _md_to_html(text: str) -> str:
     Handles: bold, italic, inline code, code blocks, headers.
     Anything that fails parsing is sent as plain text by the caller.
     """
-    import re as _re
-
     # Fenced code blocks: ```lang\n...\n``` → <pre>...</pre>
-    text = _re.sub(
+    text = re.sub(
         r"```(?:\w+)?\n(.*?)```",
         lambda m: f"<pre>{m.group(1).rstrip()}</pre>",
         text,
-        flags=_re.DOTALL,
+        flags=re.DOTALL,
     )
     # Inline code: `...` → <code>...</code>
-    text = _re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
     # Bold: **...** → <b>...</b>
-    text = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     # Italic: *...* → <i>...</i>  (but not inside <b> tags)
-    text = _re.sub(r"(?<!</b)\*(.+?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"(?<!</b)\*(.+?)\*", r"<i>\1</i>", text)
     # Headers: # ... → <b>...</b> (Telegram has no header tag)
-    text = _re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=_re.MULTILINE)
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
     return text
 
 
@@ -210,8 +211,8 @@ class TelegramChannel(Channel):
         for i in range(3):
             try:
                 await self._app.bot.get_updates(offset=-1, timeout=0)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("getUpdates cleanup failed: %s", e)
             await asyncio.sleep(0.5)
 
     def _on_polling_error(self, exc: Exception) -> None:
@@ -411,8 +412,7 @@ class TelegramChannel(Channel):
         target = current
 
         # Check for @agent mention
-        import re as _re
-        match = _re.match(r"^@(\w+)\s+(.+)$", text, _re.DOTALL)
+        match = _AT_MENTION_RE.match(text)
         if match:
             agents = self._get_agent_names()
             if match.group(1) in agents:
@@ -559,7 +559,8 @@ class TelegramChannel(Channel):
                             await self._app.bot.send_message(
                                 chat_id=chat_id, text=chunk,
                             )
-                except Exception:
+                except Exception as e:
+                    logger.debug("Final streaming edit failed, sending new message: %s", e)
                     await self._send_reply(chat_id, final_text)
             else:
                 await self._send_reply(chat_id, final_text)

@@ -504,6 +504,26 @@ class CredentialVault:
         """Return diagnostic model-health data."""
         return self._health_tracker.get_status()
 
+    def _prepare_llm_params(
+        self, request: APIProxyRequest, model: str,
+        api_base: str | None = None,
+        auth_headers: dict[str, str] | None = None,
+    ) -> tuple[list[dict], dict]:
+        """Build sanitized messages and extra kwargs for an LLM call.
+
+        Returns ``(sanitized_messages, extra_kwargs)``.
+        """
+        sanitized = sanitize_for_provider(request.params.get("messages", []), model)
+        extra = {k: v for k, v in request.params.items() if k not in ("model", "messages")}
+        if api_base:
+            extra["api_base"] = api_base
+        if auth_headers:
+            extra["extra_headers"] = {
+                **extra.get("extra_headers", {}),
+                **auth_headers,
+            }
+        return sanitized, extra
+
     async def _handle_llm(self, request: APIProxyRequest) -> APIProxyResponse:
         """Unified LLM handler. Auto-detects provider from model prefix via LiteLLM."""
         import litellm
@@ -516,15 +536,9 @@ class CredentialVault:
                 api_base: str | None = None,
                 auth_headers: dict[str, str] | None = None,
             ):
-                sanitized = sanitize_for_provider(request.params.get("messages", []), model)
-                extra = {k: v for k, v in request.params.items() if k not in ("model", "messages")}
-                if api_base:
-                    extra["api_base"] = api_base
-                if auth_headers:
-                    extra["extra_headers"] = {
-                        **extra.get("extra_headers", {}),
-                        **auth_headers,
-                    }
+                sanitized, extra = self._prepare_llm_params(
+                    request, model, api_base, auth_headers,
+                )
                 return await litellm.acompletion(
                     model=model,
                     messages=sanitized,
@@ -612,15 +626,9 @@ class CredentialVault:
                 continue
             api_base = self._get_api_base_for_model(model)
             try:
-                sanitized = sanitize_for_provider(request.params.get("messages", []), model)
-                extra = {k: v for k, v in request.params.items() if k not in ("model", "messages")}
-                if api_base:
-                    extra["api_base"] = api_base
-                if auth_headers:
-                    extra["extra_headers"] = {
-                        **extra.get("extra_headers", {}),
-                        **auth_headers,
-                    }
+                sanitized, extra = self._prepare_llm_params(
+                    request, model, api_base, auth_headers,
+                )
                 response = await litellm.acompletion(
                     model=model,
                     messages=sanitized,

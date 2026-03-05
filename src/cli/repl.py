@@ -1179,8 +1179,8 @@ class REPLSession:
                     cap_str = f" / {_format_size(cap)}" if cap else ""
                     default_marker = click.style(" (default)", fg="bright_black") if f.get("is_default") else ""
                     click.echo(f"    {fname:<20} {size_str}{cap_str}{default_marker}")
-        except Exception:
-            pass  # Agent unreachable — skip files section
+        except Exception as e:
+            logger.debug("Could not fetch workspace files for '%s': %s", name, e)
 
         click.echo()
 
