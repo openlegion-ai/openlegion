@@ -64,13 +64,26 @@ def _start_kasmvnc() -> subprocess.Popen:
         "-websocketPort", str(_VNC_PORT),
         "-httpd", "/usr/share/kasmvnc/www",
         "-sslOnly", "0",
-        "-SecurityTypes", "None",
+        "-SecurityTypes", "VncAuth",
+        "-disableBasicAuth",
         "-AlwaysShared",
         "-interface", "0.0.0.0",
         # Allow iframe embedding from dashboard (different port = different origin)
         "-http-header", "X-Frame-Options=ALLOWALL",
         "-http-header", "Access-Control-Allow-Origin=*",
     ]
+    # VncAuth needs a VNC password file (separate from .kasmpasswd)
+    vnc_dir = os.path.expanduser("~/.vnc")
+    os.makedirs(vnc_dir, exist_ok=True)
+    passwd_file = os.path.join(vnc_dir, "passwd")
+    if not os.path.exists(passwd_file):
+        subprocess.run(
+            ["kasmvncpasswd", passwd_file],
+            input="openlegion\nopenlegion\n",
+            text=True,
+            capture_output=True,
+        )
+        logger.debug("Created VNC password file")
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
     if proc.poll() is not None:
