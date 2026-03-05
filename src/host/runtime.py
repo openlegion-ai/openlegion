@@ -147,12 +147,13 @@ class DockerBackend(RuntimeBackend):
         self._browser_container = None
         self._cleanup_stale()
 
-        # Create a bridge network for agent containers.
-        # Bridge mode isolates agents from the host network (NAT only) while
-        # still allowing them to reach the mesh via host.docker.internal.
-        # The mesh proxy enforces the "mesh is the only door" policy.
+        # Internal bridge network for agent containers.
+        # internal=True blocks all egress (no internet, no host access), so
+        # agents can only communicate with other containers on this network.
+        # A lightweight mesh relay container bridges agents to the mesh host.
         self._network_name = "openlegion_agents"
         self._network = None
+        self._mesh_relay = None
         if not use_host_network:
             try:
                 self._network = self.client.networks.get(self._network_name)
@@ -160,11 +161,87 @@ class DockerBackend(RuntimeBackend):
                 self._network = self.client.networks.create(
                     self._network_name,
                     driver="bridge",
+                    internal=True,
                 )
+
+    # Name used by agents to reach the mesh via Docker DNS on the internal network.
+    MESH_RELAY_NAME = "openlegion_mesh_relay"
 
     @staticmethod
     def backend_name() -> str:
         return "docker"
+
+    def _ensure_mesh_relay(self) -> None:
+        """Start a TCP relay so agents on the internal network can reach the mesh.
+
+        The relay container sits on two networks:
+          - default bridge: can reach host.docker.internal (→ mesh on host)
+          - internal agent network: discoverable by agents via Docker DNS
+
+        This preserves ``internal=True`` isolation (no direct internet) while
+        giving agents a single path to the mesh.  Idempotent — skips if the
+        relay is already running.
+        """
+        if self.use_host_network or self._mesh_relay is not None:
+            return
+        import docker as _docker
+
+        # Clean up any stale relay from a previous run
+        try:
+            stale = self.client.containers.get(self.MESH_RELAY_NAME)
+            stale.remove(force=True)
+        except _docker.errors.NotFound:
+            pass
+
+        # Minimal async TCP proxy: forwards port on the internal network
+        # to host.docker.internal:<mesh_port> via the default bridge.
+        proxy_script = (
+            "import asyncio\n"
+            f"PORT = {self.mesh_host_port}\n"
+            "async def pipe(r, w):\n"
+            "    try:\n"
+            "        while True:\n"
+            "            d = await r.read(65536)\n"
+            "            if not d:\n"
+            "                break\n"
+            "            w.write(d)\n"
+            "            await w.drain()\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    finally:\n"
+            "        w.close()\n"
+            "async def handle(cr, cw):\n"
+            "    try:\n"
+            "        sr, sw = await asyncio.open_connection('host.docker.internal', PORT)\n"
+            "        await asyncio.gather(pipe(cr, sw), pipe(sr, cw))\n"
+            "    except Exception:\n"
+            "        cw.close()\n"
+            "async def main():\n"
+            "    s = await asyncio.start_server(handle, '0.0.0.0', PORT)\n"
+            "    await s.serve_forever()\n"
+            "asyncio.run(main())\n"
+        )
+
+        run_kwargs: dict[str, Any] = {
+            "detach": True,
+            "name": self.MESH_RELAY_NAME,
+            "entrypoint": ["python3", "-c", proxy_script],
+            "mem_limit": "64m",
+            "cpu_quota": 5000,
+            "security_opt": ["no-new-privileges"],
+            "cap_drop": ["ALL"],
+            "cap_add": ["NET_BIND_SERVICE"],
+            "read_only": True,
+            "tmpfs": {"/tmp": "size=10m,noexec,nosuid"},
+        }
+        # Start on default bridge so it can reach host.docker.internal
+        if platform.system() == "Linux":
+            run_kwargs["extra_hosts"] = {"host.docker.internal": "host-gateway"}
+
+        self._mesh_relay = self.client.containers.run(self.BASE_IMAGE, **run_kwargs)
+        # Also connect to the internal agent network so agents discover it via Docker DNS
+        self._network.connect(self._mesh_relay)
+        logger.info("Started mesh relay for agent network isolation")
 
     def _cleanup_stale(self) -> None:
         try:
@@ -189,6 +266,9 @@ class DockerBackend(RuntimeBackend):
     ) -> str:
         import docker as _docker
 
+        # Ensure the mesh relay is running before starting agents
+        self._ensure_mesh_relay()
+
         with self._port_lock:
             port = self._next_port
             self._next_port += 1
@@ -197,7 +277,9 @@ class DockerBackend(RuntimeBackend):
         auth_token = secrets.token_urlsafe(32)
         self.auth_tokens[agent_id] = auth_token
 
-        mesh_host = "127.0.0.1" if self.use_host_network else "host.docker.internal"
+        # On host networking agents reach mesh at localhost; on bridge networking
+        # they reach it via the relay container on the internal network.
+        mesh_host = "127.0.0.1" if self.use_host_network else self.MESH_RELAY_NAME
         environment: dict[str, str] = {
             "AGENT_ID": agent_id,
             "AGENT_ROLE": role,
@@ -264,15 +346,9 @@ class DockerBackend(RuntimeBackend):
         if self.use_host_network:
             run_kwargs["network_mode"] = "host"
         else:
-            # Connect to internal network (no external egress)
+            # Internal network — agents reach mesh via relay, no direct egress
             run_kwargs["network"] = self._network_name
-            # On Linux, expose host.docker.internal so agents can reach mesh
-            if platform.system() == "Linux":
-                run_kwargs["extra_hosts"] = {
-                    "host.docker.internal": "host-gateway",
-                }
-            ports = {"8400/tcp": port}
-            run_kwargs["ports"] = ports
+            run_kwargs["ports"] = {"8400/tcp": port}
 
         container_name = f"openlegion_{safe_name}"
         try:
@@ -452,6 +528,13 @@ class DockerBackend(RuntimeBackend):
 
     def stop_all(self) -> None:
         super().stop_all()
+        if self._mesh_relay is not None:
+            try:
+                self._mesh_relay.stop(timeout=5)
+                self._mesh_relay.remove()
+            except Exception:
+                pass
+            self._mesh_relay = None
         if self._network is not None:
             try:
                 self._network.remove()

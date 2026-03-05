@@ -393,6 +393,7 @@ class TestDockerBackendSlimResources:
         backend._browser_container = None
         backend._network_name = "openlegion_agents"
         backend._network = MagicMock()
+        backend._mesh_relay = MagicMock()  # pretend relay is already running
         return backend
 
     def test_slim_agent_resources(self):
