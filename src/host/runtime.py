@@ -327,11 +327,28 @@ class DockerBackend(RuntimeBackend):
         self.browser_auth_token = secrets.token_urlsafe(32)
         mesh_host = "127.0.0.1" if self.use_host_network else "host.docker.internal"
 
+        # Scale browser container resources based on plan size.
+        # Each Camoufox instance uses ~200-400 MB RAM.  We size the
+        # container memory and max concurrent browsers to support as
+        # many agents browsing simultaneously as the VPS can handle.
+        #
+        #   Plan    Server   Agents  Container  Max Browsers
+        #   Basic   cax11 4GB    1     2 GB        1
+        #   Growth  cax21 8GB    5     4 GB        5
+        #   Pro     cax31 16GB  15     8 GB       10
+        max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
+        if max_agents <= 1:
+            max_browsers, browser_mem = 1, "2g"
+        elif max_agents <= 5:
+            max_browsers, browser_mem = max_agents, "4g"
+        else:
+            max_browsers, browser_mem = min(max_agents, 10), "8g"
+
         environment = {
             "BROWSER_AUTH_TOKEN": self.browser_auth_token,
             "MESH_URL": f"http://{mesh_host}:{self.mesh_host_port}",
-            "MAX_BROWSERS": "5",
-            "IDLE_TIMEOUT_MINUTES": "30",
+            "MAX_BROWSERS": str(max_browsers),
+            "IDLE_TIMEOUT_MINUTES": "10",
         }
 
         with self._port_lock:
@@ -345,7 +362,7 @@ class DockerBackend(RuntimeBackend):
             "name": "openlegion_browser",
             "environment": environment,
             "volumes": {"openlegion_browser_data": {"bind": "/data", "mode": "rw"}},
-            "mem_limit": "2g",
+            "mem_limit": browser_mem,
             "cpu_quota": 100000,
             "shm_size": "512m",
             "security_opt": ["no-new-privileges"],
