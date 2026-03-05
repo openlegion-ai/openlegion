@@ -11,6 +11,7 @@ import asyncio
 from src.agent.skills import skill
 
 _MAX_OUTPUT = 100_000
+_MAX_TIMEOUT = 300
 
 
 @skill(
@@ -40,6 +41,7 @@ _MAX_OUTPUT = 100_000
 )
 async def exec_command(command: str, timeout: int = 30, workdir: str = "/data") -> dict:
     """Run a shell command and return exit code + output."""
+    timeout = min(timeout, _MAX_TIMEOUT)
     import os
     # Inside the container, confine workdir to /data to prevent directory escape.
     # Outside containers (dev/test), /data won't exist — skip the check.

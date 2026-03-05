@@ -13,6 +13,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import json as json_module
+import re
 
 import httpx
 
@@ -223,6 +224,13 @@ class SandboxTransport(Transport):
     """
 
     AGENT_PORT = 8400
+    _AGENT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+    @classmethod
+    def _validate_agent_id(cls, agent_id: str) -> None:
+        """Reject agent_ids that could escape the sandbox container name."""
+        if not cls._AGENT_ID_RE.match(agent_id):
+            raise ValueError(f"Invalid agent_id format: {agent_id}")
 
     async def request(
         self,
@@ -233,6 +241,7 @@ class SandboxTransport(Transport):
         timeout: int = 120,
         headers: dict[str, str] | None = None,
     ) -> dict:
+        self._validate_agent_id(agent_id)
         sandbox_name = f"openlegion_{agent_id}"
         url = f"http://localhost:{self.AGENT_PORT}{path}"
         cmd: list[str] = [
@@ -294,6 +303,7 @@ class SandboxTransport(Transport):
     ) -> dict:
         import subprocess
 
+        self._validate_agent_id(agent_id)
         sandbox_name = f"openlegion_{agent_id}"
         url = f"http://localhost:{self.AGENT_PORT}{path}"
         cmd: list[str] = [

@@ -72,7 +72,6 @@ class Blackboard:
                 timestamp TEXT DEFAULT (datetime('now'))
             );
 
-            CREATE INDEX IF NOT EXISTS idx_entries_prefix ON entries(key);
             CREATE INDEX IF NOT EXISTS idx_event_log_timestamp ON event_log(timestamp);
         """)
         self.db.commit()

@@ -19,6 +19,9 @@ Config: WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID in .env,
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import os
 
 import httpx
 from fastapi import APIRouter, Query, Request
@@ -124,6 +127,17 @@ class WhatsAppChannel(Channel):
         @router.post("/webhook")
         async def receive_webhook(request: Request) -> dict:
             """Receive incoming WhatsApp messages."""
+            # Verify X-Hub-Signature-256 if app secret is configured
+            app_secret = os.environ.get("WHATSAPP_APP_SECRET", "")
+            if app_secret:
+                raw_body = await request.body()
+                signature = request.headers.get("X-Hub-Signature-256", "")
+                expected = "sha256=" + hmac.new(
+                    app_secret.encode(), raw_body, hashlib.sha256,
+                ).hexdigest()
+                if not hmac.compare_digest(signature, expected):
+                    return {"status": "invalid_signature"}
+
             try:
                 body = await request.json()
             except Exception as e:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 
 from src.agent.skills import skill
-from src.shared.utils import setup_logging
+from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.builtins.mesh_tool")
 
@@ -99,7 +99,10 @@ async def read_shared_state(key: str, *, mesh_client=None) -> dict:
         entry = await mesh_client.read_blackboard(key)
         if entry is None:
             return {"key": key, "exists": False, "value": None}
-        return {"key": key, "exists": True, "value": entry.get("value", entry)}
+        value = entry.get("value", entry)
+        if isinstance(value, str):
+            value = sanitize_for_prompt(value)
+        return {"key": key, "exists": True, "value": value}
     except Exception as e:
         return {"error": f"Failed to read '{key}': {e}"}
 

@@ -12,6 +12,11 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+
+def _generate_id(prefix: str, length: int = 12) -> str:
+    return f"{prefix}{uuid.uuid4().hex[:length]}"
+
+
 # === Protocol Constants ===
 
 SILENT_REPLY_TOKEN = "__SILENT__"
@@ -23,7 +28,7 @@ SILENT_REPLY_TOKEN = "__SILENT__"
 class AgentMessage(BaseModel):
     """Every message between agents passes through the mesh in this format."""
 
-    id: str = Field(default_factory=lambda: f"msg_{uuid.uuid4().hex[:12]}")
+    id: str = Field(default_factory=lambda: _generate_id("msg_"))
     from_agent: str
     to: str
     type: Literal["task_request", "task_result", "event", "query", "cancel"]
@@ -56,7 +61,7 @@ class TokenBudget(BaseModel):
 class TaskAssignment(BaseModel):
     """Sent by orchestrator to an agent to begin work."""
 
-    task_id: str = Field(default_factory=lambda: f"task_{uuid.uuid4().hex[:12]}")
+    task_id: str = Field(default_factory=lambda: _generate_id("task_"))
     workflow_id: str
     step_id: str
     task_type: str
@@ -114,7 +119,7 @@ class BlackboardEntry(BaseModel):
 class MeshEvent(BaseModel):
     """Published to topics via pub/sub."""
 
-    id: str = Field(default_factory=lambda: f"evt_{uuid.uuid4().hex[:12]}")
+    id: str = Field(default_factory=lambda: _generate_id("evt_"))
     topic: str
     source: str
     payload: dict[str, Any] = {}
@@ -167,6 +172,8 @@ class AgentPermissions(BaseModel):
     allowed_apis: list[str] = []
     allowed_credentials: list[str] = []
     can_use_browser: bool = True
+    can_spawn: bool = False
+    can_manage_cron: bool = True
 
 
 # === Projects ===
@@ -207,7 +214,7 @@ class BlackboardClaimRequest(BaseModel):
 class MemoryFact(BaseModel):
     """A single fact in agent's private memory."""
 
-    id: str = Field(default_factory=lambda: f"fact_{uuid.uuid4().hex[:8]}")
+    id: str = Field(default_factory=lambda: _generate_id("fact_", 8))
     key: str
     value: str
     category: str = "general"
@@ -223,7 +230,7 @@ class MemoryFact(BaseModel):
 class MemoryLog(BaseModel):
     """An entry in the agent's action log."""
 
-    id: str = Field(default_factory=lambda: f"log_{uuid.uuid4().hex[:8]}")
+    id: str = Field(default_factory=lambda: _generate_id("log_", 8))
     action: str
     input_summary: str
     output_summary: str
@@ -327,7 +334,7 @@ class NotifyRequest(BaseModel):
 class DashboardEvent(BaseModel):
     """Real-time event broadcast to connected dashboard WebSocket clients."""
 
-    id: str = Field(default_factory=lambda: f"evt_{uuid.uuid4().hex[:12]}")
+    id: str = Field(default_factory=lambda: _generate_id("evt_"))
     type: Literal[
         "agent_state",
         "message_sent",

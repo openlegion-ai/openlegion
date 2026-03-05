@@ -80,14 +80,9 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             is_credential=body.get("is_credential", False),
         )
 
-    @app.post("/browser/{agent_id}/evaluate")
-    async def evaluate(agent_id: str, request: Request):
-        _verify_auth(request)
-        body = await request.json()
-        expression = body.get("expression", "")
-        if not expression:
-            raise HTTPException(400, "expression required")
-        return await manager.evaluate(agent_id, expression)
+    # /browser/{agent_id}/evaluate endpoint intentionally removed —
+    # arbitrary JS execution is an SSRF/sandbox-escape vector.
+    # The evaluate() method remains on BrowserManager for internal use only.
 
     @app.post("/browser/{agent_id}/screenshot")
     async def screenshot(agent_id: str, request: Request):

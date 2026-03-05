@@ -56,12 +56,12 @@ async def close_client() -> None:
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if the IP is in a range that should be blocked for SSRF."""
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
         return True
     # IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) — check the mapped v4 address too
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         mapped = ip.ipv4_mapped
-        if mapped.is_private or mapped.is_loopback or mapped.is_link_local or mapped.is_reserved:
+        if mapped.is_private or mapped.is_loopback or mapped.is_link_local or mapped.is_reserved or mapped.is_unspecified:
             return True
     return False
 
@@ -202,6 +202,9 @@ async def _request_with_pinned_dns(
     preventing DNS rebinding attacks where an attacker's DNS returns a
     public IP for the initial check but a private IP for the connection.
     """
+    original_parsed = urlparse(url)
+    original_origin = (original_parsed.scheme, original_parsed.hostname, original_parsed.port)
+
     response = await _send_pinned_request(client, method, url, headers, content, timeout)
 
     for _ in range(_MAX_REDIRECTS):
@@ -220,6 +223,12 @@ async def _request_with_pinned_dns(
         if response.status_code in (301, 302, 303):
             method = "GET"
             content = None
+
+        # Strip Authorization header on cross-origin redirects
+        redirect_parsed = urlparse(redirect_url)
+        redirect_origin = (redirect_parsed.scheme, redirect_parsed.hostname, redirect_parsed.port)
+        if redirect_origin != original_origin:
+            headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
 
         url = redirect_url
         # Re-resolve and re-validate DNS for the redirect target
@@ -243,12 +252,18 @@ async def _resolve_creds(text: str, mesh_client) -> tuple[str, list[str]]:
     if not mesh_client:
         raise ValueError("$CRED{} handles require mesh connectivity")
     secrets: list[str] = []
+    resolved: dict[str, str] = {}
     for cred_name in set(matches):  # dedupe to avoid redundant vault calls
         value = await mesh_client.vault_resolve(cred_name)
         if value is None:
             raise ValueError(f"Credential not found: {cred_name}")
-        text = text.replace(f"$CRED{{{cred_name}}}", value)
+        resolved[cred_name] = value
         secrets.append(value)
+    # Single-pass replacement prevents double-resolution attacks where a
+    # resolved value itself contains $CRED{...} patterns.
+    text = _CRED_HANDLE_RE.sub(
+        lambda m: resolved.get(m.group(1), m.group(0)), text,
+    )
     return text, secrets
 
 

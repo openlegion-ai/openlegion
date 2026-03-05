@@ -385,7 +385,12 @@ class BrowserManager:
                 return {"success": False, "error": str(e)}
 
     async def evaluate(self, agent_id: str, expression: str) -> dict:
-        """Execute JavaScript and return result."""
+        """Execute JavaScript and return result.
+
+        Intentionally NOT exposed via the HTTP API (server.py) — arbitrary
+        JS execution is a sandbox-escape vector.  Used only internally
+        (e.g. navigate body text extraction, scrolling).
+        """
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:

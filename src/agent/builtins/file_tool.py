@@ -184,7 +184,7 @@ def list_files(path: str = ".", pattern: str = "*", recursive: bool = False) -> 
         entries.append({
             "path": str(rel),
             "type": "dir" if item.is_dir() else "file",
-            "size": item.stat().st_size if item.is_file() else 0,
+            "size": item.lstat().st_size if item.is_file() else 0,
         })
 
     return {"entries": entries, "count": len(entries)}

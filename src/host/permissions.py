@@ -56,6 +56,8 @@ class PermissionMatrix:
                 allowed_apis=default.allowed_apis,
                 allowed_credentials=default.allowed_credentials,
                 can_use_browser=default.can_use_browser,
+                can_spawn=default.can_spawn,
+                can_manage_cron=default.can_manage_cron,
             )
         return AgentPermissions(agent_id=agent_id)
 
@@ -100,6 +102,20 @@ class PermissionMatrix:
             return True
         perms = self.get_permissions(agent_id)
         return perms.can_use_browser
+
+    def can_spawn(self, agent_id: str) -> bool:
+        """Check if agent is allowed to spawn ephemeral agents."""
+        if self._is_trusted(agent_id):
+            return True
+        perms = self.get_permissions(agent_id)
+        return perms.can_spawn
+
+    def can_manage_cron(self, agent_id: str) -> bool:
+        """Check if agent is allowed to create/manage cron jobs."""
+        if self._is_trusted(agent_id):
+            return True
+        perms = self.get_permissions(agent_id)
+        return perms.can_manage_cron
 
     def can_use_api(self, agent_id: str, service: str) -> bool:
         if self._is_trusted(agent_id):

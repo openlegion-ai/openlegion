@@ -1,144 +1,219 @@
-# CLAUDE.md
+# CLAUDE.md — engine
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Current State
 
-## What This Is
+### Architecture (verified 2026-03-05)
 
 OpenLegion is a container-isolated multi-agent runtime. LLM-powered agents run in Docker containers (or Sandbox microVMs), coordinated through a central mesh host. Fleet model — no CEO agent. Users talk to agents directly; agents coordinate via shared blackboard and YAML workflows.
-
-## Architecture (read this first)
 
 ```
 User (CLI REPL / Telegram / Discord / Slack / WhatsApp / Webhook)
   → Mesh Host (FastAPI :8420) — routes messages, enforces permissions, proxies APIs
     → Agent Containers (FastAPI :8400 each) — isolated execution with private memory
+    → Browser Service Container (FastAPI :8421) — shared Camoufox browser instances
 ```
 
 Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agents** (untrusted, sandboxed). Everything between zones is HTTP + JSON with Pydantic contracts defined in `src/shared/types.py`.
 
-### Key source paths
+### Module Map
 
 | Path | What it does |
 |---|---|
+| **Shared** | |
 | `src/shared/types.py` | THE contract — all Pydantic models shared between host and agents |
+| `src/shared/utils.py` | Utilities: `sanitize_for_prompt()`, `setup_logging()`, misc helpers |
+| `src/shared/trace.py` | Distributed trace-ID generation and propagation |
+| `src/shared/models.py` | Model cost/context window registry backed by LiteLLM |
+| ~~`src/shared/constants.py`~~ | *(Deleted — was dead code, zero imports)* |
+| **Agent Container** | |
 | `src/agent/loop.py` | Agent execution loop (task mode + chat mode) |
 | `src/agent/skills.py` | Skill registry and tool discovery |
-| `src/agent/builtins/` | Built-in tools (exec, file, http, browser, memory, mesh, web search, vault, introspect, skill, subagent) |
-| `src/agent/memory.py` | Per-agent SQLite + sqlite-vec + FTS5 memory store |
-| `src/agent/workspace.py` | Persistent markdown workspace (MEMORY.md, daily logs, learnings) |
-| `src/agent/context.py` | Context window management (write-then-compact) |
+| `src/agent/server.py` | Agent container FastAPI server (`/task`, `/chat`, `/status`, `/cancel`) |
 | `src/agent/llm.py` | LLM client (routes through mesh proxy, never holds keys) |
+| `src/agent/mesh_client.py` | Agent-side HTTP client for mesh communication |
+| `src/agent/memory.py` | Per-agent SQLite + sqlite-vec + FTS5 memory store |
+| `src/agent/workspace.py` | Persistent markdown workspace (SOUL.md, INSTRUCTIONS.md, MEMORY.md, daily logs, learnings) |
+| `src/agent/context.py` | Context window management (write-then-compact) |
+| `src/agent/loop_detector.py` | Tool loop detection with escalating responses |
+| `src/agent/mcp_client.py` | MCP tool server client and lifecycle |
+| `src/agent/__main__.py` | Agent container entry point |
+| **Agent Builtins** | |
+| `src/agent/builtins/exec_tool.py` | Shell execution scoped to `/data` |
+| `src/agent/builtins/file_tool.py` | File I/O with two-stage path traversal protection |
+| `src/agent/builtins/http_tool.py` | HTTP requests with CRED handles and DNS rebinding/SSRF protection |
+| `src/agent/builtins/browser_tool.py` | Browser automation via shared Camoufox service container |
+| `src/agent/builtins/memory_tool.py` | Memory search with hierarchical fallback |
+| `src/agent/builtins/mesh_tool.py` | Blackboard, pub/sub, notify_user, list_agents |
+| `src/agent/builtins/vault_tool.py` | Credential generation without returning actual values |
+| `src/agent/builtins/web_search_tool.py` | DuckDuckGo search (no API key needed) |
+| `src/agent/builtins/skill_tool.py` | Self-authoring with AST validation (forbidden imports/calls blocked) |
+| `src/agent/builtins/subagent_tool.py` | In-process subagents (MAX_DEPTH=2, MAX_CONCURRENT=3, DEFAULT_TTL=300s) |
+| `src/agent/builtins/introspect_tool.py` | Runtime state query (permissions, budget, fleet, cron, health) |
+| **Host/Mesh** | |
+| `src/host/server.py` | Mesh FastAPI app factory — all endpoints enforce permissions |
 | `src/host/mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter |
-| `src/host/orchestrator.py` | DAG workflow executor with safe condition eval |
+| `src/host/orchestrator.py` | DAG workflow executor with safe condition eval (regex, no eval()) |
 | `src/host/runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend |
 | `src/host/transport.py` | Transport ABC → HttpTransport / SandboxTransport |
-| `src/host/credentials.py` | Credential vault + LLM API proxy |
-| `src/host/permissions.py` | Per-agent ACL enforcement (glob patterns) |
-| `src/host/server.py` | Mesh FastAPI app factory |
-| `src/host/lanes.py` | Per-agent FIFO task queues |
-| `src/host/health.py` | Health monitor with auto-restart |
-| `src/host/costs.py` | Per-agent cost tracking + budget enforcement |
-| `src/host/cron.py` | Cron scheduler with heartbeat support |
+| `src/host/credentials.py` | Two-tier credential vault (SYSTEM_*/CRED_*) + LLM API proxy |
+| `src/host/permissions.py` | Per-agent ACL enforcement (glob patterns, deny-all default) |
+| `src/host/lanes.py` | Per-agent FIFO task queues (followup/steer/collect modes) |
+| `src/host/health.py` | Health monitor with auto-restart and rate limiting |
+| `src/host/costs.py` | Per-agent cost tracking + budget enforcement (SQLite) |
+| `src/host/cron.py` | Persistent cron scheduler with heartbeat probes |
 | `src/host/failover.py` | Model health tracking + failover chains |
 | `src/host/traces.py` | Request tracing + grouped summaries |
 | `src/host/transcript.py` | Provider-specific transcript sanitization |
 | `src/host/webhooks.py` | Named webhook endpoints |
 | `src/host/watchers.py` | File watcher with polling |
 | `src/host/containers.py` | Backward-compat alias for `DockerBackend` |
-| `src/channels/base.py` | Abstract channel with unified REPL-like UX |
+| **Browser Service** | |
+| `src/browser/server.py` | Browser service FastAPI app |
+| `src/browser/service.py` | BrowserManager with per-agent Camoufox instances |
+| `src/browser/redaction.py` | Credential redaction for browser output |
+| `src/browser/stealth.py` | Anti-bot fingerprint building |
+| `src/browser/timing.py` | Timing jitter for human-like behavior |
+| **Channels** | |
+| `src/channels/base.py` | Abstract Channel with PairingManager for unified REPL-like UX |
 | `src/channels/telegram.py` | Telegram bot channel adapter |
 | `src/channels/discord.py` | Discord bot channel adapter |
 | `src/channels/slack.py` | Slack channel adapter (Socket Mode) |
 | `src/channels/whatsapp.py` | WhatsApp Cloud API channel adapter |
 | `src/channels/webhook.py` | HTTP webhook channel adapter |
-| `src/agent/server.py` | Agent container FastAPI server |
-| `src/agent/mesh_client.py` | Agent-side HTTP client for mesh communication |
-| `src/agent/loop_detector.py` | Tool loop detection with escalating responses |
-| `src/agent/mcp_client.py` | MCP tool server client and lifecycle |
-| `src/agent/__main__.py` | Agent container entry point |
-| `src/shared/trace.py` | Distributed trace-ID generation and propagation |
-| `src/setup_wizard.py` | Interactive setup wizard with validation |
-| `src/marketplace.py` | Git-based skill marketplace (install/remove) |
-| `src/dashboard/server.py` | Dashboard FastAPI router + API |
-| `src/dashboard/events.py` | EventBus for real-time streaming |
-| `src/cli/` | CLI package (see below) |
+| **Dashboard** | |
+| `src/dashboard/server.py` | Dashboard FastAPI router + API endpoints |
+| `src/dashboard/events.py` | EventBus for real-time WebSocket streaming |
+| `src/dashboard/auth.py` | Session cookie verification for dashboard access |
+| **CLI** | |
 | `src/cli/main.py` | CLI entry point: start, stop, status, chat, version |
 | `src/cli/config.py` | Config loading, Docker helpers, agent management |
 | `src/cli/runtime.py` | RuntimeContext — full lifecycle management |
 | `src/cli/repl.py` | REPLSession — interactive command dispatch |
 | `src/cli/channels.py` | ChannelManager — messaging channel lifecycle |
 | `src/cli/formatting.py` | Tool display, styled output, response rendering |
+| **Other** | |
+| `src/setup_wizard.py` | Interactive setup wizard with validation |
+| `src/marketplace.py` | Git-based skill marketplace (install/remove) |
+
+### Cross-Repo Integration Points
+
+**The engine is a standalone runtime with NO direct dependencies on app/ or provisioner/.** No imports, no calls, no shared code.
+
+Integration happens externally:
+
+1. **Provisioner → Engine**: Provisioner manages engine instances via Docker/systemd on Hetzner VPS. Provisioner deploys code, writes `.env`, starts services, checks health via SSH to `/mesh/agents`.
+
+2. **App → Engine**: App generates HMAC tokens for SSO. Engine's auth gate (deployed via cloud-init) verifies HMAC tokens at `/__auth/callback?token={expiry}.{signature}` using the shared `access_token`.
+
+3. **Mesh endpoints exposed** (that external systems interact with):
+   - `/mesh/agents` — health check target (provisioner hits this via SSH)
+   - `/__auth/callback` — SSO callback (app redirects users here)
+   - Dashboard UI on port 8420 — user-facing after SSO
+
+### Patterns In Use
+
+- **Pydantic for boundaries, plain dicts internally.** Cross-component messages use Pydantic models from `types.py`. Internal data flow within a module can use dicts.
+- **Async by default.** Agent-side code is async (FastAPI + asyncio). Blocking calls wrapped in `run_in_executor`.
+- **SQLite for all state.** Blackboard, agent memory, cost tracking, cron, traces — all SQLite with WAL mode and `busy_timeout=5000`.
+- **`TYPE_CHECKING` imports** for circular dependency prevention (28 instances across codebase).
+- **`setup_logging(name)`** — every module creates `logger = setup_logging("component.module")`.
+- **Small, focused modules** — each file has a single responsibility.
+- **Skills over features** — new agent capabilities added as `@skill` decorated functions, not loop changes.
+
+### Known Tech Debt
+
+1. **Polling in orchestrator**: `_wait_for_task_result` uses polling instead of push-based notification.
+2. **Module-level globals**: `_skill_staging` in `skills.py` (protected by threading lock), `_client` in browser tool (for connection pooling). Avoid adding more.
+3. **Rate limiting**: Per-endpoint rate limiting via in-memory deque — not persistent across restarts.
+4. **Subagent browser concurrency**: Module-level state means subagents shouldn't use browser concurrently.
+
+### Infrastructure
+
+- **Runtime**: Python 3.11+, FastAPI, asyncio
+- **State**: All SQLite (WAL mode) — no Redis, no external databases
+- **Isolation**: Docker containers (or Sandbox microVMs) per agent
+- **Container hardening**: non-root (UID 1000), `no-new-privileges`, 384MB memory, 0.15 CPU
+- **Browser service**: Shared container with 2GB RAM, 1 CPU (Camoufox)
+- **Dashboard**: Alpine.js SPA — no React, no build step
+- **Dependencies**: Minimal — no LangChain, no Kubernetes
+- **CI**: GitHub Actions (lint + tests on multiple Python versions)
+
+## Target State
+
+### Architecture Decisions
+
+- Engine architecture is sound. No structural changes needed for production.
+- The polling in orchestrator should eventually be replaced with push-based notification.
+- Browser service architecture (shared container) is correct for resource efficiency.
+
+### Pattern Standards
+
+- All modules follow the same patterns consistently. No standardization needed.
+- `setup_logging()`, `TYPE_CHECKING` imports, SQLite WAL — all uniformly applied.
+
+### Security Requirements
+
+All security boundaries are already enforced:
+- Trust zones (User/Mesh/Agent) with permission checks on all 26+ mesh endpoints
+- `sanitize_for_prompt()` at 35+ choke points for prompt injection prevention
+- File path traversal protection (two-stage validation)
+- SSRF protection (DNS pinning + IP blocking)
+- Credential isolation (two-tier vault, opaque handles)
+- Execution limits (iteration caps, token budgets, subagent depth/concurrency)
+- Safe condition evaluation (regex parser, no eval)
+
+### Current → Target Gaps
+
+- No critical gaps identified. Engine is production-ready from architecture and security standpoints.
+- Minor: document `src/shared/constants.py` and `src/dashboard/auth.py` (now done above).
 
 ## Git Workflow
 
-- **Always use worktrees.** Multiple agents work on this codebase concurrently. To avoid conflicts, always work in an isolated git worktree. Use Claude Code's built-in worktree support (`isolation: "worktree"` for subagents, or the `EnterWorktree` tool for interactive sessions) so each agent gets its own branch and working directory. Never make changes directly on `main`.
-- **Never `pip install` from a worktree.** Running `pip install -e .` inside a worktree silently hijacks the global `openlegion` entry point to point at the worktree's frozen source instead of the main checkout. This breaks the CLI for the user. Never run `pip install`, `pip install -e .`, or any variant from inside a worktree. The CLI is installed once from the main checkout.
-- **Never merge directly to main.** Always create a PR via `gh pr create` and merge through GitHub. Branch protection is enforced.
-- **Wait for CI before merging.** After creating a PR, run `gh pr checks <number> --watch` and wait for all GitHub Actions checks (lint, tests on all Python versions) to pass. If any check fails, fix the issue and push again. Never merge a PR with failing checks.
-- **Branch naming:** use prefixes like `feat/`, `fix/`, `refactor/`, `docs/`, etc.
-- **Commit style:** descriptive subject line, body explains "why". Do not add Co-Authored-By trailers.
+- **Always use worktrees.** Multiple agents work on this codebase concurrently. Use `isolation: "worktree"` for subagents or `EnterWorktree` for interactive sessions. Never make changes directly on `main`.
+- **Never `pip install` from a worktree.** It hijacks the global `openlegion` entry point. A runtime guard in `src/cli/__init__.py` catches this.
+- **Never merge directly to main.** Always create a PR via `gh pr create` and merge through GitHub.
+- **Wait for CI before merging.** Run `gh pr checks <number> --watch` and wait for all checks to pass.
+- **Branch naming:** `feat/`, `fix/`, `refactor/`, `docs/`, etc.
+- **Commit style:** descriptive subject line, body explains "why". No Co-Authored-By trailers.
 
 ## Non-Negotiable Rules
 
 ### Security boundaries — never violate these
 
-1. **Agents never hold API keys.** All LLM/API calls go through the mesh credential vault (`src/host/credentials.py`). An agent's `LLMClient` posts to `/mesh/api` — the vault injects credentials server-side. If you're adding a new external service integration, add it as a vault handler, not as agent-side code.
+1. **Agents never hold API keys.** All LLM/API calls go through the mesh credential vault (`src/host/credentials.py`). An agent's `LLMClient` posts to `/mesh/api` — the vault injects credentials server-side.
 
-2. **No `eval()`, no `exec()` on untrusted input.** Workflow conditions use a regex-based safe parser (`src/host/orchestrator.py:_safe_evaluate_condition`). If you need conditional logic, extend the parser — never use `eval()`.
+2. **No `eval()`, no `exec()` on untrusted input.** Workflow conditions use a regex-based safe parser (`src/host/orchestrator.py:_safe_evaluate_condition`).
 
-3. **Permission checks before every cross-boundary operation.** Blackboard reads/writes, pub/sub, message routing, and API proxy calls all check the `PermissionMatrix` first. New mesh endpoints must enforce permissions. Default policy is deny.
+3. **Permission checks before every cross-boundary operation.** Blackboard reads/writes, pub/sub, message routing, and API proxy calls all check the `PermissionMatrix` first. Default policy is deny.
 
-4. **Path traversal protection in agent file tools.** Agent file operations are confined to `/data` inside the container. The `file_tool.py` tools must validate paths. Never expose host filesystem paths to agents.
+4. **Path traversal protection in agent file tools.** Agent file operations confined to `/data` with two-stage validation (reject `..` before resolution, then walk component-by-component with symlink resolution).
 
-5. **Container hardening is not optional.** Agents run as non-root (UID 1000), with `no-new-privileges`, memory limits (384MB), and CPU quotas (0.15 CPU). Browser operations are handled by a shared browser service container (2GB RAM, 1 CPU). Don't weaken these defaults.
+5. **Container hardening is not optional.** Non-root (UID 1000), `no-new-privileges`, memory limits (384MB), CPU quotas (0.15 CPU).
 
-6. **All untrusted text is sanitized before reaching LLM context.** `sanitize_for_prompt()` in `src/shared/utils.py` strips invisible Unicode (bidi overrides, tag chars, zero-width chars, variation selectors, etc.) at multiple choke points: user input (`src/agent/server.py`), tool results and system prompt context (`src/agent/loop.py`), workspace loading (`src/agent/workspace.py`), mesh tools (`src/agent/builtins/mesh_tool.py`), and dashboard input (`src/dashboard/server.py`). New paths from untrusted text to LLM context must call `sanitize_for_prompt()`. Never bypass these layers.
+6. **All untrusted text is sanitized before reaching LLM context.** `sanitize_for_prompt()` strips invisible Unicode at 35+ choke points: user input, tool results, workspace loading, mesh tools, dashboard input, channel messages, webhook payloads, file watcher messages, blackboard reads.
 
 ### Architectural invariants
 
-7. **`src/shared/types.py` is the contract.** Every message, event, and state object crossing component boundaries is a Pydantic model defined here. When adding new inter-component communication, add the model here first. Agents and mesh share ONLY these types.
+7. **`src/shared/types.py` is the contract.** Every message and state object crossing component boundaries is a Pydantic model defined here.
 
-8. **Fleet model, not hierarchy.** There is no CEO agent that routes or delegates. Users talk to agents directly. Agents coordinate through the blackboard (shared state) and YAML workflows (deterministic DAGs). Do not introduce agent-to-agent direct messaging patterns that bypass the mesh.
+8. **Fleet model, not hierarchy.** No CEO agent. Users talk to agents directly. Agents coordinate through blackboard and YAML workflows.
 
-9. **Bounded execution.** Agent loops have hard limits: 20 iterations for tasks (`AgentLoop.MAX_ITERATIONS`), 30 tool rounds for chat (`CHAT_MAX_TOOL_ROUNDS`). Token budgets are enforced per task. These prevent runaway agents. Do not remove these limits.
+9. **Bounded execution.** 20 iterations for tasks (`MAX_ITERATIONS`), 30 tool rounds for chat (`CHAT_MAX_TOOL_ROUNDS`). Token budgets enforced per task.
 
-10. **Write-then-compact.** Before discarding any conversation context, important facts are flushed to `MEMORY.md` via the workspace (`src/agent/context.py`). No information should be silently lost during context management.
+10. **Write-then-compact.** Before discarding context, important facts flush to `MEMORY.md` via the workspace.
 
-11. **LLM tool-calling message roles must alternate correctly.** The sequence is: `user → assistant(tool_calls) → tool(result) → assistant`. Never split a tool_call from its tool results. The `_trim_context` method in `loop.py` groups them to preserve this invariant. Breaking this causes LLM API errors.
+11. **LLM tool-calling message roles must alternate correctly.** `user → assistant(tool_calls) → tool(result) → assistant`. The `_trim_context` method groups them to preserve this invariant.
 
 ## Code Patterns
-
-### How we write code here
-
-- **Small modules.** Keep modules focused by responsibility. If a module grows large, consider splitting it.
-- **Pydantic for boundaries, plain dicts internally.** Cross-component messages use Pydantic models. Internal data flow within a module can use dicts.
-- **Async by default.** Agent-side code is async (FastAPI + asyncio). Use `async def` for any I/O. Blocking calls must be wrapped in `run_in_executor`.
-- **SQLite for all state.** Blackboard, agent memory, cost tracking, cron — all SQLite with WAL mode. No Redis, no external databases. Always set `PRAGMA journal_mode=WAL` and `PRAGMA busy_timeout=5000` on new connections.
-- **`TYPE_CHECKING` imports for circular dependency prevention.** Heavy imports (other modules in the project) go behind `if TYPE_CHECKING:` guards. See any module for examples.
-- **Logging via `setup_logging(name)`.** Every module creates a logger with `logger = setup_logging("component.module")`. Use structured logging: `logger.info("msg", extra={"extra_data": {...}})`.
 
 ### Adding a new built-in tool
 
 1. Create `src/agent/builtins/your_tool.py`
 2. Use the `@skill` decorator with `name`, `description`, and `parameters`
 3. Parameters dict defines the JSON schema for LLM function calling
-4. Accept `mesh_client` and/or `workspace_manager` as keyword-only args if needed (auto-injected by `SkillRegistry.execute`)
+4. Accept `mesh_client` and/or `workspace_manager` as keyword-only args if needed (auto-injected)
 5. Return a dict (serialized to JSON for the LLM)
 6. Add tests in `tests/test_builtins.py`
-
-```python
-@skill(
-    name="your_tool",
-    description="Clear description of what this does and when to use it",
-    parameters={
-        "param1": {"type": "string", "description": "What this param is for"},
-        "param2": {"type": "integer", "description": "Optional param", "default": 10},
-    },
-)
-async def your_tool(param1: str, param2: int = 10, *, mesh_client=None) -> dict:
-    # Implementation here
-    return {"result": "value"}
-```
 
 ### Adding a new mesh endpoint
 
@@ -152,13 +227,11 @@ async def your_tool(param1: str, param2: int = 10, *, mesh_client=None) -> dict:
 
 1. Subclass `Channel` from `src/channels/base.py`
 2. Implement `start()`, `stop()`, `send_notification()`
-3. Message handling is already provided by the base class (`handle_message`) — it handles @mentions, /commands, and agent routing
+3. Message handling provided by base class (`handle_message`)
 4. Add startup logic in `src/cli/channels.py:ChannelManager`
 5. Add tests in `tests/test_channels.py`
 
 ## Testing
-
-### Run tests
 
 ```bash
 # Unit + integration (fast, no Docker needed)
@@ -171,15 +244,15 @@ pytest tests/ -x
 pytest tests/test_loop.py -x -v
 ```
 
-### Testing conventions
+### Conventions
 
-- **Mock LLM responses, not the loop.** Tests create `AgentLoop` with mock `LLMClient` that returns predetermined `LLMResponse` objects. See `tests/test_loop.py:_make_loop()` for the pattern.
-- **Use `AsyncMock` for async methods.** All agent-side methods are async.
-- **SQLite in-memory for tests.** Use `":memory:"` or `tmp_path` for database paths in tests.
-- **E2E tests are optional.** They require Docker and an API key. They skip gracefully when unavailable. Unit tests must pass without Docker.
-- **Every new feature gets tests.** New tools, new endpoints, new channel logic — all need test coverage. Match the existing patterns in the corresponding test file.
+- Mock LLM responses, not the loop. See `tests/test_loop.py:_make_loop()`.
+- Use `AsyncMock` for async methods.
+- SQLite in-memory or `tmp_path` for database paths.
+- E2E tests are optional (Docker + API key required, skip gracefully).
+- Every new feature gets tests matching the corresponding test file.
 
-### Test structure mirrors source
+### Test file mapping
 
 | Source | Test file |
 |---|---|
@@ -208,33 +281,83 @@ pytest tests/test_loop.py -x -v
 | `src/host/webhooks.py` | `tests/test_webhooks.py` |
 | `src/host/watchers.py` | `tests/test_watchers.py` |
 | `src/dashboard/server.py` | `tests/test_dashboard.py`, `tests/test_dashboard_workspace.py` |
+| `src/dashboard/auth.py` | `tests/test_dashboard_auth.py` |
 | `src/marketplace.py` | `tests/test_marketplace.py` |
 | `src/channels/base.py` | `tests/test_channels.py` |
 | `src/channels/discord.py` | `tests/test_discord.py` |
 | `src/channels/slack.py` | `tests/test_slack.py` |
 | `src/channels/whatsapp.py` | `tests/test_whatsapp.py` |
 | `src/shared/types.py` | `tests/test_types.py` |
-| `src/shared/utils.py` (sanitization) | `tests/test_sanitize.py` |
+| `src/shared/utils.py` | `tests/test_sanitize.py` |
 | `src/cli/` | `tests/test_cli_commands.py`, `tests/test_setup_wizard.py` |
-| `src/cli/config.py` (projects) | `tests/test_projects.py` |
+| `src/cli/config.py` | `tests/test_projects.py` |
 | `src/dashboard/events.py` | `tests/test_events.py` |
 | Cross-component | `tests/test_integration.py` |
 
 ## Common Mistakes to Avoid
 
-- **Running `pip install` from a worktree.** This overwrites the user's `openlegion` entry point to point at the worktree's source instead of the main checkout. The CLI then runs stale code and the user sees none of their changes. A runtime guard in `src/cli/__init__.py` catches this and exits with an error. Never run pip install from any path containing `.claude/`.
-- **Creating httpx clients per request.** Reuse clients with connection pooling. `LLMClient` already does this (`_get_client`). Follow the same pattern elsewhere — create the client once, close on shutdown.
-- **Polling for task completion.** Prefer push-based patterns (agent posts result back to mesh) over polling loops. The current `_wait_for_task_result` in orchestrator.py is a known area for improvement.
-- **Breaking tool-call message grouping.** When trimming context, never separate an `assistant` message with `tool_calls` from its corresponding `tool` result messages. The `_trim_context` method handles this — respect the grouping pattern.
-- **Putting secrets in agent code.** Agents run in untrusted containers. API keys, tokens, credentials — all belong in the vault. LLM provider keys use `OPENLEGION_SYSTEM_*` (system tier, never agent-accessible); agent tool keys use `OPENLEGION_CRED_*` (agent tier). Both are loaded by `credentials.py`. New service integrations go through the vault proxy.
-- **Using global mutable state.** The `_skill_staging` global in `skills.py` is protected by a threading lock but is still a module-level mutable global. Avoid adding new module-level mutable globals. Pass state through constructors.
-- **Overly broad exception handling.** Don't `except Exception: pass`. Log the error. Distinguish transient errors (network timeouts, rate limits — retry with backoff) from permanent errors (invalid input, missing config — fail fast).
-- **Monolithic functions.** When adding features, prefer composable components over growing existing functions. Extract classes with clear lifecycle (init, start, stop). See `src/cli/runtime.py:RuntimeContext` and `src/cli/repl.py:REPLSession` as examples.
+- **Running `pip install` from a worktree.** Overwrites the user's entry point.
+- **Creating httpx clients per request.** Reuse clients with connection pooling.
+- **Polling for task completion.** Prefer push-based patterns.
+- **Breaking tool-call message grouping.** Never separate assistant `tool_calls` from `tool` results.
+- **Putting secrets in agent code.** All keys belong in the vault (SYSTEM_*/CRED_*).
+- **Using global mutable state.** Avoid new module-level mutable globals. Pass state through constructors.
+- **Overly broad exception handling.** Log errors. Distinguish transient from permanent.
+- **Monolithic functions.** Extract classes with clear lifecycle (init, start, stop).
 
 ## Design Philosophy
 
-- **Act first, ask never.** Agents are autonomous executors. System prompts instruct them to call tools immediately, not describe what they would do. This philosophy should extend to all UX decisions — prefer action over confirmation dialogs.
-- **The mesh is the only door.** Agents have no external network access except through the mesh. This is a feature, not a limitation — it enables credential isolation, cost tracking, and permission enforcement in one place.
-- **Private by default, shared by promotion.** Agents keep knowledge in private memory. Facts are explicitly promoted to the blackboard when they should be shared. Don't default to sharing everything.
-- **Skills over features.** New agent capabilities should be added as skills (Python functions with `@skill` decorator), not as changes to the core loop. The loop is the execution engine; skills are the capabilities. Keep them separate.
-- **Smallest thing that works.** No LangChain, no Redis, no Kubernetes. Every dependency must justify its existence. SQLite handles all state. Docker handles all isolation. The web dashboard (`src/dashboard/`) is a lightweight Alpine.js SPA — no React, no build step. Three-line BM25 search beats a vector database dependency for 90% of use cases.
+- **Act first, ask never.** Agents are autonomous executors.
+- **The mesh is the only door.** Agents have no external network access except through the mesh.
+- **Private by default, shared by promotion.** Agents keep knowledge in private memory.
+- **Skills over features.** New capabilities as `@skill` functions, not loop changes.
+- **Smallest thing that works.** No LangChain, no Redis, no Kubernetes.
+
+## Review State
+
+### Plan
+Stage 2 complete. See `/REVIEW_FINDINGS.md` for full findings.
+
+### Completed Units
+Units 1-16 (all engine units)
+
+### Findings Summary
+- **CRITICAL (3)**: AST validation bypass (skill_tool.py), SSRF via browser evaluate (browser/server.py), webhook channel zero auth (channels/webhook.py)
+- **HIGH (8)**: /mesh/spawn no permission check, streaming budget lock gap, blackboard not sanitized, auth header forwarding on redirects, webhook payloads not sanitized, file watcher not sanitized, channel messages not sanitized, WhatsApp missing signature verification
+- **MEDIUM (19)**: /mesh/cron no permission check, input_data not sanitized, HTTP 500 not retried, forced final call waste, /project no x-mesh-internal, skill auto-discovery, list_by_prefix no filtering, agent_id not validated, PUA emoji stripping, orchestrator task_result bypass, redundant index, trusted agent IDs not reserved, cron range+step parsing bug, 0.0.0.0 SSRF bypass, credential double-resolution, exec timeout unbounded, list_files symlink info leak, context summarization truncation, cron tasks not tracked
+
+### Outstanding Cross-References
+- H2 (streaming budget) coupled with H5 (TokenBudget.can_spend ignoring max_cost_usd)
+- H3 (blackboard sanitization) + H7/H8/H9 (webhook/watcher/channel sanitization) — same pattern, same fix
+
+### Fixes Applied (Stage 3, 2026-03-05)
+
+**Batch 1 — Dead Weight:**
+- Deleted `src/shared/constants.py` (zero imports)
+- Removed redundant SQLite index on `entries(key)` in `src/host/mesh.py` (M18)
+
+**Batch 2 — Standardization:**
+- Extracted `_SUMMARIZATION_INPUT_LIMIT = 20_000` constant in `src/agent/context.py` (M27)
+
+**Batch 3 — Consolidation:**
+- Added `_generate_id(prefix, length)` helper in `src/shared/types.py` replacing duplicated UUID lambdas (L1)
+- Added `can_spawn` and `can_manage_cron` fields to `AgentPermissions` in `src/shared/types.py`
+
+**Batch 5a — Security (Engine):**
+- C1: Added `_FORBIDDEN_ATTRS` denylist + `ast.Attribute` check in `src/agent/builtins/skill_tool.py`
+- C2: Removed `/browser/{agent_id}/evaluate` endpoint from `src/browser/server.py`
+- C3: Added Bearer token auth with `hmac.compare_digest` to `src/channels/webhook.py`
+- H1/M1: Added `permissions.can_spawn()` and `permissions.can_manage_cron()` checks in `src/host/server.py`
+- H3: Added `sanitize_for_prompt()` to blackboard reads in `src/agent/builtins/mesh_tool.py`
+- H6: Added cross-origin Authorization header stripping on redirects in `src/agent/builtins/http_tool.py`
+- H7: Added `sanitize_for_prompt()` to webhook payloads in `src/host/webhooks.py`
+- H8: Added `sanitize_for_prompt()` to file watcher messages in `src/host/watchers.py`
+- H9: Added `sanitize_for_prompt()` to channel messages in `src/channels/base.py`
+- H10: Added `X-Hub-Signature-256` verification in `src/channels/whatsapp.py`
+- M5: Verified `/project` already has `x-mesh-internal` check (no change needed)
+- M8: Added `_AGENT_ID_RE` validation in `src/host/transport.py`
+- M19: Added `_RESERVED_AGENT_IDS` and `_validate_agent_id()` in `src/host/server.py` and `src/cli/runtime.py`
+- M31: Added `ip.is_unspecified` to SSRF check in `src/agent/builtins/http_tool.py`
+- M32: Replaced sequential `str.replace()` with `re.sub()` callback in `src/agent/builtins/http_tool.py`
+- M33: Added `_MAX_TIMEOUT = 300` and timeout capping in `src/agent/builtins/exec_tool.py`
+- M34: Changed `item.stat()` to `item.lstat()` in `src/agent/builtins/file_tool.py`

@@ -22,6 +22,11 @@ _FORBIDDEN_CALLS = frozenset({
     "globals", "locals", "getattr", "setattr", "delattr",
     "breakpoint", "open",
 })
+_FORBIDDEN_ATTRS = frozenset({
+    "__builtins__", "__import__", "__subclasses__", "__class__",
+    "__bases__", "__mro__", "__globals__", "__code__", "__reduce__",
+    "builtins",
+})
 _MAX_SKILL_SIZE = 10_000
 
 
@@ -51,6 +56,9 @@ def _validate_skill_code(code: str) -> str | None:
                 parts = module.split(".")
                 if any(p in _FORBIDDEN_IMPORTS for p in parts) or module in _FORBIDDEN_IMPORTS:
                     return f"Forbidden import: {module}"
+        if isinstance(node, ast.Attribute):
+            if node.attr in _FORBIDDEN_ATTRS:
+                return f"Forbidden attribute access: {node.attr}"
         if isinstance(node, ast.Call):
             func_name = ""
             if isinstance(node.func, ast.Name):

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from src.host.credentials import SYSTEM_CREDENTIAL_PROVIDERS, is_system_credential
-from src.shared.utils import setup_logging
+from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("channels.base")
 
@@ -191,6 +191,8 @@ class Channel(abc.ABC):
         text = text.strip()
         if not text:
             return ""
+
+        text = sanitize_for_prompt(text)
 
         current = self._get_active_agent(user_id)
         agents = self._get_agent_names()

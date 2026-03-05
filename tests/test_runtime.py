@@ -385,7 +385,6 @@ def _make_docker_backend(**overrides):
     backend.use_host_network = False
     backend._next_port = 8401
     backend._port_lock = threading.Lock()
-    backend._relay_lock = threading.Lock()
     backend.project_root = __import__("pathlib").Path("/tmp")
     backend.browser_service_url = None
     backend.browser_vnc_url = None
@@ -393,10 +392,6 @@ def _make_docker_backend(**overrides):
     backend._browser_container = None
     backend._network_name = "openlegion_agents"
     backend._network = MagicMock()
-    # Pretend relay is already running (status check passes)
-    relay_mock = MagicMock()
-    relay_mock.status = "running"
-    backend._mesh_relay = relay_mock
     for k, v in overrides.items():
         setattr(backend, k, v)
     return backend
@@ -503,8 +498,8 @@ class TestDockerBackendSlimResources:
         run_call = mock_client.containers.run.call_args
         assert "init" not in run_call.kwargs
 
-    def test_agent_mesh_url_uses_relay(self):
-        """Agent MESH_URL points to the relay container, not host.docker.internal."""
+    def test_agent_mesh_url_uses_host_docker_internal(self):
+        """Agent MESH_URL points to host.docker.internal on bridge networking."""
         import docker as _docker
 
         backend = self._make_backend()
@@ -518,14 +513,13 @@ class TestDockerBackendSlimResources:
 
         run_call = mock_client.containers.run.call_args
         env = run_call.kwargs.get("environment", {})
-        assert env["MESH_URL"] == f"http://{DockerBackend.MESH_RELAY_NAME}:8420"
-        assert "host.docker.internal" not in env["MESH_URL"]
+        assert env["MESH_URL"] == "http://host.docker.internal:8420"
 
     def test_agent_mesh_url_localhost_on_host_network(self):
-        """On host networking, MESH_URL uses 127.0.0.1 (no relay)."""
+        """On host networking, MESH_URL uses 127.0.0.1."""
         import docker as _docker
 
-        backend = _make_docker_backend(use_host_network=True, _mesh_relay=None)
+        backend = _make_docker_backend(use_host_network=True)
         mock_container = MagicMock()
         mock_client = MagicMock()
         mock_client.containers.run.return_value = mock_container
@@ -538,8 +532,8 @@ class TestDockerBackendSlimResources:
         env = run_call.kwargs.get("environment", {})
         assert env["MESH_URL"] == "http://127.0.0.1:8420"
 
-    def test_agent_on_internal_network(self):
-        """Agent containers are placed on the internal agent network."""
+    def test_agent_on_bridge_network(self):
+        """Agent containers are placed on the agent bridge network."""
         import docker as _docker
 
         backend = self._make_backend()
@@ -555,185 +549,8 @@ class TestDockerBackendSlimResources:
         assert run_call.kwargs.get("network") == "openlegion_agents"
 
 
-class TestMeshRelay:
-    """Tests for the mesh relay container that bridges internal network to mesh."""
-
-    def test_ensure_relay_starts_container(self):
-        """_ensure_mesh_relay creates a relay on first call."""
-        import docker as _docker
-
-        backend = _make_docker_backend(_mesh_relay=None)
-        mock_relay = MagicMock()
-        mock_relay.status = "running"
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_relay
-        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
-        backend.client = mock_client
-
-        backend._ensure_mesh_relay()
-
-        assert backend._mesh_relay is mock_relay
-        mock_client.containers.run.assert_called_once()
-        run_call = mock_client.containers.run.call_args
-        assert run_call.kwargs["name"] == DockerBackend.MESH_RELAY_NAME
-        # Relay connected to internal network
-        backend._network.connect.assert_called_once_with(mock_relay)
-
-    def test_ensure_relay_idempotent(self):
-        """_ensure_mesh_relay skips if relay is already running."""
-        existing_relay = MagicMock()
-        existing_relay.status = "running"
-        backend = _make_docker_backend(_mesh_relay=existing_relay)
-        mock_client = MagicMock()
-        backend.client = mock_client
-
-        backend._ensure_mesh_relay()
-
-        mock_client.containers.run.assert_not_called()
-        assert backend._mesh_relay is existing_relay
-
-    def test_ensure_relay_skips_host_network(self):
-        """No relay needed when using host networking."""
-        backend = _make_docker_backend(use_host_network=True, _mesh_relay=None)
-        mock_client = MagicMock()
-        backend.client = mock_client
-
-        backend._ensure_mesh_relay()
-
-        mock_client.containers.run.assert_not_called()
-        assert backend._mesh_relay is None
-
-    def test_ensure_relay_restarts_crashed(self):
-        """_ensure_mesh_relay restarts a crashed relay container."""
-        import docker as _docker
-
-        dead_relay = MagicMock()
-        dead_relay.status = "exited"
-        backend = _make_docker_backend(_mesh_relay=dead_relay)
-
-        new_relay = MagicMock()
-        new_relay.status = "running"
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = new_relay
-        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
-        backend.client = mock_client
-
-        backend._ensure_mesh_relay()
-
-        dead_relay.remove.assert_called_once_with(force=True)
-        assert backend._mesh_relay is new_relay
-
-    def test_relay_hardening(self):
-        """Relay container has security hardening and auto-restart."""
-        import docker as _docker
-
-        backend = _make_docker_backend(_mesh_relay=None)
-        mock_relay = MagicMock()
-        mock_relay.status = "running"
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = mock_relay
-        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
-        backend.client = mock_client
-
-        backend._ensure_mesh_relay()
-
-        run_call = mock_client.containers.run.call_args
-        assert run_call.kwargs["mem_limit"] == "128m"
-        assert run_call.kwargs["read_only"] is True
-        assert run_call.kwargs["cap_drop"] == ["ALL"]
-        assert run_call.kwargs["security_opt"] == ["no-new-privileges"]
-        assert run_call.kwargs["restart_policy"] == {"Name": "unless-stopped"}
-        # No unnecessary capabilities
-        assert "cap_add" not in run_call.kwargs
-
-    def test_relay_cleans_stale_on_start(self):
-        """_start_mesh_relay removes a stale relay container before starting."""
-        backend = _make_docker_backend(_mesh_relay=None)
-        stale = MagicMock()
-        new_relay = MagicMock()
-        new_relay.status = "running"
-        mock_client = MagicMock()
-        mock_client.containers.get.return_value = stale  # stale exists
-        mock_client.containers.run.return_value = new_relay
-        backend.client = mock_client
-
-        backend._ensure_mesh_relay()
-
-        stale.remove.assert_called_once_with(force=True)
-
-    def test_relay_network_connect_failure_cleans_up(self):
-        """If connecting relay to internal network fails, relay is removed."""
-        import docker as _docker
-
-        backend = _make_docker_backend(_mesh_relay=None)
-        relay = MagicMock()
-        relay.status = "running"
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = relay
-        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
-        backend.client = mock_client
-        backend._network = MagicMock()
-        backend._network.connect.side_effect = _docker.errors.APIError("network error")
-
-        backend._ensure_mesh_relay()
-
-        # Relay should be cleaned up, not left as orphan
-        relay.stop.assert_called_once()
-        relay.remove.assert_called_once()
-        assert backend._mesh_relay is None
-
-    def test_relay_startup_failure_cleans_up(self):
-        """If relay container exits immediately, it is cleaned up."""
-        import docker as _docker
-
-        backend = _make_docker_backend(_mesh_relay=None)
-        relay = MagicMock()
-        relay.status = "exited"  # never reaches "running"
-        relay.logs.return_value = b"ImportError: no module named asyncio"
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = relay
-        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
-        backend.client = mock_client
-
-        backend._ensure_mesh_relay()
-
-        relay.remove.assert_called_once_with(force=True)
-        assert backend._mesh_relay is None
-
-    def test_relay_reload_exception_triggers_restart(self):
-        """If relay.reload() raises, relay is recreated."""
-        import docker as _docker
-
-        dead_relay = MagicMock()
-        dead_relay.reload.side_effect = _docker.errors.NotFound("removed externally")
-        backend = _make_docker_backend(_mesh_relay=dead_relay)
-
-        new_relay = MagicMock()
-        new_relay.status = "running"
-        mock_client = MagicMock()
-        mock_client.containers.run.return_value = new_relay
-        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
-        backend.client = mock_client
-
-        backend._ensure_mesh_relay()
-
-        assert backend._mesh_relay is new_relay
-
-
 class TestStopAll:
-    """Tests for stop_all cleanup of relay and network."""
-
-    def test_stop_all_cleans_relay(self):
-        """stop_all stops and removes the mesh relay."""
-        relay = MagicMock()
-        backend = _make_docker_backend(_mesh_relay=relay)
-        backend.client = MagicMock()
-
-        backend.stop_all()
-
-        relay.stop.assert_called_once_with(timeout=5)
-        relay.remove.assert_called_once()
-        assert backend._mesh_relay is None
+    """Tests for stop_all cleanup."""
 
     def test_stop_all_cleans_network(self):
         """stop_all removes the agent network."""
@@ -746,99 +563,132 @@ class TestStopAll:
         network.remove.assert_called_once()
         assert backend._network is None
 
-    def test_stop_all_relay_before_network(self):
-        """Relay is stopped before network is removed (relay is connected)."""
-        call_order = []
-        relay = MagicMock()
-        relay.stop.side_effect = lambda **kw: call_order.append("relay_stop")
-        relay.remove.side_effect = lambda: call_order.append("relay_remove")
-        network = MagicMock()
-        network.remove.side_effect = lambda: call_order.append("network_remove")
-
-        backend = _make_docker_backend(_mesh_relay=relay, _network=network)
-        backend.client = MagicMock()
-
-        backend.stop_all()
-
-        assert call_order == ["relay_stop", "relay_remove", "network_remove"]
-
-    def test_stop_all_no_relay(self):
-        """stop_all handles missing relay gracefully."""
-        backend = _make_docker_backend(_mesh_relay=None)
+    def test_stop_all_no_network(self):
+        """stop_all handles missing network gracefully."""
+        backend = _make_docker_backend(_network=None)
         backend.client = MagicMock()
 
         backend.stop_all()  # should not raise
 
+        assert backend._network is None
 
-class TestNetworkInternalFlag:
-    """Tests for _ensure_internal_network validation."""
 
-    def test_reuses_internal_network(self):
-        """Existing internal network is reused without recreation."""
-        existing = MagicMock()
-        existing.attrs = {"Internal": True}
+class TestAgentNetwork:
+    """Tests for _ensure_agent_network — plain bridge with stale internal replacement."""
 
+    def _make_backend(self):
         backend = _make_docker_backend()
         backend.client = MagicMock()
+        return backend
+
+    def test_reuses_normal_bridge(self):
+        """Existing non-internal bridge network is reused."""
+        backend = self._make_backend()
+        existing = MagicMock()
+        existing.attrs = {"Internal": False}
         backend.client.networks.get.return_value = existing
 
-        result = backend._ensure_internal_network()
+        result = backend._ensure_agent_network()
 
         assert result is existing
         backend.client.networks.create.assert_not_called()
 
-    def test_replaces_non_internal_network(self):
-        """Non-internal network is removed and recreated with internal=True."""
-        non_internal = MagicMock()
-        non_internal.attrs = {"Internal": False}
+    def test_replaces_internal_network(self):
+        """Old internal=True networks are replaced with a plain bridge."""
+        backend = self._make_backend()
+        old_internal = MagicMock()
+        old_internal.attrs = {"Internal": True}
+        backend.client.networks.get.return_value = old_internal
 
-        new_network = MagicMock()
+        new_net = MagicMock()
+        backend.client.networks.create.return_value = new_net
 
-        backend = _make_docker_backend()
-        backend.client = MagicMock()
-        backend.client.networks.get.return_value = non_internal
-        backend.client.networks.create.return_value = new_network
+        result = backend._ensure_agent_network()
 
-        result = backend._ensure_internal_network()
-
-        non_internal.remove.assert_called_once()
+        old_internal.remove.assert_called_once()
         backend.client.networks.create.assert_called_once_with(
-            backend._network_name, driver="bridge", internal=True,
+            "openlegion_agents", driver="bridge",
         )
-        assert result is new_network
+        assert result is new_net
 
     def test_creates_when_not_found(self):
-        """Creates a new internal network when none exists."""
-        import docker
+        """Creates a new bridge network when none exists."""
+        import docker as _docker
 
-        new_network = MagicMock()
+        backend = self._make_backend()
+        backend.client.networks.get.side_effect = _docker.errors.NotFound("nope")
 
-        backend = _make_docker_backend()
-        backend.client = MagicMock()
-        backend.client.networks.get.side_effect = docker.errors.NotFound("not found")
-        backend.client.networks.create.return_value = new_network
+        new_net = MagicMock()
+        backend.client.networks.create.return_value = new_net
 
-        result = backend._ensure_internal_network()
+        result = backend._ensure_agent_network()
 
         backend.client.networks.create.assert_called_once_with(
-            backend._network_name, driver="bridge", internal=True,
+            "openlegion_agents", driver="bridge",
         )
-        assert result is new_network
+        assert result is new_net
 
-    def test_keeps_non_internal_if_remove_fails(self):
-        """Falls back to non-internal network if removal fails."""
-        import docker
+    def test_keeps_stale_if_remove_fails(self):
+        """Falls back to stale internal network if removal fails."""
+        backend = self._make_backend()
+        old_internal = MagicMock()
+        old_internal.attrs = {"Internal": True}
+        old_internal.remove.side_effect = Exception("in use")
+        backend.client.networks.get.return_value = old_internal
 
-        non_internal = MagicMock()
-        non_internal.attrs = {"Internal": False}
-        non_internal.remove.side_effect = docker.errors.APIError("has active endpoints")
+        result = backend._ensure_agent_network()
+
+        assert result is old_internal
+        backend.client.networks.create.assert_not_called()
+
+
+class TestContainerHardening:
+    """Tests for security hardening on agent containers."""
+
+    def test_pids_limit(self):
+        """Agent containers have a PID limit to prevent fork bombs."""
+        import docker as _docker
 
         backend = _make_docker_backend()
-        backend.client = MagicMock()
-        backend.client.networks.get.return_value = non_internal
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
 
-        result = backend._ensure_internal_network()
+        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
 
-        assert result is non_internal
-        backend.client.networks.create.assert_not_called()
+        run_call = mock_client.containers.run.call_args
+        assert run_call.kwargs.get("pids_limit") == 256
+
+    def test_no_unnecessary_capabilities(self):
+        """Agent containers drop ALL caps and don't add any back."""
+        import docker as _docker
+
+        backend = _make_docker_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
+
+        run_call = mock_client.containers.run.call_args
+        assert run_call.kwargs.get("cap_drop") == ["ALL"]
+        assert "cap_add" not in run_call.kwargs
+
+    def test_read_only_rootfs(self):
+        """Agent containers have read-only root filesystem."""
+        import docker as _docker
+
+        backend = _make_docker_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
+
+        run_call = mock_client.containers.run.call_args
+        assert run_call.kwargs.get("read_only") is True
+        assert run_call.kwargs.get("security_opt") == ["no-new-privileges"]
 

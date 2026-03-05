@@ -99,11 +99,14 @@ def create_mesh_app(
     import re as _re
 
     _AGENT_ID_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+    _RESERVED_AGENT_IDS = frozenset({"mesh", "orchestrator"})
     _MAX_SYSTEM_PROMPT = 10_000
 
     def _validate_agent_id(agent_id: str) -> str:
         if not agent_id or not _AGENT_ID_RE.match(agent_id):
             raise HTTPException(400, "Invalid agent_id: must be 1-64 alphanumeric/hyphen/underscore chars")
+        if agent_id in _RESERVED_AGENT_IDS:
+            raise HTTPException(400, f"Agent ID '{agent_id}' is reserved for internal use")
         return agent_id
 
     def _validate_port(port: int) -> int:
@@ -172,23 +175,10 @@ def create_mesh_app(
 
     app.cleanup_rate_limits = _cleanup_rate_limits  # type: ignore[attr-defined]
 
-    def _verify_auth(agent_id: str, request: Request) -> None:
-        """Verify agent identity via auth token. No-op when auth is not configured."""
-        if not _auth_tokens or not agent_id or agent_id in ("mesh", "orchestrator"):
-            return
-        auth_header = request.headers.get("authorization", "")
-        if not auth_header.startswith("Bearer "):
-            raise HTTPException(401, "Missing authentication token")
-        token = auth_header[7:]
-        expected = _auth_tokens.get(agent_id)
-        if not expected or not hmac.compare_digest(token, expected):
-            raise HTTPException(401, "Invalid authentication token")
-
     def _extract_verified_agent_id(request: Request) -> str:
-        """Extract and verify agent identity from an auth token.
+        """Extract and verify agent identity from a Bearer token.
 
-        Unlike _verify_auth (which trusts caller-supplied agent_id), this
-        derives the agent_id from the Bearer token itself, preventing
+        Derives the agent_id from the token itself, preventing
         identity spoofing via headers or query parameters.
 
         Returns 'unknown' when auth is not configured (dev/test mode).
@@ -244,7 +234,7 @@ def create_mesh_app(
         are intercepted and resolved against the orchestrator's pending futures
         instead of being routed to an agent container.
         """
-        _verify_auth(msg.from_agent, request)
+        msg.from_agent = _resolve_agent_id(msg.from_agent, request)
         if msg.to == "orchestrator" and msg.type == "task_result" and orchestrator is not None:
             from src.shared.types import TaskResult
             try:
@@ -431,7 +421,7 @@ def create_mesh_app(
     @app.post("/mesh/api", response_model=APIProxyResponse)
     async def proxy_api_call(request: Request, api_request: APIProxyRequest, agent_id: str) -> APIProxyResponse:
         """Proxy external API calls. Agent never sees credentials."""
-        _verify_auth(agent_id, request)
+        agent_id = _resolve_agent_id(agent_id, request)
         if not permissions.can_use_api(agent_id, api_request.service):
             raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
         if credential_vault is None:
@@ -509,7 +499,7 @@ def create_mesh_app(
     @app.post("/mesh/api/stream")
     async def proxy_api_stream(request: Request, api_request: APIProxyRequest, agent_id: str) -> StreamingResponse:
         """Streaming API proxy. Returns SSE stream for LLM completions."""
-        _verify_auth(agent_id, request)
+        agent_id = _resolve_agent_id(agent_id, request)
         if not permissions.can_use_api(agent_id, api_request.service):
             raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
         if credential_vault is None:
@@ -624,7 +614,7 @@ def create_mesh_app(
     async def register_agent(data: dict, request: Request) -> dict:
         """Agent registers itself with the mesh on startup."""
         agent_id = _validate_agent_id(data.get("agent_id", ""))
-        _verify_auth(agent_id, request)
+        agent_id = _resolve_agent_id(agent_id, request)
         capabilities = data.get("capabilities", [])
         if not isinstance(capabilities, list) or len(capabilities) > 50:
             raise HTTPException(400, "capabilities must be a list of at most 50 items")
@@ -656,7 +646,7 @@ def create_mesh_app(
     @app.post("/mesh/notify")
     async def notify_user(body: NotifyRequest, request: Request) -> dict:
         """Push a notification from an agent to the user across all channels."""
-        _verify_auth(body.agent_id, request)
+        body.agent_id = _resolve_agent_id(body.agent_id, request)
         if notify_fn is None:
             raise HTTPException(503, "Notifications not available")
         message = body.message[:_NOTIFY_MAX_LEN]
@@ -684,7 +674,7 @@ def create_mesh_app(
         - neither (dashboard/internal): return all
         """
         if agent_id:
-            _verify_auth(agent_id, request)
+            agent_id = _resolve_agent_id(agent_id, request)
         else:
             _require_any_auth(request)
         def _agent_entry(aid: str, url: str) -> dict:
@@ -804,7 +794,9 @@ def create_mesh_app(
         agent_id = data.get("agent_id", "")
         if agent_id:
             _validate_agent_id(agent_id)
-            _verify_auth(agent_id, request)
+            agent_id = _resolve_agent_id(agent_id, request)
+            if not permissions.can_manage_cron(agent_id):
+                raise HTTPException(403, f"Agent {agent_id} is not allowed to manage cron jobs")
             await _check_rate_limit("cron_create", agent_id)
         schedule = data.get("schedule")
         message = data.get("message", "")
@@ -869,8 +861,9 @@ def create_mesh_app(
         role = data.get("role", "assistant")
         if not isinstance(role, str) or len(role) > 64:
             raise HTTPException(400, "role must be a string of at most 64 chars")
-        spawned_by = data.get("spawned_by", "unknown")
-        _verify_auth(spawned_by, request)
+        spawned_by = _resolve_agent_id(data.get("spawned_by", "unknown"), request)
+        if not permissions.can_spawn(spawned_by):
+            raise HTTPException(403, f"Agent {spawned_by} is not allowed to spawn agents")
         model = data.get("model", "")
         ttl = data.get("ttl", 3600)
         if not isinstance(ttl, (int, float)) or ttl < 60 or ttl > 86400:
@@ -919,7 +912,7 @@ def create_mesh_app(
     async def get_agent_history(agent_id: str, request: Request, requesting_agent: str = "") -> dict:
         """Retrieve an agent's daily logs. Permission-checked."""
         if requesting_agent:
-            _verify_auth(requesting_agent, request)
+            requesting_agent = _resolve_agent_id(requesting_agent, request)
             if not permissions.can_message(requesting_agent, agent_id):
                 raise HTTPException(403, f"Agent {requesting_agent} cannot read history of {agent_id}")
         else:
@@ -996,6 +989,16 @@ def create_mesh_app(
         })
         if action not in _ALLOWED_ACTIONS:
             raise HTTPException(400, f"Unknown browser action: {action}")
+
+        # SSRF protection: validate navigate URLs before forwarding to browser
+        if action == "navigate":
+            nav_url = params.get("url", "")
+            if nav_url:
+                from src.agent.builtins.http_tool import _resolve_and_pin
+                try:
+                    _resolve_and_pin(nav_url)
+                except ValueError as e:
+                    raise HTTPException(400, str(e))
 
         # Proxy to browser service
         browser_service_url = None

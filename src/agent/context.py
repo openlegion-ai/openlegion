@@ -31,6 +31,7 @@ _WARNING_THRESHOLD = 0.80
 _encoding_cache: dict[str, object | None] = {}
 
 _DEFAULT_CONTEXT_WINDOW = 128_000
+_SUMMARIZATION_INPUT_LIMIT = 20_000
 
 
 def _get_tiktoken_encoding(model: str):
@@ -209,7 +210,7 @@ class ContextManager:
             '  - "category": one of "preference", "decision", "fact", "context"\n\n'
             "Only include information worth remembering long-term.\n"
             "If there's nothing important, respond with an empty array: []\n\n"
-            f"Conversation:\n{conversation_text[:20000]}"
+            f"Conversation:\n{conversation_text[:_SUMMARIZATION_INPUT_LIMIT]}"
         )
 
         try:
@@ -290,7 +291,7 @@ class ContextManager:
             "Summarize this conversation concisely, preserving key context "
             "the assistant needs to continue helpfully. Include: what was discussed, "
             "what actions were taken, what's pending, and any user preferences revealed.\n\n"
-            f"Conversation:\n{conversation_text[:20000]}"
+            f"Conversation:\n{conversation_text[:_SUMMARIZATION_INPUT_LIMIT]}"
         )
 
         last_err = None

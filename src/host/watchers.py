@@ -11,7 +11,7 @@ import asyncio
 from pathlib import Path
 from typing import Callable, Optional
 
-from src.shared.utils import setup_logging
+from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("host.watchers")
 
@@ -74,6 +74,7 @@ class FileWatcher:
                         filepath=str(filepath),
                         filename=filepath.name,
                     )
+                    message = sanitize_for_prompt(message)
                     await self._dispatch_safe(watch["agent"], message, filepath.name)
 
     async def _dispatch_safe(self, agent: str, message: str, filename: str) -> None:

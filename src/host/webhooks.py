@@ -18,7 +18,7 @@ from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from src.shared.utils import generate_id, setup_logging
+from src.shared.utils import generate_id, sanitize_for_prompt, setup_logging
 
 logger = setup_logging("host.webhooks")
 
@@ -111,6 +111,7 @@ class WebhookManager:
                 f"```json\n{json.dumps(body, indent=2, default=str)[:3000]}\n```\n"
                 f"Process this webhook payload."
             )
+            message = sanitize_for_prompt(message)
 
             response = None
             if manager.dispatch_fn:

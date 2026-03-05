@@ -315,7 +315,12 @@ class RuntimeContext:
 
         self.runtime.extra_env["EMBEDDING_MODEL"] = embedding_model
 
+        _reserved_ids = frozenset({"mesh", "orchestrator"})
         for agent_id, agent_cfg in agents_cfg.items():
+            if agent_id in _reserved_ids:
+                raise click.ClickException(
+                    f"Agent ID '{agent_id}' is reserved for internal use"
+                )
             budget = agent_cfg.get("budget", {})
             if budget:
                 self.cost_tracker.set_budget(

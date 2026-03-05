@@ -273,6 +273,11 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         the identity file allowlist. The mesh pushes updates here after
         the user edits it on the dashboard.
         """
+        if not request.headers.get("x-mesh-internal"):
+            raise HTTPException(
+                403,
+                "Project updates via this endpoint require X-Mesh-Internal header.",
+            )
         if not loop.workspace:
             raise HTTPException(503, "Workspace not available")
         body = await request.json()
