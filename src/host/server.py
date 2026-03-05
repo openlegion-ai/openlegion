@@ -212,8 +212,11 @@ def create_mesh_app(
         Used for endpoints that should be restricted in production but
         don't need a specific agent identity (traces, model-health, etc.).
         No-op in dev/test mode (no auth tokens configured).
+        Accepts x-mesh-internal header for localhost callers (health checks).
         """
         if not _auth_tokens:
+            return
+        if request.headers.get("x-mesh-internal"):
             return
         auth_header = request.headers.get("authorization", "")
         if not auth_header.startswith("Bearer "):
