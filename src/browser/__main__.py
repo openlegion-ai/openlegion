@@ -38,13 +38,15 @@ def _start_kasmvnc() -> subprocess.Popen:
     Uses Xvnc directly with:
     - ``-sslOnly 0``: disable TLS (access control via Docker port mapping)
     - ``-SecurityTypes None``: no VNC authentication
-    - ``-disableBasicAuth``: no HTTP basic auth on the web client
     - ``-httpd``: serve the KasmVNC web client files
     - ``-AlwaysShared``: allow multiple VNC viewers
+
+    Auth is handled by the mesh host's VNC proxy which fetches API tokens
+    server-side. The web client never sees the login prompt because it
+    connects through the proxy, not directly to KasmVNC.
     """
-    # KasmVNC 1.4.0 requires a valid .kasmpasswd file for its /api/get_token
-    # endpoint even when -disableBasicAuth is set. Without it, the web client
-    # can't establish a websocket connection and shows a blue screen.
+    # KasmVNC 1.4.0 requires a valid .kasmpasswd for /api/get_token and
+    # /api/ws. The mesh VNC proxy authenticates server-side with these creds.
     kasmpasswd = os.path.expanduser("~/.kasmpasswd")
     if not os.path.exists(kasmpasswd):
         subprocess.run(
@@ -63,7 +65,6 @@ def _start_kasmvnc() -> subprocess.Popen:
         "-httpd", "/usr/share/kasmvnc/www",
         "-sslOnly", "0",
         "-SecurityTypes", "None",
-        "-disableBasicAuth",
         "-AlwaysShared",
         "-interface", "0.0.0.0",
         # Allow iframe embedding from dashboard (different port = different origin)
