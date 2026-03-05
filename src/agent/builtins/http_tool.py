@@ -61,7 +61,8 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     # IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) — check the mapped v4 address too
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         mapped = ip.ipv4_mapped
-        if mapped.is_private or mapped.is_loopback or mapped.is_link_local or mapped.is_reserved or mapped.is_unspecified:
+        if (mapped.is_private or mapped.is_loopback or mapped.is_link_local
+                or mapped.is_reserved or mapped.is_unspecified):
             return True
     return False
 

@@ -220,6 +220,7 @@ class TestProjectEndpoint:
             resp = await client.put(
                 "/project",
                 json={"content": "# My Project\n\nBuild a web app."},
+                headers={"x-mesh-internal": "1"},
             )
             assert resp.status_code == 200
             data = resp.json()
@@ -239,6 +240,7 @@ class TestProjectEndpoint:
             resp = await client.put(
                 "/project",
                 json={"content": "clean\u200Btext\u202Ehere"},
+                headers={"x-mesh-internal": "1"},
             )
             assert resp.status_code == 200
             content = (Path(tmp_workspace) / "PROJECT.md").read_text()
@@ -254,6 +256,7 @@ class TestProjectEndpoint:
             resp = await client.put(
                 "/project",
                 json={"content": "anything"},
+                headers={"x-mesh-internal": "1"},
             )
             assert resp.status_code == 503
 
@@ -265,6 +268,7 @@ class TestProjectEndpoint:
             resp = await client.put(
                 "/project",
                 json={"content": 12345},
+                headers={"x-mesh-internal": "1"},
             )
             assert resp.status_code == 400
 
