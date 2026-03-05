@@ -433,6 +433,50 @@ class TestDashboardAgentCRUD:
 
     @patch("src.cli.config._create_agent_from_template")
     @patch("src.cli.config._load_config")
+    def test_post_agent_template_passes_initial_env(self, mock_load, mock_create_tpl):
+        """Verify that initial_soul/instructions/heartbeat reach runtime.extra_env."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+            "agents": {
+                "my_pm": {
+                    "role": "Product manager",
+                    "skills_dir": "", "model": "openai/gpt-4o-mini",
+                    "initial_instructions": "You are a PM.",
+                    "initial_soul": "Precise and outcome-focused.",
+                    "initial_heartbeat": "Check tasks board.",
+                },
+            },
+        }
+        runtime = self.components["runtime"]
+        runtime.start_agent.return_value = "http://localhost:8403"
+        runtime.wait_for_agent = AsyncMock(return_value=True)
+        runtime.extra_env = {}
+        self.components["permissions"].reload = MagicMock()
+
+        # Capture extra_env at the moment start_agent is called
+        captured_env: dict = {}
+
+        def _capture(*a, **kw):
+            captured_env.update(runtime.extra_env)
+            return "http://localhost:8403"
+
+        runtime.start_agent.side_effect = _capture
+
+        resp = self.client.post(
+            "/dashboard/api/agents",
+            json={"name": "my_pm", "template": "devteam/pm"},
+        )
+        assert resp.status_code == 200
+        assert captured_env["INITIAL_INSTRUCTIONS"] == "You are a PM."
+        assert captured_env["INITIAL_SOUL"] == "Precise and outcome-focused."
+        assert captured_env["INITIAL_HEARTBEAT"] == "Check tasks board."
+        # Cleaned up after start
+        assert "INITIAL_INSTRUCTIONS" not in runtime.extra_env
+        assert "INITIAL_SOUL" not in runtime.extra_env
+        assert "INITIAL_HEARTBEAT" not in runtime.extra_env
+
+    @patch("src.cli.config._create_agent_from_template")
+    @patch("src.cli.config._load_config")
     def test_post_agent_invalid_template(self, mock_load, mock_create_tpl):
         mock_load.return_value = {
             "llm": {"default_model": "openai/gpt-4o-mini"},

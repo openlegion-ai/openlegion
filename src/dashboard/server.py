@@ -330,13 +330,28 @@ def create_dashboard_router(
                 role = acfg.get("role", role)
             import os
             skills_dir = os.path.abspath(acfg.get("skills_dir", ""))
-            url = runtime.start_agent(
-                agent_id=name,
-                role=role,
-                skills_dir=skills_dir,
-                model=acfg.get("model", model),
-                thinking=acfg.get("thinking", ""),
-            )
+            # Pass workspace seed values via extra_env so the agent
+            # container writes template content into SOUL.md etc.
+            for env_key, cfg_key in (
+                ("INITIAL_INSTRUCTIONS", "initial_instructions"),
+                ("INITIAL_SOUL", "initial_soul"),
+                ("INITIAL_HEARTBEAT", "initial_heartbeat"),
+            ):
+                val = acfg.get(cfg_key, "")
+                if val:
+                    runtime.extra_env[env_key] = val
+            try:
+                url = runtime.start_agent(
+                    agent_id=name,
+                    role=role,
+                    skills_dir=skills_dir,
+                    model=acfg.get("model", model),
+                    thinking=acfg.get("thinking", ""),
+                )
+            finally:
+                runtime.extra_env.pop("INITIAL_INSTRUCTIONS", None)
+                runtime.extra_env.pop("INITIAL_SOUL", None)
+                runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
             if router is not None:
                 router.register_agent(name, url, role=role)
             else:
