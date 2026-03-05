@@ -1164,7 +1164,7 @@ def create_mesh_app(
             "Origin": f"http://127.0.0.1:{port}",
         }
 
-        await websocket.accept()
+        await websocket.accept(subprotocol="binary")
         try:
             import websockets
 
@@ -1172,6 +1172,7 @@ def create_mesh_app(
                 target,
                 subprotocols=["binary"],
                 additional_headers=extra_headers,
+                compression=None,
             ) as upstream:
 
                 async def client_to_upstream():
