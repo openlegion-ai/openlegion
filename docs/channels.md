@@ -14,7 +14,7 @@ Every channel provides a unified interface:
 
 ## Commands
 
-All channels support the same command set:
+### Channel Commands (available on all platforms)
 
 | Command | Description |
 |---------|-------------|
@@ -27,14 +27,30 @@ All channels support the same command set:
 | `/debug [trace_id]` | Show recent traces or trace detail |
 | `/costs` | Show today's LLM spend per agent |
 | `/addkey <service> <key>` | Add an API credential to the vault |
-| `/removekey <name>` | Remove a credential from the vault |
+| `/reset` | Clear conversation with active agent |
+| `/help` | Show command help |
+
+### REPL-Only Commands (not available in external channels)
+
+These commands require interactive prompts or local system access and are only available in the CLI REPL (`openlegion start`) or detached chat (`openlegion chat`):
+
+| Command | Description |
+|---------|-------------|
+| `/add` | Add a new agent (interactive prompts) |
+| `/agent [edit\|view]` | Agent overview, config editing, workspace file access |
+| `/edit [name]` | Edit agent settings (model, budget, thinking) |
+| `/remove [name]` | Remove an agent |
+| `/restart [name]` | Restart an agent container |
+| `/history [agent]` | Show recent conversation messages |
 | `/blackboard [list\|get\|set\|del]` | View/edit shared blackboard entries |
 | `/queue` | Show agent task queue status |
 | `/workflow [list\|run]` | List or trigger workflows |
 | `/cron [list\|del\|pause\|resume\|run]` | Manage cron jobs |
-| `/project [list\|create\|delete\|...]` | Manage multi-project namespaces |
-| `/reset` | Clear conversation with active agent |
-| `/help` | Show command help |
+| `/project [list\|use\|info]` | Manage multi-project namespaces |
+| `/credential [add\|list\|remove]` | Manage API credentials |
+| `/removekey [name]` | Remove a credential from the vault |
+| `/logs [--level LEVEL]` | Show recent runtime logs |
+| `/traces [trace_id]` | Alias for `/debug` |
 
 ## CLI REPL
 
@@ -46,7 +62,7 @@ openlegion start -d       # Detached (background)
 openlegion chat <agent>   # Connect to running agent (detached mode)
 ```
 
-The CLI REPL supports the full command set above plus additional management commands and token-level streaming responses with tool-use progress indicators. REPL-only commands (not available in external channels): `/add`, `/edit`, `/remove`, `/restart`, `/history`, `/logs`, `/credential`, `/traces`. These require interactive prompts or local system access.
+The CLI REPL supports all channel commands above plus the REPL-only commands listed in the table. It also provides token-level streaming responses with tool-use progress indicators and tab completion for agent names and subcommands.
 
 ## Telegram
 

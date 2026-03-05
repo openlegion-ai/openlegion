@@ -227,12 +227,17 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `GET` | `/dashboard/api/traces/{id}` | Trace detail |
 | `GET` | `/dashboard/api/queues` | Queue status per agent |
 | `GET` | `/dashboard/api/cron` | List cron jobs |
+| `POST` | `/dashboard/api/cron` | Create a cron job |
 | `POST` | `/dashboard/api/cron/{id}/run` | Trigger cron job |
 | `PUT` | `/dashboard/api/cron/{id}` | Update cron job schedule |
 | `POST` | `/dashboard/api/cron/{id}/pause` | Pause cron job |
 | `POST` | `/dashboard/api/cron/{id}/resume` | Resume cron job |
 | `DELETE` | `/dashboard/api/cron/{id}` | Delete cron job |
 | `GET` | `/dashboard/api/settings` | Environment settings |
+| `POST` | `/dashboard/api/credentials/validate` | Validate a credential (check if set) |
+| `GET` | `/dashboard/api/model-health` | Model health and failover status |
+| `POST` | `/dashboard/api/channels/{type}/connect` | Connect a messaging channel |
+| `POST` | `/dashboard/api/channels/{type}/disconnect` | Disconnect a messaging channel |
 | `POST` | `/dashboard/api/broadcast` | Send message to all agents |
 | `POST` | `/dashboard/api/broadcast/stream` | SSE streaming broadcast to all agents |
 | `GET` | `/dashboard/api/messages` | Recent message log |

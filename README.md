@@ -8,7 +8,7 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 1635](https://img.shields.io/badge/tests-1635%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 1744](https://img.shields.io/badge/tests-1744%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -113,7 +113,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 1635 tests including full Docker E2E |
+| **Test coverage** | Minimal | 1744 tests including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~25,000 lines — auditable in a day |
 
 ---
@@ -128,7 +128,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**1635 tests passing** across **~25,000 lines** of application code.
+**1744 tests passing** across **~25,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
@@ -641,6 +641,7 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 /use <agent>                         Switch active agent
 /agents                              List all running agents
 /add                                 Add a new agent (hot-adds to running system)
+/agent [edit|view]                   Agent overview, config editing, workspace files
 /edit [name]                         Edit agent settings (model, browser, budget)
 /remove [name]                       Remove an agent
 /restart [name]                      Restart an agent container
@@ -675,6 +676,8 @@ Templates are offered during first-run setup (via `openlegion start`):
 | `sales` | researcher, qualifier, outreach | Sales pipeline team |
 | `devteam` | pm, engineer, reviewer | Software development team |
 | `content` | researcher, writer, editor | Content creation team |
+| `deep-research` | researcher, analyst | Deep research and analysis team |
+| `monitor` | monitor | Autonomous monitoring agent |
 
 ---
 
@@ -907,7 +910,7 @@ pytest tests/
 | Memory Tools | 6 | memory_search, memory_save |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **1635** | |
+| **Total** | **1744** | |
 
 ---
 
@@ -1015,7 +1018,9 @@ src/
     ├── starter.yaml                    # Single-agent template
     ├── sales.yaml                      # Sales pipeline team
     ├── devteam.yaml                    # Dev team template
-    └── content.yaml                    # Content creation team
+    ├── content.yaml                    # Content creation team
+    ├── deep-research.yaml              # Deep research and analysis team
+    └── monitor.yaml                    # Autonomous monitoring agent
 
 config/
 ├── mesh.yaml                           # Framework settings

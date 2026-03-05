@@ -22,8 +22,11 @@ Agents run as non-root (UID 1000) with:
 - 384MB memory limit (agents are slim — no browser)
 - 0.15 CPU quota (agents are I/O-bound, waiting on LLM APIs)
 - Browser operations handled by shared browser service container (2GB RAM, 1 CPU)
+- `cap_drop: ALL` with only `NET_BIND_SERVICE` added back
+- Read-only root filesystem (`read_only: True`)
+- Tmpfs at `/tmp` (100MB, noexec, nosuid)
 - No host filesystem access (only `/data` volume)
-- Bridge network with port mapping (no direct host network on macOS/Windows)
+- Internal bridge network (no external egress) — agents can only reach the mesh host
 
 ```bash
 openlegion start  # Default container isolation

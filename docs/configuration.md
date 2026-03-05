@@ -47,10 +47,10 @@ agents:
 | `model` | string | No | LLM model in `provider/model` format. Falls back to `llm.default_model` in mesh.yaml |
 | `skills_dir` | string | No | Path to custom skills directory |
 | `system_prompt` | string | No | Custom system prompt. Auto-generated if omitted. Also accepted as `instructions` |
-| `resources.memory_limit` | string | No | Docker memory limit (default: `384m`) |
-| `resources.cpu_limit` | float | No | CPU quota as fraction of one core (default: `0.15`). Note: runtime currently uses hardcoded values; this field is accepted but not yet enforced |
-| `budget.daily_usd` | float | No | Daily spend cap in USD |
-| `budget.monthly_usd` | float | No | Monthly spend cap in USD |
+| `resources.memory_limit` | string | No | Reserved for future use. Currently hardcoded to `384m` by the runtime for security. |
+| `resources.cpu_limit` | float | No | Reserved for future use. Currently hardcoded to `0.15` by the runtime for security. |
+| `budget.daily_usd` | float | No | Daily spend cap in USD (default: `10.00`) |
+| `budget.monthly_usd` | float | No | Monthly spend cap in USD (default: `200.00`) |
 | `initial_instructions` | string | No | Seeds `INSTRUCTIONS.md` on first boot. Distinct from `system_prompt` — this sets the agent's operating instructions file |
 | `thinking` | string | No | Extended thinking/reasoning mode: `off` (default), `low`, `medium`, or `high`. Anthropic models use thinking budgets (5K/10K/25K tokens). OpenAI o-series models use `reasoning_effort`. Ignored for unsupported models |
 | `mcp_servers` | list | No | External MCP tool servers. See [MCP Integration](mcp.md) |

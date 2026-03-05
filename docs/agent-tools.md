@@ -37,6 +37,7 @@ All agents share a single **browser service container** running Camoufox (a stea
 | `browser_screenshot` | `full_page` | Take screenshot, return base64 PNG. |
 | `browser_click` | `ref` or `selector` | Click element by accessibility ref or CSS selector |
 | `browser_type` | `ref` or `selector`, `text` | Type into input field (supports `$CRED{name}` handles) |
+| `browser_scroll` | `direction`, `amount`, `ref` | Scroll page up/down or scroll element into view. Default direction: `down`, default amount: one viewport height. |
 | `browser_evaluate` | `script` | Run JavaScript in page context |
 | `browser_reset` | -- | Reset browser session (profile preserved) |
 | `browser_solve_captcha` | -- | Manual CAPTCHA detection and solving. Usually not needed — `browser_navigate` auto-detects CAPTCHAs. |
@@ -57,8 +58,12 @@ All agents share a single **browser service container** running Camoufox (a stea
 | `write_shared_state` | `key`, `value` | Write to the project-scoped blackboard |
 | `list_shared_state` | `prefix` | Browse project blackboard entries by prefix |
 | `publish_event` | `topic`, `data` | Publish event to mesh pub/sub |
+| `subscribe_event` | `topic` | Subscribe to a pub/sub topic at runtime. Events arrive as steer messages between tool rounds. |
+| `watch_blackboard` | `pattern` | Watch blackboard keys matching a glob pattern. Notifications arrive when matching keys are written. |
+| `claim_task` | `key`, `claim_value` | Atomically claim a task from the blackboard (compare-and-swap). Prevents duplicate work. |
 | `save_artifact` | `name`, `content` | Save deliverable to workspace and register on project blackboard |
 | `notify_user` | `message` | Send a notification to the user across all connected channels (CLI, Telegram, Discord, Slack, etc.) |
+| `read_agent_history` | `agent_id` | Read another agent's conversation logs (permission-checked) |
 
 **Project isolation:** Blackboard tools (`read_shared_state`, `write_shared_state`, `list_shared_state`, `save_artifact`) are only available to agents assigned to a project. Standalone agents cannot access the blackboard — calls return an error explaining they must be added to a project first.
 
@@ -66,7 +71,7 @@ All agents share a single **browser service container** running Camoufox (a stea
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `update_workspace` | `filename`, `content` | Update a writable workspace file (HEARTBEAT.md, USER.md) to persist learnings across sessions |
+| `update_workspace` | `filename`, `content` | Update a writable workspace file (SOUL.md, INSTRUCTIONS.md, USER.md, or HEARTBEAT.md) to persist learnings across sessions |
 
 ### Scheduling & Automation
 
@@ -94,7 +99,7 @@ All agents share a single **browser service container** running Camoufox (a stea
 
 Lightweight subagents that run inside the same process as the parent agent, sharing LLM and mesh clients but with their own memory and workspace.
 
-**Limits:** Max 3 concurrent subagents, max depth 2 (no grandchildren), default TTL 300s, max 10 iterations per subagent. Subagents cannot use `create_skill`, `reload_skills`, or `spawn_subagent` (prevents recursion). Results are written to blackboard at `subagent_results/{parent_id}/{subagent_id}`.
+**Limits:** Max 3 concurrent subagents, max depth 2 (no grandchildren), default TTL 300s, max 10 iterations per subagent. Subagents cannot use `create_skill`, `reload_skills`, `spawn_subagent`, or `wait_for_subagent` (prevents recursion and nesting). Results are written to blackboard at `subagent_results/{parent_id}/{subagent_id}`.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|

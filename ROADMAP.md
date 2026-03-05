@@ -110,9 +110,9 @@ Implemented. See Completed section.
 
 Implemented. See Completed section.
 
-### 4.4 Extended Thinking / Reasoning Support
+### ~~4.4 Extended Thinking / Reasoning Support~~ ✅ Done
 
-No support for Claude's extended thinking or OpenAI's reasoning effort parameters. OpenClaw supports configurable thinking levels (off/low/medium/high) with auto-fallback to lower levels when unsupported. Extended thinking produces dramatically better results on complex tasks (planning, debugging, multi-step reasoning) at the cost of more tokens.
+Implemented. Per-agent `thinking` field in `agents.yaml` supports `off`/`low`/`medium`/`high`. Anthropic models use thinking budgets (5K/10K/25K tokens). OpenAI o-series models use `reasoning_effort`. Auto-fallback when unsupported. See `src/agent/llm.py`.
 
 **Impact:** Significant quality improvement on complex tasks. Zero-effort capability boost — just passing a parameter through.
 

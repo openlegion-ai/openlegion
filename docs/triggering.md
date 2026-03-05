@@ -55,6 +55,7 @@ Agent: I'll set up a daily check.
 ```bash
 curl -X POST http://localhost:8420/mesh/cron \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $MESH_AUTH_TOKEN" \
   -d '{
     "agent_id": "researcher",
     "schedule": "every 2h",
@@ -62,16 +63,20 @@ curl -X POST http://localhost:8420/mesh/cron \
   }'
 ```
 
+> **Note:** Mesh API endpoints require authentication via the `MESH_AUTH_TOKEN` header. Agents receive this token automatically; external callers need to provide it.
+
 ### Managing Cron Jobs
 
 **List jobs:**
 ```bash
-curl http://localhost:8420/mesh/cron
+curl -H "Authorization: Bearer $MESH_AUTH_TOKEN" \
+  http://localhost:8420/mesh/cron
 ```
 
 **Remove a job:**
 ```bash
-curl -X DELETE http://localhost:8420/mesh/cron/<job_id>
+curl -X DELETE -H "Authorization: Bearer $MESH_AUTH_TOKEN" \
+  http://localhost:8420/mesh/cron/<job_id>
 ```
 
 **Via agent tools:**
@@ -124,6 +129,7 @@ The probes (disk_usage, pending_signals, pending_tasks) run automatically -- you
 ```bash
 curl -X POST http://localhost:8420/mesh/cron \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $MESH_AUTH_TOKEN" \
   -d '{
     "agent_id": "researcher",
     "schedule": "every 30m",
@@ -267,7 +273,7 @@ This sends the notification to:
 4. **Slack** -- sent to configured channels
 5. **WhatsApp** -- sent to paired users
 
-Agents can use `notify_user` at any time -- during cron jobs, heartbeats, workflows, or regular tasks. Messages are capped at 2000 characters.
+Agents can use `notify_user` at any time -- during cron jobs, heartbeats, workflows, or regular tasks.
 
 ## File Watchers
 

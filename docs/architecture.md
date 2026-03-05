@@ -90,6 +90,14 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `subagent_tool.py` | In-container subagent spawning and management |
 | `web_search_tool.py` | DuckDuckGo web search (no API key) |
 
+### Browser Service (`src/browser/`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `service.py` | Camoufox session management and lifecycle |
+| `stealth.py` | Anti-detection configuration |
+| `redaction.py` | Credential redaction for browser content |
+
 ### Channels (`src/channels/`)
 
 | Module | Platform |
