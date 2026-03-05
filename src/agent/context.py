@@ -12,7 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Coroutine
+from typing import TYPE_CHECKING, Any
 
 from src.shared.models import get_context_window
 from src.shared.utils import setup_logging
@@ -90,6 +91,7 @@ class ContextManager:
         workspace: WorkspaceManager | None = None,
         memory: MemoryStore | None = None,
         model: str = "",
+        on_memory_update: Callable[[], Coroutine[Any, Any, None]] | None = None,
     ):
         self.model = model
         self.max_tokens = max_tokens or get_context_window(model)
@@ -98,6 +100,7 @@ class ContextManager:
         self.memory = memory
         self._flush_triggered = False
         self._flush_lock = asyncio.Lock()
+        self._on_memory_update = on_memory_update
 
     def reset(self) -> None:
         """Reset per-session state for a new conversation."""
@@ -241,6 +244,11 @@ class ContextManager:
                 self.workspace.append_memory(
                     f"\n## {label} ({_now_str()})\n\n" + "\n".join(lines),
                 )
+                if self._on_memory_update:
+                    try:
+                        await self._on_memory_update()
+                    except Exception:
+                        logger.debug("Non-fatal: memory update notification failed")
 
             # Store structured facts in memory DB for search
             if self.memory:

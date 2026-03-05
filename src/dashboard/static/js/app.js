@@ -51,7 +51,7 @@ function dashboard() {
     eventTypes: [
       'agent_state', 'message_sent', 'message_received',
       'tool_start', 'tool_result', 'text_delta', 'llm_call',
-      'blackboard_write', 'health_change', 'notification',
+      'blackboard_write', 'health_change', 'notification', 'workspace_updated',
     ],
 
     // Agent detail
@@ -3014,6 +3014,7 @@ function dashboard() {
         blackboard_write: 'text-cyan-400',
         health_change: 'text-red-400',
         notification: 'text-amber-300',
+        workspace_updated: 'text-teal-300',
         // Trace event types
         chat: 'text-green-400',
         chat_response: 'text-green-300',
@@ -3042,6 +3043,7 @@ function dashboard() {
         blackboard_write: 'bg-cyan-400',
         health_change: 'bg-red-400',
         notification: 'bg-amber-300',
+        workspace_updated: 'bg-teal-300',
         chat: 'bg-green-400',
         chat_response: 'bg-green-300',
         message_route: 'bg-teal-400',

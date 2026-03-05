@@ -89,7 +89,13 @@ def main() -> None:
         except OSError:
             logger.debug("Could not copy PROJECT.md into workspace")
 
-    context_mgr = ContextManager(llm=llm, workspace=workspace, memory=memory, model=llm_model)
+    async def _notify_memory_update() -> None:
+        await mesh_client.notify_user(f"[{agent_id}] MEMORY.md updated during context compaction.")
+
+    context_mgr = ContextManager(
+        llm=llm, workspace=workspace, memory=memory, model=llm_model,
+        on_memory_update=_notify_memory_update,
+    )
 
     loop = AgentLoop(
         agent_id=agent_id,
