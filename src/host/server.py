@@ -1114,6 +1114,7 @@ def create_mesh_app(
         """Reverse-proxy HTTP requests to KasmVNC (static files)."""
         _reject_agent_tokens(request)
         import httpx
+        import base64
 
         port = _get_vnc_port()
         if port is None:
@@ -1122,9 +1123,14 @@ def create_mesh_app(
         target = f"http://127.0.0.1:{port}/{path}"
         if query:
             target += f"?{query}"
+        # KasmVNC requires Basic Auth on all HTTP endpoints
+        kasm_creds = base64.b64encode(b"browser:openlegion").decode()
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(target)
+                resp = await client.get(
+                    target,
+                    headers={"Authorization": f"Basic {kasm_creds}"},
+                )
         except (httpx.ConnectError, httpx.TimeoutException):
             raise HTTPException(502, "Browser VNC not reachable")
         headers = {}
@@ -1140,24 +1146,6 @@ def create_mesh_app(
     # KasmVNC credentials — matches .kasmpasswd created in browser __main__.py
     _KASM_USER = "browser"
     _KASM_PASS = "openlegion"
-
-    async def _get_kasm_token(port: int) -> str | None:
-        """Fetch a session token from KasmVNC's /api/get_token (Basic Auth)."""
-        import httpx
-        import base64
-        creds = base64.b64encode(f"{_KASM_USER}:{_KASM_PASS}".encode()).decode()
-        try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.get(
-                    f"http://127.0.0.1:{port}/api/get_token",
-                    headers={"Authorization": f"Basic {creds}"},
-                )
-                if resp.status_code == 200:
-                    return resp.text.strip()
-                _server_logger.debug("KasmVNC /api/get_token returned %d", resp.status_code)
-        except Exception as e:
-            _server_logger.debug("Failed to get KasmVNC token: %s", e)
-        return None
 
     @app.websocket("/vnc/{path:path}")
     async def vnc_ws_proxy(websocket: WebSocket, path: str):
@@ -1180,20 +1168,24 @@ def create_mesh_app(
             await websocket.close(code=1011, reason="Browser service not available")
             return
 
-        # KasmVNC 1.4.0: get token via /api/get_token, connect to /api/ws?token=
-        kasm_token = await _get_kasm_token(port)
-        if kasm_token:
-            target = f"ws://127.0.0.1:{port}/api/ws?token={kasm_token}"
-        else:
-            # Fallback: try the path directly
-            target = f"ws://127.0.0.1:{port}/{path}"
-            _server_logger.warning("KasmVNC token fetch failed, trying direct WS to /%s", path)
+        # KasmVNC 1.4.0 WebSocket at /websockify requires Basic Auth on upgrade.
+        # Inject credentials server-side so the dashboard user never sees a prompt.
+        import base64
+        kasm_creds = base64.b64encode(
+            f"{_KASM_USER}:{_KASM_PASS}".encode()
+        ).decode()
+        target = f"ws://127.0.0.1:{port}/websockify"
+        extra_headers = {"Authorization": f"Basic {kasm_creds}"}
 
         await websocket.accept()
         try:
             import websockets
 
-            async with websockets.connect(target, subprotocols=["binary"]) as upstream:
+            async with websockets.connect(
+                target,
+                subprotocols=["binary"],
+                additional_headers=extra_headers,
+            ) as upstream:
 
                 async def client_to_upstream():
                     try:
