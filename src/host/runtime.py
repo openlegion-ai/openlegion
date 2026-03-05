@@ -351,6 +351,10 @@ class DockerBackend(RuntimeBackend):
             "IDLE_TIMEOUT_MINUTES": "10",
         }
 
+        for var in ("BROWSER_PROXY_URL", "BROWSER_PROXY_USER", "BROWSER_PROXY_PASS"):
+            if os.environ.get(var):
+                environment[var] = os.environ[var]
+
         with self._port_lock:
             api_port = self._next_port
             self._next_port += 1
