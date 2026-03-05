@@ -648,8 +648,6 @@ class TestMeshRelay:
 
     def test_relay_cleans_stale_on_start(self):
         """_start_mesh_relay removes a stale relay container before starting."""
-        import docker as _docker
-
         backend = _make_docker_backend(_mesh_relay=None)
         stale = MagicMock()
         new_relay = MagicMock()
@@ -777,8 +775,6 @@ class TestNetworkInternalFlag:
 
     def test_reuses_internal_network(self):
         """Existing internal network is reused without recreation."""
-        import docker
-
         existing = MagicMock()
         existing.attrs = {"Internal": True}
 
@@ -793,8 +789,6 @@ class TestNetworkInternalFlag:
 
     def test_replaces_non_internal_network(self):
         """Non-internal network is removed and recreated with internal=True."""
-        import docker
-
         non_internal = MagicMock()
         non_internal.attrs = {"Internal": False}
 
