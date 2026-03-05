@@ -675,20 +675,6 @@
             </div>
           </div>
         </div>
-        <!-- Empty state -->
-        <div x-show="agents.length === 0 && !loading && !showOnboarding" class="text-center py-16" x-cloak>
-          <svg class="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
-          </svg>
-          <div class="text-gray-500 text-lg mb-2 font-medium">No agents yet</div>
-          <div class="text-gray-400 text-sm mb-1">Create an autonomous AI agent</div>
-          <div class="text-gray-600 text-sm mb-5">Start agents with <code class="bg-gray-800 px-1.5 py-0.5 rounded text-gray-400 text-xs">openlegion start</code> or add one below</div>
-          <button @click="openAddAgentModal('assistant')"
-            class="text-sm px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-2 shadow-lg shadow-indigo-900/30">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            Add Agent
-          </button>
-        </div>
       </div>
 
       <!-- Slide-over chat panel -->
