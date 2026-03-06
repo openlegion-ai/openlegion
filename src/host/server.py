@@ -221,8 +221,12 @@ def create_mesh_app(
         if request.headers.get("x-mesh-internal"):
             # Only accept from localhost (Caddy or internal callers)
             client_host = request.client.host if request.client else ""
-            if client_host in ("127.0.0.1", "::1", "localhost"):
-                return
+            try:
+                import ipaddress
+                if ipaddress.ip_address(client_host).is_loopback:
+                    return
+            except (ValueError, AttributeError):
+                pass  # Not a valid IP — fall through to Bearer token check
         auth_header = request.headers.get("authorization", "")
         if not auth_header.startswith("Bearer "):
             raise HTTPException(401, "Missing authentication token")

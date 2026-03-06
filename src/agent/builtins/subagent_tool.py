@@ -201,7 +201,7 @@ async def spawn_subagent(
     if mesh_client is None:
         return {"error": "No mesh_client available"}
 
-    ttl_seconds = min(ttl_seconds, MAX_TTL)
+    ttl_seconds = max(1, min(ttl_seconds, MAX_TTL))
 
     # Determine parent from mesh_client
     parent_id = getattr(mesh_client, "agent_id", "unknown")
