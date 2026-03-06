@@ -456,7 +456,11 @@ class TestDockerBackendSlimResources:
         mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
         backend.client = mock_client
 
-        backend.start_browser_service()
+        # Mock httpx so API + VNC health checks pass
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp):
+            backend.start_browser_service()
 
         assert backend.browser_service_url is not None
         assert backend.browser_vnc_url is not None
@@ -473,6 +477,38 @@ class TestDockerBackendSlimResources:
         mock_container.stop.assert_called_once()
         mock_container.remove.assert_called_once()
         assert backend.browser_service_url is None
+
+    def test_browser_service_vnc_health_fail(self):
+        """browser_vnc_url stays None when KasmVNC is unreachable."""
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        call_count = 0
+
+        def _fake_get(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # API health check succeeds
+            if "/browser/status" in url:
+                resp = MagicMock()
+                resp.status_code = 200
+                return resp
+            # VNC health check fails
+            import httpx
+            raise httpx.ConnectError("refused")
+
+        with patch("httpx.get", side_effect=_fake_get), \
+             patch("time.sleep"):
+            backend.start_browser_service()
+
+        assert backend.browser_service_url is not None
+        assert backend.browser_vnc_url is None
 
     def test_containers_no_docker_init(self):
         """Docker init=True must NOT be set — Dockerfile ENTRYPOINT tini handles it.
