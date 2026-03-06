@@ -34,6 +34,13 @@ _MAX_RETRIES = 3
 _BACKOFF_BASE = 1  # seconds: 1, 2, 4
 _TOOL_TIMEOUT = 300  # seconds — hard ceiling for a single tool execution
 
+# Tools that require a project blackboard — excluded for standalone agents.
+_BLACKBOARD_TOOLS = frozenset({
+    "read_shared_state", "write_shared_state", "list_shared_state",
+    "publish_event", "subscribe_event", "watch_blackboard",
+    "claim_task",
+})
+
 
 async def _llm_call_with_retry(llm_chat_fn, *, system, messages, tools, **kwargs):
     """Call the LLM with exponential backoff on transient errors.
@@ -133,6 +140,10 @@ class AgentLoop:
         self._introspect_cache: dict | None = None
         self._introspect_cache_ts: float = 0
         self._loop_detector = ToolLoopDetector()
+        # Standalone agents have no project blackboard — hide those tools
+        self._excluded_tools: frozenset[str] | None = (
+            _BLACKBOARD_TOOLS if mesh_client.is_standalone else None
+        )
 
     async def _fetch_fleet_roster(self) -> list[dict]:
         """Fetch and cache the fleet roster from the mesh (TTL: 10 min)."""
@@ -193,7 +204,10 @@ class AgentLoop:
             if self.workspace:
                 try:
                     from src.agent.workspace import generate_system_md
-                    system_md = generate_system_md(data, self.agent_id)
+                    system_md = generate_system_md(
+                        data, self.agent_id,
+                        is_standalone=self.mesh_client.is_standalone,
+                    )
                     (self.workspace.root / "SYSTEM.md").write_text(system_md)
                 except Exception as e:
                     logger.debug("Failed to refresh SYSTEM.md: %s", e)
@@ -352,7 +366,7 @@ class AgentLoop:
                     self.llm.chat,
                     system=effective_system,
                     messages=messages,
-                    tools=self.skills.get_tool_definitions() or None,
+                    tools=self.skills.get_tool_definitions(exclude=self._excluded_tools) or None,
                 )
                 total_tokens += llm_response.tokens_used
                 if assignment.token_budget:
@@ -656,7 +670,7 @@ class AgentLoop:
     def _build_system_prompt(
         self, assignment: TaskAssignment, introspect_data: dict | None = None,
     ) -> str:
-        tools_desc = self.skills.get_descriptions()
+        tools_desc = self.skills.get_descriptions(exclude=self._excluded_tools)
         parts = []
 
         # Load workspace identity + project files into system prompt
@@ -665,7 +679,8 @@ class AgentLoop:
             if bootstrap:
                 parts.append(sanitize_for_prompt(bootstrap))
 
-        parts.append(
+        is_standalone = self.mesh_client.is_standalone
+        rules = (
             f"You are the '{self.role}' agent in the OpenLegion multi-agent system.\n"
             f"Your current task: {assignment.task_type}\n\n"
             f"## Available Tools\n\n{tools_desc}\n\n"
@@ -676,11 +691,17 @@ class AgentLoop:
             f"- When done, respond with JSON: "
             f"{{\"result\": {{...}}, \"promote\": {{...}}}} "
             f"('promote' = data other agents need).\n"
-            f"- Use notify_user for the user; blackboard for other agents only.\n"
+        )
+        if is_standalone:
+            rules += f"- Use notify_user to report results to the user.\n"
+        else:
+            rules += f"- Use notify_user for the user; blackboard for other agents only.\n"
+        rules += (
             f"- You have max {self.MAX_ITERATIONS} iterations.\n"
             f"- Use update_workspace to evolve your SOUL.md, INSTRUCTIONS.md, "
-            f"USER.md, and HEARTBEAT.md over time.\n",
+            f"USER.md, and HEARTBEAT.md over time.\n"
         )
+        parts.append(rules)
         if self.workspace:
             learnings = self.workspace.get_learnings_context()
             if learnings:
@@ -768,7 +789,7 @@ class AgentLoop:
             combined = "\n\n".join(steered)
             self._chat_messages[-1]["content"] += f"\n\n[Additional context]: {combined}"
 
-        roster = await self._fetch_fleet_roster()
+        roster = [] if self.mesh_client.is_standalone else await self._fetch_fleet_roster()
         introspect_data = await self._fetch_introspect_cached()
         system = self._build_chat_system_prompt(
             goals=goals, fleet_roster=roster, introspect_data=introspect_data,
@@ -928,7 +949,7 @@ class AgentLoop:
                     self.llm.chat,
                     system=system,
                     messages=self._chat_messages,
-                    tools=self.skills.get_tool_definitions() or None,
+                    tools=self.skills.get_tool_definitions(exclude=self._excluded_tools) or None,
                 )
                 total_tokens += llm_response.tokens_used
 
@@ -969,7 +990,7 @@ class AgentLoop:
                 self.llm.chat,
                 system=system,
                 messages=self._chat_messages,
-                tools=self.skills.get_tool_definitions() or None,
+                tools=self.skills.get_tool_definitions(exclude=self._excluded_tools) or None,
             )
             total_tokens += llm_response.tokens_used
             content = self._resolve_content(llm_response)
@@ -1054,7 +1075,7 @@ class AgentLoop:
         fleet_roster: list[dict] | None = None,
         introspect_data: dict | None = None,
     ) -> str:
-        tools_desc = self.skills.get_descriptions()
+        tools_desc = self.skills.get_descriptions(exclude=self._excluded_tools)
         parts = []
 
         if goals:
@@ -1069,8 +1090,9 @@ class AgentLoop:
             if learnings:
                 parts.append(f"## Learnings from Past Sessions\n\n{sanitize_for_prompt(learnings)}")
 
-        has_browser = "browser_navigate" in self.skills.list_skills()
+        has_browser = "browser_navigate" in self.skills.list_skills(exclude=self._excluded_tools)
 
+        is_standalone = self.mesh_client.is_standalone
         rules = (
             f"You are the '{self.role}' agent in the OpenLegion fleet.\n\n"
             f"## Available Tools\n\n{tools_desc}\n\n"
@@ -1078,9 +1100,12 @@ class AgentLoop:
             f"- Act first — call tools immediately. Report results, not intentions.\n"
             f"- Never refuse without trying. Attempt the task, report blockers after.\n"
             f"- Make decisions with reasonable defaults. Ask only when truly ambiguous.\n"
-            f"- Use notify_user for the user; blackboard for other agents only.\n"
-            f"- Before answering from memory, run memory_search first.\n"
         )
+        if is_standalone:
+            rules += f"- Use notify_user to report results to the user.\n"
+        else:
+            rules += f"- Use notify_user for the user; blackboard for other agents only.\n"
+        rules += f"- Before answering from memory, run memory_search first.\n"
 
         if has_browser:
             rules += (
@@ -1147,7 +1172,7 @@ class AgentLoop:
             role=self.role,
             state=self.state,
             current_task=self.current_task,
-            capabilities=self.skills.list_skills(),
+            capabilities=self.skills.list_skills(exclude=self._excluded_tools),
             uptime_seconds=time.time() - self._start_time,
             tasks_completed=self.tasks_completed,
             tasks_failed=self.tasks_failed,
@@ -1197,7 +1222,7 @@ class AgentLoop:
                 llm_response = None
                 used_streaming = False
                 any_text_streamed = False
-                tools = self.skills.get_tool_definitions() or None
+                tools = self.skills.get_tool_definitions(exclude=self._excluded_tools) or None
                 try:
                     async for event in self.llm.chat_stream(
                         system=system, messages=self._chat_messages, tools=tools,
@@ -1269,7 +1294,7 @@ class AgentLoop:
                 self.llm.chat,
                 system=system,
                 messages=self._chat_messages,
-                tools=self.skills.get_tool_definitions() or None,
+                tools=self.skills.get_tool_definitions(exclude=self._excluded_tools) or None,
             )
             total_tokens += llm_response.tokens_used
             content = self._resolve_content(llm_response)

@@ -48,7 +48,7 @@ async def notify_user(message: str, *, mesh_client=None) -> dict:
     description=(
         "List agents in your project (or just yourself if standalone). Returns "
         "each agent's name and role. Use this to discover who else is working "
-        "in your project and what artifacts they may have published to the blackboard."
+        "in your project."
     ),
     parameters={},
 )

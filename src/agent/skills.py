@@ -145,14 +145,18 @@ class SkillRegistry:
             return await func(**call_args)
         return await asyncio.get_running_loop().run_in_executor(None, lambda: func(**call_args))
 
-    def list_skills(self) -> list[str]:
+    def list_skills(self, exclude: frozenset[str] | None = None) -> list[str]:
         """Return list of available skill names."""
+        if exclude:
+            return [n for n in self.skills if n not in exclude]
         return list(self.skills.keys())
 
-    def get_descriptions(self) -> str:
+    def get_descriptions(self, exclude: frozenset[str] | None = None) -> str:
         """Return human-readable descriptions of all skills."""
         lines = []
         for name, info in self.skills.items():
+            if exclude and name in exclude:
+                continue
             raw_params = info["parameters"]
             # MCP tools have full JSON Schema; extract from "properties"
             if info.get("function") == "mcp":
@@ -163,10 +167,12 @@ class SkillRegistry:
             lines.append(f"- {name}({params}): {info['description']}")
         return "\n".join(lines)
 
-    def get_tool_definitions(self) -> list[dict]:
+    def get_tool_definitions(self, exclude: frozenset[str] | None = None) -> list[dict]:
         """Return OpenAI-compatible tool definitions for LLM function calling."""
         tools = []
         for name, info in self.skills.items():
+            if exclude and name in exclude:
+                continue
             params = info["parameters"]
 
             # MCP tools provide a full JSON Schema (with "type": "object",

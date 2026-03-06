@@ -152,7 +152,9 @@ def main() -> None:
             try:
                 from src.agent.workspace import generate_system_md
                 info = await mesh_client.introspect("all")
-                system_md = generate_system_md(info, agent_id)
+                system_md = generate_system_md(
+                    info, agent_id, is_standalone=mesh_client.is_standalone,
+                )
                 Path("/data/workspace").mkdir(parents=True, exist_ok=True)
                 Path("/data/workspace/SYSTEM.md").write_text(system_md)
                 logger.info(f"Generated SYSTEM.md for '{agent_id}'")
