@@ -53,7 +53,7 @@ agents:
   analyst:
     role: Monitor analyst — investigates alerts and provides context
     model: "{default_model}"
-    thinking: short
+    thinking: low
     instructions: |
       You are a monitoring analyst. When the watcher detects a change,
       you investigate and provide context.

@@ -463,11 +463,14 @@ def _set_collaborative_permissions() -> None:
     _save_permissions(perms)
 
 
+_RESERVED_AGENT_NAMES = frozenset({"mesh", "orchestrator"})
+
+
 def _validate_agent_name(name: str) -> str:
     """Validate and return a safe agent name.
 
-    Rejects path traversal, slashes, and non-alphanumeric chars
-    (aside from hyphens and underscores).
+    Rejects path traversal, slashes, non-alphanumeric chars
+    (aside from hyphens and underscores), and reserved internal names.
     """
     import re
 
@@ -476,6 +479,8 @@ def _validate_agent_name(name: str) -> str:
             f"Invalid agent name '{name}': must be 1–64 alphanumeric chars, "
             "hyphens, or underscores (must start with a letter or digit)."
         )
+    if name in _RESERVED_AGENT_NAMES:
+        raise ValueError(f"Agent name '{name}' is reserved for internal use")
     return name
 
 
@@ -817,8 +822,18 @@ def _apply_template(template_name: str, tpl: dict) -> list[str]:
     tpl_agents = tpl.get("agents", {})
     created: list[str] = []
 
+    # Load existing agents to avoid silent overwrites
+    existing_agents: set[str] = set()
+    if AGENTS_FILE.exists():
+        with open(AGENTS_FILE) as f:
+            existing_cfg = yaml.safe_load(f) or {}
+        existing_agents = set(existing_cfg.get("agents", {}).keys())
+
     for agent_name, agent_def in tpl_agents.items():
         agent_name = _validate_agent_name(agent_name)
+        if agent_name in existing_agents:
+            click.echo(f"  Skipping '{agent_name}' — agent already exists")
+            continue
         model = agent_def.get("model", default_model).replace("{default_model}", default_model)
         instructions = agent_def.get("instructions", "") or agent_def.get("system_prompt", "")
         soul = agent_def.get("soul", "")

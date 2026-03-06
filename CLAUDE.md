@@ -2,15 +2,15 @@
 
 ## Current State
 
-### Architecture (verified 2026-03-05)
+### Architecture (verified 2026-03-06)
 
 OpenLegion is a container-isolated multi-agent runtime. LLM-powered agents run in Docker containers (or Sandbox microVMs), coordinated through a central mesh host. Fleet model — no CEO agent. Users talk to agents directly; agents coordinate via shared blackboard and YAML workflows.
 
 ```
 User (CLI REPL / Telegram / Discord / Slack / WhatsApp / Webhook)
-  → Mesh Host (FastAPI :8420) — routes messages, enforces permissions, proxies APIs
+  → Mesh Host (FastAPI :8420) — routes messages, enforces permissions, proxies APIs, VNC proxy
     → Agent Containers (FastAPI :8400 each) — isolated execution with private memory
-    → Browser Service Container (FastAPI :8421) — shared Camoufox browser instances
+    → Browser Service Container (FastAPI :8421 + KasmVNC :6080) — shared Camoufox browser instances with live VNC viewing
 ```
 
 Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agents** (untrusted, sandboxed). Everything between zones is HTTP + JSON with Pydantic contracts defined in `src/shared/types.py`.
@@ -20,11 +20,10 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | Path | What it does |
 |---|---|
 | **Shared** | |
-| `src/shared/types.py` | THE contract — all Pydantic models shared between host and agents |
+| `src/shared/types.py` | THE contract — all Pydantic models shared between host and agents. `_generate_id()` helper for UUID generation. |
 | `src/shared/utils.py` | Utilities: `sanitize_for_prompt()`, `setup_logging()`, misc helpers |
 | `src/shared/trace.py` | Distributed trace-ID generation and propagation |
 | `src/shared/models.py` | Model cost/context window registry backed by LiteLLM |
-| ~~`src/shared/constants.py`~~ | *(Deleted — was dead code, zero imports)* |
 | **Agent Container** | |
 | `src/agent/loop.py` | Agent execution loop (task mode + chat mode) |
 | `src/agent/skills.py` | Skill registry and tool discovery |
@@ -33,30 +32,31 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `src/agent/mesh_client.py` | Agent-side HTTP client for mesh communication |
 | `src/agent/memory.py` | Per-agent SQLite + sqlite-vec + FTS5 memory store |
 | `src/agent/workspace.py` | Persistent markdown workspace (SOUL.md, INSTRUCTIONS.md, MEMORY.md, daily logs, learnings) |
-| `src/agent/context.py` | Context window management (write-then-compact) |
+| `src/agent/context.py` | Context window management (write-then-compact, `_SUMMARIZATION_INPUT_LIMIT = 20_000`) |
 | `src/agent/loop_detector.py` | Tool loop detection with escalating responses |
 | `src/agent/mcp_client.py` | MCP tool server client and lifecycle |
 | `src/agent/__main__.py` | Agent container entry point |
 | **Agent Builtins** | |
-| `src/agent/builtins/exec_tool.py` | Shell execution scoped to `/data` |
-| `src/agent/builtins/file_tool.py` | File I/O with two-stage path traversal protection |
-| `src/agent/builtins/http_tool.py` | HTTP requests with CRED handles and DNS rebinding/SSRF protection |
+| `src/agent/builtins/exec_tool.py` | Shell execution scoped to `/data` (`_MAX_TIMEOUT = 300`) |
+| `src/agent/builtins/file_tool.py` | File I/O with two-stage path traversal protection (uses `lstat()` to prevent symlink info leak) |
+| `src/agent/builtins/http_tool.py` | HTTP requests with CRED handles, DNS rebinding/SSRF protection (blocks `0.0.0.0`), cross-origin auth header stripping |
 | `src/agent/builtins/browser_tool.py` | Browser automation via shared Camoufox service container |
+| `src/agent/builtins/captcha.py` | CAPTCHA detection and solving via 2Captcha / CapSolver APIs (reCAPTCHA v2/v3/Enterprise, hCaptcha, Turnstile) |
 | `src/agent/builtins/memory_tool.py` | Memory search with hierarchical fallback |
-| `src/agent/builtins/mesh_tool.py` | Blackboard, pub/sub, notify_user, list_agents |
+| `src/agent/builtins/mesh_tool.py` | Blackboard (with `sanitize_for_prompt()`), pub/sub, notify_user, list_agents |
 | `src/agent/builtins/vault_tool.py` | Credential generation without returning actual values |
 | `src/agent/builtins/web_search_tool.py` | DuckDuckGo search (no API key needed) |
-| `src/agent/builtins/skill_tool.py` | Self-authoring with AST validation (forbidden imports/calls blocked) |
+| `src/agent/builtins/skill_tool.py` | Self-authoring with AST validation (`_FORBIDDEN_ATTRS` denylist, forbidden imports/calls blocked) |
 | `src/agent/builtins/subagent_tool.py` | In-process subagents (MAX_DEPTH=2, MAX_CONCURRENT=3, DEFAULT_TTL=300s) |
 | `src/agent/builtins/introspect_tool.py` | Runtime state query (permissions, budget, fleet, cron, health) |
 | **Host/Mesh** | |
-| `src/host/server.py` | Mesh FastAPI app factory — all endpoints enforce permissions |
+| `src/host/server.py` | Mesh FastAPI app factory — all endpoints enforce permissions. Includes VNC reverse proxy (`/vnc/{path}`) with agent token rejection. |
 | `src/host/mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter |
 | `src/host/orchestrator.py` | DAG workflow executor with safe condition eval (regex, no eval()) |
-| `src/host/runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend |
-| `src/host/transport.py` | Transport ABC → HttpTransport / SandboxTransport |
+| `src/host/runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. DockerBackend manages agent network (`openlegion_agents` bridge), browser container (with KasmVNC + plan-based resource scaling), VNC URL tracking. |
+| `src/host/transport.py` | Transport ABC → HttpTransport / SandboxTransport. `_AGENT_ID_RE` validation. |
 | `src/host/credentials.py` | Two-tier credential vault (SYSTEM_*/CRED_*) + LLM API proxy |
-| `src/host/permissions.py` | Per-agent ACL enforcement (glob patterns, deny-all default) |
+| `src/host/permissions.py` | Per-agent ACL enforcement (glob patterns, deny-all default). Includes `can_spawn`, `can_manage_cron`. |
 | `src/host/lanes.py` | Per-agent FIFO task queues (followup/steer/collect modes) |
 | `src/host/health.py` | Health monitor with auto-restart and rate limiting |
 | `src/host/costs.py` | Per-agent cost tracking + budget enforcement (SQLite) |
@@ -64,33 +64,38 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `src/host/failover.py` | Model health tracking + failover chains |
 | `src/host/traces.py` | Request tracing + grouped summaries |
 | `src/host/transcript.py` | Provider-specific transcript sanitization |
-| `src/host/webhooks.py` | Named webhook endpoints |
-| `src/host/watchers.py` | File watcher with polling |
+| `src/host/webhooks.py` | Named webhook endpoints (payloads sanitized) |
+| `src/host/watchers.py` | File watcher with polling (messages sanitized) |
 | `src/host/containers.py` | Backward-compat alias for `DockerBackend` |
 | **Browser Service** | |
-| `src/browser/server.py` | Browser service FastAPI app |
+| `src/browser/__main__.py` | Browser service entry point — starts KasmVNC (Xvnc), Openbox WM, and FastAPI command server |
+| `src/browser/server.py` | Browser service FastAPI app (note: `/browser/{agent_id}/evaluate` removed for security) |
 | `src/browser/service.py` | BrowserManager with per-agent Camoufox instances |
 | `src/browser/redaction.py` | Credential redaction for browser output |
 | `src/browser/stealth.py` | Anti-bot fingerprint building |
 | `src/browser/timing.py` | Timing jitter for human-like behavior |
 | **Channels** | |
-| `src/channels/base.py` | Abstract Channel with PairingManager for unified REPL-like UX |
+| `src/channels/base.py` | Abstract Channel with PairingManager for unified REPL-like UX. All channel messages sanitized via `sanitize_for_prompt()`. |
 | `src/channels/telegram.py` | Telegram bot channel adapter |
 | `src/channels/discord.py` | Discord bot channel adapter |
 | `src/channels/slack.py` | Slack channel adapter (Socket Mode) |
-| `src/channels/whatsapp.py` | WhatsApp Cloud API channel adapter |
-| `src/channels/webhook.py` | HTTP webhook channel adapter |
+| `src/channels/whatsapp.py` | WhatsApp Cloud API channel adapter (`X-Hub-Signature-256` verification) |
+| `src/channels/webhook.py` | HTTP webhook channel adapter (Bearer token auth with `hmac.compare_digest`) |
 | **Dashboard** | |
-| `src/dashboard/server.py` | Dashboard FastAPI router + API endpoints |
+| `src/dashboard/server.py` | Dashboard FastAPI router + API endpoints + VNC URL injection for browser viewing |
 | `src/dashboard/events.py` | EventBus for real-time WebSocket streaming |
 | `src/dashboard/auth.py` | Session cookie verification for dashboard access |
+| `src/dashboard/templates/index.html` | Alpine.js SPA template |
+| `src/dashboard/static/` | JS (app.js, websocket.js), CSS (dashboard.css), avatars, favicons |
 | **CLI** | |
 | `src/cli/main.py` | CLI entry point: start, stop, status, chat, version |
-| `src/cli/config.py` | Config loading, Docker helpers, agent management |
-| `src/cli/runtime.py` | RuntimeContext — full lifecycle management |
-| `src/cli/repl.py` | REPLSession — interactive command dispatch |
+| `src/cli/config.py` | Config loading, Docker helpers, agent management, fleet template system (`_load_templates()`, `_apply_template()`, `_create_agent_from_template()`, `_load_skill_templates()`) |
+| `src/cli/runtime.py` | RuntimeContext — full lifecycle management. `_RESERVED_AGENT_IDS` validation. |
+| `src/cli/repl.py` | REPLSession — interactive command dispatch (includes template-based agent creation) |
 | `src/cli/channels.py` | ChannelManager — messaging channel lifecycle |
 | `src/cli/formatting.py` | Tool display, styled output, response rendering |
+| **Templates** | |
+| `src/templates/` | YAML fleet templates defining agent configurations, souls, heartbeats, permissions, budgets, and workflows. Templates: `starter`, `content`, `deep-research`, `devteam`, `monitor`, `sales`. |
 | **Other** | |
 | `src/setup_wizard.py` | Interactive setup wizard with validation |
 | `src/marketplace.py` | Git-based skill marketplace (install/remove) |
@@ -101,7 +106,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 
 Integration happens externally:
 
-1. **Provisioner → Engine**: Provisioner manages engine instances via Docker/systemd on Hetzner VPS. Provisioner deploys code, writes `.env`, starts services, checks health via SSH to `/mesh/agents`.
+1. **Provisioner → Engine**: Provisioner manages engine instances via Docker/systemd on Hetzner VPS. Provisioner deploys code, writes `.env`, starts services, checks health via SSH to `/mesh/agents`. Provisioner also forwards proxy env vars for browser anti-detection.
 
 2. **App → Engine**: App generates HMAC tokens for SSO. Engine's auth gate (deployed via cloud-init) verifies HMAC tokens at `/__auth/callback?token={expiry}.{signature}` using the shared `access_token`.
 
@@ -109,6 +114,7 @@ Integration happens externally:
    - `/mesh/agents` — health check target (provisioner hits this via SSH)
    - `/__auth/callback` — SSO callback (app redirects users here)
    - Dashboard UI on port 8420 — user-facing after SSO
+   - `/vnc/{path}` — reverse proxy to browser container's KasmVNC (accessed through dashboard)
 
 ### Patterns In Use
 
@@ -119,6 +125,7 @@ Integration happens externally:
 - **`setup_logging(name)`** — every module creates `logger = setup_logging("component.module")`.
 - **Small, focused modules** — each file has a single responsibility.
 - **Skills over features** — new agent capabilities added as `@skill` decorated functions, not loop changes.
+- **YAML templates for fleet configuration** — agent definitions, permissions, budgets, and workflows defined declaratively in `src/templates/*.yaml`.
 
 ### Known Tech Debt
 
@@ -126,14 +133,15 @@ Integration happens externally:
 2. **Module-level globals**: `_skill_staging` in `skills.py` (protected by threading lock), `_client` in browser tool (for connection pooling). Avoid adding more.
 3. **Rate limiting**: Per-endpoint rate limiting via in-memory deque — not persistent across restarts.
 4. **Subagent browser concurrency**: Module-level state means subagents shouldn't use browser concurrently.
+5. **VNC proxy creates httpx client per request** in `host/server.py` — should pool if VNC usage becomes heavy.
 
 ### Infrastructure
 
 - **Runtime**: Python 3.11+, FastAPI, asyncio
 - **State**: All SQLite (WAL mode) — no Redis, no external databases
-- **Isolation**: Docker containers (or Sandbox microVMs) per agent
-- **Container hardening**: non-root (UID 1000), `no-new-privileges`, 384MB memory, 0.15 CPU
-- **Browser service**: Shared container with 2GB RAM, 1 CPU (Camoufox)
+- **Isolation**: Docker containers (or Sandbox microVMs) per agent, bridge network (`openlegion_agents`)
+- **Container hardening**: non-root (UID 1000), `no-new-privileges`, 384MB memory, 0.15 CPU (plan-scalable for browser container)
+- **Browser service**: Shared container with KasmVNC (Xvnc + Openbox), Camoufox. Resources scaled by plan tier.
 - **Dashboard**: Alpine.js SPA — no React, no build step
 - **Dependencies**: Minimal — no LangChain, no Kubernetes
 - **CI**: GitHub Actions (lint + tests on multiple Python versions)
@@ -144,7 +152,7 @@ Integration happens externally:
 
 - Engine architecture is sound. No structural changes needed for production.
 - The polling in orchestrator should eventually be replaced with push-based notification.
-- Browser service architecture (shared container) is correct for resource efficiency.
+- Browser service architecture (shared container with KasmVNC) is correct for resource efficiency + debuggability.
 
 ### Pattern Standards
 
@@ -157,15 +165,19 @@ All security boundaries are already enforced:
 - Trust zones (User/Mesh/Agent) with permission checks on all 26+ mesh endpoints
 - `sanitize_for_prompt()` at 35+ choke points for prompt injection prevention
 - File path traversal protection (two-stage validation)
-- SSRF protection (DNS pinning + IP blocking)
+- SSRF protection (DNS pinning + IP blocking including `0.0.0.0`)
 - Credential isolation (two-tier vault, opaque handles)
 - Execution limits (iteration caps, token budgets, subagent depth/concurrency)
 - Safe condition evaluation (regex parser, no eval)
+- VNC proxy blocks agent Bearer tokens (prevents untrusted agent access)
+- AST validation for skill self-authoring (forbidden attrs + imports)
+- Webhook channel requires Bearer token auth
+- WhatsApp verifies `X-Hub-Signature-256`
 
 ### Current → Target Gaps
 
-- No critical gaps identified. Engine is production-ready from architecture and security standpoints.
-- Minor: document `src/shared/constants.py` and `src/dashboard/auth.py` (now done above).
+- No critical gaps. Engine is production-ready.
+- Minor: VNC proxy httpx client pooling (only matters under heavy usage).
 
 ## Git Workflow
 
@@ -184,7 +196,7 @@ All security boundaries are already enforced:
 
 2. **No `eval()`, no `exec()` on untrusted input.** Workflow conditions use a regex-based safe parser (`src/host/orchestrator.py:_safe_evaluate_condition`).
 
-3. **Permission checks before every cross-boundary operation.** Blackboard reads/writes, pub/sub, message routing, and API proxy calls all check the `PermissionMatrix` first. Default policy is deny.
+3. **Permission checks before every cross-boundary operation.** Blackboard reads/writes, pub/sub, message routing, API proxy calls, spawn, and cron management all check the `PermissionMatrix` first. Default policy is deny.
 
 4. **Path traversal protection in agent file tools.** Agent file operations confined to `/data` with two-stage validation (reject `..` before resolution, then walk component-by-component with symlink resolution).
 
@@ -230,6 +242,14 @@ All security boundaries are already enforced:
 3. Message handling provided by base class (`handle_message`)
 4. Add startup logic in `src/cli/channels.py:ChannelManager`
 5. Add tests in `tests/test_channels.py`
+
+### Adding a new fleet template
+
+1. Create `src/templates/your_template.yaml`
+2. Define agents with `role`, `model`, `instructions`, `soul`, `resources`
+3. Optionally include `heartbeat_rules`, `permissions`, `budget`, `workflows`
+4. Templates are auto-discovered by `_load_templates()` in `src/cli/config.py`
+5. Add tests in `tests/test_templates.py`
 
 ## Testing
 
@@ -280,8 +300,12 @@ pytest tests/test_loop.py -x -v
 | `src/host/failover.py` | `tests/test_failover.py` |
 | `src/host/webhooks.py` | `tests/test_webhooks.py` |
 | `src/host/watchers.py` | `tests/test_watchers.py` |
+| `src/host/server.py` (VNC proxy) | `tests/test_dashboard.py` |
 | `src/dashboard/server.py` | `tests/test_dashboard.py`, `tests/test_dashboard_workspace.py` |
 | `src/dashboard/auth.py` | `tests/test_dashboard_auth.py` |
+| `src/browser/service.py` | `tests/test_browser_service.py` |
+| `src/shared/models.py` | `tests/test_models.py` |
+| `src/templates/` | `tests/test_templates.py` |
 | `src/marketplace.py` | `tests/test_marketplace.py` |
 | `src/channels/base.py` | `tests/test_channels.py` |
 | `src/channels/discord.py` | `tests/test_discord.py` |
@@ -293,6 +317,7 @@ pytest tests/test_loop.py -x -v
 | `src/cli/config.py` | `tests/test_projects.py` |
 | `src/dashboard/events.py` | `tests/test_events.py` |
 | Cross-component | `tests/test_integration.py` |
+| Test fixtures | `tests/fixtures/echo_mcp_server.py` |
 
 ## Common Mistakes to Avoid
 
@@ -316,19 +341,34 @@ pytest tests/test_loop.py -x -v
 ## Review State
 
 ### Plan
-Stage 2 complete. See `/REVIEW_FINDINGS.md` for full findings.
+Stage 2 complete. See `/REVIEW_FINDINGS.md` for full prior findings.
+New review (2026-03-06) starting — 14 files changed since last review with 600+ lines of new code. Focus areas: VNC proxy security, template system, browser resource scaling, dashboard event handling.
 
 ### Completed Units
-Units 1-16 (all engine units)
+Units 1-16 (all engine units) — prior review as of commit `d840e4a`.
 
-### Findings Summary
-- **CRITICAL (3)**: AST validation bypass (skill_tool.py), SSRF via browser evaluate (browser/server.py), webhook channel zero auth (channels/webhook.py)
-- **HIGH (8)**: /mesh/spawn no permission check, streaming budget lock gap, blackboard not sanitized, auth header forwarding on redirects, webhook payloads not sanitized, file watcher not sanitized, channel messages not sanitized, WhatsApp missing signature verification
-- **MEDIUM (19)**: /mesh/cron no permission check, input_data not sanitized, HTTP 500 not retried, forced final call waste, /project no x-mesh-internal, skill auto-discovery, list_by_prefix no filtering, agent_id not validated, PUA emoji stripping, orchestrator task_result bypass, redundant index, trusted agent IDs not reserved, cron range+step parsing bug, 0.0.0.0 SSRF bypass, credential double-resolution, exec timeout unbounded, list_files symlink info leak, context summarization truncation, cron tasks not tracked
+### Post-Review Changes (since d840e4a, 2026-03-05)
+Key commits requiring fresh review:
+- `2a136cc` fix: allow x-mesh-internal header to bypass auth on internal endpoints
+- `7db7bcb` feat: forward proxy env vars to browser container
+- `51a4738`..`e0bfd52` (12 commits): KasmVNC integration and VNC proxy in dashboard/server.py + host/server.py
+- `cb709e7` fix: remove duplicate notification event emission
+- `d57b613` fix: pass template workspace seed values to agent container
+- `5022970` fix: workspace_updated events silently dropped
+- `c483efd` feat: skill template selection when creating agents
+- `2708532` feat: scale browser container resources based on plan tier
+
+### Prior Findings Summary (still valid unless superseded by new commits)
+- **CRITICAL (3)**: All fixed in Stage 3
+- **HIGH (8)**: All fixed in Stage 3
+- **MEDIUM (19)**: All addressed in Stage 3
+- See "Fixes Applied" below for complete list
 
 ### Outstanding Cross-References
-- H2 (streaming budget) coupled with H5 (TokenBudget.can_spend ignoring max_cost_usd)
-- H3 (blackboard sanitization) + H7/H8/H9 (webhook/watcher/channel sanitization) — same pattern, same fix
+- VNC proxy in `host/server.py` — needs review for SSRF, auth bypass, WebSocket security
+- Template system in `cli/config.py` — needs review for injection via template YAML values
+- Browser resource scaling in `host/runtime.py` — needs review for resource exhaustion
+- `x-mesh-internal` auth bypass in `host/server.py` — needs review for header spoofing risk
 
 ### Fixes Applied (Stage 3, 2026-03-05)
 
