@@ -639,16 +639,18 @@ class SandboxBackend(RuntimeBackend):
             env_cfg["THINKING"] = thinking
         env_cfg.update(self.extra_env)
 
-        def _quote_env_value(v: str) -> str:
-            """Quote a value for env-file format, escaping special chars."""
-            v = v.replace("\\", "\\\\").replace('"', '\\"')
-            v = v.replace("$", "\\$").replace("`", "\\`")
-            v = v.replace("\n", "\\n").replace("\r", "")
-            return f'"{v}"'
+        def _sanitize_env_value(v: str) -> str:
+            """Sanitize a value for Docker --env-file format.
+
+            Docker reads values literally after '=' — no quote stripping
+            or shell expansion.  Only newlines need escaping since each
+            line is a separate entry.
+            """
+            return v.replace("\r", "").replace("\n", "\\n")
 
         env_file = ws / ".agent.env"
         env_file.write_text(
-            "\n".join(f"{k}={_quote_env_value(v)}" for k, v in env_cfg.items()) + "\n"
+            "\n".join(f"{k}={_sanitize_env_value(v)}" for k, v in env_cfg.items()) + "\n"
         )
         return ws
 

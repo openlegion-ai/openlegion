@@ -16,16 +16,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm /tmp/kasmvnc.deb \
     && rm -rf /var/lib/apt/lists/*
 
-# Remove KasmVNC branding: hide logo, splash screen, and control bar branding
+# Remove KasmVNC branding: hide logo, splash screen, and control bar branding.
+# Also patch loading screen HTML to remove logo images.
+# NOTE: printf body is a single line because Docker strips continuation lines
+# starting with '#' as Dockerfile comments, breaking the CSS selectors.
 RUN CSS_FILE="/usr/share/kasmvnc/www/app/styles/kasm.css" \
     && if [ -f "$CSS_FILE" ]; then \
-       printf '\n/* OpenLegion: hide KasmVNC branding */\n\
-#noVNC_logo, .kasm_logo, #noVNC_kasm_banner, #kasm_watermark,\n\
-#noVNC_control_bar_anchor .kasm-logo, .kasm-watermark,\n\
-#noVNC_loading .kasm_logo, #noVNC_loading_logo { display: none !important; }\n\
-#noVNC_status_bar { background: #1e1e2e !important; }\n' >> "$CSS_FILE"; \
+       printf '\n/* OpenLegion: hide KasmVNC branding */\n#noVNC_logo, .kasm_logo, #noVNC_kasm_banner, #kasm_watermark,\n#noVNC_control_bar_anchor .kasm-logo, .kasm-watermark,\n#noVNC_loading .kasm_logo, #noVNC_loading_logo { display: none !important; }\n#noVNC_status_bar { background: #1e1e2e !important; }\n' >> "$CSS_FILE"; \
        fi \
-    # Also patch the loading screen HTML to remove logo image
     && for f in /usr/share/kasmvnc/www/vnc.html /usr/share/kasmvnc/www/index.html; do \
        [ -f "$f" ] && sed -i 's|<img[^>]*kasm[^>]*>||gi' "$f" || true; \
        done

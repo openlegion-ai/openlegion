@@ -86,9 +86,9 @@ class TestSandboxBackend:
         assert (ws / ".agent.env").exists()
 
         env_content = (ws / ".agent.env").read_text()
-        assert 'AGENT_ID="alpha"' in env_content
-        assert 'AGENT_ROLE="test"' in env_content
-        assert 'LLM_MODEL="openai/gpt-4o-mini"' in env_content
+        assert "AGENT_ID=alpha" in env_content
+        assert "AGENT_ROLE=test" in env_content
+        assert "LLM_MODEL=openai/gpt-4o-mini" in env_content
         assert "MESH_AUTH_TOKEN=" in env_content
         assert "alpha" in backend.auth_tokens
 
@@ -162,7 +162,36 @@ class TestSandboxBackend:
         )
 
         env_content = (ws / ".agent.env").read_text()
-        assert 'EMBEDDING_MODEL="custom/embed-v2"' in env_content
+        assert "EMBEDDING_MODEL=custom/embed-v2" in env_content
+
+    def test_prepare_workspace_newline_in_value(self, tmp_path):
+        """Newlines in env values are escaped to prevent env-file injection."""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+
+        backend = SandboxBackend.__new__(SandboxBackend)
+        backend.project_root = project_root
+        backend.mesh_host_port = 8420
+        backend.agents = {}
+        backend.auth_tokens = {}
+        backend.extra_env = {}
+        backend._workspace_root = tmp_path / ".openlegion" / "agents"
+        backend._workspace_root.mkdir(parents=True)
+
+        ws = backend._prepare_workspace(
+            agent_id="nl-test",
+            role="test",
+            skills_dir="",
+            system_prompt="line1\nline2\r\nline3",
+            model="openai/gpt-4o-mini",
+        )
+
+        env_content = (ws / ".agent.env").read_text()
+        # Newlines must be escaped — not raw — to prevent env-file injection
+        assert "INITIAL_INSTRUCTIONS=line1\\nline2\\nline3" in env_content
+        # Each real line in the file should be a single KEY=VALUE entry
+        for line in env_content.strip().split("\n"):
+            assert "=" in line, f"Malformed env line: {line}"
 
     def test_stop_agent_removes_from_registry(self):
         backend = SandboxBackend.__new__(SandboxBackend)
