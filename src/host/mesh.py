@@ -73,8 +73,23 @@ class Blackboard:
             );
 
             CREATE INDEX IF NOT EXISTS idx_event_log_timestamp ON event_log(timestamp);
+
+            CREATE TABLE IF NOT EXISTS watchers (
+                agent_id TEXT NOT NULL,
+                pattern TEXT NOT NULL,
+                PRIMARY KEY (agent_id, pattern)
+            );
         """)
         self.db.commit()
+        self._load_watchers()
+
+    def _load_watchers(self) -> None:
+        """Load persisted watcher registrations from SQLite."""
+        rows = self.db.execute("SELECT agent_id, pattern FROM watchers").fetchall()
+        for agent_id, pattern in rows:
+            self._watchers.setdefault(agent_id, [])
+            if pattern not in self._watchers[agent_id]:
+                self._watchers[agent_id].append(pattern)
 
     def write(
         self,
@@ -289,29 +304,42 @@ class Blackboard:
     # ── Blackboard Watchers ─────────────────────────────────────
 
     def add_watch(self, agent_id: str, pattern: str) -> None:
-        """Register a glob pattern watch for an agent."""
+        """Register a glob pattern watch for an agent (persisted to SQLite)."""
         with self._write_lock:
             if agent_id not in self._watchers:
                 self._watchers[agent_id] = []
             if pattern not in self._watchers[agent_id]:
                 self._watchers[agent_id].append(pattern)
+                self.db.execute(
+                    "INSERT OR IGNORE INTO watchers (agent_id, pattern) VALUES (?, ?)",
+                    (agent_id, pattern),
+                )
+                self.db.commit()
 
     def remove_watch(self, agent_id: str, pattern: str | None = None) -> None:
         """Remove a specific watch pattern, or all watches for an agent."""
         with self._write_lock:
             if pattern is None:
                 self._watchers.pop(agent_id, None)
+                self.db.execute("DELETE FROM watchers WHERE agent_id = ?", (agent_id,))
             elif agent_id in self._watchers:
                 self._watchers[agent_id] = [
                     p for p in self._watchers[agent_id] if p != pattern
                 ]
                 if not self._watchers[agent_id]:
                     del self._watchers[agent_id]
+                self.db.execute(
+                    "DELETE FROM watchers WHERE agent_id = ? AND pattern = ?",
+                    (agent_id, pattern),
+                )
+            self.db.commit()
 
     def remove_agent_watches(self, agent_id: str) -> None:
         """Remove all watches for an agent (cleanup on deregister)."""
         with self._write_lock:
             self._watchers.pop(agent_id, None)
+            self.db.execute("DELETE FROM watchers WHERE agent_id = ?", (agent_id,))
+            self.db.commit()
 
     def get_watchers_for_key(self, key: str, exclude: str | None = None) -> list[str]:
         """Return agent IDs watching a key, excluding the writer to prevent self-notify."""

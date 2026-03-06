@@ -694,6 +694,49 @@ def test_blackboard_no_watchers(blackboard):
     assert blackboard.get_watchers_for_key("anything") == []
 
 
+def test_blackboard_watchers_persisted(tmp_path):
+    """Watcher registrations survive close/reopen."""
+    db_path = str(tmp_path / "bb_persist.db")
+    bb = Blackboard(db_path=db_path)
+    bb.add_watch("agent1", "tasks/*")
+    bb.add_watch("agent2", "context/*")
+    bb.close()
+
+    # Re-open — watchers should be loaded from SQLite
+    bb2 = Blackboard(db_path=db_path)
+    assert "agent1" in bb2.get_watchers_for_key("tasks/foo")
+    assert "agent2" in bb2.get_watchers_for_key("context/bar")
+    bb2.close()
+
+
+def test_blackboard_watcher_remove_persisted(tmp_path):
+    """Removed watchers are not reloaded on restart."""
+    db_path = str(tmp_path / "bb_remove.db")
+    bb = Blackboard(db_path=db_path)
+    bb.add_watch("agent1", "tasks/*")
+    bb.add_watch("agent1", "context/*")
+    bb.remove_watch("agent1", "tasks/*")
+    bb.close()
+
+    bb2 = Blackboard(db_path=db_path)
+    assert "agent1" not in bb2.get_watchers_for_key("tasks/foo")
+    assert "agent1" in bb2.get_watchers_for_key("context/bar")
+    bb2.close()
+
+
+def test_blackboard_remove_agent_watches_persisted(tmp_path):
+    """remove_agent_watches clears persisted watchers too."""
+    db_path = str(tmp_path / "bb_agent_rm.db")
+    bb = Blackboard(db_path=db_path)
+    bb.add_watch("agent1", "tasks/*")
+    bb.remove_agent_watches("agent1")
+    bb.close()
+
+    bb2 = Blackboard(db_path=db_path)
+    assert "agent1" not in bb2._watchers
+    bb2.close()
+
+
 # === Blackboard Compare-and-Swap Tests ===
 
 
