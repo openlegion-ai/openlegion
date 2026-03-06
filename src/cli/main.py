@@ -71,7 +71,7 @@ def cli(verbose: bool, quiet: bool):
     """OpenLegion -- Autonomous AI agent fleet."""
     from dotenv import load_dotenv
 
-    load_dotenv(cli_config.ENV_FILE)
+    load_dotenv(cli_config.ENV_FILE, interpolate=False)
 
     if verbose:
         logging.basicConfig(level=logging.DEBUG, force=True)

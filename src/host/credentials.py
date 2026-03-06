@@ -65,8 +65,9 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     """Persist an environment variable to .env and os.environ.
 
     If *env_file* is empty, defaults to ``PROJECT_ROOT / ".env"``.
-    Values are single-quoted to prevent python-dotenv variable
-    interpolation (``$VAR``) from corrupting tokens on reload.
+    Values are single-quoted to prevent python-dotenv from mangling
+    special characters (``$``, ``#``).  Production loads with
+    ``interpolate=False`` as a second layer of defense.
     """
     import re
     from pathlib import Path
@@ -81,13 +82,15 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     if not env_file:
         env_file = str(Path(__file__).resolve().parent.parent.parent / ".env")
 
-    # Quote to prevent python-dotenv interpolation of $, #, etc.
+    # Quote to prevent python-dotenv from mangling values.
+    # Single quotes: no interpolation, no escape processing — safest.
+    # Double quotes (for values with '): still safe because we load with
+    # interpolate=False; only need to escape \ and " which dotenv always
+    # processes inside double quotes.
     if "'" not in value:
-        # Single quotes: no interpolation, no escapes — safest
         formatted = f"{env_key}='{value}'"
     else:
-        # Double quotes: escape \, $, " so python-dotenv reads them back
-        escaped = value.replace("\\", "\\\\").replace("$", "\\$").replace('"', '\\"')
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         formatted = f'{env_key}="{escaped}"'
 
     env_path = Path(env_file)

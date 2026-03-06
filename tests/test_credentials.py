@@ -137,6 +137,19 @@ def test_remove_from_env_file(tmp_path):
     assert "BAZ=qux" in content
 
 
+def test_remove_from_env_file_quoted(tmp_path):
+    """_remove_from_env handles the new quoted format."""
+    from src.host.credentials import _remove_from_env
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("FOO='bar'\nOPENLEGION_CRED_KEY='secret$val'\nBAZ='qux'\n")
+    _remove_from_env("OPENLEGION_CRED_KEY", env_file=str(env_file))
+    content = env_file.read_text()
+    assert "OPENLEGION_CRED_KEY" not in content
+    assert "FOO='bar'" in content
+    assert "BAZ='qux'" in content
+
+
 # ── Failover integration tests ────────────────────────────────
 
 
@@ -336,6 +349,7 @@ def test_add_credential_regular_key_not_in_api_bases(monkeypatch):
 def test_add_credential_persists_to_env(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text("EXISTING_VAR=keep\n")
+    monkeypatch.delenv("OPENLEGION_CRED_TEST_KEY", raising=False)
 
     from src.host.credentials import _persist_to_env
 
@@ -353,13 +367,14 @@ def test_persist_to_env_quotes_survive_dotenv_reload(tmp_path, monkeypatch):
     from src.host.credentials import _persist_to_env
 
     env_file = tmp_path / ".env"
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", raising=False)
 
-    # Token with $ that would be corrupted without quoting
+    # Token with $ that would be corrupted without quoting + interpolate=False
     token = "sk-ant-oat01-abc$xyz$123"
     _persist_to_env("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", token, env_file=str(env_file))
 
-    # Simulate restart: read back via python-dotenv
-    loaded = dotenv_values(str(env_file))
+    # Simulate restart: read back the same way production does
+    loaded = dotenv_values(str(env_file), interpolate=False)
     assert loaded["OPENLEGION_SYSTEM_ANTHROPIC_API_KEY"] == token
 
 
@@ -370,25 +385,89 @@ def test_persist_to_env_quotes_with_hash(tmp_path, monkeypatch):
     from src.host.credentials import _persist_to_env
 
     env_file = tmp_path / ".env"
+    monkeypatch.delenv("OPENLEGION_CRED_TEST", raising=False)
     value = "key-with-hash#inside"
     _persist_to_env("OPENLEGION_CRED_TEST", value, env_file=str(env_file))
 
-    loaded = dotenv_values(str(env_file))
+    loaded = dotenv_values(str(env_file), interpolate=False)
     assert loaded["OPENLEGION_CRED_TEST"] == value
 
 
 def test_persist_to_env_single_quote_in_value(tmp_path, monkeypatch):
-    """Values containing single quotes are escaped properly."""
+    """Values containing single quotes use double-quote fallback."""
     from dotenv import dotenv_values
 
     from src.host.credentials import _persist_to_env
 
     env_file = tmp_path / ".env"
+    monkeypatch.delenv("OPENLEGION_CRED_QUOTE", raising=False)
     value = "it's-a-test"
     _persist_to_env("OPENLEGION_CRED_QUOTE", value, env_file=str(env_file))
 
-    loaded = dotenv_values(str(env_file))
+    loaded = dotenv_values(str(env_file), interpolate=False)
     assert loaded["OPENLEGION_CRED_QUOTE"] == value
+
+
+def test_persist_to_env_single_quote_and_dollar(tmp_path, monkeypatch):
+    """Values with both ' and $ use double-quote fallback."""
+    from dotenv import dotenv_values
+
+    from src.host.credentials import _persist_to_env
+
+    env_file = tmp_path / ".env"
+    monkeypatch.delenv("OPENLEGION_CRED_COMBO", raising=False)
+    value = "it's$money"
+    _persist_to_env("OPENLEGION_CRED_COMBO", value, env_file=str(env_file))
+
+    loaded = dotenv_values(str(env_file), interpolate=False)
+    assert loaded["OPENLEGION_CRED_COMBO"] == value
+
+
+def test_persist_to_env_all_special_chars(tmp_path, monkeypatch):
+    """Round-trip a value containing every special char: ' " $ \\ #."""
+    from dotenv import dotenv_values
+
+    from src.host.credentials import _persist_to_env
+
+    env_file = tmp_path / ".env"
+    monkeypatch.delenv("OPENLEGION_CRED_SPECIAL", raising=False)
+    value = "a'b\"c$d\\e#f"
+    _persist_to_env("OPENLEGION_CRED_SPECIAL", value, env_file=str(env_file))
+
+    loaded = dotenv_values(str(env_file), interpolate=False)
+    assert loaded["OPENLEGION_CRED_SPECIAL"] == value
+
+
+def test_persist_to_env_empty_value(tmp_path, monkeypatch):
+    """Empty string round-trips correctly."""
+    from dotenv import dotenv_values
+
+    from src.host.credentials import _persist_to_env
+
+    env_file = tmp_path / ".env"
+    monkeypatch.delenv("OPENLEGION_CRED_EMPTY", raising=False)
+    _persist_to_env("OPENLEGION_CRED_EMPTY", "", env_file=str(env_file))
+
+    loaded = dotenv_values(str(env_file), interpolate=False)
+    assert loaded["OPENLEGION_CRED_EMPTY"] == ""
+
+
+def test_persist_to_env_overwrites_quoted_value(tmp_path, monkeypatch):
+    """Updating an already-quoted .env entry works correctly."""
+    from dotenv import dotenv_values
+
+    from src.host.credentials import _persist_to_env
+
+    env_file = tmp_path / ".env"
+    monkeypatch.delenv("OPENLEGION_CRED_UPD", raising=False)
+    _persist_to_env("OPENLEGION_CRED_UPD", "old$val", env_file=str(env_file))
+    _persist_to_env("OPENLEGION_CRED_UPD", "new$val", env_file=str(env_file))
+
+    loaded = dotenv_values(str(env_file), interpolate=False)
+    assert loaded["OPENLEGION_CRED_UPD"] == "new$val"
+    # Must not duplicate lines
+    content = env_file.read_text()
+    assert content.count("OPENLEGION_CRED_UPD=") == 1
 
 
 def test_resolve_credential():
