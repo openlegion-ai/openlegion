@@ -14,13 +14,6 @@ agents:
       4. Write the brief to the blackboard under sources/*
       5. Publish "research_complete" so the writer can start
 
-      ## Tools to use
-      - **web_search**: Find articles, data, statistics, expert opinions
-      - **browser_navigate / browser_screenshot**: Browse and capture web pages
-      - **http_request**: Access APIs for data
-      - **blackboard_write**: Post research briefs under sources/*
-      - **publish**: Signal "research_complete"
-      - **memory_save**: Cache sources for future reference
     soul: |
       You are thorough and source-driven. You always cite where information
       comes from. You distinguish facts from opinions. You organize findings
@@ -48,13 +41,6 @@ agents:
       3. Post the draft to the blackboard under drafts/*
       4. Publish "draft_ready" so the editor can review
 
-      ## Tools to use
-      - **blackboard_read**: Get research briefs from sources/*
-      - **blackboard_write**: Post drafts under drafts/*
-      - **file_write**: Save long-form content to files
-      - **publish**: Signal "draft_ready"
-      - **web_search**: Verify facts or find additional context
-      - **memory_save**: Store style guides and recurring patterns
     soul: |
       You write engaging, well-structured content. You match tone to audience.
       You use concrete examples and avoid filler. Your writing is clear,
@@ -83,11 +69,6 @@ agents:
       4. Write feedback to feedback/* on the blackboard
       5. Publish "edit_complete" with your verdict
 
-      ## Tools to use
-      - **blackboard_read**: Get drafts and research briefs
-      - **blackboard_write**: Post feedback under feedback/*
-      - **publish**: Signal "edit_complete"
-      - **web_search**: Verify factual claims
     soul: |
       You have high standards but you're constructive. You suggest specific
       rewrites, not vague critiques. You catch factual errors, weak arguments,

@@ -181,7 +181,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     _WORKSPACE_ALLOWLIST = frozenset({
         "SOUL.md", "HEARTBEAT.md", "USER.md", "INSTRUCTIONS.md", "AGENTS.md", "MEMORY.md",
     })
-    _DEFAULT_HEARTBEAT_PREFIX = "# Heartbeat Rules\n\nYou are woken periodically"
+    _DEFAULT_HEARTBEAT_HEADING = "# Heartbeat Rules"
 
     _FILE_CAPS = {
         "SOUL.md": 4000,
@@ -191,13 +191,13 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         "MEMORY.md": 16000,
         "HEARTBEAT.md": None,
     }
-    _DEFAULT_PREFIXES = {
-        "SOUL.md": "# Identity\n\n",
-        "INSTRUCTIONS.md": "# Instructions\n\n",
-        "AGENTS.md": "# Agent Instructions\n\n",
-        "USER.md": "# User Context\n\n",
-        "MEMORY.md": "# Long-Term Memory\n\n",
-        "HEARTBEAT.md": "# Heartbeat Rules\n\nYou are woken periodically",
+    _DEFAULT_HEADINGS = {
+        "SOUL.md": "# Identity",
+        "INSTRUCTIONS.md": "# Instructions",
+        "AGENTS.md": "# Agent Instructions",
+        "USER.md": "# User Context",
+        "MEMORY.md": "# Long-Term Memory",
+        "HEARTBEAT.md": "# Heartbeat Rules",
     }
 
     @app.get("/workspace")
@@ -214,9 +214,9 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             if size > 0:
                 content = loop.workspace._read_file(filename)
                 if content:
-                    prefix = _DEFAULT_PREFIXES.get(filename)
+                    heading = _DEFAULT_HEADINGS.get(filename)
                     is_default = not content.strip() or (
-                        prefix and content.strip().startswith(prefix)
+                        heading is not None and content.strip() == heading
                     )
             files.append({
                 "name": filename,
@@ -327,7 +327,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         daily = loop.workspace.load_daily_logs(days=2)
         is_default = (
             not rules.strip()
-            or rules.strip().startswith(_DEFAULT_HEARTBEAT_PREFIX)
+            or rules.strip() == _DEFAULT_HEARTBEAT_HEADING
         )
         # Cap daily logs at 8000 chars for transport
         if len(daily) > 8000:

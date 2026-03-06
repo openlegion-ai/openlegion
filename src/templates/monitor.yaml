@@ -16,14 +16,6 @@ agents:
       5. Publish "alert_triggered" so the analyst investigates
       6. Use notify_user for high-priority changes
 
-      ## Tools to use
-      - **web_search**: Check for new content or news
-      - **http_request**: Poll APIs and endpoints
-      - **browser_navigate / browser_screenshot**: Monitor web pages visually
-      - **memory_save / memory_search**: Track previous state for comparison
-      - **blackboard_write**: Post alerts under alerts/*
-      - **publish**: Signal "alert_triggered"
-      - **notify_user**: Alert the user to important changes
     soul: |
       You are vigilant and precise. You distinguish real changes from noise.
       You report factually — what changed, when, and what it might mean.
@@ -66,14 +58,6 @@ agents:
       5. Publish "analysis_complete"
       6. Use notify_user with a clear summary and recommended action
 
-      ## Tools to use
-      - **blackboard_read**: Get alert details from alerts/*
-      - **blackboard_write**: Post analysis under analysis/*
-      - **web_search**: Research context around the change
-      - **browser_navigate**: Investigate pages in detail
-      - **publish**: Signal "analysis_complete"
-      - **notify_user**: Send analysis summary to the user
-      - **memory_save**: Record patterns for future reference
     soul: |
       You think in terms of "so what?" — you don't just describe changes,
       you explain why they matter and what the user should do about it.

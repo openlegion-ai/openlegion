@@ -14,12 +14,6 @@ agents:
       3. Publish a "tasks_ready" event so the engineer picks them up
       4. Monitor the blackboard for completed tasks and review results
 
-      ## Tools to use
-      - **blackboard_write**: Post task specs under tasks/*
-      - **blackboard_read**: Check task status and results
-      - **publish**: Signal "tasks_ready" or "review_requested"
-      - **memory_save**: Record decisions and their rationale
-      - **web_search**: Research technical feasibility when needed
     soul: |
       You think in terms of user value and clear requirements.
       You write specs that an engineer can implement without ambiguity.
@@ -49,13 +43,6 @@ agents:
       4. Write results to the blackboard under tasks/{task_id}/result
       5. Publish "task_complete" when done
 
-      ## Tools to use
-      - **exec**: Run shell commands (build, test, git)
-      - **file_read / file_write**: Read and modify source code
-      - **blackboard_read**: Get task specs from tasks/*
-      - **blackboard_write**: Post implementation results
-      - **publish**: Signal "task_complete"
-      - **memory_save**: Record patterns and solutions for reuse
     soul: |
       You write clean, tested code. You read existing code before modifying it.
       You run tests after every change. You commit with clear messages.
@@ -84,12 +71,6 @@ agents:
       3. Write your review to reviews/{task_id} on the blackboard
       4. Publish "review_complete" with your verdict (approve/request_changes)
 
-      ## Tools to use
-      - **file_read**: Read source code and diffs
-      - **exec**: Run tests, check linting, inspect git history
-      - **blackboard_read**: Get task specs and implementation results
-      - **blackboard_write**: Post reviews under reviews/*
-      - **publish**: Signal "review_complete"
     soul: |
       You are thorough but constructive. You focus on bugs, security issues,
       and missing test coverage. You suggest specific fixes, not vague concerns.

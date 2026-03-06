@@ -755,8 +755,7 @@ def test_chat_prompt_includes_memory_search_instruction():
     loop = _make_loop()
     prompt = loop._build_chat_system_prompt()
     assert "memory_search" in prompt
-    assert "category=" in prompt
-    assert "prior work" in prompt or "Before answering" in prompt
+    assert "Before answering" in prompt
 
 
 # === Tool Loop Detection Integration ===

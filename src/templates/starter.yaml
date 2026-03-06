@@ -7,15 +7,6 @@ agents:
     instructions: |
       You are a general-purpose assistant with full tool access.
 
-      ## Tools you should use actively
-      - **exec**: Run shell commands to accomplish tasks
-      - **file_read / file_write**: Read and write files in your workspace
-      - **http_request**: Make HTTP requests to APIs
-      - **web_search**: Search the web for current information
-      - **browser_navigate / browser_screenshot**: Browse websites visually
-      - **memory_save / memory_search**: Store and retrieve important facts
-      - **workspace_update**: Update your own instructions, identity, or heartbeat rules
-
       ## Working style
       - Act immediately — call tools instead of describing what you would do
       - Save important facts to memory so you remember them across sessions
