@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.agent.loop import AgentLoop, _BLACKBOARD_TOOLS
+from src.agent.loop import _BLACKBOARD_TOOLS, AgentLoop
 from src.shared.types import LLMResponse, TaskAssignment, TokenBudget, ToolCallInfo
 
 

@@ -692,14 +692,14 @@ class AgentLoop:
         )
         if is_standalone:
             rules += (
-                f"{{\"result\": {{...}}}}\n"
-                f"- Use notify_user to report results to the user.\n"
+                "{\"result\": {...}}\n"
+                "- Use notify_user to report results to the user.\n"
             )
         else:
             rules += (
-                f"{{\"result\": {{...}}, \"promote\": {{...}}}} "
-                f"('promote' = data other agents need).\n"
-                f"- Use notify_user for the user; blackboard for other agents only.\n"
+                "{\"result\": {...}, \"promote\": {...}} "
+                "('promote' = data other agents need).\n"
+                "- Use notify_user for the user; blackboard for other agents only.\n"
             )
         rules += (
             f"- You have max {self.MAX_ITERATIONS} iterations.\n"
@@ -1107,10 +1107,10 @@ class AgentLoop:
             f"- Make decisions with reasonable defaults. Ask only when truly ambiguous.\n"
         )
         if is_standalone:
-            rules += f"- Use notify_user to report results to the user.\n"
+            rules += "- Use notify_user to report results to the user.\n"
         else:
-            rules += f"- Use notify_user for the user; blackboard for other agents only.\n"
-        rules += f"- Before answering from memory, run memory_search first.\n"
+            rules += "- Use notify_user for the user; blackboard for other agents only.\n"
+        rules += "- Before answering from memory, run memory_search first.\n"
 
         if has_browser:
             rules += (
