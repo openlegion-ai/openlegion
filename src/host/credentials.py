@@ -26,6 +26,13 @@ from src.shared.utils import setup_logging
 
 logger = setup_logging("host.credentials")
 
+# ── OAuth setup-token constants ───────────────────────────
+# Anthropic's unofficial OAuth path for Claude Pro/Max subscriptions.
+# Tokens from `claude setup-token` use Bearer auth instead of x-api-key.
+_OAUTH_TOKEN_PREFIX = "sk-ant-oat01-"
+_CLAUDE_CLI_VERSION = "2.1.62"
+_ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+
 
 def _extract_content(raw_content) -> tuple[str, str | None]:
     """Extract text and thinking from LLM response content.
@@ -123,6 +130,11 @@ SYSTEM_CREDENTIAL_PROVIDERS = frozenset({
     "minimax", "xai", "groq", "zai",
 })
 SYSTEM_CREDENTIAL_SUFFIXES = ("_api_key", "_api_base")
+
+
+def is_oauth_token(token: str) -> bool:
+    """Check if a token is an Anthropic OAuth setup-token."""
+    return token.startswith(_OAUTH_TOKEN_PREFIX)
 
 
 def is_system_credential(name: str) -> bool:
@@ -413,12 +425,19 @@ class CredentialVault:
     def _get_auth_for_model(self, model: str) -> tuple[str | None, dict[str, str]]:
         """Resolve API key and any extra auth headers for a model.
 
-        Returns ``(api_key, extra_headers)``.  The second element is
-        currently always empty — reserved for future use.
+        Returns ``(api_key, extra_headers)``.  For OAuth setup-tokens,
+        extra_headers contains the Bearer auth and required beta flags.
         """
         api_key = self._get_api_key_for_model(model)
         if api_key is None:
             return None, {}
+        if is_oauth_token(api_key):
+            return api_key, {
+                "Authorization": f"Bearer {api_key}",
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+                "user-agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
+            }
         return api_key, {}
 
     def get_providers_with_credentials(self) -> set[str]:
@@ -524,11 +543,269 @@ class CredentialVault:
             }
         return sanitized, extra
 
+    # ── OAuth direct-call helpers ────────────────────────────
+
+    @staticmethod
+    def _oauth_headers(token: str) -> dict[str, str]:
+        """Build Anthropic API headers for OAuth bearer auth."""
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+            "user-agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
+        }
+
+    @staticmethod
+    def _build_anthropic_body(params: dict) -> dict:
+        """Convert LiteLLM-style params to Anthropic Messages API format."""
+        messages = params.get("messages", [])
+        model = params.get("model", "").removeprefix("anthropic/")
+
+        system_parts: list[str] = []
+        non_system: list[dict] = []
+        for m in messages:
+            if m.get("role") == "system":
+                c = m.get("content", "")
+                if isinstance(c, str):
+                    system_parts.append(c)
+                elif isinstance(c, list):
+                    system_parts.append(" ".join(
+                        b.get("text", "") for b in c if isinstance(b, dict)
+                    ))
+            else:
+                non_system.append(m)
+
+        body: dict = {
+            "model": model,
+            "messages": non_system,
+            "max_tokens": params.get("max_tokens", 4096),
+        }
+        if system_parts:
+            body["system"] = "\n\n".join(system_parts)
+
+        temp = params.get("temperature")
+        if temp is not None:
+            body["temperature"] = temp
+
+        # Convert OpenAI function-calling tools to Anthropic format
+        tools = params.get("tools")
+        if tools:
+            anthropic_tools = []
+            for t in tools:
+                if "function" in t:
+                    func = t["function"]
+                    anthropic_tools.append({
+                        "name": func["name"],
+                        "description": func.get("description", ""),
+                        "input_schema": func.get("parameters", {"type": "object"}),
+                    })
+                else:
+                    anthropic_tools.append(t)
+            body["tools"] = anthropic_tools
+
+        # Extended thinking
+        thinking = params.get("thinking")
+        if thinking:
+            body["thinking"] = thinking
+
+        return body
+
+    @staticmethod
+    def _parse_anthropic_response(data: dict, model_prefix: str) -> dict:
+        """Convert Anthropic API response to our standard result dict."""
+        content = ""
+        thinking_content = ""
+        tool_calls: list[dict] = []
+
+        for block in data.get("content", []):
+            btype = block.get("type", "")
+            if btype == "text":
+                content += block.get("text", "")
+            elif btype == "thinking":
+                thinking_content += block.get("thinking", "")
+            elif btype == "tool_use":
+                tool_calls.append({
+                    "name": block["name"],
+                    "arguments": json.dumps(block.get("input", {})),
+                })
+
+        usage = data.get("usage", {})
+        input_t = usage.get("input_tokens", 0)
+        output_t = usage.get("output_tokens", 0)
+
+        result: dict = {
+            "content": content,
+            "tokens_used": input_t + output_t,
+            "input_tokens": input_t,
+            "output_tokens": output_t,
+            "model": model_prefix,
+            "tool_calls": tool_calls,
+        }
+        if thinking_content:
+            result["thinking_content"] = thinking_content
+        return result
+
+    async def _oauth_chat(
+        self, request: APIProxyRequest, api_key: str, model: str,
+    ) -> APIProxyResponse:
+        """Direct Anthropic API call using OAuth bearer auth (non-streaming)."""
+        sanitized = sanitize_for_provider(
+            request.params.get("messages", []), model,
+        )
+        params = {**request.params, "messages": sanitized}
+        body = self._build_anthropic_body(params)
+        headers = self._oauth_headers(api_key)
+
+        client = await self._get_http_client()
+        try:
+            resp = await client.post(
+                _ANTHROPIC_API_URL, headers=headers, json=body, timeout=120,
+            )
+        except httpx.TimeoutException as e:
+            raise RuntimeError(f"Anthropic API timeout: {e}") from e
+
+        if resp.status_code == 401:
+            error_data = resp.json()
+            msg = error_data.get("error", {}).get("message", "Authentication failed")
+            if "OAuth" in msg:
+                raise RuntimeError(
+                    "Anthropic has disabled OAuth for third-party apps. "
+                    "Use a standard API key from console.anthropic.com instead."
+                )
+            raise RuntimeError(f"OAuth authentication failed: {msg}")
+
+        if not resp.is_success:
+            error_text = resp.text[:500]
+            raise RuntimeError(
+                f"Anthropic API error (HTTP {resp.status_code}): {error_text}"
+            )
+
+        data = resp.json()
+        result = self._parse_anthropic_response(data, model)
+        self._health_tracker.record_success(model)
+        return APIProxyResponse(success=True, data=result)
+
+    async def _oauth_chat_stream(
+        self, request: APIProxyRequest, api_key: str, model: str,
+        agent_id: str = "",
+    ):
+        """Streaming Anthropic API call using OAuth bearer auth.
+
+        Yields SSE-formatted strings matching the ``stream_llm`` protocol.
+        """
+        sanitized = sanitize_for_provider(
+            request.params.get("messages", []), model,
+        )
+        params = {**request.params, "messages": sanitized}
+        body = self._build_anthropic_body(params)
+        body["stream"] = True
+        headers = self._oauth_headers(api_key)
+
+        client = await self._get_http_client()
+        collected_content = ""
+        collected_thinking = ""
+        collected_tool_calls: list[dict] = []
+        input_tokens = 0
+        output_tokens = 0
+        current_tool_idx = -1
+
+        try:
+            async with client.stream(
+                "POST", _ANTHROPIC_API_URL, headers=headers,
+                json=body, timeout=120,
+            ) as resp:
+                if resp.status_code == 401:
+                    await resp.aread()
+                    error_data = resp.json()
+                    msg = error_data.get("error", {}).get("message", "Auth failed")
+                    yield f"data: {json.dumps({'error': f'OAuth auth failed: {msg}'})}\n\n"
+                    return
+                if not resp.is_success:
+                    await resp.aread()
+                    yield f"data: {json.dumps({'error': f'Anthropic API error (HTTP {resp.status_code})'})}\n\n"
+                    return
+
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:]
+                    if payload.strip() == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+
+                    etype = event.get("type", "")
+
+                    if etype == "content_block_start":
+                        block = event.get("content_block", {})
+                        if block.get("type") == "tool_use":
+                            current_tool_idx += 1
+                            collected_tool_calls.append({
+                                "name": block.get("name", ""),
+                                "arguments": "",
+                            })
+
+                    elif etype == "content_block_delta":
+                        delta = event.get("delta", {})
+                        dtype = delta.get("type", "")
+                        if dtype == "text_delta":
+                            text = delta.get("text", "")
+                            collected_content += text
+                            yield f"data: {json.dumps({'type': 'text_delta', 'content': text})}\n\n"
+                        elif dtype == "thinking_delta":
+                            collected_thinking += delta.get("thinking", "")
+                        elif dtype == "input_json_delta":
+                            if current_tool_idx >= 0:
+                                collected_tool_calls[current_tool_idx]["arguments"] += delta.get("partial_json", "")
+
+                    elif etype == "message_delta":
+                        usage = event.get("usage", {})
+                        output_tokens = usage.get("output_tokens", output_tokens)
+
+                    elif etype == "message_start":
+                        usage = event.get("message", {}).get("usage", {})
+                        input_tokens = usage.get("input_tokens", input_tokens)
+
+            tokens_used = input_tokens + output_tokens
+            self._health_tracker.record_success(model)
+
+            done_data: dict = {
+                "type": "done", "content": collected_content,
+                "tool_calls": collected_tool_calls,
+                "tokens_used": tokens_used, "model": model,
+            }
+            if collected_thinking:
+                done_data["thinking_content"] = collected_thinking
+            yield f"data: {json.dumps(done_data)}\n\n"
+
+            if self.cost_tracker and agent_id and tokens_used:
+                pt = input_tokens or int(tokens_used * 0.7)
+                ct = output_tokens or (tokens_used - pt)
+                self.cost_tracker.track(agent_id, model, pt, ct)
+
+        except Exception as e:
+            logger.error(f"OAuth streaming call failed: {e}")
+            self._health_tracker.record_failure(model, type(e).__name__, 0)
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
     async def _handle_llm(self, request: APIProxyRequest) -> APIProxyResponse:
-        """Unified LLM handler. Auto-detects provider from model prefix via LiteLLM."""
+        """Unified LLM handler. Auto-detects provider from model prefix via LiteLLM.
+
+        OAuth setup-tokens bypass LiteLLM entirely — direct httpx calls to
+        Anthropic's Messages API with Bearer auth.
+        """
         import litellm
 
         requested_model = request.params.get("model", "")
+
+        # OAuth fast-path: bypass LiteLLM for Anthropic OAuth tokens
+        if request.action == "chat":
+            api_key = self._get_api_key_for_model(requested_model)
+            if api_key and is_oauth_token(api_key):
+                return await self._oauth_chat(request, api_key, requested_model)
 
         if request.action == "chat":
             async def _chat(
@@ -614,6 +891,15 @@ class CredentialVault:
                 return
 
         requested_model = request.params.get("model", "")
+
+        # OAuth fast-path: bypass LiteLLM for Anthropic OAuth tokens
+        api_key = self._get_api_key_for_model(requested_model)
+        if api_key and is_oauth_token(api_key):
+            async for chunk in self._oauth_chat_stream(
+                request, api_key, requested_model, agent_id,
+            ):
+                yield chunk
+            return
         models_to_try = self._failover_chain.get_models_to_try(requested_model)
 
         response = None

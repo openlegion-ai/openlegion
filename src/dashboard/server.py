@@ -921,6 +921,19 @@ def create_dashboard_router(
         base_url = body.get("base_url", "").strip() or None
         if not service or not key:
             raise HTTPException(status_code=400, detail="service and key are required")
+
+        # OAuth setup-token: validate directly against Anthropic API
+        from src.host.credentials import is_oauth_token
+        if is_oauth_token(key):
+            from src.setup_wizard import SetupWizard
+            fmt_error = SetupWizard._validate_oauth_token_format(key)
+            if fmt_error:
+                return {"valid": False, "skipped": False, "reason": fmt_error}
+            valid = SetupWizard._validate_oauth_token_live(key)
+            if valid:
+                return {"valid": True, "skipped": False, "oauth": True}
+            return {"valid": False, "skipped": False, "reason": "Invalid or expired setup-token"}
+
         # Strip _api_key suffix to get provider name
         provider = service.replace("_api_key", "")
         from src.setup_wizard import _VALIDATION_MODELS

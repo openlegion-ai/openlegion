@@ -271,8 +271,8 @@ class TestInlineSetup:
         vault.credentials = {}
         setup = InlineSetup(tmp_path, credential_vault=vault)
 
-        # Input: provider=1 (Anthropic), key, model=1
-        with patch("click.prompt", side_effect=[1, "sk-test-key", 1]):
+        # Input: provider=1 (Anthropic), auth_type="1" (API key), key, model=1
+        with patch("click.prompt", side_effect=[1, "1", "sk-test-key", 1]):
             with patch.object(SetupWizard, "_validate_api_key", return_value=True):
                 with patch("src.cli.config._set_env_key"):
                     setup.run()
@@ -287,5 +287,49 @@ class TestInlineSetup:
         assert config_file.exists()
         cfg = yaml.safe_load(config_file.read_text())
         assert "default_model" in cfg.get("llm", {})
+
+
+class TestOAuthTokenValidation:
+    """Tests for OAuth setup-token format validation."""
+
+    def test_valid_token_format(self):
+        token = "sk-ant-oat01-" + "x" * 80
+        assert SetupWizard._validate_oauth_token_format(token) is None
+
+    def test_wrong_prefix(self):
+        err = SetupWizard._validate_oauth_token_format("sk-ant-api03-regular")
+        assert err is not None
+        assert "prefix" in err.lower()
+
+    def test_too_short(self):
+        err = SetupWizard._validate_oauth_token_format("sk-ant-oat01-short")
+        assert err is not None
+        assert "truncated" in err.lower()
+
+    def test_newline_in_token(self):
+        token = "sk-ant-oat01-" + "x" * 40 + "\n" + "x" * 40
+        err = SetupWizard._validate_oauth_token_format(token)
+        assert err is not None
+        assert "line break" in err.lower()
+
+    def test_inline_setup_autodetects_oauth_token(self, tmp_path):
+        """InlineSetup detects pasted OAuth token and validates it."""
+        vault = MagicMock()
+        vault.credentials = {}
+        setup = InlineSetup(tmp_path, credential_vault=vault)
+        oauth_token = "sk-ant-oat01-" + "x" * 80
+
+        # Input: provider=1 (Anthropic), auth_type="1" (API key),
+        # but user pastes an OAuth token, model=1
+        with patch("click.prompt", side_effect=[1, "1", oauth_token, 1]):
+            with patch.object(
+                SetupWizard, "_validate_oauth_token_live", return_value=True,
+            ):
+                with patch("src.cli.config._set_env_key"):
+                    setup.run()
+
+        vault.add_credential.assert_called_once()
+        call_args = vault.add_credential.call_args[0]
+        assert call_args[1] == oauth_token
 
 

@@ -635,7 +635,7 @@
                 <div class="text-sm font-medium text-gray-200 mb-2">Add an API key</div>
                 <div x-show="!settingsData?.has_llm_credentials" class="space-y-2">
                   <div class="flex flex-wrap gap-2">
-                    <select x-model="onboardProvider" :disabled="onboardSaving" class="dash-select text-xs w-40">
+                    <select x-model="onboardProvider" :disabled="onboardSaving" class="dash-select text-xs w-40" @change="onboardAuthType = 'api_key'">
                       <option value="">Provider...</option>
                       <option value="anthropic">Anthropic</option>
                       <option value="openai">OpenAI</option>
@@ -646,10 +646,24 @@
                       <option value="groq">Groq</option>
                       <option value="minimax">MiniMax</option>
                     </select>
-                    <input type="password" x-model="onboardKey" :disabled="onboardSaving" class="dash-input flex-1 min-w-[200px]" placeholder="API key">
+                    <template x-if="onboardProvider === 'anthropic'">
+                      <select x-model="onboardAuthType" :disabled="onboardSaving" class="dash-select text-xs w-48">
+                        <option value="api_key">API Key (recommended)</option>
+                        <option value="oauth">Subscription Token</option>
+                      </select>
+                    </template>
+                    <input type="password" x-model="onboardKey" :disabled="onboardSaving" class="dash-input flex-1 min-w-[200px]"
+                      :placeholder="onboardAuthType === 'oauth' ? 'sk-ant-oat01-...' : 'API key'">
+                  </div>
+                  <template x-if="onboardAuthType === 'oauth'">
+                    <div class="text-[10px] text-amber-400/80 leading-snug">
+                      Experimental — uses unofficial OAuth that may break without notice. Generate with: <code class="font-mono bg-gray-800 px-1 rounded">claude setup-token</code>
+                    </div>
+                  </template>
+                  <div x-show="onboardAuthType !== 'oauth'" class="flex flex-wrap gap-2 items-center">
+                    <input type="text" x-model="onboardBaseUrl" :disabled="onboardSaving" class="dash-input flex-1 min-w-[200px]" placeholder="Custom API base URL (optional)">
                   </div>
                   <div class="flex flex-wrap gap-2 items-center">
-                    <input type="text" x-model="onboardBaseUrl" :disabled="onboardSaving" class="dash-input flex-1 min-w-[200px]" placeholder="Custom API base URL (optional)">
                     <button @click="submitOnboardCredential()" :disabled="onboardSaving || !onboardProvider || !onboardKey"
                       class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors inline-flex items-center gap-1.5">
                       <svg x-show="onboardSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
@@ -2079,7 +2093,7 @@
               <div x-show="showCredForm" x-transition>
                 <div class="text-xs text-gray-500 mb-2">New credential</div>
                 <div class="flex gap-2 mb-2">
-                  <select x-model="credService" :disabled="credSaving" class="dash-select text-xs w-40">
+                  <select x-model="credService" :disabled="credSaving" class="dash-select text-xs w-40" @change="credAuthType = 'api_key'">
                     <option value="">Service...</option>
                     <optgroup label="LLM Providers (system tier)">
                       <option value="anthropic">Anthropic</option>
@@ -2099,16 +2113,28 @@
                     </optgroup>
                     <option value="__custom__">Custom...</option>
                   </select>
+                  <template x-if="credService === 'anthropic'">
+                    <select x-model="credAuthType" :disabled="credSaving" class="dash-select text-xs w-48">
+                      <option value="api_key">API Key (recommended)</option>
+                      <option value="oauth">Subscription Token</option>
+                    </select>
+                  </template>
                   <input x-show="credService === '__custom__'" type="text" x-model="credCustomService" :disabled="credSaving" class="dash-input text-xs w-40" placeholder="credential_name">
                   <select x-show="credService === '__custom__'" x-model="credTier" :disabled="credSaving" class="dash-select text-xs w-28">
                     <option value="agent">Agent tier</option>
                     <option value="system">System tier</option>
                   </select>
-                  <input type="password" x-model="credKey" :disabled="credSaving" class="dash-input flex-1" placeholder="API key or value">
+                  <input type="password" x-model="credKey" :disabled="credSaving" class="dash-input flex-1"
+                    :placeholder="credAuthType === 'oauth' && credService === 'anthropic' ? 'sk-ant-oat01-...' : 'API key or value'">
                 </div>
-                <input type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
+                <template x-if="credAuthType === 'oauth' && credService === 'anthropic'">
+                  <div class="text-[10px] text-amber-400/80 leading-snug mb-2">
+                    Experimental — uses unofficial OAuth that may break without notice. Generate with: <code class="font-mono bg-gray-800 px-1 rounded">claude setup-token</code>
+                  </div>
+                </template>
+                <input x-show="!(credAuthType === 'oauth' && credService === 'anthropic')" type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
                 <div class="flex justify-between">
-                  <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'; credAuthType = 'api_key'" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
                   <button @click="addCredential()" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
                     <svg x-show="credSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                     <span x-text="credSaving ? 'Saving...' : 'Save Credential'"></span>

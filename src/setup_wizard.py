@@ -23,6 +23,10 @@ logger = setup_logging("setup_wizard")
 if TYPE_CHECKING:
     from src.host.credentials import CredentialVault
 
+# OAuth setup-token constants (shared with credentials.py)
+_OAUTH_TOKEN_PREFIX = "sk-ant-oat01-"
+_OAUTH_MIN_LENGTH = 90
+
 # Validation models: cheapest model per provider for key checks
 _VALIDATION_MODELS = {
     "anthropic": "anthropic/claude-haiku-4-5-20251001",
@@ -212,11 +216,15 @@ class SetupWizard:
         if existing_key:
             click.echo(f"  API key already set for {provider}.")
             if click.confirm("  Replace it?", default=False):
-                api_key = self._prompt_and_validate_key(provider, _PROVIDERS[choice - 1]["label"])
+                api_key = self._prompt_and_validate_key_with_oauth(
+                    provider, _PROVIDERS[choice - 1]["label"],
+                )
                 if api_key:
                     _set_env_key(key_name, api_key, system=True)
         else:
-            api_key = self._prompt_and_validate_key(provider, _PROVIDERS[choice - 1]["label"])
+            api_key = self._prompt_and_validate_key_with_oauth(
+                provider, _PROVIDERS[choice - 1]["label"],
+            )
             if api_key:
                 _set_env_key(key_name, api_key, system=True)
 
@@ -337,6 +345,110 @@ class SetupWizard:
                     click.echo("  Saving key anyway — you can fix it later in .env")
                     return api_key.strip()
         return ""
+
+    def _prompt_and_validate_key_with_oauth(self, provider: str, label: str) -> str:
+        """Prompt for API key with optional OAuth setup-token path for Anthropic."""
+        if provider != "anthropic":
+            return self._prompt_and_validate_key(provider, label)
+
+        click.echo("  How would you like to authenticate?\n")
+        click.echo("  1. API Key (recommended) — from console.anthropic.com")
+        click.echo("  2. Claude Subscription Token (experimental) — from `claude setup-token`\n")
+        try:
+            auth_choice = click.prompt("  Auth method", default="1").strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+
+        if auth_choice == "2":
+            return self._prompt_and_validate_oauth_token()
+        return self._prompt_and_validate_key(provider, label)
+
+    def _prompt_and_validate_oauth_token(self) -> str:
+        """Prompt for and validate a Claude OAuth setup-token."""
+        click.echo(
+            "\n  Subscription tokens use an unofficial OAuth path that may break\n"
+            "  without notice. For production workloads, use an API key.\n"
+            "\n  Generate one with: claude setup-token\n"
+        )
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                token = click.prompt("  Setup token (sk-ant-oat01-...)", hide_input=True)
+            except (EOFError, KeyboardInterrupt):
+                return ""
+            token = token.strip()
+            if not token:
+                click.echo("  No token provided.")
+                continue
+
+            # Format validation
+            error = self._validate_oauth_token_format(token)
+            if error:
+                click.echo(f"  {error}")
+                continue
+
+            # Live validation
+            click.echo("  Validating token...", nl=False)
+            valid = self._validate_oauth_token_live(token)
+            if valid:
+                click.echo(" valid.\n")
+                return token
+            remaining = max_attempts - attempt - 1
+            if remaining > 0:
+                click.echo(f" invalid. {remaining} attempt(s) remaining.")
+            else:
+                click.echo(" invalid.")
+                click.echo("  Saving token anyway — you can fix it later in .env")
+                return token
+        return ""
+
+    @staticmethod
+    def _validate_oauth_token_format(token: str) -> str | None:
+        """Validate OAuth token format. Returns error message or None."""
+        if not token.startswith(_OAUTH_TOKEN_PREFIX):
+            return f"Expected prefix {_OAUTH_TOKEN_PREFIX}"
+        if len(token) < _OAUTH_MIN_LENGTH:
+            return "Token appears truncated (check for line breaks in terminal)"
+        if "\n" in token or "\r" in token:
+            return "Token contains line breaks"
+        return None
+
+    @staticmethod
+    def _validate_oauth_token_live(token: str) -> bool:
+        """Test an OAuth token with a minimal API call."""
+        import httpx as _httpx
+
+        from src.host.credentials import _ANTHROPIC_API_URL, _CLAUDE_CLI_VERSION
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+            "user-agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
+        }
+        body = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        try:
+            resp = _httpx.post(
+                _ANTHROPIC_API_URL, headers=headers, json=body, timeout=30,
+            )
+            if resp.status_code == 200:
+                return True
+            # Rate limit / transient — assume valid
+            if resp.status_code in (429, 500, 502, 503, 529):
+                logger.debug("OAuth validation skipped due to status %d", resp.status_code)
+                return True
+            return False
+        except (_httpx.TimeoutException, _httpx.ConnectError):
+            logger.debug("OAuth validation skipped due to connection error")
+            return True
+        except Exception as e:
+            logger.debug("OAuth validation failed: %s", e)
+            return False
 
     def _validate_api_key(self, provider: str, api_key: str) -> bool:
         """Lightweight key check using litellm with minimal token usage."""
@@ -471,7 +583,22 @@ class InlineSetup:
     def _prompt_and_validate_inline(
         wizard: SetupWizard, provider: str, label: str,
     ) -> str:
-        """Prompt for API key, validate, and return stripped key or empty string."""
+        """Prompt for API key, validate, and return stripped key or empty string.
+
+        For Anthropic, offers the OAuth setup-token path.
+        """
+        if provider == "anthropic":
+            click.echo("  How would you like to authenticate?\n")
+            click.echo("  1. API Key (recommended) — from console.anthropic.com")
+            click.echo("  2. Claude Subscription Token (experimental) — from `claude setup-token`\n")
+            try:
+                auth_choice = click.prompt("  Auth method", default="1").strip()
+            except (EOFError, KeyboardInterrupt):
+                return ""
+            if auth_choice == "2":
+                token = wizard._prompt_and_validate_oauth_token()
+                return token
+
         try:
             api_key = click.prompt(f"  {label} API key", hide_input=True)
         except (EOFError, KeyboardInterrupt):
@@ -480,6 +607,16 @@ class InlineSetup:
             click.echo("  No key provided.")
             return ""
         api_key = api_key.strip()
+        # Auto-detect pasted OAuth token
+        if api_key.startswith(_OAUTH_TOKEN_PREFIX):
+            click.echo("  Detected OAuth setup-token.")
+            click.echo("  Validating token...", nl=False)
+            valid = wizard._validate_oauth_token_live(api_key)
+            if valid:
+                click.echo(" valid.\n")
+            else:
+                click.echo(" could not validate (saved anyway).\n")
+            return api_key
         click.echo("  Validating API key...", nl=False)
         valid = wizard._validate_api_key(provider, api_key)
         if valid:

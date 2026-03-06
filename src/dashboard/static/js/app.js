@@ -207,6 +207,7 @@ function dashboard() {
     credKey: '',
     credBaseUrl: '',
     credTier: 'agent',
+    credAuthType: 'api_key',
 
     // Channels
     channels: [],
@@ -259,6 +260,7 @@ function dashboard() {
     onboardProvider: '',
     onboardKey: '',
     onboardBaseUrl: '',
+    onboardAuthType: 'api_key',
 
     // WebSocket reconnect countdown (Alpine-reactive mirror)
     wsReconnectIn: 0,
@@ -2659,12 +2661,14 @@ function dashboard() {
       const service = this.credService === '__custom__' ? this.credCustomService.trim() : this.credService.trim();
       if (!service || !this.credKey.trim()) return;
       this.credSaving = true;
-      this.showToast('Validating API key...');
+      const isOAuth = this.credAuthType === 'oauth' && this.credService === 'anthropic';
+      this.showToast(isOAuth ? 'Validating token...' : 'Validating API key...');
       try {
-        if (!await this._validateCredential(service, this.credKey.trim(), this.credBaseUrl.trim())) return;
+        const baseUrl = isOAuth ? '' : this.credBaseUrl.trim();
+        if (!await this._validateCredential(service, this.credKey.trim(), baseUrl)) return;
         const body = { service, key: this.credKey.trim() };
         if (this.credService === '__custom__' && this.credTier === 'system') body.tier = 'system';
-        if (this.credBaseUrl.trim()) body.base_url = this.credBaseUrl.trim();
+        if (baseUrl) body.base_url = baseUrl;
         const resp = await fetch(`${window.__config.apiBase}/credentials`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(body),
@@ -2677,6 +2681,7 @@ function dashboard() {
           this.credKey = '';
           this.credBaseUrl = '';
           this.credTier = 'agent';
+          this.credAuthType = 'api_key';
           this.showCredForm = false;
           this.fetchSettings();
         } else {
@@ -2708,21 +2713,24 @@ function dashboard() {
       if (this.onboardSaving) return;
       if (!this.onboardProvider || !this.onboardKey.trim()) return;
       this.onboardSaving = true;
-      this.showToast('Validating API key...');
+      const isOAuth = this.onboardAuthType === 'oauth';
+      this.showToast(isOAuth ? 'Validating token...' : 'Validating API key...');
       try {
-        if (!await this._validateCredential(this.onboardProvider, this.onboardKey.trim(), this.onboardBaseUrl.trim())) return;
+        const baseUrl = isOAuth ? '' : this.onboardBaseUrl.trim();
+        if (!await this._validateCredential(this.onboardProvider, this.onboardKey.trim(), baseUrl)) return;
         const body = { service: this.onboardProvider, key: this.onboardKey.trim() };
-        if (this.onboardBaseUrl.trim()) body.base_url = this.onboardBaseUrl.trim();
+        if (baseUrl) body.base_url = baseUrl;
         const resp = await fetch(`${window.__config.apiBase}/credentials`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(body),
         });
         if (resp.ok) {
           const data = await resp.json();
-          this.showToast('API key saved');
+          this.showToast(isOAuth ? 'Subscription token saved' : 'API key saved');
           this.onboardProvider = '';
           this.onboardKey = '';
           this.onboardBaseUrl = '';
+          this.onboardAuthType = 'api_key';
           this.fetchSettings();
         } else {
           const err = await resp.json();

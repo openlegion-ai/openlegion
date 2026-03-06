@@ -1142,6 +1142,128 @@ class TestGetAuthForModel:
         providers = v.get_providers_with_credentials()
         assert providers == set()
 
+    def test_get_auth_for_model_oauth_token(self, monkeypatch):
+        """OAuth setup-token returns Bearer auth headers."""
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_API_KEY",
+            "sk-ant-oat01-" + "x" * 80,
+        )
+        v = CredentialVault()
+        api_key, headers = v._get_auth_for_model("anthropic/claude-sonnet-4-6")
+        assert api_key.startswith("sk-ant-oat01-")
+        assert "Authorization" in headers
+        assert headers["Authorization"].startswith("Bearer sk-ant-oat01-")
+        assert "anthropic-beta" in headers
+        assert "oauth-2025-04-20" in headers["anthropic-beta"]
+        assert headers["user-agent"].startswith("claude-cli/")
+
+
+# ── OAuth token detection ──────────────────────────────────────
+
+
+class TestOAuthTokenHandling:
+    """Tests for OAuth setup-token detection and API body conversion."""
+
+    def test_is_oauth_token(self):
+        from src.host.credentials import is_oauth_token
+        assert is_oauth_token("sk-ant-oat01-" + "x" * 80)
+        assert not is_oauth_token("sk-ant-api03-regular-key")
+        assert not is_oauth_token("")
+        assert not is_oauth_token("some-random-token")
+
+    def test_build_anthropic_body_basic(self):
+        """Converts LiteLLM-style params to Anthropic format."""
+        params = {
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello"},
+            ],
+            "max_tokens": 1024,
+            "temperature": 0.5,
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        assert body["model"] == "claude-sonnet-4-6"
+        assert body["system"] == "You are helpful."
+        assert len(body["messages"]) == 1
+        assert body["messages"][0]["role"] == "user"
+        assert body["max_tokens"] == 1024
+        assert body["temperature"] == 0.5
+
+    def test_build_anthropic_body_with_tools(self):
+        """Converts OpenAI-style tools to Anthropic format."""
+        params = {
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search the web",
+                    "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+                },
+            }],
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        assert len(body["tools"]) == 1
+        tool = body["tools"][0]
+        assert tool["name"] == "search"
+        assert tool["description"] == "Search the web"
+        assert "input_schema" in tool
+
+    def test_parse_anthropic_response_text(self):
+        """Parses a simple text response."""
+        data = {
+            "content": [{"type": "text", "text": "Hello!"}],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "model": "claude-sonnet-4-6",
+        }
+        result = CredentialVault._parse_anthropic_response(data, "anthropic/claude-sonnet-4-6")
+        assert result["content"] == "Hello!"
+        assert result["tokens_used"] == 15
+        assert result["input_tokens"] == 10
+        assert result["output_tokens"] == 5
+        assert result["tool_calls"] == []
+
+    def test_parse_anthropic_response_tool_use(self):
+        """Parses a tool-use response."""
+        import json
+        data = {
+            "content": [
+                {"type": "text", "text": "Let me search."},
+                {"type": "tool_use", "name": "search", "input": {"q": "test"}},
+            ],
+            "usage": {"input_tokens": 20, "output_tokens": 30},
+        }
+        result = CredentialVault._parse_anthropic_response(data, "anthropic/claude-sonnet-4-6")
+        assert result["content"] == "Let me search."
+        assert len(result["tool_calls"]) == 1
+        assert result["tool_calls"][0]["name"] == "search"
+        assert json.loads(result["tool_calls"][0]["arguments"]) == {"q": "test"}
+
+    def test_parse_anthropic_response_thinking(self):
+        """Parses response with thinking blocks."""
+        data = {
+            "content": [
+                {"type": "thinking", "thinking": "reasoning here"},
+                {"type": "text", "text": "Answer"},
+            ],
+            "usage": {"input_tokens": 50, "output_tokens": 100},
+        }
+        result = CredentialVault._parse_anthropic_response(data, "anthropic/test")
+        assert result["content"] == "Answer"
+        assert result["thinking_content"] == "reasoning here"
+
+    def test_oauth_headers_structure(self):
+        """OAuth headers include all required fields."""
+        headers = CredentialVault._oauth_headers("sk-ant-oat01-test")
+        assert headers["Authorization"] == "Bearer sk-ant-oat01-test"
+        assert headers["anthropic-version"] == "2023-06-01"
+        assert "claude-code-20250219" in headers["anthropic-beta"]
+        assert "oauth-2025-04-20" in headers["anthropic-beta"]
+        assert headers["user-agent"].startswith("claude-cli/")
+        assert headers["Content-Type"] == "application/json"
+
 
 # ── Budget lock timeout returns error ──────────────────────────
 
