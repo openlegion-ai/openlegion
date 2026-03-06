@@ -1145,6 +1145,25 @@ class TestDashboardBlackboardWrite:
         assert resp.status_code == 200
         assert resp.json()["written_by"] == "dashboard"
 
+    def test_write_key_too_long(self):
+        """Dashboard rejects keys longer than 512 chars."""
+        long_key = "x" * 520
+        resp = self.client.put(
+            f"/dashboard/api/blackboard/{long_key}",
+            json={"value": {"data": 1}},
+        )
+        assert resp.status_code == 400
+        assert "Key too long" in resp.json()["detail"]
+
+    def test_write_value_too_large(self):
+        """Dashboard rejects values larger than 256 KB."""
+        resp = self.client.put(
+            "/dashboard/api/blackboard/test/big",
+            json={"value": {"data": "x" * 300_000}},
+        )
+        assert resp.status_code == 413
+        assert "Value too large" in resp.json()["detail"]
+
 
 # ── V2 Tests: Settings ──────────────────────────────────────
 

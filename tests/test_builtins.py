@@ -1909,6 +1909,19 @@ class TestBlackboardSanitization:
         preview = result["entries"][0]["value_preview"]
         assert "\u200b" not in preview
 
+    @pytest.mark.asyncio
+    async def test_read_sanitizes_dict_keys(self):
+        """Dict keys with invisible chars are sanitized."""
+        from src.agent.builtins.mesh_tool import read_shared_state
+        mc = self._project_client()
+        mc.read_blackboard = AsyncMock(return_value={
+            "key": "k",
+            "value": {"inject\u200bed": "data"},
+        })
+        result = await read_shared_state(key="k", mesh_client=mc)
+        keys = list(result["value"].keys())
+        assert keys == ["injected"]
+
     def test_sanitize_value_preserves_non_strings(self):
         """_sanitize_value passes through numbers, bools, None."""
         from src.agent.builtins.mesh_tool import _sanitize_value

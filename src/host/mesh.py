@@ -322,6 +322,7 @@ class Blackboard:
             if pattern is None:
                 self._watchers.pop(agent_id, None)
                 self.db.execute("DELETE FROM watchers WHERE agent_id = ?", (agent_id,))
+                self.db.commit()
             elif agent_id in self._watchers:
                 self._watchers[agent_id] = [
                     p for p in self._watchers[agent_id] if p != pattern
@@ -332,7 +333,7 @@ class Blackboard:
                     "DELETE FROM watchers WHERE agent_id = ? AND pattern = ?",
                     (agent_id, pattern),
                 )
-            self.db.commit()
+                self.db.commit()
 
     def remove_agent_watches(self, agent_id: str) -> None:
         """Remove all watches for an agent (cleanup on deregister)."""

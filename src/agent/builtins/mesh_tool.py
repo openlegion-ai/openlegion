@@ -80,7 +80,7 @@ def _sanitize_value(value):
     if isinstance(value, str):
         return sanitize_for_prompt(value)
     if isinstance(value, dict):
-        return {k: _sanitize_value(v) for k, v in value.items()}
+        return {sanitize_for_prompt(k): _sanitize_value(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_sanitize_value(item) for item in value]
     return value

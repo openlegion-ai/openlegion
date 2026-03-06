@@ -140,6 +140,34 @@ def test_blackboard_claim_key_too_long(mesh_components):
     assert response.status_code == 400
 
 
+def test_blackboard_claim_value_too_large(mesh_components):
+    """CAS claim rejects values larger than 256 KB."""
+    client = mesh_components["client"]
+    response = client.post(
+        "/mesh/blackboard/claim",
+        json={
+            "agent_id": "research",
+            "key": "context/big_claim",
+            "value": {"data": "x" * 300_000},
+            "expected_version": 1,
+        },
+    )
+    assert response.status_code == 413
+
+
+def test_blackboard_key_at_limit_succeeds(mesh_components):
+    """Keys exactly at 512 chars are accepted."""
+    client = mesh_components["client"]
+    key = "context/research_" + "x" * (512 - len("context/research_"))
+    assert len(key) == 512
+    response = client.put(
+        f"/mesh/blackboard/{key}",
+        params={"agent_id": "research"},
+        json={"data": "ok"},
+    )
+    assert response.status_code == 200
+
+
 def test_blackboard_list_by_prefix(mesh_components):
     client = mesh_components["client"]
 
