@@ -381,6 +381,15 @@ class ContextManager:
         # Keep first group + last 4 groups
         kept = groups[:1] + groups[-4:]
         pruned = [msg for group in kept for msg in group]
+
+        # Prevent consecutive same-role messages across the gap
+        if (len(pruned) >= 2
+                and pruned[0].get("role") == pruned[1].get("role") == "user"):
+            pruned.insert(1, {
+                "role": "assistant",
+                "content": "Understood, continuing from above.",
+            })
+
         logger.warning(f"Hard-pruned {len(messages)} -> {len(pruned)} messages (group-aware)")
         return pruned
 

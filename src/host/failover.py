@@ -26,7 +26,7 @@ _TRANSIENT_MAX_COOLDOWN = 1500  # Cap for exponential backoff
 # Status codes by category
 _BILLING_CODES = {402, 429}
 _AUTH_CODES = {401, 403}
-_TRANSIENT_CODES = {408, 500, 502, 503, 504}
+_TRANSIENT_CODES = {408, 500, 502, 503, 504, 529}
 _TRANSIENT_KEYWORDS = {"connection", "timeout", "connecterror", "readtimeout"}
 
 
@@ -76,10 +76,11 @@ class ModelHealthTracker:
 
         cooldown = self._compute_cooldown(h, error_type, status_code)
         h.cooldown_until = time.time() + cooldown
+        status_info = f" status={status_code}" if status_code else ""
+        error_info = f" error={error_type}" if error_type else ""
         logger.warning(
             f"Model '{model}' failed (#{h.consecutive_failures}), "
-            f"cooldown {cooldown:.0f}s",
-            extra={"model": model, "status_code": status_code, "cooldown": cooldown},
+            f"cooldown {cooldown:.0f}s{status_info}{error_info}",
         )
 
     def _compute_cooldown(

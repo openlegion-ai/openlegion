@@ -1440,6 +1440,87 @@ class TestOAuthTokenHandling:
         assert "tools" not in body
         assert "tool_choice" not in body
 
+    def test_build_anthropic_body_converts_tool_messages(self):
+        """OpenAI-format tool_calls and role:'tool' are converted to Anthropic format."""
+        params = {
+            "model": "anthropic/claude-opus-4-6",
+            "messages": [
+                {"role": "user", "content": "search for cats"},
+                {
+                    "role": "assistant",
+                    "content": "Let me search.",
+                    "tool_calls": [
+                        {
+                            "id": "call_abc",
+                            "type": "function",
+                            "function": {"name": "search", "arguments": '{"q": "cats"}'},
+                        },
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": "Found 3 results",
+                    "tool_call_id": "call_abc",
+                },
+                {"role": "assistant", "content": "I found 3 results about cats."},
+            ],
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        msgs = body["messages"]
+        assert len(msgs) == 4
+
+        # Assistant with tool_use blocks
+        assert msgs[1]["role"] == "assistant"
+        assert isinstance(msgs[1]["content"], list)
+        assert msgs[1]["content"][0] == {"type": "text", "text": "Let me search."}
+        assert msgs[1]["content"][1]["type"] == "tool_use"
+        assert msgs[1]["content"][1]["id"] == "call_abc"
+        assert msgs[1]["content"][1]["name"] == "search"
+        assert msgs[1]["content"][1]["input"] == {"q": "cats"}
+
+        # Tool result → user with tool_result block
+        assert msgs[2]["role"] == "user"
+        assert isinstance(msgs[2]["content"], list)
+        assert msgs[2]["content"][0]["type"] == "tool_result"
+        assert msgs[2]["content"][0]["tool_use_id"] == "call_abc"
+        assert msgs[2]["content"][0]["content"] == "Found 3 results"
+
+        # Final assistant unchanged
+        assert msgs[3] == {"role": "assistant", "content": "I found 3 results about cats."}
+
+    def test_build_anthropic_body_merges_consecutive_tool_results(self):
+        """Multiple consecutive tool results merge into one user message."""
+        params = {
+            "model": "anthropic/claude-opus-4-6",
+            "messages": [
+                {"role": "user", "content": "do two things"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "c1", "type": "function", "function": {"name": "a", "arguments": "{}"}},
+                        {"id": "c2", "type": "function", "function": {"name": "b", "arguments": "{}"}},
+                    ],
+                },
+                {"role": "tool", "content": "result_a", "tool_call_id": "c1"},
+                {"role": "tool", "content": "result_b", "tool_call_id": "c2"},
+            ],
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        msgs = body["messages"]
+        assert len(msgs) == 3  # user, assistant, merged-user
+
+        # Assistant: empty content should not produce a text block
+        assistant_blocks = msgs[1]["content"]
+        assert all(b["type"] == "tool_use" for b in assistant_blocks)
+        assert len(assistant_blocks) == 2
+
+        # Merged tool results
+        assert msgs[2]["role"] == "user"
+        assert len(msgs[2]["content"]) == 2
+        assert msgs[2]["content"][0]["tool_use_id"] == "c1"
+        assert msgs[2]["content"][1]["tool_use_id"] == "c2"
+
 
 # ── OAuth async integration tests ─────────────────────────────
 

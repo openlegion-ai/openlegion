@@ -342,13 +342,41 @@ class TestHardPrune:
         pruned = cm._hard_prune(msgs)
         assert pruned[0] == msgs[0]  # first preserved
         assert pruned[-1] == msgs[-1]  # last preserved
-        assert len(pruned) == 5
+        # 1 first group + bridge assistant + 4 last groups = 6
+        assert len(pruned) == 6
 
     def test_prune_leaves_small_lists_alone(self):
         cm = ContextManager(max_tokens=100)
         msgs = _make_messages(4, chars_each=50)
         pruned = cm._hard_prune(msgs)
         assert pruned == msgs
+
+    def test_prune_inserts_bridge_for_consecutive_user_messages(self):
+        """Hard prune inserts bridge assistant msg when gap creates consecutive user roles."""
+        cm = ContextManager(max_tokens=100)
+        # First group is user, then many alternating, last 4 groups start with user
+        msgs = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "u3"},
+            {"role": "assistant", "content": "a3"},
+            {"role": "user", "content": "u4"},
+            {"role": "assistant", "content": "a4"},
+            {"role": "user", "content": "u5"},
+            {"role": "assistant", "content": "a5"},
+        ]
+        pruned = cm._hard_prune(msgs)
+        # First group=[user], last 4=[a3, u4, a4, u5, a5] — but groups are single msgs
+        # After pruning, first msg is user, second kept msg could be user
+        # Check no two consecutive messages share the same role
+        for i in range(len(pruned) - 1):
+            if pruned[i].get("role") == "user" and pruned[i + 1].get("role") == "user":
+                pytest.fail(
+                    f"Consecutive user messages at index {i} and {i+1}: "
+                    f"{pruned[i]['content']!r}, {pruned[i+1]['content']!r}"
+                )
 
 
 class TestEstimateTokensAccuracy:
