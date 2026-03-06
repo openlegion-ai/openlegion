@@ -390,7 +390,6 @@ class DockerBackend(RuntimeBackend):
 
         self._browser_container = self.client.containers.run(self.BROWSER_IMAGE, **run_kwargs)
         self.browser_service_url = f"http://127.0.0.1:{api_port}"
-        self.browser_vnc_url = f"http://127.0.0.1:{vnc_port}/index.html?autoconnect=true&path=&resize=scale"
 
         # Wait for browser service API to be ready
         import httpx as _httpx
@@ -410,9 +409,29 @@ class DockerBackend(RuntimeBackend):
             time.sleep(1)
 
         if not browser_ready:
-            logger.warning("Browser service failed to become ready after 15 attempts")
-        else:
-            logger.info("Started browser service at %s (VNC: %s)", self.browser_service_url, self.browser_vnc_url)
+            logger.warning("Browser service API failed to become ready after 15 attempts")
+            return
+
+        # Verify KasmVNC is also reachable — it starts independently of the
+        # FastAPI service and can fail even when the API is healthy.
+        vnc_url = f"http://127.0.0.1:{vnc_port}"
+        vnc_ready = False
+        for attempt in range(10):
+            try:
+                resp = _httpx.get(f"{vnc_url}/index.html", timeout=2)
+                if resp.status_code == 200:
+                    vnc_ready = True
+                    break
+            except Exception as e:
+                logger.debug("KasmVNC not ready (attempt %d): %s", attempt + 1, e)
+            time.sleep(1)
+
+        if not vnc_ready:
+            logger.warning("KasmVNC failed to become reachable on port %d", vnc_port)
+            return
+
+        self.browser_vnc_url = f"http://127.0.0.1:{vnc_port}/index.html?autoconnect=true&path=&resize=scale"
+        logger.info("Started browser service at %s (VNC: %s)", self.browser_service_url, self.browser_vnc_url)
 
     def stop_browser_service(self) -> None:
         """Stop the browser service container."""

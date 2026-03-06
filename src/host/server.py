@@ -1140,7 +1140,8 @@ def create_mesh_app(
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(target)
-        except (httpx.ConnectError, httpx.TimeoutException):
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            _server_logger.warning("VNC HTTP proxy failed to reach %s: %s", target, exc)
             raise HTTPException(502, "Browser VNC not reachable")
         headers = {}
         ct = resp.headers.get("content-type")
