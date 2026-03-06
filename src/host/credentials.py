@@ -566,83 +566,6 @@ class CredentialVault:
         }
 
     @staticmethod
-    def _convert_messages_to_anthropic(messages: list[dict]) -> list[dict]:
-        """Convert OpenAI-format messages to Anthropic Messages API format.
-
-        Handles:
-        - assistant messages with tool_calls → tool_use content blocks
-        - tool result messages → tool_result content blocks under role: user
-        - ensures strict user/assistant alternation by merging consecutive same-role
-        """
-        converted: list[dict] = []
-        for m in messages:
-            role = m.get("role", "")
-
-            if role == "assistant":
-                blocks: list[dict] = []
-                # Text content
-                content = m.get("content", "")
-                if content:
-                    blocks.append({"type": "text", "text": content})
-                # Tool calls → tool_use blocks
-                for tc in m.get("tool_calls", []):
-                    func = tc.get("function", {})
-                    try:
-                        inp = json.loads(func.get("arguments", "{}"))
-                    except (json.JSONDecodeError, TypeError):
-                        inp = {}
-                    blocks.append({
-                        "type": "tool_use",
-                        "id": tc.get("id", ""),
-                        "name": func.get("name", ""),
-                        "input": inp,
-                    })
-                converted.append({
-                    "role": "assistant",
-                    "content": blocks if blocks else content or "",
-                })
-
-            elif role == "tool":
-                # Tool results become user messages with tool_result blocks
-                result_block = {
-                    "type": "tool_result",
-                    "tool_use_id": m.get("tool_call_id", ""),
-                    "content": m.get("content", ""),
-                }
-                # Merge consecutive tool results into one user message
-                if converted and converted[-1].get("role") == "user":
-                    last_content = converted[-1].get("content", [])
-                    if isinstance(last_content, list):
-                        last_content.append(result_block)
-                        continue
-                converted.append({"role": "user", "content": [result_block]})
-
-            elif role == "user":
-                content = m.get("content", "")
-                # Merge consecutive user messages
-                if converted and converted[-1].get("role") == "user":
-                    last_content = converted[-1].get("content", [])
-                    if isinstance(last_content, list):
-                        if isinstance(content, str):
-                            last_content.append({"type": "text", "text": content})
-                        elif isinstance(content, list):
-                            last_content.extend(content)
-                        continue
-                    elif isinstance(last_content, str):
-                        if isinstance(content, str):
-                            converted[-1]["content"] = [
-                                {"type": "text", "text": last_content},
-                                {"type": "text", "text": content},
-                            ]
-                            continue
-                converted.append({"role": "user", "content": content})
-
-            else:
-                converted.append(m)
-
-        return converted
-
-    @staticmethod
     def _build_anthropic_body(params: dict) -> dict:
         """Convert LiteLLM-style params to Anthropic Messages API format."""
         messages = params.get("messages", [])
@@ -662,12 +585,59 @@ class CredentialVault:
             else:
                 non_system.append(m)
 
-        # Convert OpenAI message format to Anthropic format
-        anthropic_messages = CredentialVault._convert_messages_to_anthropic(non_system)
+        # Convert OpenAI-format tool messages to Anthropic Messages API format.
+        # OpenAI uses role:"tool" for results and tool_calls on assistant msgs.
+        # Anthropic uses role:"user" with tool_result blocks and role:"assistant"
+        # with tool_use content blocks.
+        converted: list[dict] = []
+        for m in non_system:
+            role = m.get("role", "")
+
+            if role == "assistant" and m.get("tool_calls"):
+                # Assistant + tool_calls → tool_use content blocks
+                content_blocks: list[dict] = []
+                text = m.get("content", "")
+                if isinstance(text, str) and text:
+                    content_blocks.append({"type": "text", "text": text})
+                elif isinstance(text, list):
+                    content_blocks.extend(text)
+                for tc in m["tool_calls"]:
+                    func = tc.get("function", tc)
+                    args = func.get("arguments", "{}")
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except (json.JSONDecodeError, ValueError):
+                            args = {"raw": args}
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": func.get("name", ""),
+                        "input": args,
+                    })
+                converted.append({"role": "assistant", "content": content_blocks})
+
+            elif role == "tool":
+                # Tool result → user message with tool_result block
+                tool_result = {
+                    "type": "tool_result",
+                    "tool_use_id": m.get("tool_call_id", ""),
+                    "content": m.get("content", ""),
+                }
+                # Merge consecutive tool results into one user message
+                if (converted
+                        and converted[-1].get("role") == "user"
+                        and isinstance(converted[-1].get("content"), list)):
+                    converted[-1]["content"].append(tool_result)
+                else:
+                    converted.append({"role": "user", "content": [tool_result]})
+
+            else:
+                converted.append(m)
 
         body: dict = {
             "model": model,
-            "messages": anthropic_messages,
+            "messages": converted,
             "max_tokens": params.get("max_tokens", 4096),
         }
         if system_parts:
@@ -770,9 +740,11 @@ class CredentialVault:
                 _ANTHROPIC_API_URL, headers=headers, json=body, timeout=120,
             )
         except (httpx.TimeoutException, httpx.ConnectError) as e:
+            self._health_tracker.record_failure(model, type(e).__name__, 0)
             raise RuntimeError(f"Anthropic API connection error: {e}") from e
 
         if resp.status_code == 401:
+            self._health_tracker.record_failure(model, "AuthError", 401)
             try:
                 error_data = resp.json()
                 msg = error_data.get("error", {}).get("message", "Authentication failed")
@@ -827,6 +799,7 @@ class CredentialVault:
                 json=body, timeout=120,
             ) as resp:
                 if resp.status_code == 401:
+                    self._health_tracker.record_failure(model, "AuthError", 401)
                     await resp.aread()
                     try:
                         error_data = resp.json()
@@ -836,6 +809,9 @@ class CredentialVault:
                     yield f"data: {json.dumps({'error': f'OAuth auth failed: {msg}'})}\n\n"
                     return
                 if not resp.is_success:
+                    self._health_tracker.record_failure(
+                        model, "HTTPError", resp.status_code,
+                    )
                     await resp.aread()
                     yield f"data: {json.dumps({'error': f'Anthropic API error (HTTP {resp.status_code})'})}\n\n"
                     return
