@@ -406,6 +406,34 @@ Stage 3 complete (2026-03-06). Two full review passes completed. All CRITICAL an
 - M12: Added `_quote_env_value()` for proper .env value escaping in `src/host/runtime.py`
 - Updated 3 test assertions in `tests/test_runtime.py` for quoted .env format
 
+### Fixes Applied (Production Readiness Review #3, 2026-03-06)
+
+**Batch 1 — Dead Weight:**
+- Moved inline `from urllib.parse import urlparse` and `import base64` to module-level in `src/browser/service.py`
+- Removed 4 redundant inner `import re`/`import os` in `src/dashboard/server.py`
+- Removed 2 redundant inner `import json as _json` in `src/cli/main.py`
+
+**Batch 2 — Standardization:**
+- Added `autoescape=True` to SPA catchall Jinja2 Environment in `src/dashboard/server.py`
+- Added `default-src 'self'; connect-src 'self'; frame-src 'self'` to CSP headers in `src/dashboard/server.py` (both main dashboard and catchall)
+- Extracted `_verify_dashboard_auth` to module level, added as dependency to SPA catchall router (X1-4)
+
+**Batch 4 — Bug Fixes:**
+- E14-01 (HIGH): Fixed `_remove_project_blackboard_permissions` in `src/cli/config.py` — now only removes project-specific pattern instead of blanket-clearing all
+- E14-02 (HIGH): Fixed log file handling in `_start_detached()` — append mode + try/finally for cleanup
+- E11-7 (MEDIUM): Added `_MAX_WALK_DEPTH = 50` to `snapshot._walk()` in `src/browser/service.py`
+- E11-10 (MEDIUM): Upgraded cleanup error logging from `debug` to `warning` in `src/browser/service.py`
+- E11-13 (LOW): Added `proc.wait()` after `proc.kill()` in `src/browser/__main__.py` to reap zombies
+- E13-4 (MEDIUM): Added `threading.Lock` to `EventBus.emit()` in `src/dashboard/events.py`
+
+**Batch 5 — Security:**
+- E12-C1 (CRITICAL): Added `sanitize_for_prompt()` to streaming dispatch in `src/channels/telegram.py`, `discord.py`, `slack.py`
+- E11-1 (HIGH): Removed `"evaluate"` from `_ALLOWED_ACTIONS` in `src/host/server.py`, removed `browser_evaluate` skill from `src/agent/builtins/browser_tool.py` and formatting case from `src/cli/formatting.py`
+- E11-2 (HIGH): Added startup warning in `src/browser/server.py` when `BROWSER_AUTH_TOKEN` is not set
+- E11-3 (MEDIUM): Replaced hardcoded KasmVNC password with `secrets.token_urlsafe(16)` in `src/browser/__main__.py`
+
+**Tests:** Removed `TestBrowserEvaluateHttpClient` class and `test_evaluate_no_mesh` from `tests/test_builtins.py` (skill was removed). 1779 passed, 0 regressions.
+
 ### Outstanding Findings (not fixed — deferred)
 - H1: No OAuth token refresh/expiry handling (design decision needed)
 - H3: Template pub/sub permissions overridden by collaboration-mode wildcards
@@ -417,6 +445,11 @@ Stage 3 complete (2026-03-06). Two full review passes completed. All CRITICAL an
 - M5: Task mode doesn't refresh system prompt after workspace writes
 - M13-M15: Template workflow issues (name collisions, feedback loops, missing conditions)
 - Batch 3 (consolidation) skipped: duplicated tool call construction, duplicated OAuth auth-choice prompt, `search()` using direct file reads instead of `_read_file()`
+- E8-1: `_prepare_llm_params` agent-controlled kwargs leak (needs design decision on kwarg allowlist)
+- E11-9: Overly broad redaction regex false positives (needs UX testing)
+- E11-4: KasmVNC bound to 0.0.0.0 (Docker networking constraint)
+- E14-03: `select.select` on stdin doesn't work on Windows
+- E14-16/E14-17: Mesh server binds 0.0.0.0 ignoring mesh.host config
 
 ### Pre-Existing Test Failures (not regressions)
 - `test_dashboard.py::TestDashboardAgentsAPI::test_api_agents_returns_fleet` — expects 2 agents but gets 5 (reads actual mesh.yaml from disk instead of mocked config)

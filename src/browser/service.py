@@ -8,9 +8,11 @@ browser context on a shared Xvnc display.
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from src.browser.redaction import CredentialRedactor
 from src.browser.stealth import build_launch_options
@@ -93,7 +95,7 @@ class BrowserManager:
             try:
                 await self._cleanup_idle()
             except Exception as e:
-                logger.debug("Cleanup loop error: %s", e)
+                logger.warning("Cleanup loop error: %s", e)
 
     async def _cleanup_idle(self):
         now = time.time()
@@ -237,7 +239,6 @@ class BrowserManager:
     async def navigate(self, agent_id: str, url: str, wait_ms: int = 1000) -> dict:
         """Navigate to URL and return page text."""
         # Validate URL scheme
-        from urllib.parse import urlparse
         try:
             parsed = urlparse(url)
         except Exception:
@@ -283,7 +284,11 @@ class BrowserManager:
                 refs: dict[str, dict] = {}
                 ref_counter = [0]
 
+                _MAX_WALK_DEPTH = 50
+
                 def _walk(node, depth=0):
+                    if depth > _MAX_WALK_DEPTH:
+                        return
                     role = node.get("role", "")
                     name = node.get("name", "")
                     if role in _ACTIONABLE_ROLES or role in _CONTEXT_ROLES:
@@ -403,8 +408,6 @@ class BrowserManager:
 
     async def screenshot(self, agent_id: str, full_page: bool = False) -> dict:
         """Take screenshot, return base64 PNG."""
-        import base64
-
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:

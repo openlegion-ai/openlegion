@@ -161,47 +161,48 @@ def _start_detached(config_path: str) -> None:
     import time
 
     log_path = cli_config.PROJECT_ROOT / ".openlegion.log"
-    log_fd = open(log_path, "w")
+    log_fd = open(log_path, "a")
 
-    cmd = [sys.executable, "-m", "src.cli", "start", "--config", config_path, "--serve"]
+    try:
+        cmd = [sys.executable, "-m", "src.cli", "start", "--config", config_path, "--serve"]
 
-    popen_kwargs: dict = dict(
-        cwd=str(cli_config.PROJECT_ROOT),
-        stdin=subprocess.DEVNULL,
-        stdout=log_fd,
-        stderr=subprocess.STDOUT,
-    )
-    if sys.platform == "win32":
-        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        popen_kwargs["start_new_session"] = True
+        popen_kwargs: dict = dict(
+            cwd=str(cli_config.PROJECT_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=log_fd,
+            stderr=subprocess.STDOUT,
+        )
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
 
-    proc = subprocess.Popen(cmd, **popen_kwargs)
+        proc = subprocess.Popen(cmd, **popen_kwargs)
 
-    # Poll log file for startup output
-    deadline = time.time() + 90
-    printed_lines = 0
-    ready = False
+        # Poll log file for startup output
+        deadline = time.time() + 90
+        printed_lines = 0
+        ready = False
 
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            break
-        try:
-            lines = log_path.read_text().splitlines()
-        except OSError:
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            try:
+                lines = log_path.read_text().splitlines()
+            except OSError:
+                time.sleep(0.5)
+                continue
+
+            for line in lines[printed_lines:]:
+                click.echo(line)
+            printed_lines = len(lines)
+
+            if any("Chatting with" in line for line in lines):
+                ready = True
+                break
             time.sleep(0.5)
-            continue
-
-        for line in lines[printed_lines:]:
-            click.echo(line)
-        printed_lines = len(lines)
-
-        if any("Chatting with" in line for line in lines):
-            ready = True
-            break
-        time.sleep(0.5)
-
-    log_fd.close()
+    finally:
+        log_fd.close()
 
     if proc.poll() is not None:
         # Process died during startup
@@ -391,8 +392,6 @@ def _single_agent_repl(agent_name: str, agent_url: str, mesh_port: int = 8420) -
 
 def _stream_detached_chat(agent_name: str, agent_url: str, message: str) -> None:
     """Stream a chat response via SSE."""
-    import json as _json
-
     import httpx
 
     from src.cli.formatting import (
@@ -547,8 +546,6 @@ def status(port: int, wide: bool, watch_interval: int | None, as_json: bool):
             click.echo("\nMesh is not running. Start with: openlegion start")
 
     if as_json:
-        import json as _json
-
         agents_data, mesh_online, _ = _collect_status()
         click.echo(_json.dumps({"agents": agents_data, "mesh_online": mesh_online}))
         return

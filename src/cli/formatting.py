@@ -31,15 +31,6 @@ def _format_tool_summary(name: str, inp: dict, out: dict) -> str:
         if len(text) > 30:
             text = text[:27] + "..."
         return f'{sel} \u2190 "{text}"'
-    elif name == "browser_evaluate":
-        script = inp.get("script", "")
-        for line in script.strip().splitlines():
-            line = line.strip()
-            if line and not line.startswith("//"):
-                if len(line) > 60:
-                    line = line[:57] + "..."
-                return line
-        return script[:60]
     elif name == "browser_screenshot":
         return inp.get("filename", "screenshot.png")
     elif name == "web_search":

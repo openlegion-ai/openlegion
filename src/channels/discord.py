@@ -21,7 +21,7 @@ import re
 import time
 
 from src.channels.base import Channel, PairingManager, chunk_text
-from src.shared.utils import setup_logging
+from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("channels.discord")
 
@@ -452,6 +452,8 @@ class DiscordChannel(Channel):
         tool_count = 0
         last_edit_time = 0.0
         _EDIT_INTERVAL = 0.5
+
+        text = sanitize_for_prompt(text)
 
         try:
             async with channel.typing():
