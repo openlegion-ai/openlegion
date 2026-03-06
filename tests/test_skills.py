@@ -120,6 +120,68 @@ def test_list_skills():
     assert "b" in names
 
 
+def test_list_skills_with_exclude():
+    @skill(name="keep_me", description="keep", parameters={})
+    def keep():
+        return None
+
+    @skill(name="drop_me", description="drop", parameters={})
+    def drop():
+        return None
+
+    registry = SkillRegistry.__new__(SkillRegistry)
+    registry.skills = dict(_skill_staging)
+
+    excluded = frozenset({"drop_me"})
+    names = registry.list_skills(exclude=excluded)
+    assert "keep_me" in names
+    assert "drop_me" not in names
+    # Without exclude, both present
+    assert "drop_me" in registry.list_skills()
+
+
+def test_get_descriptions_with_exclude():
+    @skill(name="visible", description="I am visible", parameters={})
+    def vis():
+        return None
+
+    @skill(name="hidden", description="I am hidden", parameters={})
+    def hid():
+        return None
+
+    registry = SkillRegistry.__new__(SkillRegistry)
+    registry.skills = dict(_skill_staging)
+
+    excluded = frozenset({"hidden"})
+    desc = registry.get_descriptions(exclude=excluded)
+    assert "visible" in desc
+    assert "hidden" not in desc
+    # Without exclude, both present
+    assert "hidden" in registry.get_descriptions()
+
+
+def test_get_tool_definitions_with_exclude():
+    @skill(name="included", description="inc", parameters={"x": {"type": "string"}})
+    def inc(x: str):
+        return x
+
+    @skill(name="excluded_tool", description="exc", parameters={"y": {"type": "string"}})
+    def exc(y: str):
+        return y
+
+    registry = SkillRegistry.__new__(SkillRegistry)
+    registry.skills = dict(_skill_staging)
+
+    excluded = frozenset({"excluded_tool"})
+    defs = registry.get_tool_definitions(exclude=excluded)
+    names = [d["function"]["name"] for d in defs]
+    assert "included" in names
+    assert "excluded_tool" not in names
+    # Without exclude, both present
+    all_names = [d["function"]["name"] for d in registry.get_tool_definitions()]
+    assert "excluded_tool" in all_names
+
+
 class TestSkillReload:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()

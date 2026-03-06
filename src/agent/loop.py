@@ -689,13 +689,18 @@ class AgentLoop:
             f"- Never refuse without trying. Attempt the task, report blockers after.\n"
             f"- Before acting on past context, run memory_search first.\n"
             f"- When done, respond with JSON: "
-            f"{{\"result\": {{...}}, \"promote\": {{...}}}} "
-            f"('promote' = data other agents need).\n"
         )
         if is_standalone:
-            rules += f"- Use notify_user to report results to the user.\n"
+            rules += (
+                f"{{\"result\": {{...}}}}\n"
+                f"- Use notify_user to report results to the user.\n"
+            )
         else:
-            rules += f"- Use notify_user for the user; blackboard for other agents only.\n"
+            rules += (
+                f"{{\"result\": {{...}}, \"promote\": {{...}}}} "
+                f"('promote' = data other agents need).\n"
+                f"- Use notify_user for the user; blackboard for other agents only.\n"
+            )
         rules += (
             f"- You have max {self.MAX_ITERATIONS} iterations.\n"
             f"- Use update_workspace to evolve your SOUL.md, INSTRUCTIONS.md, "

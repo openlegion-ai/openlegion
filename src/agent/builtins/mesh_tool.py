@@ -22,9 +22,7 @@ logger = setup_logging("agent.builtins.mesh_tool")
         "to report back to the user when working autonomously (heartbeat, "
         "cron jobs, long-running tasks). Use it for progress updates, "
         "completed work summaries, errors needing attention, or anything "
-        "the user should know about. Keep messages concise and actionable. "
-        "Do NOT write user-facing updates to the blackboard — the blackboard "
-        "is for agent-to-agent collaboration only."
+        "the user should know about. Keep messages concise and actionable."
     ),
     parameters={
         "message": {
@@ -213,6 +211,8 @@ async def publish_event(
 ) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
+    if mesh_client.is_standalone:
+        return {"error": _STANDALONE_ERROR}
     try:
         parsed = json.loads(data) if isinstance(data, str) else data
     except json.JSONDecodeError:
@@ -243,6 +243,8 @@ async def publish_event(
 async def subscribe_event(topic: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
+    if mesh_client.is_standalone:
+        return {"error": _STANDALONE_ERROR}
     try:
         result = await mesh_client.subscribe_topic(topic)
         return {"subscribed": True, "topic": topic, **result}
@@ -323,9 +325,9 @@ async def claim_task(key: str, claim_value: str, *, mesh_client=None) -> dict:
 @skill(
     name="save_artifact",
     description=(
-        "Save a named output file to your workspace and register it on the "
-        "shared blackboard so other agents can find it. Use this for deliverables "
-        "like reports, code files, or data exports."
+        "Save a named output file to your workspace. Use this for deliverables "
+        "like reports, code files, or data exports. In multi-agent projects, "
+        "also shares it with teammates."
     ),
     parameters={
         "name": {

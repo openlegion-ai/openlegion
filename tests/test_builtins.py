@@ -2113,7 +2113,37 @@ class TestBrowserScrollHttpClient:
         assert "error" in result
 
 
-# ── Coordination Tools Tests (subscribe_event, watch_blackboard, claim_task) ──
+# ── Coordination Tools Tests (publish_event, subscribe_event, watch_blackboard, claim_task) ──
+
+
+class TestPublishEventTool:
+    @pytest.mark.asyncio
+    async def test_publish_event_success(self):
+        from src.agent.builtins.mesh_tool import publish_event
+
+        mock_client = AsyncMock()
+        mock_client.is_standalone = False
+        mock_client.publish_event = AsyncMock(return_value={"published": True})
+        result = await publish_event(topic="research_complete", data='{"done": true}', mesh_client=mock_client)
+        assert result["published"] is True
+        assert result["topic"] == "research_complete"
+
+    @pytest.mark.asyncio
+    async def test_publish_event_standalone(self):
+        from src.agent.builtins.mesh_tool import publish_event
+
+        mock_client = AsyncMock()
+        mock_client.is_standalone = True
+        result = await publish_event(topic="test", mesh_client=mock_client)
+        assert "error" in result
+        assert "not assigned" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_publish_event_no_mesh_client(self):
+        from src.agent.builtins.mesh_tool import publish_event
+
+        result = await publish_event(topic="test", mesh_client=None)
+        assert "error" in result
 
 
 class TestSubscribeEventTool:
@@ -2122,11 +2152,22 @@ class TestSubscribeEventTool:
         from src.agent.builtins.mesh_tool import subscribe_event
 
         mock_client = AsyncMock()
+        mock_client.is_standalone = False
         mock_client.subscribe_topic = AsyncMock(return_value={"subscribed": True})
         result = await subscribe_event(topic="research_complete", mesh_client=mock_client)
         assert result["subscribed"] is True
         assert result["topic"] == "research_complete"
         mock_client.subscribe_topic.assert_awaited_once_with("research_complete")
+
+    @pytest.mark.asyncio
+    async def test_subscribe_event_standalone(self):
+        from src.agent.builtins.mesh_tool import subscribe_event
+
+        mock_client = AsyncMock()
+        mock_client.is_standalone = True
+        result = await subscribe_event(topic="test", mesh_client=mock_client)
+        assert "error" in result
+        assert "not assigned" in result["error"]
 
     @pytest.mark.asyncio
     async def test_subscribe_event_no_mesh_client(self):
@@ -2140,6 +2181,7 @@ class TestSubscribeEventTool:
         from src.agent.builtins.mesh_tool import subscribe_event
 
         mock_client = AsyncMock()
+        mock_client.is_standalone = False
         mock_client.subscribe_topic = AsyncMock(side_effect=RuntimeError("fail"))
         result = await subscribe_event(topic="test", mesh_client=mock_client)
         assert "error" in result

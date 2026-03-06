@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.agent.loop import AgentLoop
+from src.agent.loop import AgentLoop, _BLACKBOARD_TOOLS
 from src.shared.types import LLMResponse, TaskAssignment, TokenBudget, ToolCallInfo
 
 
@@ -50,6 +50,7 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
     llm.default_model = "test-model"
 
     mesh_client = MagicMock()
+    mesh_client.is_standalone = False
     mesh_client.send_system_message = AsyncMock(return_value={})
     mesh_client.read_blackboard = AsyncMock(return_value=None)
 
@@ -1333,3 +1334,102 @@ class TestFormatRuntimeContext:
         }
         result = AgentLoop._format_runtime_context(data)
         assert "\u200b" not in result
+
+
+# === Standalone Agent Blackboard Isolation ===
+
+
+class TestStandaloneBlackboardIsolation:
+    """Standalone agents should not see blackboard tools or references."""
+
+    def _make_standalone_loop(self):
+        loop = _make_loop()
+        loop.mesh_client.is_standalone = True
+        # Re-compute excluded tools (normally set in __init__)
+        loop._excluded_tools = _BLACKBOARD_TOOLS
+        return loop
+
+    def _make_project_loop(self):
+        loop = _make_loop()
+        loop.mesh_client.is_standalone = False
+        loop._excluded_tools = None
+        return loop
+
+    def test_standalone_excludes_blackboard_tools(self):
+        """Standalone agents have _excluded_tools set to _BLACKBOARD_TOOLS."""
+        mesh = MagicMock()
+        mesh.is_standalone = True
+        loop = AgentLoop(
+            agent_id="test", role="helper",
+            memory=MagicMock(get_tool_history=MagicMock(return_value=[])),
+            skills=MagicMock(), llm=MagicMock(), mesh_client=mesh,
+        )
+        assert loop._excluded_tools == _BLACKBOARD_TOOLS
+
+    def test_project_agent_no_exclusion(self):
+        """Project agents have _excluded_tools = None."""
+        mesh = MagicMock()
+        mesh.is_standalone = False
+        loop = AgentLoop(
+            agent_id="test", role="helper",
+            memory=MagicMock(get_tool_history=MagicMock(return_value=[])),
+            skills=MagicMock(), llm=MagicMock(), mesh_client=mesh,
+        )
+        assert loop._excluded_tools is None
+
+    def test_standalone_task_prompt_no_blackboard(self):
+        """Standalone agent task prompt omits blackboard references."""
+        loop = self._make_standalone_loop()
+        assignment = TaskAssignment(
+            workflow_id="wf1", step_id="s1", task_type="research", input_data={},
+        )
+        prompt = loop._build_system_prompt(assignment)
+        assert "blackboard" not in prompt.lower()
+        assert "notify_user to report results" in prompt
+
+    def test_project_task_prompt_has_blackboard(self):
+        """Project agent task prompt includes blackboard references."""
+        loop = self._make_project_loop()
+        assignment = TaskAssignment(
+            workflow_id="wf1", step_id="s1", task_type="research", input_data={},
+        )
+        prompt = loop._build_system_prompt(assignment)
+        assert "blackboard" in prompt.lower()
+        assert "promote" in prompt.lower()
+
+    def test_standalone_chat_prompt_no_blackboard(self):
+        """Standalone agent chat prompt omits blackboard references."""
+        loop = self._make_standalone_loop()
+        prompt = loop._build_chat_system_prompt()
+        assert "blackboard" not in prompt.lower()
+        assert "notify_user to report results" in prompt
+
+    def test_project_chat_prompt_has_blackboard(self):
+        """Project agent chat prompt includes blackboard references."""
+        loop = self._make_project_loop()
+        prompt = loop._build_chat_system_prompt()
+        assert "blackboard" in prompt.lower()
+
+    def test_standalone_task_prompt_no_promote(self):
+        """Standalone task prompt uses simple JSON format without 'promote'."""
+        loop = self._make_standalone_loop()
+        assignment = TaskAssignment(
+            workflow_id="wf1", step_id="s1", task_type="research", input_data={},
+        )
+        prompt = loop._build_system_prompt(assignment)
+        assert "promote" not in prompt.lower()
+
+    def test_standalone_get_status_excludes_blackboard(self):
+        """get_status capabilities list excludes blackboard tools for standalone."""
+        loop = self._make_standalone_loop()
+        # Use a real SkillRegistry-like mock that respects exclude
+        loop.skills.list_skills = MagicMock(
+            side_effect=lambda exclude=None: (
+                [n for n in ["memory_save", "read_shared_state", "notify_user"]
+                 if not exclude or n not in exclude]
+            ),
+        )
+        status = loop.get_status()
+        assert "read_shared_state" not in status.capabilities
+        assert "notify_user" in status.capabilities
+        assert "memory_save" in status.capabilities

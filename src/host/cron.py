@@ -296,21 +296,29 @@ class CronScheduler:
 
                         # Hardcoded operating rules — always included, cannot be
                         # overridden by agent-editable HEARTBEAT.md
-                        sections.append(
+                        agent_standalone = ctx.get("is_standalone", False)
+                        hb_rules = (
                             "## Heartbeat Operating Rules (non-negotiable)\n\n"
                             "1. Be ECONOMICAL. Each heartbeat costs API credits. "
                             "Only call tools if there is actual work to do.\n"
                             "2. If nothing needs attention, respond HEARTBEAT_OK "
                             "immediately. Do NOT make unnecessary tool calls.\n"
                             "3. Report what you worked on to the USER via "
-                            "notify_user — not the blackboard.\n"
-                            "4. The blackboard is for sharing data with other "
-                            "agents. Do NOT write status updates or progress "
-                            "reports there.\n"
-                            "5. Do NOT change your heartbeat schedule to run "
-                            "more frequently unless the user asked you to. "
-                            "More frequent heartbeats waste credits."
+                            "notify_user.\n"
                         )
+                        if not agent_standalone:
+                            hb_rules += (
+                                "4. The blackboard is for sharing data with other "
+                                "agents. Do NOT write status updates or progress "
+                                "reports there.\n"
+                            )
+                        hb_rules += (
+                            f"{'4' if agent_standalone else '5'}. Do NOT change "
+                            "your heartbeat schedule to run more frequently unless "
+                            "the user asked you to. More frequent heartbeats "
+                            "waste credits."
+                        )
+                        sections.append(hb_rules)
 
                         rules = ctx.get("heartbeat_rules", "")
                         if rules and not is_default:

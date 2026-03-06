@@ -358,22 +358,15 @@ class TestDepthTracking:
 class TestWaitForSubagent:
     @pytest.mark.asyncio
     async def test_wait_for_subagent_basic(self):
-        """Wait for a completed subagent and get its result from blackboard."""
+        """Wait for a completed subagent and get its result from the task."""
         _cleanup()
 
         mock_mesh = AsyncMock()
         mock_mesh.agent_id = "wait-parent"
-        # read_blackboard returns raw BlackboardEntry dict (no "exists" field)
-        mock_mesh.read_blackboard = AsyncMock(return_value={
-            "key": "subagent_results/wait-parent/sub_1",
-            "value": {"status": "complete", "result": "done"},
-            "written_by": "sub_1",
-            "version": 1,
-        })
 
-        # Create a task that completes immediately
+        # Create a task that completes immediately with full result data
         async def instant():
-            return {"status": "complete"}
+            return {"status": "complete", "result": "done"}
 
         task = asyncio.create_task(instant())
         _active_subagents["wait-parent"] = {"sub_1": task}
@@ -429,14 +422,15 @@ class TestWaitForSubagent:
 
     @pytest.mark.asyncio
     async def test_wait_for_subagent_no_mesh_client(self):
-        """Wait without mesh_client returns fallback result after task completes."""
+        """Wait without mesh_client returns fallback result when task has no dict."""
         _cleanup()
 
         async def instant():
-            return {}
+            raise RuntimeError("simulated failure")
 
         task = asyncio.create_task(instant())
-        # mesh_client=None → parent_id="unknown"
+        await asyncio.sleep(0)  # let the task finish
+        # mesh_client=None → parent_id="unknown", skips blackboard fallback
         _active_subagents["unknown"] = {"sub_no_mesh": task}
 
         result = await wait_for_subagent("sub_no_mesh", timeout=5, mesh_client=None)
@@ -447,7 +441,7 @@ class TestWaitForSubagent:
 
     @pytest.mark.asyncio
     async def test_wait_for_subagent_blackboard_read_fails(self):
-        """Wait succeeds with fallback when blackboard read raises."""
+        """Wait succeeds with fallback when task raises and blackboard read raises."""
         _cleanup()
 
         mock_mesh = AsyncMock()
@@ -455,9 +449,10 @@ class TestWaitForSubagent:
         mock_mesh.read_blackboard = AsyncMock(side_effect=Exception("connection lost"))
 
         async def instant():
-            return {}
+            raise RuntimeError("simulated failure")
 
         task = asyncio.create_task(instant())
+        await asyncio.sleep(0)  # let the task finish
         _active_subagents["bb-fail-parent"] = {"sub_bbfail": task}
 
         result = await wait_for_subagent("sub_bbfail", timeout=5, mesh_client=mock_mesh)
@@ -468,7 +463,7 @@ class TestWaitForSubagent:
 
     @pytest.mark.asyncio
     async def test_wait_for_subagent_blackboard_returns_none(self):
-        """Wait succeeds with fallback when blackboard key not found (404)."""
+        """Wait succeeds with fallback when task raises and blackboard returns None."""
         _cleanup()
 
         mock_mesh = AsyncMock()
@@ -476,9 +471,10 @@ class TestWaitForSubagent:
         mock_mesh.read_blackboard = AsyncMock(return_value=None)
 
         async def instant():
-            return {}
+            raise RuntimeError("simulated failure")
 
         task = asyncio.create_task(instant())
+        await asyncio.sleep(0)  # let the task finish
         _active_subagents["bb-none-parent"] = {"sub_bbnone": task}
 
         result = await wait_for_subagent("sub_bbnone", timeout=5, mesh_client=mock_mesh)

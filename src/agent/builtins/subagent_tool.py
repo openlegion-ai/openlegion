@@ -167,8 +167,8 @@ async def _run_subagent(
     description=(
         "Spawn a lightweight subagent to handle a subtask in parallel. "
         "The subagent runs in the same container with its own memory and workspace. "
-        "Results are written to the blackboard at subagent_results/<your_id>/<subagent_id>. "
-        "Use read_shared_state to check results. Max 3 concurrent, max depth 2. "
+        "Use wait_for_subagent to get results when done. "
+        "Max 3 concurrent, max depth 2. "
         "NOTE: Subagents should not use browser tools (shared browser state)."
     ),
     parameters={
@@ -274,9 +274,8 @@ async def list_subagents(*, mesh_client=None) -> dict:
 @skill(
     name="wait_for_subagent",
     description=(
-        "Wait for a subagent to complete and return its result. "
-        "Use after spawn_subagent instead of polling read_shared_state. "
-        "Returns the subagent's result directly."
+        "Wait for a subagent to complete and return its result directly. "
+        "Use after spawn_subagent. Returns the subagent's result."
     ),
     parameters={
         "subagent_id": {
@@ -303,7 +302,17 @@ async def wait_for_subagent(
         await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
     except asyncio.TimeoutError:
         return {"error": f"Subagent {subagent_id} did not complete within {timeout}s", "timed_out": True}
-    # Task is done — read result from blackboard
+    except Exception:
+        pass  # Task raised — handled by task.result() below
+    # Task is done — get result from the asyncio task directly
+    try:
+        result_data = task.result()
+        if isinstance(result_data, dict):
+            return {"subagent_id": subagent_id, "completed": True, **result_data}
+    except Exception as e:
+        logger.warning("Failed to get subagent result from task: %s", e)
+
+    # Fallback: try reading from blackboard (for project agents)
     result_key = f"subagent_results/{parent_id}/{subagent_id}"
     if mesh_client:
         try:
