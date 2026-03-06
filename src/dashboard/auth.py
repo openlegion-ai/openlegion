@@ -20,8 +20,10 @@ from src.shared.utils import setup_logging
 logger = setup_logging("dashboard.auth")
 
 _ACCESS_TOKEN_PATH = "/opt/openlegion/.access_token"
+_HOSTED_INDICATOR = "/opt/openlegion/.subdomain"
 _cached_cookie_key: bytes | None = None
 _cookie_key_loaded = False
+_is_hosted: bool | None = None
 
 # Maximum cookie lifetime (defense-in-depth).  Even if the auth gate
 # issues a longer-lived cookie, the engine rejects cookies older than this.
@@ -60,7 +62,14 @@ def verify_session_cookie(cookie_value: str) -> str | None:
     """
     key = _dashboard_cookie_key()
     if key is None:
-        return None  # No access token — self-hosted / dev mode, skip check
+        # No access token — allow in dev/self-hosted mode, but deny in
+        # hosted mode where the auth gate should always be running.
+        global _is_hosted
+        if _is_hosted is None:
+            _is_hosted = Path(_HOSTED_INDICATOR).exists()
+        if _is_hosted:
+            return "Dashboard authentication required (access token not configured)"
+        return None  # Dev / self-hosted mode — skip check
     if not cookie_value:
         return "Dashboard authentication required"
     try:

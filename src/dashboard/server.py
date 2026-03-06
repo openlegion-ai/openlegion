@@ -117,7 +117,14 @@ def create_dashboard_router(
             api_base="/dashboard/api",
             v=ASSET_VERSION,
         )
-        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+        return HTMLResponse(html, headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": (
+                "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+                "style-src 'self' 'unsafe-inline'; "
+                "object-src 'none'"
+            ),
+        })
 
     def _browser_vnc_url_for_request(request: Request) -> str | None:
         """Build shared browser VNC URL using the request host.

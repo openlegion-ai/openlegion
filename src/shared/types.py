@@ -173,7 +173,7 @@ class AgentPermissions(BaseModel):
     allowed_credentials: list[str] = []
     can_use_browser: bool = True
     can_spawn: bool = False
-    can_manage_cron: bool = True
+    can_manage_cron: bool = False
 
 
 # === Projects ===
