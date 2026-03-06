@@ -23,8 +23,9 @@ logger = setup_logging("setup_wizard")
 if TYPE_CHECKING:
     from src.host.credentials import CredentialVault
 
-# OAuth setup-token constants (shared with credentials.py)
-_OAUTH_TOKEN_PREFIX = "sk-ant-oat01-"
+from src.host.credentials import _OAUTH_TOKEN_PREFIX
+
+# Minimum expected length for a valid OAuth setup-token
 _OAUTH_MIN_LENGTH = 90
 
 # Validation models: cheapest model per provider for key checks
@@ -418,15 +419,12 @@ class SetupWizard:
         """Test an OAuth token with a minimal API call."""
         import httpx as _httpx
 
-        from src.host.credentials import _ANTHROPIC_API_URL, _CLAUDE_CLI_VERSION
+        from src.host.credentials import (
+            _ANTHROPIC_API_URL,
+            CredentialVault,
+        )
 
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-            "anthropic-version": "2023-06-01",
-            "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
-            "user-agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
-        }
+        headers = CredentialVault._oauth_headers(token)
         body = {
             "model": "claude-haiku-4-5-20251001",
             "max_tokens": 1,

@@ -610,7 +610,7 @@ class CredentialVault:
             elif tool_choice == "required":
                 body["tool_choice"] = {"type": "any"}
             elif tool_choice == "none":
-                pass  # Anthropic doesn't have "none" — just omit tools
+                body.pop("tools", None)  # Anthropic has no "none" — omit tools entirely
             elif isinstance(tool_choice, dict) and "function" in tool_choice:
                 body["tool_choice"] = {
                     "type": "tool",
@@ -693,6 +693,7 @@ class CredentialVault:
 
         if not resp.is_success:
             error_text = resp.text[:500]
+            self._health_tracker.record_failure(model, "HTTPError", resp.status_code)
             raise RuntimeError(
                 f"Anthropic API error (HTTP {resp.status_code}): {error_text}"
             )

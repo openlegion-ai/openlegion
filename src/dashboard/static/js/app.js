@@ -2713,7 +2713,7 @@ function dashboard() {
       if (this.onboardSaving) return;
       if (!this.onboardProvider || !this.onboardKey.trim()) return;
       this.onboardSaving = true;
-      const isOAuth = this.onboardAuthType === 'oauth';
+      const isOAuth = this.onboardAuthType === 'oauth' && this.onboardProvider === 'anthropic';
       this.showToast(isOAuth ? 'Validating token...' : 'Validating API key...');
       try {
         const baseUrl = isOAuth ? '' : this.onboardBaseUrl.trim();

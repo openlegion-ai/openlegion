@@ -1304,6 +1304,18 @@ class TestOAuthTokenHandling:
         body = CredentialVault._build_anthropic_body(params)
         assert body["top_p"] == 0.9
 
+    def test_build_anthropic_body_tool_choice_none_removes_tools(self):
+        """tool_choice='none' removes tools from body entirely."""
+        params = {
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [{"function": {"name": "t", "parameters": {"type": "object"}}}],
+            "tool_choice": "none",
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        assert "tools" not in body
+        assert "tool_choice" not in body
+
 
 # ── OAuth async integration tests ─────────────────────────────
 
@@ -1406,6 +1418,78 @@ async def test_oauth_chat_401_non_json(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="OAuth authentication failed"):
         await v._oauth_chat(req, "sk-ant-oat01-" + "x" * 80, "anthropic/claude-sonnet-4-6")
+
+
+@pytest.mark.asyncio
+async def test_oauth_chat_401_oauth_disabled(monkeypatch):
+    """_oauth_chat raises specific message when Anthropic disables OAuth."""
+    import httpx
+
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
+    v = CredentialVault()
+
+    mock_response = httpx.Response(
+        401,
+        json={"error": {"message": "OAuth access has been disabled for this application"}},
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+    )
+
+    async def mock_post(*args, **kwargs):
+        return mock_response
+
+    mock_client = MagicMock()
+    mock_client.post = mock_post
+    mock_client.is_closed = False
+    v._http_client = mock_client
+
+    req = APIProxyRequest(
+        service="llm", action="chat",
+        params={
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    with pytest.raises(RuntimeError, match="disabled OAuth for third-party"):
+        await v._oauth_chat(req, "sk-ant-oat01-" + "x" * 80, "anthropic/claude-sonnet-4-6")
+
+
+@pytest.mark.asyncio
+async def test_oauth_chat_500_records_health_failure(monkeypatch):
+    """_oauth_chat records health failure for server errors."""
+    import httpx
+
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
+    v = CredentialVault()
+
+    mock_response = httpx.Response(
+        500,
+        text="Internal Server Error",
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+    )
+
+    async def mock_post(*args, **kwargs):
+        return mock_response
+
+    mock_client = MagicMock()
+    mock_client.post = mock_post
+    mock_client.is_closed = False
+    v._http_client = mock_client
+
+    req = APIProxyRequest(
+        service="llm", action="chat",
+        params={
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        await v._oauth_chat(req, "sk-ant-oat01-" + "x" * 80, "anthropic/claude-sonnet-4-6")
+
+    # Verify health tracker recorded the failure
+    status = v._health_tracker.get_status()
+    model_status = [s for s in status if s["model"] == "anthropic/claude-sonnet-4-6"]
+    assert len(model_status) == 1
+    assert model_status[0]["failure_count"] > 0
 
 
 @pytest.mark.asyncio

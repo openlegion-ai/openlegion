@@ -930,7 +930,7 @@ def create_dashboard_router(
             if fmt_error:
                 return {"valid": False, "skipped": False, "reason": fmt_error}
             import asyncio
-            valid = await asyncio.get_event_loop().run_in_executor(
+            valid = await asyncio.get_running_loop().run_in_executor(
                 None, SetupWizard._validate_oauth_token_live, key,
             )
             if valid:
