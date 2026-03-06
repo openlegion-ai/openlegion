@@ -173,6 +173,8 @@ class CronScheduler:
             message=f"Heartbeat check for {agent}", heartbeat=True,
         )
 
+    _UPDATABLE_FIELDS = frozenset({"schedule", "message", "enabled", "suppress_empty"})
+
     async def update_job(self, job_id: str, **kwargs) -> CronJob | None:
         """Update fields on an existing cron job. Returns updated job or None."""
         async with self._job_locks[job_id]:
@@ -180,7 +182,7 @@ class CronScheduler:
             if not job:
                 return None
             for k, v in kwargs.items():
-                if hasattr(job, k) and k != "id":
+                if k in self._UPDATABLE_FIELDS and hasattr(job, k):
                     setattr(job, k, v)
             self._save()
             return job

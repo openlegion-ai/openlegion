@@ -639,9 +639,16 @@ class SandboxBackend(RuntimeBackend):
             env_cfg["THINKING"] = thinking
         env_cfg.update(self.extra_env)
 
+        def _quote_env_value(v: str) -> str:
+            """Quote a value for env-file format, escaping special chars."""
+            v = v.replace("\\", "\\\\").replace('"', '\\"')
+            v = v.replace("$", "\\$").replace("`", "\\`")
+            v = v.replace("\n", "\\n").replace("\r", "")
+            return f'"{v}"'
+
         env_file = ws / ".agent.env"
         env_file.write_text(
-            "\n".join(f"{k}={v}" for k, v in env_cfg.items()) + "\n"
+            "\n".join(f"{k}={_quote_env_value(v)}" for k, v in env_cfg.items()) + "\n"
         )
         return ws
 

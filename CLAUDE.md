@@ -266,6 +266,7 @@ pytest tests/test_loop.py -x -v
 
 ### Conventions
 
+- **Always run tests in a subagent.** Use the Agent tool to run `pytest` so the main context window isn't polluted with test output. This applies to both running existing tests and verifying new ones.
 - Mock LLM responses, not the loop. See `tests/test_loop.py:_make_loop()`.
 - Use `AsyncMock` for async methods.
 - SQLite in-memory or `tmp_path` for database paths.
@@ -341,36 +342,13 @@ pytest tests/test_loop.py -x -v
 ## Review State
 
 ### Plan
-Stage 2 complete. See `/REVIEW_FINDINGS.md` for full prior findings.
-New review (2026-03-06) starting — 14 files changed since last review with 600+ lines of new code. Focus areas: VNC proxy security, template system, browser resource scaling, dashboard event handling.
+Stage 3 complete (2026-03-06). Two full review passes completed. All CRITICAL and HIGH findings fixed. Test suite: 1779 passed, 0 regressions, 28 skipped, 2 pre-existing dashboard test failures (unrelated).
 
 ### Completed Units
-Units 1-16 (all engine units) — prior review as of commit `d840e4a`.
+- Units 1-16 (all engine units) — prior review as of commit `d840e4a`
+- Units E1-E6 (2026-03-06 review): credentials/OAuth, workspace, loop, server, cron, subagent, mesh_tool, host/server, host/runtime, templates
 
-### Post-Review Changes (since d840e4a, 2026-03-05)
-Key commits requiring fresh review:
-- `2a136cc` fix: allow x-mesh-internal header to bypass auth on internal endpoints
-- `7db7bcb` feat: forward proxy env vars to browser container
-- `51a4738`..`e0bfd52` (12 commits): KasmVNC integration and VNC proxy in dashboard/server.py + host/server.py
-- `cb709e7` fix: remove duplicate notification event emission
-- `d57b613` fix: pass template workspace seed values to agent container
-- `5022970` fix: workspace_updated events silently dropped
-- `c483efd` feat: skill template selection when creating agents
-- `2708532` feat: scale browser container resources based on plan tier
-
-### Prior Findings Summary (still valid unless superseded by new commits)
-- **CRITICAL (3)**: All fixed in Stage 3
-- **HIGH (8)**: All fixed in Stage 3
-- **MEDIUM (19)**: All addressed in Stage 3
-- See "Fixes Applied" below for complete list
-
-### Outstanding Cross-References
-- VNC proxy in `host/server.py` — needs review for SSRF, auth bypass, WebSocket security
-- Template system in `cli/config.py` — needs review for injection via template YAML values
-- Browser resource scaling in `host/runtime.py` — needs review for resource exhaustion
-- `x-mesh-internal` auth bypass in `host/server.py` — needs review for header spoofing risk
-
-### Fixes Applied (Stage 3, 2026-03-05)
+### Fixes Applied (Stage 3, 2026-03-05 — prior review)
 
 **Batch 1 — Dead Weight:**
 - Deleted `src/shared/constants.py` (zero imports)
@@ -401,3 +379,45 @@ Key commits requiring fresh review:
 - M32: Replaced sequential `str.replace()` with `re.sub()` callback in `src/agent/builtins/http_tool.py`
 - M33: Added `_MAX_TIMEOUT = 300` and timeout capping in `src/agent/builtins/exec_tool.py`
 - M34: Changed `item.stat()` to `item.lstat()` in `src/agent/builtins/file_tool.py`
+
+### Fixes Applied (Stage 3, 2026-03-06 — current review)
+
+**Batch 1 — Dead Weight:**
+- Removed dead `load_prompt_context()` method from `src/agent/workspace.py`
+- Removed 4 dead tests for `load_prompt_context` from `tests/test_workspace.py`
+
+**Batch 2 — Standardization:**
+- Extracted `_FLEET_ROSTER_TTL`, `_FALLBACK_MAX_TOKENS`, `_TOOL_HISTORY_LIMIT` constants in `src/agent/loop.py`
+- Added `days` parameter clamping (`max(1, min(days, 14))`) to `/history` endpoint in `src/agent/server.py`
+- Added `_UPDATABLE_FIELDS` frozenset allowlist to `update_job` in `src/host/cron.py`
+- Added `MAX_TTL = 600` constant and TTL clamping in `src/agent/builtins/subagent_tool.py`
+- Added `monthly_usd` budget to all 6 templates in `src/templates/`
+
+**Batch 4 — Bug Fixes:**
+- **CRITICAL**: Added `_convert_messages_to_anthropic()` in `src/host/credentials.py` — converts OpenAI-format tool messages to Anthropic Messages API format for OAuth path. Integrated into `_build_anthropic_body`.
+- Added 2 tests in `tests/test_credentials.py` for Anthropic message conversion
+
+**Batch 5 — Security:**
+- H2: Added `_sanitize_value(result)` to `read_agent_history` return in `src/agent/builtins/mesh_tool.py`
+- M8: Added `sanitize_for_prompt()` to `list_shared_state` key field in `src/agent/builtins/mesh_tool.py`
+- M9: Added localhost validation for `x-mesh-internal` header in `src/host/server.py`
+- M10: Added `ol_session` cookie auth to VNC HTTP proxy in `src/host/server.py`
+- M11: Added `ol_session` cookie auth to VNC WebSocket proxy in `src/host/server.py`
+- M12: Added `_quote_env_value()` for proper .env value escaping in `src/host/runtime.py`
+- Updated 3 test assertions in `tests/test_runtime.py` for quoted .env format
+
+### Outstanding Findings (not fixed — deferred)
+- H1: No OAuth token refresh/expiry handling (design decision needed)
+- H3: Template pub/sub permissions overridden by collaboration-mode wildcards
+- H4: No `_oauth_chat_stream` tests (test coverage gap)
+- M1: OAuth bypasses failover chain (structural change)
+- M2: Network failures during OAuth validation treated as valid
+- M3: OAuth error messages may leak token data
+- M4: Self-evolution feedback loop risk
+- M5: Task mode doesn't refresh system prompt after workspace writes
+- M13-M15: Template workflow issues (name collisions, feedback loops, missing conditions)
+- Batch 3 (consolidation) skipped: duplicated tool call construction, duplicated OAuth auth-choice prompt, `search()` using direct file reads instead of `_read_file()`
+
+### Pre-Existing Test Failures (not regressions)
+- `test_dashboard.py::TestDashboardAgentsAPI::test_api_agents_returns_fleet` — expects 2 agents but gets 5 (reads actual mesh.yaml from disk instead of mocked config)
+- `test_dashboard.py::TestDashboardAgentsAPI::test_api_agents_empty_registry` — same root cause

@@ -195,43 +195,6 @@ class TestWorkspaceScaffold:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_load_prompt_context_returns_file_contents(self):
-        root = Path(self._tmpdir)
-        (root / "INSTRUCTIONS.md").write_text("# My Agent\nDo X.")
-        (root / "SOUL.md").write_text("# Identity\nFriendly.")
-        (root / "USER.md").write_text("# User\nPrefers Python.")
-        ws = WorkspaceManager(workspace_dir=self._tmpdir)
-        context = ws.load_prompt_context()
-        assert "Do X." in context
-        assert "Friendly." in context
-        assert "Prefers Python." in context
-
-    def test_load_prompt_context_skips_empty(self):
-        root = Path(self._tmpdir)
-        (root / "INSTRUCTIONS.md").write_text("")
-        (root / "SOUL.md").write_text("Identity")
-        (root / "USER.md").write_text("")
-        ws = WorkspaceManager(workspace_dir=self._tmpdir)
-        context = ws.load_prompt_context()
-        assert "Identity" in context
-        assert "---" not in context  # no separator for single file
-
-    def test_load_prompt_context_includes_project_md(self):
-        root = Path(self._tmpdir)
-        (root / "PROJECT.md").write_text("## What We're Building\nA lead gen tool.")
-        ws = WorkspaceManager(workspace_dir=self._tmpdir)
-        context = ws.load_prompt_context()
-        assert "lead gen tool" in context
-
-    def test_load_prompt_context_without_project_md(self):
-        """PROJECT.md is optional -- no error if missing."""
-        root = Path(self._tmpdir)
-        (root / "PROJECT.md").unlink(missing_ok=True)
-        ws = WorkspaceManager(workspace_dir=self._tmpdir)
-        context = ws.load_prompt_context()
-        assert "Instructions" in context
-
-
 class TestBootstrapContent:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()

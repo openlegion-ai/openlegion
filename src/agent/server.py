@@ -149,6 +149,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     @app.get("/history")
     async def get_history(days: int = 3) -> dict:
         """Return this agent's daily logs for inter-agent context sharing."""
+        days = max(1, min(days, 14))
         if not loop.workspace:
             return {"agent_id": loop.agent_id, "logs": [], "memory": ""}
         daily = loop.workspace.load_daily_logs(days=days)

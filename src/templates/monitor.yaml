@@ -45,6 +45,7 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 3.0
+      monthly_usd: 60.0
 
   analyst:
     role: Monitor analyst — investigates alerts and provides context
@@ -76,3 +77,4 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 5.0
+      monthly_usd: 100.0
