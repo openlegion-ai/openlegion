@@ -169,21 +169,8 @@ class AgentLoop:
             else:
                 lines.append(f"- **{agent['name']}**")
         lines.append(
-            "\n## Blackboard = Agent-to-Agent Collaboration ONLY\n"
-            "The blackboard is for coordinating with other agents — NOT for reporting to the user.\n"
-            "Use it to:\n"
-            "- **Share data other agents need**: `write_shared_state(key='findings/<topic>', ...)`\n"
-            "- **Read teammates' work**: `list_shared_state(prefix='findings/')` then `read_shared_state(key=...)`\n"
-            "- **Request work from a teammate**: write to `tasks/<agent_name>`\n"
-            "- **Publish artifacts for other agents**: `save_artifact(name=..., content=...)`\n"
-            "\nDo NOT write status updates, progress reports, or summaries to the blackboard.\n"
-            "Keep blackboard writes focused and minimal — only what another agent needs to act on.\n"
-            "\n## Reporting to the User\n"
-            "Report progress, results, and updates to the user via:\n"
-            "- **Chat responses**: when the user is talking to you directly\n"
-            "- **notify_user(message)**: push updates when working autonomously "
-            "(heartbeat, cron, long tasks)\n"
-            "\nThe user wants to hear from you — don't just write to the blackboard and go silent."
+            "\nCoordinate via blackboard — write only data a teammate needs to act on.\n"
+            "Report results to the user via chat or notify_user, not the blackboard."
         )
         return "\n".join(lines)
 
@@ -684,10 +671,12 @@ class AgentLoop:
             f"## Available Tools\n\n{tools_desc}\n\n"
             f"## Operating Rules\n"
             f"- Act first — call tools immediately, explain results after.\n"
+            f"- Never refuse without trying. Attempt the task, report blockers after.\n"
+            f"- Before acting on past context, run memory_search first.\n"
             f"- When done, respond with JSON: "
             f"{{\"result\": {{...}}, \"promote\": {{...}}}} "
             f"('promote' = data other agents need).\n"
-            f"- Use notify_user for the user; blackboard for other agents.\n"
+            f"- Use notify_user for the user; blackboard for other agents only.\n"
             f"- You have max {self.MAX_ITERATIONS} iterations.\n"
             f"- Use update_workspace to evolve your SOUL.md, INSTRUCTIONS.md, "
             f"USER.md, and HEARTBEAT.md over time.\n",
@@ -1087,8 +1076,9 @@ class AgentLoop:
             f"## Available Tools\n\n{tools_desc}\n\n"
             f"## Operating Rules\n"
             f"- Act first — call tools immediately. Report results, not intentions.\n"
+            f"- Never refuse without trying. Attempt the task, report blockers after.\n"
             f"- Make decisions with reasonable defaults. Ask only when truly ambiguous.\n"
-            f"- Use notify_user for the user; blackboard for other agents.\n"
+            f"- Use notify_user for the user; blackboard for other agents only.\n"
             f"- Before answering from memory, run memory_search first.\n"
         )
 
@@ -1101,15 +1091,17 @@ class AgentLoop:
 
         rules += (
             "\n## Self-Evolution\n"
-            "Use update_workspace to evolve these files across sessions:\n"
-            "- **INSTRUCTIONS.md**: procedures, rules, domain knowledge.\n"
-            "- **SOUL.md**: identity, communication style.\n"
-            "- **USER.md**: user preferences and corrections.\n"
-            "- **HEARTBEAT.md**: autonomous wakeup rules.\n"
-            "When the user corrects you, save it to USER.md immediately.\n"
-            "When you discover a better approach, update INSTRUCTIONS.md.\n"
+            "You improve across sessions by updating your workspace files:\n"
+            "- **INSTRUCTIONS.md**: add procedures, rules, and domain knowledge "
+            "you discover.\n"
+            "- **SOUL.md**: refine your identity and communication style "
+            "based on feedback.\n"
+            "- **USER.md**: record user preferences, corrections, and context "
+            "immediately when given.\n"
+            "- **HEARTBEAT.md**: tune your autonomous wakeup behavior.\n\n"
+            "Read the file first before updating — merge, don't overwrite.\n"
             "When errors repeat, distill the pattern into INSTRUCTIONS.md "
-            "and clear the resolved entries from errors.md.\n"
+            "and clear resolved entries from errors.md.\n"
         )
         parts.append(rules)
 
