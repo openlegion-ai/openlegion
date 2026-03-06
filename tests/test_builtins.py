@@ -4,7 +4,7 @@ import math
 import os
 import shutil
 import tempfile
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
