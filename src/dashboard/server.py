@@ -1237,7 +1237,10 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="value must be a JSON object")
         value_size = len(_json.dumps(value, default=str))
         if value_size > _MAX_BB_VALUE_BYTES:
-            raise HTTPException(status_code=413, detail=f"Value too large ({value_size} bytes, max {_MAX_BB_VALUE_BYTES})")
+            raise HTTPException(
+                status_code=413,
+                detail=f"Value too large ({value_size} bytes, max {_MAX_BB_VALUE_BYTES})",
+            )
         # Always attribute to "dashboard" — never trust client-supplied written_by
         # to prevent impersonation of agents via the dashboard API.
         entry = blackboard.write(key, value, written_by="dashboard")
