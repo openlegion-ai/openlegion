@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -50,6 +51,7 @@ class EventBus:
         self._clients: list[_Subscription] = []
         self._loop: asyncio.AbstractEventLoop | None = None
         self._seq: int = 0  # monotonic sequence counter
+        self._lock = threading.Lock()
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind to the mesh server's event loop. Idempotent."""
@@ -66,9 +68,10 @@ class EventBus:
         """
         evt = DashboardEvent(type=event_type, agent=agent, data=data or {})
         evt_dict = evt.model_dump(mode="json")
-        self._seq += 1
-        evt_dict["_seq"] = self._seq
-        self._buffer.append(evt_dict)
+        with self._lock:
+            self._seq += 1
+            evt_dict["_seq"] = self._seq
+            self._buffer.append(evt_dict)
 
         if not self._clients:
             return

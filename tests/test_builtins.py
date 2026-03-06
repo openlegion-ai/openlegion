@@ -1125,22 +1125,6 @@ class TestCredentialRedaction:
         bt._resolved_credential_values.clear()
 
 
-class TestBrowserEvaluateHttpClient:
-    """browser_evaluate sends evaluate command through mesh_client."""
-
-    @pytest.mark.asyncio
-    async def test_evaluate_calls_browser_command(self):
-        from src.agent.builtins.browser_tool import browser_evaluate
-
-        mc = AsyncMock()
-        mc.browser_command = AsyncMock(return_value={"result": "Hello World"})
-
-        result = await browser_evaluate(script="document.title", mesh_client=mc)
-
-        mc.browser_command.assert_awaited_once_with("evaluate", {"expression": "document.title"})
-        assert result["result"] == "Hello World"
-
-
 class TestBrowserResetHttpClient:
     """browser_reset sends reset command and clears credential tracking."""
 
@@ -1193,12 +1177,6 @@ class TestBrowserNoMeshClient:
     async def test_click_no_mesh(self):
         from src.agent.builtins.browser_tool import browser_click
         result = await browser_click(ref="e1", mesh_client=None)
-        assert "error" in result
-
-    @pytest.mark.asyncio
-    async def test_evaluate_no_mesh(self):
-        from src.agent.builtins.browser_tool import browser_evaluate
-        result = await browser_evaluate(script="1+1", mesh_client=None)
         assert "error" in result
 
     @pytest.mark.asyncio

@@ -24,6 +24,8 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         kwargs["lifespan"] = lifespan
     app = FastAPI(**kwargs)
     auth_token = os.environ.get("BROWSER_AUTH_TOKEN", "")
+    if not auth_token:
+        logger.warning("BROWSER_AUTH_TOKEN not set — browser service auth is DISABLED")
 
     def _verify_auth(request: Request) -> None:
         if not auth_token:

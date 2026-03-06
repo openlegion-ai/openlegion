@@ -714,8 +714,12 @@ def _remove_project_blackboard_permissions(agent: str, project: str) -> None:
     agent_perms = perms.get("permissions", {}).get(agent)
     if agent_perms is None:
         return
-    agent_perms["blackboard_read"] = []
-    agent_perms["blackboard_write"] = []
+    project_pattern = f"projects/{project}/*"
+    for field in ("blackboard_read", "blackboard_write"):
+        patterns = agent_perms.get(field, [])
+        if project_pattern in patterns:
+            patterns.remove(project_pattern)
+        agent_perms[field] = patterns
     _save_permissions(perms)
 
 

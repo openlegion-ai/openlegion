@@ -11,6 +11,7 @@ No separate Xvfb is needed.
 from __future__ import annotations
 
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -44,10 +45,11 @@ def _start_kasmvnc() -> subprocess.Popen:
     mapping, so disabling auth is safe.
     """
     # .kasmpasswd still needed for KasmVNC internals even with -disableBasicAuth
+    vnc_password = secrets.token_urlsafe(16)
     kasmpasswd = os.path.expanduser("~/.kasmpasswd")
     subprocess.run(
         ["kasmvncpasswd", "-u", "browser", "-ow", kasmpasswd],
-        input="openlegion\nopenlegion\n",
+        input=f"{vnc_password}\n{vnc_password}\n",
         text=True,
         capture_output=True,
     )
@@ -126,6 +128,7 @@ def main() -> None:
                 proc.wait(timeout=5)
             except Exception:
                 proc.kill()
+                proc.wait()
         logger.info("Browser service shut down")
 
     app = create_browser_app(manager, lifespan=lifespan)

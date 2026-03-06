@@ -259,21 +259,6 @@ async def browser_scroll(
     return await _browser_command(mesh_client, "scroll", params)
 
 
-@skill(
-    name="browser_evaluate",
-    description=(
-        "Execute JavaScript in the browser page and return the result. "
-        "Use for DOM inspection, extracting data, or triggering page actions "
-        "that CSS selectors can't reach."
-    ),
-    parameters={
-        "script": {"type": "string", "description": "JavaScript code to evaluate"},
-    },
-)
-async def browser_evaluate(script: str, *, mesh_client=None) -> dict:
-    """Evaluate JavaScript in the page context."""
-    return await _browser_command(mesh_client, "evaluate", {"expression": script})
-
 
 @skill(
     name="browser_reset",

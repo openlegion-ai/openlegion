@@ -52,6 +52,13 @@ def _compute_asset_version() -> str:
 ASSET_VERSION = _compute_asset_version()
 
 
+def _verify_dashboard_auth(request: Request) -> None:
+    """Verify the ol_session cookie on dashboard API requests."""
+    error = verify_session_cookie(request.cookies.get("ol_session", ""))
+    if error is not None:
+        raise HTTPException(401, error)
+
+
 def create_dashboard_router(
     blackboard: Blackboard,
     health_monitor: HealthMonitor | None,
@@ -79,12 +86,6 @@ def create_dashboard_router(
     _max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
     _max_projects = int(os.environ.get("OPENLEGION_MAX_PROJECTS", "0"))
     _projects_disabled = _max_projects == 0 and "OPENLEGION_MAX_PROJECTS" in os.environ
-
-    def _verify_dashboard_auth(request: Request) -> None:
-        """Verify the ol_session cookie on dashboard API requests."""
-        error = verify_session_cookie(request.cookies.get("ol_session", ""))
-        if error is not None:
-            raise HTTPException(401, error)
 
     api_router = APIRouter(
         prefix="/dashboard",
@@ -120,8 +121,11 @@ def create_dashboard_router(
         return HTMLResponse(html, headers={
             "Cache-Control": "no-store",
             "Content-Security-Policy": (
+                "default-src 'self'; "
                 "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
                 "style-src 'self' 'unsafe-inline'; "
+                "connect-src 'self'; "
+                "frame-src 'self'; "
                 "object-src 'none'"
             ),
         })
@@ -249,7 +253,6 @@ def create_dashboard_router(
     @api_router.post("/api/agents")
     async def api_add_agent(request: Request) -> dict:
         """Add a new agent: create config, start container, register."""
-        import re
         body = await request.json()
         name = body.get("name", "").strip()
         role = body.get("role", "").strip()
@@ -282,8 +285,7 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="Avatar must be an integer between 1 and 50")
 
         if template:
-            import re as _re
-            if not _re.match(r"^[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]*$", template):
+            if not re.match(r"^[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]*$", template):
                 raise HTTPException(status_code=400, detail="Invalid template id format")
 
         if not model:
@@ -331,7 +333,6 @@ def create_dashboard_router(
             acfg = cfg.get("agents", {}).get(name, {})
             if template:
                 role = acfg.get("role", role)
-            import os
             skills_dir = os.path.abspath(acfg.get("skills_dir", ""))
             # Pass workspace seed values via extra_env so the agent
             # container writes template content into SOUL.md etc.
@@ -979,7 +980,6 @@ def create_dashboard_router(
 
     @api_router.post("/api/credentials")
     async def api_add_credential(request: Request) -> dict:
-        import re
         if credential_vault is None:
             raise HTTPException(status_code=503, detail="Credential vault not available")
         body = await request.json()
@@ -1736,8 +1736,11 @@ def create_spa_catchall_router() -> APIRouter:
     """
     from jinja2 import Environment, FileSystemLoader
 
-    env = Environment(loader=FileSystemLoader(str(_TEMPLATES_DIR)))
-    catchall = APIRouter()
+    env = Environment(
+        loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+        autoescape=True,
+    )
+    catchall = APIRouter(dependencies=[Depends(_verify_dashboard_auth)])
 
     @catchall.get("/{path:path}", response_class=HTMLResponse)
     async def spa_catchall(path: str) -> HTMLResponse:
@@ -1748,8 +1751,11 @@ def create_spa_catchall_router() -> APIRouter:
         return HTMLResponse(html, headers={
             "Cache-Control": "no-store",
             "Content-Security-Policy": (
+                "default-src 'self'; "
                 "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
                 "style-src 'self' 'unsafe-inline'; "
+                "connect-src 'self'; "
+                "frame-src 'self'; "
                 "object-src 'none'"
             ),
         })
