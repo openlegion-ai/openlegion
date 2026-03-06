@@ -219,7 +219,10 @@ def create_mesh_app(
         if not _auth_tokens:
             return
         if request.headers.get("x-mesh-internal"):
-            return
+            # Only accept from localhost (Caddy or internal callers)
+            client_host = request.client.host if request.client else ""
+            if client_host in ("127.0.0.1", "::1", "localhost"):
+                return
         auth_header = request.headers.get("authorization", "")
         if not auth_header.startswith("Bearer "):
             raise HTTPException(401, "Missing authentication token")
@@ -1128,6 +1131,11 @@ def create_mesh_app(
     async def vnc_http_proxy(path: str, request: Request):
         """Reverse-proxy HTTP requests to KasmVNC (static files)."""
         _reject_agent_tokens(request)
+        from src.dashboard.auth import verify_session_cookie
+        cookie_value = request.cookies.get("ol_session", "")
+        auth_error = verify_session_cookie(cookie_value)
+        if auth_error is not None:
+            raise HTTPException(401, auth_error)
         import httpx
 
         port = _get_vnc_port()
@@ -1156,9 +1164,14 @@ def create_mesh_app(
     @app.websocket("/vnc/{path:path}")
     async def vnc_ws_proxy(websocket: WebSocket, path: str):
         """Reverse-proxy WebSocket connections to KasmVNC."""
+        # Verify session cookie
+        from src.dashboard.auth import verify_session_cookie
+        cookie_value = websocket.cookies.get("ol_session", "")
+        auth_error = verify_session_cookie(cookie_value)
+        if auth_error is not None:
+            await websocket.close(code=1008, reason=auth_error)
+            return
         # Block agent tokens — could arrive as header or query param.
-        # Dashboard users connect via Caddy which validates session cookies
-        # on the HTTP upgrade request; they never send Bearer tokens.
         if _auth_tokens:
             token = websocket.query_params.get("token", "")
             auth_header = websocket.headers.get("authorization", "")

@@ -86,9 +86,9 @@ class TestSandboxBackend:
         assert (ws / ".agent.env").exists()
 
         env_content = (ws / ".agent.env").read_text()
-        assert "AGENT_ID=alpha" in env_content
-        assert "AGENT_ROLE=test" in env_content
-        assert "LLM_MODEL=openai/gpt-4o-mini" in env_content
+        assert 'AGENT_ID="alpha"' in env_content
+        assert 'AGENT_ROLE="test"' in env_content
+        assert 'LLM_MODEL="openai/gpt-4o-mini"' in env_content
         assert "MESH_AUTH_TOKEN=" in env_content
         assert "alpha" in backend.auth_tokens
 
@@ -162,7 +162,7 @@ class TestSandboxBackend:
         )
 
         env_content = (ws / ".agent.env").read_text()
-        assert "EMBEDDING_MODEL=custom/embed-v2" in env_content
+        assert 'EMBEDDING_MODEL="custom/embed-v2"' in env_content
 
     def test_stop_agent_removes_from_registry(self):
         backend = SandboxBackend.__new__(SandboxBackend)

@@ -156,15 +156,6 @@ class WorkspaceManager:
 
     # ── Reading ──────────────────────────────────────────────
 
-    def load_prompt_context(self) -> str:
-        """Load PROJECT.md, INSTRUCTIONS.md, SOUL.md, USER.md into the system prompt."""
-        parts: list[str] = []
-        for filename in self.PROMPT_FILES:
-            content = self._read_file(filename)
-            if content and content.strip():
-                parts.append(content.strip())
-        return "\n\n---\n\n".join(parts) if parts else ""
-
     def load_memory(self) -> str:
         """Load MEMORY.md content."""
         return self._read_file(self.MEMORY_FILE) or ""

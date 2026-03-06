@@ -177,7 +177,7 @@ async def list_shared_state(prefix: str, *, mesh_client=None) -> dict:
         items = []
         for entry in entries:
             items.append({
-                "key": entry.get("key", ""),
+                "key": sanitize_for_prompt(entry.get("key", "")),
                 "written_by": entry.get("written_by", ""),
                 "updated_at": entry.get("updated_at", ""),
                 "value_preview": _preview(entry.get("value", {})),
@@ -528,7 +528,7 @@ async def read_agent_history(agent_id: str, *, mesh_client=None) -> dict:
         return {"error": "No mesh_client available"}
     try:
         result = await mesh_client.get_agent_history(agent_id)
-        return result
+        return _sanitize_value(result)
     except Exception as e:
         return {"error": f"Failed to read history of '{agent_id}': {e}"}
 

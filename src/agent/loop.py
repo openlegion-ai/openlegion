@@ -33,6 +33,9 @@ _RETRYABLE_STATUS_CODES = {429, 502, 503}
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1  # seconds: 1, 2, 4
 _TOOL_TIMEOUT = 300  # seconds — hard ceiling for a single tool execution
+_FLEET_ROSTER_TTL = 600  # seconds — cache TTL for fleet roster
+_FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
+_TOOL_HISTORY_LIMIT = 10  # recent tool outcomes in system prompt
 
 # Tools that require a project blackboard — excluded for standalone agents.
 _BLACKBOARD_TOOLS = frozenset({
@@ -147,7 +150,7 @@ class AgentLoop:
 
     async def _fetch_fleet_roster(self) -> list[dict]:
         """Fetch and cache the fleet roster from the mesh (TTL: 10 min)."""
-        if self._fleet_roster is not None and (time.time() - self._fleet_roster_ts) < 600:
+        if self._fleet_roster is not None and (time.time() - self._fleet_roster_ts) < _FLEET_ROSTER_TTL:
             return self._fleet_roster
         try:
             registry = await self.mesh_client.list_agents()
@@ -420,7 +423,7 @@ class AgentLoop:
                     if self.context_manager:
                         messages = await self.context_manager.maybe_compact(system_prompt, messages)
                     else:
-                        messages = self._trim_context(messages, max_tokens=100_000)
+                        messages = self._trim_context(messages, max_tokens=_FALLBACK_MAX_TOKENS)
 
                 else:
                     # LLM returned final answer -- task is done
@@ -656,7 +659,7 @@ class AgentLoop:
                         names.append(name)
         return names
 
-    def _build_tool_history_context(self, limit: int = 10) -> str:
+    def _build_tool_history_context(self, limit: int = _TOOL_HISTORY_LIMIT) -> str:
         """Build a system prompt section with recent tool outcomes."""
         history = self.memory.get_tool_history(limit=limit)
         if not history:
@@ -912,7 +915,7 @@ class AgentLoop:
                 system, self._chat_messages,
             )
         else:
-            self._chat_messages = self._trim_context(self._chat_messages, max_tokens=100_000)
+            self._chat_messages = self._trim_context(self._chat_messages, max_tokens=_FALLBACK_MAX_TOKENS)
 
         steered = self._drain_steer_messages()
         if steered:

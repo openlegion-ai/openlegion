@@ -32,6 +32,7 @@ _parent_llm_refs: dict[str, LLMClient] = {}  # agent_id -> LLM reference
 MAX_CONCURRENT = 3
 MAX_DEPTH = 2
 DEFAULT_TTL = 300
+MAX_TTL = 600
 DEFAULT_MAX_ITERATIONS = 10
 
 # Skills that subagents should NOT have (they could cause recursion or contention)
@@ -199,6 +200,8 @@ async def spawn_subagent(
     """Spawn a background subagent for parallel work."""
     if mesh_client is None:
         return {"error": "No mesh_client available"}
+
+    ttl_seconds = min(ttl_seconds, MAX_TTL)
 
     # Determine parent from mesh_client
     parent_id = getattr(mesh_client, "agent_id", "unknown")

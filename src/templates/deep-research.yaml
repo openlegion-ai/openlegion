@@ -36,6 +36,7 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 5.0
+      monthly_usd: 100.0
 
   analyst:
     role: Research analyst — synthesizes sources into structured analysis
@@ -73,6 +74,7 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 8.0
+      monthly_usd: 160.0
 
   writer:
     role: Research writer — produces clear, well-sourced reports
@@ -109,6 +111,7 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 5.0
+      monthly_usd: 100.0
 
 workflow:
   name: research-pipeline

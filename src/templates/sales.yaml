@@ -35,6 +35,7 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 5.0
+      monthly_usd: 100.0
 
   qualifier:
     role: Lead qualifier — scores leads on fit, timing, and budget
@@ -70,6 +71,7 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 3.0
+      monthly_usd: 60.0
 
   outreach:
     role: Outreach specialist — crafts personalized email sequences
@@ -108,6 +110,7 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 3.0
+      monthly_usd: 60.0
 
 workflow:
   name: sales-pipeline

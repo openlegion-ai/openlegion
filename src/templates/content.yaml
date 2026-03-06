@@ -29,6 +29,7 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 5.0
+      monthly_usd: 100.0
 
   writer:
     role: Content writer — creates articles, posts, and documentation
@@ -65,6 +66,7 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 5.0
+      monthly_usd: 100.0
 
   editor:
     role: Editor — reviews content for clarity, accuracy, and engagement
@@ -100,6 +102,7 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 3.0
+      monthly_usd: 60.0
 
 workflow:
   name: content-pipeline

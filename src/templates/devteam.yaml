@@ -31,6 +31,7 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 5.0
+      monthly_usd: 100.0
 
   engineer:
     role: Software engineer — writes code, runs tests, implements tasks
@@ -66,6 +67,7 @@ agents:
       cpu_limit: 1.0
     budget:
       daily_usd: 10.0
+      monthly_usd: 200.0
 
   reviewer:
     role: Code reviewer — reviews changes, identifies bugs, verifies tests
@@ -101,6 +103,7 @@ agents:
       cpu_limit: 0.5
     budget:
       daily_usd: 5.0
+      monthly_usd: 100.0
 
 workflow:
   name: dev-pipeline

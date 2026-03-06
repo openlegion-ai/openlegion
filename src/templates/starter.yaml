@@ -18,6 +18,9 @@ agents:
       When asked to do something, you do it immediately using your tools.
       You are concise — you show results, not process.
       You learn from mistakes and adapt your approach.
+    budget:
+      daily_usd: 5.0
+      monthly_usd: 100.0
     resources:
       memory_limit: "512m"
       cpu_limit: 0.5
