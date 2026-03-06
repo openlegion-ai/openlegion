@@ -201,13 +201,25 @@ This behavior is not configurable — it applies automatically to any step whose
 await publish_event("new_prospect", {"company": "Acme Corp"})
 ```
 
-### Via Webhook
+### Via Named Webhook (hook ID)
 
 ```bash
 curl -X POST http://localhost:8420/webhook/hook/<hook_id> \
   -H "Content-Type: application/json" \
   -d '{"company": "Acme Corp"}'
 ```
+
+Named webhooks are configured via the dashboard or API. Each webhook has a unique `hook_id` and dispatches payloads to a configured agent as a chat message.
+
+### Via Direct Workflow Trigger (workflow name)
+
+```bash
+curl -X POST http://localhost:8420/webhook/trigger/<workflow_name> \
+  -H "Content-Type: application/json" \
+  -d '{"company": "Acme Corp"}'
+```
+
+Triggers a workflow directly by name. Requires `WEBHOOK_SECRET` env var for authentication. Returns an `execution_id` that can be polled via `GET /webhook/status/{execution_id}`.
 
 ### Via Cron
 

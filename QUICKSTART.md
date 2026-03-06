@@ -210,7 +210,7 @@ On first run (no credentials configured), `openlegion start` offers three paths:
 2. **Open the dashboard** — configure everything via the web UI at `/dashboard`
 3. **Skip** — start the runtime and use `/addkey` later in the REPL
 
-The Docker image builds automatically on your first `openlegion start` (~2 min).
+The Docker image builds automatically on your first `openlegion start` (~2 min). Config files (`config/mesh.yaml`, `config/agents.yaml`, `config/permissions.json`) are created automatically during setup.
 
 ---
 

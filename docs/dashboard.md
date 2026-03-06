@@ -243,11 +243,15 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `GET` | `/dashboard/api/messages` | Recent message log |
 | `GET` | `/dashboard/api/workflows` | Workflow definitions |
 | `POST` | `/dashboard/api/workflows/{name}/run` | Trigger a workflow by name |
+| `POST` | `/dashboard/api/workflows/{execution_id}/cancel` | Cancel a workflow execution |
 | `GET` | `/dashboard/api/webhooks` | List configured webhooks |
 | `POST` | `/dashboard/api/webhooks` | Create a webhook endpoint |
 | `DELETE` | `/dashboard/api/webhooks/{name}` | Delete a webhook |
 | `POST` | `/dashboard/api/webhooks/{name}/test` | Send test payload to webhook |
 | `GET` | `/dashboard/api/logs` | Runtime logs (query: lines, level) |
+| `GET` | `/dashboard/api/channels` | List connected messaging channels |
+| `GET` | `/dashboard/api/agent-templates` | Available agent fleet templates |
+| `POST` | `/dashboard/api/browser/{agent_id}/focus` | Focus browser window for agent |
 | `WS` | `/ws/events` | Real-time event stream |
 
 ## Accessibility

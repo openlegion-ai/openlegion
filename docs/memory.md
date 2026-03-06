@@ -76,16 +76,17 @@ Persistent markdown files stored on the agent's `/data/workspace` volume.
 
 ### Core Files
 
-| File | Purpose | When Loaded |
-|------|---------|-------------|
-| `INSTRUCTIONS.md` | Operating procedures, workflow rules, domain knowledge | System prompt |
-| `SOUL.md` | Agent personality and behavioral guidelines | System prompt |
-| `USER.md` | User preferences and working style | System prompt |
-| `MEMORY.md` | Curated long-term facts | System prompt |
-| `PROJECT.md` | Project-wide context (optional, mounted read-only from host) | System prompt |
-| `SYSTEM.md` | System architecture guide + runtime snapshot (auto-generated, read-only) | System prompt |
-| `HEARTBEAT.md` | Autonomous monitoring rules | Heartbeat dispatch (auto-loaded) |
-| `AGENTS.md` | Fleet roster of project peers (auto-generated, read-only, 8K cap) | System prompt |
+| File | Purpose | Cap | When Loaded |
+|------|---------|-----|-------------|
+| `INSTRUCTIONS.md` | Operating procedures, workflow rules, domain knowledge | 8K chars | System prompt |
+| `SOUL.md` | Agent personality and behavioral guidelines | 4K chars | System prompt |
+| `USER.md` | User preferences and working style | 4K chars | System prompt |
+| `MEMORY.md` | Curated long-term facts | 16K chars | System prompt |
+| `PROJECT.md` | Project-wide context (optional, mounted read-only from host) | -- | System prompt |
+| `SYSTEM.md` | System architecture guide + runtime snapshot (auto-generated, read-only) | 6K chars | System prompt |
+| `HEARTBEAT.md` | Autonomous monitoring rules | -- | Heartbeat dispatch (auto-loaded) |
+
+Total bootstrap injection into the system prompt is capped at 40K characters across all files.
 
 ### System File (`SYSTEM.md`)
 
