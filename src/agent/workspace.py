@@ -33,51 +33,11 @@ from src.shared.utils import setup_logging
 logger = setup_logging("agent.workspace")
 
 _SCAFFOLD_FILES: dict[str, str] = {
-    "INSTRUCTIONS.md": (
-        "# Instructions\n\n"
-        "Operating procedures, workflow rules, and domain knowledge.\n"
-        "This file is loaded into your system prompt on every turn.\n\n"
-        "## How to Use This File\n"
-        "- Add step-by-step procedures for recurring tasks\n"
-        "- Record tool usage patterns that work well\n"
-        "- Note domain-specific rules or constraints\n"
-        "- Keep it focused on *what to do* — for *who you are*, use SOUL.md\n"
-    ),
-    "SOUL.md": (
-        "# Identity\n\n"
-        "Personality, tone, and behavioral guidelines.\n"
-        "This shapes how you communicate and approach problems.\n\n"
-        "## How to Use This File\n"
-        "- Define your communication style and tone\n"
-        "- Set behavioral principles (e.g. be concise, show reasoning)\n"
-        "- Note what makes your responses distinctive\n"
-        "- Keep it focused on *who you are* — for *what to do*, use INSTRUCTIONS.md\n"
-    ),
-    "USER.md": (
-        "# User Context\n\n"
-        "Your user's preferences, working style, and important context.\n"
-        "This file is loaded into your system prompt on every turn.\n\n"
-        "## How to Use This File\n"
-        "- Record communication preferences (e.g. concise vs detailed)\n"
-        "- Note project context and domain knowledge\n"
-        "- Track corrections and preferred approaches\n"
-        "- Keep it focused on *your user* — for *your behavior*, use SOUL.md\n"
-    ),
-    "MEMORY.md": (
-        "# Long-Term Memory\n\n"
-        "Curated facts and important information are stored here automatically.\n"
-        "You can also edit this file directly.\n"
-    ),
-    "HEARTBEAT.md": (
-        "# Heartbeat Rules\n\n"
-        "You are woken periodically. On each heartbeat:\n"
-        "1. Check the blackboard for tasks or signals from other agents\n"
-        "2. Continue working toward your current goal\n"
-        "3. Report what you worked on to the user via notify_user\n"
-        "   (what you did, progress made, any blockers)\n"
-        "\nRemember: the blackboard is for collaborating with other agents.\n"
-        "Use notify_user to keep the user informed of your progress.\n"
-    ),
+    "INSTRUCTIONS.md": "# Instructions\n",
+    "SOUL.md": "# Identity\n",
+    "USER.md": "# User Context\n",
+    "MEMORY.md": "# Long-Term Memory\n",
+    "HEARTBEAT.md": "# Heartbeat Rules\n",
 }
 
 _MAX_FILE_SIZE = 200_000
@@ -531,46 +491,13 @@ conversations (large context), vision/screenshot tools, embedding calls.
 
 
 def generate_system_md(introspect_data: dict, agent_id: str) -> str:
-    """Generate SYSTEM.md content: static preamble + initial snapshot.
+    """Generate SYSTEM.md content: static preamble only.
 
-    The preamble teaches agents *how the system works*. A compact snapshot
-    of permissions and fleet is appended as initial context but the
-    authoritative live data comes from the ``## Runtime Context`` block
+    The preamble teaches agents *how the system works*. Permissions and
+    fleet data are provided live via the ``## Runtime Context`` block
     injected into the system prompt on each turn by ``AgentLoop``.
-
-    Role strings from the fleet are sanitized to prevent prompt injection
-    via malicious agent registration data.
     """
-    from src.shared.utils import sanitize_for_prompt
-
-    parts = [_SYSTEM_MD_PREAMBLE]
-
-    # Compact snapshot — helps agents on first message before runtime
-    # context kicks in.  Kept deliberately short to avoid duplication
-    # with the live runtime context block.
-    perms = introspect_data.get("permissions")
-    if perms:
-        lines = ["## Your Permissions (snapshot)\n"]
-        for key in INTROSPECT_PERM_KEYS:
-            patterns = perms.get(key, [])
-            if isinstance(patterns, list) and patterns:
-                lines.append(f"- **{key}**: {', '.join(str(p) for p in patterns)}")
-        parts.append("\n".join(lines))
-
-    fleet = introspect_data.get("fleet")
-    if fleet:
-        names = []
-        for agent in fleet:
-            aid = sanitize_for_prompt(str(agent.get("id", "?")))
-            role = sanitize_for_prompt(str(agent.get("role", "")))
-            # Truncate to prevent bloat from malicious registration
-            aid = aid[:60]
-            role = role[:80]
-            marker = " (you)" if aid == agent_id else ""
-            names.append(f"{aid}{marker}" + (f" ({role})" if role else ""))
-        parts.append(f"## Fleet: {', '.join(names)}")
-
-    content = "\n\n".join(parts)
+    content = _SYSTEM_MD_PREAMBLE
     if len(content) > _MAX_SYSTEM:
         content = content[:_MAX_SYSTEM].rsplit("\n", 1)[0] + "\n\n... (truncated)"
     return content

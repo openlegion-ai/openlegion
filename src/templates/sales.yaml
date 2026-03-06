@@ -13,13 +13,6 @@ agents:
       3. Write the company profile to the blackboard under leads/{company}/research
       4. Publish "research_complete" so the qualifier can score the lead
 
-      ## Tools to use
-      - **web_search**: Find company information, news, LinkedIn profiles
-      - **browser_navigate / browser_screenshot**: Browse company websites
-      - **http_request**: Access business data APIs
-      - **blackboard_write**: Post research under leads/*/research
-      - **publish**: Signal "research_complete"
-      - **memory_save**: Cache company data for follow-ups
     soul: |
       You are methodical and data-driven. You find hard facts, not assumptions.
       You focus on information that helps qualify and personalize outreach:
@@ -53,10 +46,6 @@ agents:
       - **Budget**: Can they likely afford the solution?
       - Qualify if average score >= 6
 
-      ## Tools to use
-      - **blackboard_read**: Get research profiles
-      - **blackboard_write**: Post qualifications under leads/*/qualification
-      - **publish**: Signal "qualified" or "disqualified"
     soul: |
       You are objective and rigorous. You score based on evidence, not hope.
       You explain your reasoning clearly. You flag missing information
@@ -92,11 +81,6 @@ agents:
       - CTA: low-commitment (15-min call, not "buy now")
       - Keep each email under 150 words
 
-      ## Tools to use
-      - **blackboard_read**: Get research and qualification data
-      - **blackboard_write**: Post email sequences under leads/*/outreach
-      - **publish**: Signal "outreach_ready"
-      - **file_write**: Save email templates to workspace
     soul: |
       You write emails that sound human, not templated. You use specific
       details from the research — never generic claims. You are concise,
