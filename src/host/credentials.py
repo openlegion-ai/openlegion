@@ -65,6 +65,8 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     """Persist an environment variable to .env and os.environ.
 
     If *env_file* is empty, defaults to ``PROJECT_ROOT / ".env"``.
+    Values are single-quoted to prevent python-dotenv variable
+    interpolation (``$VAR``) from corrupting tokens on reload.
     """
     import re
     from pathlib import Path
@@ -79,6 +81,15 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     if not env_file:
         env_file = str(Path(__file__).resolve().parent.parent.parent / ".env")
 
+    # Quote to prevent python-dotenv interpolation of $, #, etc.
+    if "'" not in value:
+        # Single quotes: no interpolation, no escapes — safest
+        formatted = f"{env_key}='{value}'"
+    else:
+        # Double quotes: escape \, $, " so python-dotenv reads them back
+        escaped = value.replace("\\", "\\\\").replace("$", "\\$").replace('"', '\\"')
+        formatted = f'{env_key}="{escaped}"'
+
     env_path = Path(env_file)
     lines: list[str] = []
     found = False
@@ -86,13 +97,13 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     if env_path.exists():
         for line in env_path.read_text().splitlines():
             if line.startswith(f"{env_key}=") or line.startswith(f"# {env_key}="):
-                lines.append(f"{env_key}={value}")
+                lines.append(formatted)
                 found = True
             else:
                 lines.append(line)
 
     if not found:
-        lines.append(f"{env_key}={value}")
+        lines.append(formatted)
 
     env_path.write_text("\n".join(lines) + "\n")
     os.chmod(env_file, 0o600)

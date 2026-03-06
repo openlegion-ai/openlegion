@@ -342,8 +342,53 @@ def test_add_credential_persists_to_env(tmp_path, monkeypatch):
     _persist_to_env("OPENLEGION_CRED_TEST_KEY", "val123", env_file=str(env_file))
 
     content = env_file.read_text()
-    assert "OPENLEGION_CRED_TEST_KEY=val123" in content
+    assert "OPENLEGION_CRED_TEST_KEY='val123'" in content
     assert "EXISTING_VAR=keep" in content
+
+
+def test_persist_to_env_quotes_survive_dotenv_reload(tmp_path, monkeypatch):
+    """Values with $ must survive a python-dotenv round-trip (no interpolation)."""
+    from dotenv import dotenv_values
+
+    from src.host.credentials import _persist_to_env
+
+    env_file = tmp_path / ".env"
+
+    # Token with $ that would be corrupted without quoting
+    token = "sk-ant-oat01-abc$xyz$123"
+    _persist_to_env("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", token, env_file=str(env_file))
+
+    # Simulate restart: read back via python-dotenv
+    loaded = dotenv_values(str(env_file))
+    assert loaded["OPENLEGION_SYSTEM_ANTHROPIC_API_KEY"] == token
+
+
+def test_persist_to_env_quotes_with_hash(tmp_path, monkeypatch):
+    """Values with # must not be truncated as inline comments."""
+    from dotenv import dotenv_values
+
+    from src.host.credentials import _persist_to_env
+
+    env_file = tmp_path / ".env"
+    value = "key-with-hash#inside"
+    _persist_to_env("OPENLEGION_CRED_TEST", value, env_file=str(env_file))
+
+    loaded = dotenv_values(str(env_file))
+    assert loaded["OPENLEGION_CRED_TEST"] == value
+
+
+def test_persist_to_env_single_quote_in_value(tmp_path, monkeypatch):
+    """Values containing single quotes are escaped properly."""
+    from dotenv import dotenv_values
+
+    from src.host.credentials import _persist_to_env
+
+    env_file = tmp_path / ".env"
+    value = "it's-a-test"
+    _persist_to_env("OPENLEGION_CRED_QUOTE", value, env_file=str(env_file))
+
+    loaded = dotenv_values(str(env_file))
+    assert loaded["OPENLEGION_CRED_QUOTE"] == value
 
 
 def test_resolve_credential():
