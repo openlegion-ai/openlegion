@@ -16,14 +16,13 @@ from typing import TYPE_CHECKING
 import click
 import yaml
 
+from src.host.credentials import _OAUTH_TOKEN_PREFIX
 from src.shared.utils import setup_logging
 
 logger = setup_logging("setup_wizard")
 
 if TYPE_CHECKING:
     from src.host.credentials import CredentialVault
-
-from src.host.credentials import _OAUTH_TOKEN_PREFIX
 
 # Minimum expected length for a valid OAuth setup-token
 _OAUTH_MIN_LENGTH = 90
