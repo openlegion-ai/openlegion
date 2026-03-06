@@ -421,7 +421,10 @@ function dashboard() {
     // ── Computed ───────────────────────────────────────────
 
     get showOnboarding() {
-      if (this.loading || !this.settingsData) return false;
+      if (this.loading) return false;
+      // Show onboarding when settings haven't loaded yet (fallback) or when
+      // credentials are missing / no agents exist — prevents blank page.
+      if (!this.settingsData) return this.agents.length === 0;
       return !this.settingsData.has_llm_credentials || this.agents.length === 0;
     },
 
