@@ -79,6 +79,14 @@ curl -X DELETE -H "Authorization: Bearer $MESH_AUTH_TOKEN" \
   http://localhost:8420/mesh/cron/<job_id>
 ```
 
+**Update a job:**
+```bash
+curl -X PUT -H "Authorization: Bearer $MESH_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  http://localhost:8420/mesh/cron/<job_id> \
+  -d '{"schedule": "every 1h", "message": "Updated message"}'
+```
+
 **Via agent tools:**
 - `list_cron()` -- list all jobs for the agent
 - `remove_cron(job_id)` -- remove a job

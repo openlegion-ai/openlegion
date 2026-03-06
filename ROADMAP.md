@@ -534,7 +534,7 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 ### Session 8 (Adoption + Security Hardening)
 - [x] **1.1 SOUL.md Persona Injection** — Fallback chain: agent workspace SOUL.md → project `/app/SOUL.md` → default scaffold. Injected into chat system prompt via `workspace.get_bootstrap_content()`. Subject to 4K cap.
 - [x] **1.5a Mesh Auth Tokens** — Per-agent `secrets.token_urlsafe(32)` generated at container startup. Injected as `MESH_AUTH_TOKEN` env var. All mesh requests include `Authorization: Bearer` header. Timing-safe comparison via `hmac.compare_digest`. All 14 agent-facing endpoints protected.
-- [x] **1.5b Vault Security Hardening** — `_redact_credentials()` pattern-based redaction on `browser_navigate`, `browser_snapshot`, and `browser_evaluate` output. `_credential_filled_refs` tracking in `browser_type`. Rate limiting on `/mesh/vault/resolve` (5/60s). Audit logging on vault resolve.
+- [x] **1.5b Vault Security Hardening** — `_redact_credentials()` pattern-based redaction on `browser_navigate` and `browser_snapshot` output (`browser_evaluate` was subsequently removed for security). `_credential_filled_refs` tracking in `browser_type`. Rate limiting on `/mesh/vault/resolve` (5/60s). Audit logging on vault resolve.
 - [x] **2.1 Silent Reply Token** — `SILENT_REPLY_TOKEN = "__SILENT__"` detected in all 4 code paths (chat normal, chat max-rounds, stream normal, stream max-rounds). Channels suppress empty responses.
 - [x] `/addkey` wired through to Telegram and Discord channel constructors
 - [x] 24 new tests (473 total passing)

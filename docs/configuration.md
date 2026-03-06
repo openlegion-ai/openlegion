@@ -51,6 +51,7 @@ agents:
 | `resources.cpu_limit` | float | No | Reserved for future use. Currently hardcoded to `0.15` by the runtime for security. |
 | `budget.daily_usd` | float | No | Daily spend cap in USD (default: `10.00`) |
 | `budget.monthly_usd` | float | No | Monthly spend cap in USD (default: `200.00`) |
+| `soul` | string | No | Seeds `SOUL.md` on first boot — defines the agent's personality and behavioral guidelines |
 | `initial_instructions` | string | No | Seeds `INSTRUCTIONS.md` on first boot. Distinct from `system_prompt` — this sets the agent's operating instructions file |
 | `thinking` | string | No | Extended thinking/reasoning mode: `off` (default), `low`, `medium`, or `high`. Anthropic models use thinking budgets (5K/10K/25K tokens). OpenAI o-series models use `reasoning_effort`. Ignored for unsupported models |
 | `mcp_servers` | list | No | External MCP tool servers. See [MCP Integration](mcp.md) |
@@ -114,7 +115,7 @@ collaboration: true
 | `mesh.host` | string | `0.0.0.0` | Bind address for mesh server |
 | `mesh.port` | integer | `8420` | Mesh server port |
 | `llm.default_model` | string | -- | Default model for agents without explicit model |
-| `llm.embedding_model` | string | *auto* | Model for memory embeddings. Auto-detected from default LLM provider (OpenAI → `text-embedding-3-small`, others → `none`). Must produce 1536-dim vectors. Set to `"none"` to disable vector search (FTS5 keyword search still works) |
+| `llm.embedding_model` | string | *auto* | Model for memory embeddings. Auto-detected from default LLM provider (OpenAI → `text-embedding-3-small`; Anthropic, Google, DeepSeek, and all others → `"none"`). Must produce 1536-dim vectors. Set to `"none"` to disable vector search (FTS5 keyword search still works) |
 | `llm.max_tokens` | integer | `4096` | Max output tokens per completion |
 | `llm.temperature` | float | `0.7` | Sampling temperature |
 | `llm.failover.primary` | string | -- | Primary model for failover routing |

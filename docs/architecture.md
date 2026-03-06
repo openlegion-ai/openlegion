@@ -72,7 +72,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `llm.py` | LLM client with streaming (`chat_stream()`) and non-streaming (`chat()`) — routes through mesh proxy |
 | `mesh_client.py` | HTTP client for agent-to-mesh communication |
 | `loop_detector.py` | Stuck tool-call detection with escalating intervention (warn → block → terminate) |
-| `server.py` | Agent-side FastAPI server (/task, /chat, /status) |
+| `server.py` | Agent-side FastAPI server (/task, /chat/stream, /status, /cancel, /capabilities, /workspace, /heartbeat-context, and others) |
 
 ### Built-in Tools (`src/agent/builtins/`)
 

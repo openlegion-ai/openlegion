@@ -21,8 +21,8 @@ Agents run as non-root (UID 1000) with:
 - `no-new-privileges` security option
 - 384MB memory limit (agents are slim — no browser)
 - 0.15 CPU quota (agents are I/O-bound, waiting on LLM APIs)
-- Browser operations handled by shared browser service container (2GB RAM, 1 CPU)
-- `cap_drop: ALL` with only `NET_BIND_SERVICE` added back
+- Browser operations handled by shared browser service container (2–8GB RAM scaled by fleet size, 1 CPU)
+- `cap_drop: ALL` (no capabilities re-added)
 - Read-only root filesystem (`read_only: True`)
 - Tmpfs at `/tmp` (100MB, noexec, nosuid)
 - No host filesystem access (only `/data` volume)
@@ -81,7 +81,6 @@ Resolved credentials are automatically redacted from tool outputs to prevent acc
 
 - **HTTP responses** — `http_request` strips resolved `$CRED{name}` values from response headers and body before returning results to the agent
 - **Browser snapshots** — `browser_snapshot` strips common secret patterns (API keys, GitHub tokens, AWS keys, etc.) from accessibility tree text
-- **Browser evaluate** — JavaScript evaluation results are scanned for credential patterns
 
 This ensures that even if an agent interacts with an API that echoes credentials back, the actual secret values are not exposed in the conversation.
 

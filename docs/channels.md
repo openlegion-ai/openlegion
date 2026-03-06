@@ -23,8 +23,8 @@ Every channel provides a unified interface:
 | `/agents` | List all available agents |
 | `/status` | Show agent health and task counts |
 | `/broadcast <msg>` | Send a message to all agents |
-| `/steer <msg>` | Inject message into busy agent's context |
-| `/debug [trace_id]` | Show recent traces or trace detail |
+| `/steer <msg>` | Inject message into busy agent's context (when configured) |
+| `/debug [trace_id]` | Show recent traces or trace detail (when configured) |
 | `/costs` | Show today's LLM spend per agent |
 | `/addkey <service> <key>` | Add an API credential to the vault |
 | `/reset` | Clear conversation with active agent |
