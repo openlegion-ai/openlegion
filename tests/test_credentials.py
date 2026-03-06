@@ -1143,7 +1143,7 @@ class TestGetAuthForModel:
         assert providers == set()
 
     def test_get_auth_for_model_oauth_token(self, monkeypatch):
-        """OAuth setup-token returns Bearer auth headers."""
+        """OAuth setup-token returns key with empty headers (OAuth bypasses LiteLLM)."""
         monkeypatch.setenv(
             "OPENLEGION_SYSTEM_ANTHROPIC_API_KEY",
             "sk-ant-oat01-" + "x" * 80,
@@ -1151,11 +1151,8 @@ class TestGetAuthForModel:
         v = CredentialVault()
         api_key, headers = v._get_auth_for_model("anthropic/claude-sonnet-4-6")
         assert api_key.startswith("sk-ant-oat01-")
-        assert "Authorization" in headers
-        assert headers["Authorization"].startswith("Bearer sk-ant-oat01-")
-        assert "anthropic-beta" in headers
-        assert "oauth-2025-04-20" in headers["anthropic-beta"]
-        assert headers["user-agent"].startswith("claude-cli/")
+        # OAuth tokens bypass LiteLLM — headers built in _oauth_headers() instead
+        assert headers == {}
 
 
 # ── OAuth token detection ──────────────────────────────────────
@@ -1263,6 +1260,177 @@ class TestOAuthTokenHandling:
         assert "oauth-2025-04-20" in headers["anthropic-beta"]
         assert headers["user-agent"].startswith("claude-cli/")
         assert headers["Content-Type"] == "application/json"
+
+    def test_build_anthropic_body_tool_choice_auto(self):
+        """tool_choice='auto' converts to Anthropic format."""
+        params = {
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [{"function": {"name": "t", "parameters": {"type": "object"}}}],
+            "tool_choice": "auto",
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        assert body["tool_choice"] == {"type": "auto"}
+
+    def test_build_anthropic_body_tool_choice_required(self):
+        """tool_choice='required' maps to Anthropic 'any'."""
+        params = {
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [{"function": {"name": "t", "parameters": {"type": "object"}}}],
+            "tool_choice": "required",
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        assert body["tool_choice"] == {"type": "any"}
+
+    def test_build_anthropic_body_tool_choice_specific(self):
+        """tool_choice with specific function maps to Anthropic 'tool' type."""
+        params = {
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [{"function": {"name": "search", "parameters": {"type": "object"}}}],
+            "tool_choice": {"function": {"name": "search"}},
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        assert body["tool_choice"] == {"type": "tool", "name": "search"}
+
+    def test_build_anthropic_body_top_p(self):
+        """top_p is forwarded to body."""
+        params = {
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "test"}],
+            "top_p": 0.9,
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        assert body["top_p"] == 0.9
+
+
+# ── OAuth async integration tests ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_oauth_chat_success(monkeypatch):
+    """_oauth_chat returns parsed response on 200."""
+    import httpx
+
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
+    v = CredentialVault()
+
+    mock_response = httpx.Response(
+        200,
+        json={
+            "content": [{"type": "text", "text": "Hello!"}],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "model": "claude-sonnet-4-6",
+        },
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+    )
+
+    async def mock_post(*args, **kwargs):
+        return mock_response
+
+    mock_client = MagicMock()
+    mock_client.post = mock_post
+    mock_client.is_closed = False
+    v._http_client = mock_client
+
+    req = APIProxyRequest(
+        service="llm", action="chat",
+        params={
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100,
+        },
+    )
+    result = await v._oauth_chat(req, v.system_credentials["anthropic_api_key"], "anthropic/claude-sonnet-4-6")
+    assert result.success
+    assert result.data["content"] == "Hello!"
+    assert result.data["tokens_used"] == 15
+
+
+@pytest.mark.asyncio
+async def test_oauth_chat_connect_error(monkeypatch):
+    """_oauth_chat raises RuntimeError on ConnectError."""
+    import httpx
+
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
+    v = CredentialVault()
+
+    async def mock_post(*args, **kwargs):
+        raise httpx.ConnectError("Connection refused")
+
+    mock_client = MagicMock()
+    mock_client.post = mock_post
+    mock_client.is_closed = False
+    v._http_client = mock_client
+
+    req = APIProxyRequest(
+        service="llm", action="chat",
+        params={
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    with pytest.raises(RuntimeError, match="connection error"):
+        await v._oauth_chat(req, "sk-ant-oat01-" + "x" * 80, "anthropic/claude-sonnet-4-6")
+
+
+@pytest.mark.asyncio
+async def test_oauth_chat_401_non_json(monkeypatch):
+    """_oauth_chat handles non-JSON 401 response gracefully."""
+    import httpx
+
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
+    v = CredentialVault()
+
+    mock_response = httpx.Response(
+        401,
+        text="Unauthorized",
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+    )
+
+    async def mock_post(*args, **kwargs):
+        return mock_response
+
+    mock_client = MagicMock()
+    mock_client.post = mock_post
+    mock_client.is_closed = False
+    v._http_client = mock_client
+
+    req = APIProxyRequest(
+        service="llm", action="chat",
+        params={
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    with pytest.raises(RuntimeError, match="OAuth authentication failed"):
+        await v._oauth_chat(req, "sk-ant-oat01-" + "x" * 80, "anthropic/claude-sonnet-4-6")
+
+
+@pytest.mark.asyncio
+async def test_handle_llm_routes_oauth_to_direct_path(monkeypatch):
+    """_handle_llm routes OAuth tokens to _oauth_chat, not LiteLLM."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
+    v = CredentialVault()
+
+    mock_result = MagicMock()
+    mock_result.success = True
+    mock_result.data = {"content": "test"}
+    v._oauth_chat = AsyncMock(return_value=mock_result)
+
+    req = APIProxyRequest(
+        service="llm", action="chat",
+        params={
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    result = await v._handle_llm(req)
+    v._oauth_chat.assert_called_once()
+    assert result.success
 
 
 # ── Budget lock timeout returns error ──────────────────────────

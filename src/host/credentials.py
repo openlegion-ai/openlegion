@@ -425,19 +425,14 @@ class CredentialVault:
     def _get_auth_for_model(self, model: str) -> tuple[str | None, dict[str, str]]:
         """Resolve API key and any extra auth headers for a model.
 
-        Returns ``(api_key, extra_headers)``.  For OAuth setup-tokens,
-        extra_headers contains the Bearer auth and required beta flags.
+        Returns ``(api_key, extra_headers)``.  OAuth tokens are handled
+        separately via ``_oauth_chat`` / ``_oauth_chat_stream`` — this
+        method always returns empty extra_headers for them since they
+        bypass LiteLLM entirely.
         """
         api_key = self._get_api_key_for_model(model)
         if api_key is None:
             return None, {}
-        if is_oauth_token(api_key):
-            return api_key, {
-                "Authorization": f"Bearer {api_key}",
-                "anthropic-version": "2023-06-01",
-                "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
-                "user-agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
-            }
         return api_key, {}
 
     def get_providers_with_credentials(self) -> set[str]:
@@ -587,6 +582,9 @@ class CredentialVault:
         temp = params.get("temperature")
         if temp is not None:
             body["temperature"] = temp
+        top_p = params.get("top_p")
+        if top_p is not None:
+            body["top_p"] = top_p
 
         # Convert OpenAI function-calling tools to Anthropic format
         tools = params.get("tools")
@@ -603,6 +601,21 @@ class CredentialVault:
                 else:
                     anthropic_tools.append(t)
             body["tools"] = anthropic_tools
+
+        # Tool choice — convert OpenAI format to Anthropic format
+        tool_choice = params.get("tool_choice")
+        if tool_choice is not None and tools:
+            if tool_choice == "auto":
+                body["tool_choice"] = {"type": "auto"}
+            elif tool_choice == "required":
+                body["tool_choice"] = {"type": "any"}
+            elif tool_choice == "none":
+                pass  # Anthropic doesn't have "none" — just omit tools
+            elif isinstance(tool_choice, dict) and "function" in tool_choice:
+                body["tool_choice"] = {
+                    "type": "tool",
+                    "name": tool_choice["function"]["name"],
+                }
 
         # Extended thinking
         thinking = params.get("thinking")
@@ -662,12 +675,15 @@ class CredentialVault:
             resp = await client.post(
                 _ANTHROPIC_API_URL, headers=headers, json=body, timeout=120,
             )
-        except httpx.TimeoutException as e:
-            raise RuntimeError(f"Anthropic API timeout: {e}") from e
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            raise RuntimeError(f"Anthropic API connection error: {e}") from e
 
         if resp.status_code == 401:
-            error_data = resp.json()
-            msg = error_data.get("error", {}).get("message", "Authentication failed")
+            try:
+                error_data = resp.json()
+                msg = error_data.get("error", {}).get("message", "Authentication failed")
+            except (json.JSONDecodeError, ValueError):
+                msg = resp.text[:200] or "Authentication failed"
             if "OAuth" in msg:
                 raise RuntimeError(
                     "Anthropic has disabled OAuth for third-party apps. "
@@ -717,8 +733,11 @@ class CredentialVault:
             ) as resp:
                 if resp.status_code == 401:
                     await resp.aread()
-                    error_data = resp.json()
-                    msg = error_data.get("error", {}).get("message", "Auth failed")
+                    try:
+                        error_data = resp.json()
+                        msg = error_data.get("error", {}).get("message", "Auth failed")
+                    except (json.JSONDecodeError, ValueError):
+                        msg = resp.text[:200] or "Auth failed"
                     yield f"data: {json.dumps({'error': f'OAuth auth failed: {msg}'})}\n\n"
                     return
                 if not resp.is_success:
@@ -730,8 +749,6 @@ class CredentialVault:
                     if not line.startswith("data: "):
                         continue
                     payload = line[6:]
-                    if payload.strip() == "[DONE]":
-                        break
                     try:
                         event = json.loads(payload)
                     except json.JSONDecodeError:
@@ -801,13 +818,12 @@ class CredentialVault:
 
         requested_model = request.params.get("model", "")
 
-        # OAuth fast-path: bypass LiteLLM for Anthropic OAuth tokens
         if request.action == "chat":
+            # OAuth fast-path: bypass LiteLLM for Anthropic OAuth tokens
             api_key = self._get_api_key_for_model(requested_model)
             if api_key and is_oauth_token(api_key):
                 return await self._oauth_chat(request, api_key, requested_model)
 
-        if request.action == "chat":
             async def _chat(
                 model: str, api_key: str,
                 api_base: str | None = None,

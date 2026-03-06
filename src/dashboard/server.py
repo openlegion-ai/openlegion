@@ -929,7 +929,10 @@ def create_dashboard_router(
             fmt_error = SetupWizard._validate_oauth_token_format(key)
             if fmt_error:
                 return {"valid": False, "skipped": False, "reason": fmt_error}
-            valid = SetupWizard._validate_oauth_token_live(key)
+            import asyncio
+            valid = await asyncio.get_event_loop().run_in_executor(
+                None, SetupWizard._validate_oauth_token_live, key,
+            )
             if valid:
                 return {"valid": True, "skipped": False, "oauth": True}
             return {"valid": False, "skipped": False, "reason": "Invalid or expired setup-token"}
