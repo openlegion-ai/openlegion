@@ -1846,6 +1846,78 @@ class TestStandaloneBlackboardGuards:
         mc.list_blackboard.assert_awaited_once()
 
 
+# ── Blackboard Sanitization Tests ─────────────────────────────────
+
+
+class TestBlackboardSanitization:
+    """Verify that blackboard reads deep-sanitize values."""
+
+    def _project_client(self):
+        mc = AsyncMock()
+        mc.is_standalone = False
+        return mc
+
+    @pytest.mark.asyncio
+    async def test_read_sanitizes_nested_dict(self):
+        """Strings inside nested dicts are sanitized."""
+        from src.agent.builtins.mesh_tool import read_shared_state
+        mc = self._project_client()
+        # \u200b is a zero-width space — should be stripped by sanitize_for_prompt
+        mc.read_blackboard = AsyncMock(return_value={
+            "key": "k",
+            "value": {"nested": {"deep": "hello\u200bworld"}},
+        })
+        result = await read_shared_state(key="k", mesh_client=mc)
+        assert result["value"]["nested"]["deep"] == "helloworld"
+
+    @pytest.mark.asyncio
+    async def test_read_sanitizes_list_values(self):
+        """Strings inside lists are sanitized."""
+        from src.agent.builtins.mesh_tool import read_shared_state
+        mc = self._project_client()
+        mc.read_blackboard = AsyncMock(return_value={
+            "key": "k",
+            "value": ["clean", "has\u200binvisible"],
+        })
+        result = await read_shared_state(key="k", mesh_client=mc)
+        assert result["value"] == ["clean", "hasinvisible"]
+
+    @pytest.mark.asyncio
+    async def test_read_sanitizes_plain_string(self):
+        """Plain string values are sanitized (existing behavior)."""
+        from src.agent.builtins.mesh_tool import read_shared_state
+        mc = self._project_client()
+        mc.read_blackboard = AsyncMock(return_value={
+            "key": "k",
+            "value": "text\u200bhere",
+        })
+        result = await read_shared_state(key="k", mesh_client=mc)
+        assert result["value"] == "texthere"
+
+    @pytest.mark.asyncio
+    async def test_list_preview_sanitized(self):
+        """List previews are sanitized."""
+        from src.agent.builtins.mesh_tool import list_shared_state
+        mc = self._project_client()
+        mc.list_blackboard = AsyncMock(return_value=[{
+            "key": "k",
+            "written_by": "agent1",
+            "updated_at": "2026-01-01",
+            "value": {"data": "has\u200binvisible"},
+        }])
+        result = await list_shared_state(prefix="", mesh_client=mc)
+        preview = result["entries"][0]["value_preview"]
+        assert "\u200b" not in preview
+
+    def test_sanitize_value_preserves_non_strings(self):
+        """_sanitize_value passes through numbers, bools, None."""
+        from src.agent.builtins.mesh_tool import _sanitize_value
+        assert _sanitize_value(42) == 42
+        assert _sanitize_value(True) is True
+        assert _sanitize_value(None) is None
+        assert _sanitize_value(3.14) == 3.14
+
+
 # ── Introspect Tool ─────────────────────────────────────────────
 
 

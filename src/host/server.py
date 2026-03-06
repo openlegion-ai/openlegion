@@ -101,6 +101,8 @@ def create_mesh_app(
     _AGENT_ID_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
     _RESERVED_AGENT_IDS = frozenset({"mesh", "orchestrator"})
     _MAX_SYSTEM_PROMPT = 10_000
+    _MAX_BB_KEY_LEN = 512
+    _MAX_BB_VALUE_BYTES = 262_144  # 256 KB
 
     def _validate_agent_id(agent_id: str) -> str:
         if not agent_id or not _AGENT_ID_RE.match(agent_id):
@@ -291,6 +293,11 @@ def create_mesh_app(
         """Write to blackboard. Agent must have write permission."""
         agent_id = _resolve_agent_id(agent_id, request)
         await _check_rate_limit("blackboard_write", agent_id)
+        if len(key) > _MAX_BB_KEY_LEN:
+            raise HTTPException(400, f"Key too long ({len(key)} chars, max {_MAX_BB_KEY_LEN})")
+        value_size = len(json.dumps(value, default=str))
+        if value_size > _MAX_BB_VALUE_BYTES:
+            raise HTTPException(413, f"Value too large ({value_size} bytes, max {_MAX_BB_VALUE_BYTES})")
         if not permissions.can_write_blackboard(agent_id, key):
             raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
         entry = blackboard.write(key, value, written_by=agent_id)
@@ -326,6 +333,11 @@ def create_mesh_app(
         agent_id = _resolve_agent_id(body.agent_id, request)
         key = body.key
         await _check_rate_limit("blackboard_write", agent_id)
+        if len(key) > _MAX_BB_KEY_LEN:
+            raise HTTPException(400, f"Key too long ({len(key)} chars, max {_MAX_BB_KEY_LEN})")
+        value_size = len(json.dumps(body.value, default=str))
+        if value_size > _MAX_BB_VALUE_BYTES:
+            raise HTTPException(413, f"Value too large ({value_size} bytes, max {_MAX_BB_VALUE_BYTES})")
         if not permissions.can_write_blackboard(agent_id, key):
             raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
         expected_version = body.expected_version

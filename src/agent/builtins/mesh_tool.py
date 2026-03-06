@@ -75,6 +75,17 @@ _STANDALONE_ERROR = (
 )
 
 
+def _sanitize_value(value):
+    """Recursively sanitize all strings inside a value (dict, list, or scalar)."""
+    if isinstance(value, str):
+        return sanitize_for_prompt(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_value(item) for item in value]
+    return value
+
+
 @skill(
     name="read_shared_state",
     description=(
@@ -99,9 +110,7 @@ async def read_shared_state(key: str, *, mesh_client=None) -> dict:
         entry = await mesh_client.read_blackboard(key)
         if entry is None:
             return {"key": key, "exists": False, "value": None}
-        value = entry.get("value", entry)
-        if isinstance(value, str):
-            value = sanitize_for_prompt(value)
+        value = _sanitize_value(entry.get("value", entry))
         return {"key": key, "exists": True, "value": value}
     except Exception as e:
         return {"error": f"Failed to read '{key}': {e}"}
@@ -599,4 +608,5 @@ async def update_workspace(
 
 def _preview(value: dict, max_len: int = 200) -> str:
     text = json.dumps(value, default=str)
-    return text[:max_len] + "..." if len(text) > max_len else text
+    preview = text[:max_len] + "..." if len(text) > max_len else text
+    return sanitize_for_prompt(preview)
