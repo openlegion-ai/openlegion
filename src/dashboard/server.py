@@ -120,7 +120,7 @@ def create_dashboard_router(
         return HTMLResponse(html, headers={
             "Cache-Control": "no-store",
             "Content-Security-Policy": (
-                "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+                "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
                 "style-src 'self' 'unsafe-inline'; "
                 "object-src 'none'"
             ),
@@ -1745,6 +1745,13 @@ def create_spa_catchall_router() -> APIRouter:
             raise HTTPException(status_code=404, detail="Not found")
         template = env.get_template("index.html")
         html = template.render(ws_path="/ws/events", api_base="/dashboard/api", v=ASSET_VERSION)
-        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+        return HTMLResponse(html, headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": (
+                "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+                "style-src 'self' 'unsafe-inline'; "
+                "object-src 'none'"
+            ),
+        })
 
     return catchall
