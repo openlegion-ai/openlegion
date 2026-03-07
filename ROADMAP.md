@@ -1,6 +1,6 @@
 # OpenLegion Roadmap
 
-Prioritized for public launch. Ordered by adoption impact — informed by competitive analysis across OpenClaw, MemU, NanoBot, NanoClaw, HermitClaw, and ZeroClaw. Tier 4 priorities driven by deep agent-level comparative analysis of OpenClaw (Feb 2026). Items 4.8–4.9 and backlog additions (Provider Flexibility, Channel Expansion, Security Hardening) driven by deep source-level analysis of ZeroClaw (Feb 25, 2026).
+Prioritized for public launch. Ordered by adoption impact — informed by competitive analysis across OpenClaw, MemU, NanoBot, NanoClaw, HermitClaw, and ZeroClaw. Tier 4 priorities driven by deep agent-level comparative analysis of OpenClaw (Feb 2026). Items 4.8–4.9 and backlog additions (Provider Flexibility, Channel Expansion, Security Hardening) driven by deep source-level analysis of ZeroClaw (Feb 25, 2026). Tier 6 (Self-Improving Fleet) driven by analysis of fleet performance optimization opportunities and secure self-modification patterns (Feb 25, 2026).
 
 **Design principle:** Ship what users need to adopt, then what power users demand, then what separates us from everyone else. Never compromise security boundaries for convenience.
 
@@ -337,6 +337,165 @@ Dashboard can now view and edit agent workspace files (SOUL.md, HEARTBEAT.md, US
 
 ---
 
+## Tier 6: Self-Improving Fleet (Engineering Agent)
+
+The fleet can monitor itself, but can't improve itself. Users manually tune prompts, adjust configs, and debug agent failures by reading logs. An engineering agent — running in a standard container with the same hardening as every other agent — observes fleet performance through new mesh endpoints, diagnoses problems from traces/errors/costs, and applies improvements: code PRs for engine fixes, config changes via validated admin API, and direct coaching messages to underperforming agents. No host access, no Docker socket, no special privileges. The mesh mediates everything.
+
+**Architecture decision:** The engineering agent is a regular containerized agent, not a host-side tool. This was a deliberate security choice. A host-side tool has full filesystem access — including `.env` (all API keys), the Docker socket (root-equivalent), and config files (permission escalation). A containerized agent has none of these. It gets fleet visibility through new mesh API endpoints that aggregate existing data (traces, costs, health). Config changes go through validated admin endpoints — the agent proposes, the mesh validates and writes. Code improvements go through git clone → test → PR from inside the container. Human review required for code merges. Security model unchanged: mesh is the only door.
+
+**Dependencies:** Benefits from Tier 5 observability (traces, event bus) for richer data. Can start with fleet diagnostics endpoint before full dashboard is operational — traces and costs already exist in SQLite.
+
+### 6.1 Fleet Observability API
+
+No fleet-wide data is accessible to agents today. `introspect` only returns the calling agent's own state. Traces, costs, and health data exist in the mesh host's SQLite stores and in-memory objects, but no mesh endpoint aggregates them for agent consumption. The dashboard API serves this data to the web UI, but agents can't reach dashboard endpoints through the permission-checked mesh path.
+
+**Impact:** Foundation for the engineering agent and any fleet-aware agent. Also useful for dashboard improvements and external monitoring integrations. Any agent with `fleet_read` permission gets fleet awareness — not just the engineering agent.
+
+**Changes:**
+- `GET /mesh/fleet/diagnostics` endpoint in `server.py` — aggregates from existing in-process objects: `HealthMonitor.get_status()` (agent health), `CostTracker.get_all_agents_spend("today")` (costs), `TraceStore` filtered by `status="error"` (recent errors), `FailoverChain.get_status()` (model health). Returns:
+  ```json
+  {
+    "agents": [{"id": "...", "role": "...", "health": "healthy", "daily_cost": 0.42, "daily_tokens": 12500}],
+    "fleet_totals": {"total_cost_today": 1.87, "healthy": 3, "unhealthy": 1},
+    "recent_errors": [{"trace_id": "...", "agent": "...", "error": "...", "timestamp": "..."}],
+    "model_health": [{"model": "anthropic/claude-sonnet-4-6", "success": 142, "failures": 3}]
+  }
+  ```
+- `GET /mesh/fleet/agent/{id}/learnings` endpoint — proxies to target agent's `/workspace-learnings` via Transport. Returns `errors.md` + `corrections.md` content. Permission-checked: calling agent must have `can_message` permission for the target agent
+- `GET /mesh/fleet/agent/{id}/workspace/{file}` endpoint — proxies to target agent's `/workspace/{file}` via Transport. Allowlisted files only: MEMORY.md, AGENTS.md, SOUL.md, daily logs. Blocks access to SYSTEM.md (contains mesh URL), memory databases, and arbitrary paths
+- Add `fleet_read` to `allowed_apis` in permission system (`src/host/permissions.py`). Only agents with this permission can call `/mesh/fleet/*`. Default: denied
+- Add `MeshClient.fleet_diagnostics()`, `MeshClient.fleet_agent_learnings(agent_id)`, `MeshClient.fleet_agent_workspace(agent_id, file)` methods to `src/agent/mesh_client.py`
+- Rate limit: 30 calls/60s on diagnostics (expensive aggregation), 60 calls/60s on per-agent endpoints
+
+### 6.2 Config Management API
+
+The engineering agent can observe the fleet (6.1) but can't change anything. Agent configs (model, system prompt, thinking level), permissions, and mesh settings live in YAML/JSON files on the host filesystem — inaccessible from inside a container. The only way to change config today is manual file editing + agent restart.
+
+**Impact:** Enables the engineering agent to tune agent parameters, model selection, and permissions without host access. Safety-gated: schema validation prevents broken configs, security checks prevent privilege escalation, automatic backups enable rollback. Also useful for any future admin tooling (CLI, dashboard config editor).
+
+**Changes:**
+- `GET /mesh/admin/config/{filename}` endpoint — reads and returns parsed config files. Allowlist: `agents.yaml`, `permissions.json`, `mesh.yaml`. Never serves `.env`, credential files, or arbitrary paths. Returns parsed YAML/JSON as dict
+- `POST /mesh/admin/config/{filename}` endpoint — accepts proposed config change as JSON body. The mesh host:
+  1. Validates against schema (no malformed YAML, no invalid model names from `_PROVIDER_MODELS`)
+  2. Security checks: cannot grant `system` credential access to any agent, cannot add `admin` permission to self, cannot remove own permission restrictions (deadman's switch)
+  3. Creates timestamped backup: `config/{filename}.backup.{timestamp}`
+  4. Writes validated config to disk
+  5. Triggers reload where applicable (`permissions.reload()`, config re-read)
+  6. Returns `{applied: true, diff: "...", backup: "..."}`
+- `POST /mesh/admin/restart/{agent_id}` endpoint — restarts a specific agent to apply config changes. Wraps existing `runtime.stop_agent()` + `runtime.start_agent()` with fresh config. Agent re-registers on startup
+- `POST /mesh/admin/config/{filename}/rollback` endpoint — restores from the most recent backup. Safety net for bad changes
+- Add `admin` permission type in permission system. Default: `false`. Only agents with `"admin": true` can call `/mesh/admin/*`. Engineering agent is the only agent that should have this
+- All admin operations logged to trace store with `source="mesh.admin"` for audit trail
+
+### 6.3 Engineering Agent Definition
+
+The engineering agent itself — a regular fleet agent with broad read permissions, admin API access, and a system prompt encoding the observe → diagnose → improve → track loop. No new tools needed — it uses existing builtins (`exec`, `file`, `http`, `memory`, `blackboard`, `introspect`, `vault_resolve`).
+
+**Impact:** A continuously-improving fleet. The engineering agent identifies problems, proposes fixes, and tracks outcomes — turning fleet operation from reactive to proactive. Code improvements go through PR review (human gate). Config improvements go through validated admin API (schema + security gate). Per-agent coaching goes through normal messaging (agents apply their own improvements).
+
+**Changes:**
+- Agent definition in `config/agents.yaml` template:
+  ```yaml
+  engineer:
+    role: "engineering"
+    model: "anthropic/claude-sonnet-4-6"  # Strong reasoning, cost-efficient
+    thinking: "medium"                     # Needs reasoning for diagnosis
+  ```
+- System prompt encoding the ODIT (Observe-Diagnose-Improve-Track) loop:
+  - **OBSERVE**: Call `/mesh/fleet/diagnostics` for fleet health/costs/errors. Read peer agent learnings via `/mesh/fleet/agent/{id}/learnings`. Read peer agent workspace files. Search own memory for past improvements and their outcomes
+  - **DIAGNOSE**: Rank problems by frequency (how often), severity (task failure vs inefficiency), breadth (one agent vs fleet-wide). Identify patterns, not one-offs. Cross-reference errors with agent configs to find root causes
+  - **IMPROVE (code path)**: `exec: git clone {repo} /data/openlegion` → read relevant source files → make targeted changes → `exec: pytest tests/ --ignore=tests/test_e2e*.py -x` → `exec: git push && gh pr create`. Human reviews and merges
+  - **IMPROVE (config path)**: Read current config via admin API → propose change → mesh validates and applies → restart affected agent if needed. Auto-rollback if metrics degrade
+  - **IMPROVE (coaching path)**: Message underperforming agents with specific instructions to update their AGENTS.md. Example: "Based on your error patterns, add to your AGENTS.md: 'When searching for data, always use web_search before browser navigation — browser-first wastes 3-4 tool calls.'" Target agent uses its own `update_workspace` tool
+  - **TRACK**: Compare fleet metrics before vs after each improvement. Record outcomes in memory. Learn which improvement types have highest impact for which agent roles
+- Permissions in `config/permissions.json`:
+  ```json
+  {
+    "engineer": {
+      "can_message": ["*"],
+      "blackboard_read": ["*"],
+      "blackboard_write": ["engineering/*", "diagnostics/engineer"],
+      "allowed_apis": ["llm", "fleet_read", "admin"],
+      "allowed_credentials": ["github_token"],
+      "admin": true
+    }
+  }
+  ```
+- GitHub PAT stored as `OPENLEGION_CRED_GITHUB_TOKEN` — scoped to `repo` permission on the OpenLegion fork only. Agent resolves via `vault_resolve("github_token")` and uses in git commands. If PAT is compromised (container breached), blast radius is one git repo with PR-only access — human still reviews
+- Cron-triggered daily analysis run via existing cron scheduler. Can also trigger on-demand via messaging
+
+### 6.4 Heartbeat Diagnostics Publishing
+
+Agents already run periodic heartbeats (cron-triggered health checks). Currently heartbeats only check if an agent is alive and dispatch autonomous tasks. They don't publish any performance data. The engineering agent needs per-agent performance summaries that aren't available through fleet-level traces alone — tool success rates, correction frequency, context compaction counts live inside each agent's private memory.
+
+**Impact:** Gives the engineering agent per-agent performance data without violating privacy boundaries. Agents choose what to publish (consistent with "private by default, shared by promotion" philosophy). Any fleet-aware agent benefits.
+
+**Changes:**
+- Extend heartbeat handler to write a self-reported summary to blackboard under `diagnostics/{agent_id}` after each heartbeat cycle:
+  ```json
+  {
+    "timestamp": "2026-02-25T10:00:00Z",
+    "recent_errors": 3,
+    "tool_success_rate": 0.92,
+    "top_failing_tool": "browser_navigate",
+    "corrections_received": 1,
+    "context_compactions": 2,
+    "tasks_completed_24h": 7,
+    "avg_iterations_per_task": 4.2
+  }
+  ```
+- Data sourced from existing per-agent stores: `tool_outcomes` table (success rates), `learnings/errors.md` (error count), `learnings/corrections.md` (correction count), context manager counters (compaction count). No new data collection — just aggregation and publishing
+- TTL on blackboard entries: 24 hours (prevents stale data accumulation)
+- Engineering agent reads `diagnostics/*` prefix from blackboard for fleet-wide analysis
+- ~40-60 lines added to heartbeat context handling. No new modules
+
+### 6.5 Improvement Tracking & Feedback Loop
+
+Without feedback, the engineering agent makes educated guesses. With a structured feedback loop, it learns which improvements work and which don't — building a corpus of validated optimization patterns over time.
+
+**Impact:** Transforms the engineering agent from one-shot interventions to data-driven continuous optimization. Enables auto-rollback on regression. Over time, the engineering agent becomes increasingly effective as it accumulates evidence about what works for each agent role and task type.
+
+**Changes:**
+- Engineering agent writes improvement records to blackboard under `engineering/improvements/{date}/{id}`:
+  ```json
+  {
+    "type": "config_change|code_pr|agent_coaching",
+    "target": "assistant|loop.py|fleet-wide",
+    "description": "Switched signal_watcher from Opus to Sonnet — simple lookup tasks don't need heavy reasoning",
+    "metrics_before": {"daily_cost": 4.20, "success_rate": 0.85, "avg_iterations": 6.1},
+    "metrics_after": null,
+    "pr_url": null,
+    "config_diff": "model: anthropic/claude-opus-4-6 → anthropic/claude-sonnet-4-6",
+    "status": "proposed|applied|measured|reverted",
+    "applied_at": "2026-02-25T10:00:00Z",
+    "measured_at": null,
+    "outcome": null
+  }
+  ```
+- After improvement is applied and configurable measurement period elapses (default 24h), engineering agent's next cron run compares fleet metrics before vs after:
+  - Cost change: `(metrics_after.daily_cost - metrics_before.daily_cost) / metrics_before.daily_cost`
+  - Quality change: success rate delta, error count delta, iteration count delta
+  - Net assessment: improvement confirmed / regression detected / inconclusive
+- If regression detected on a config change: auto-rollback via `POST /mesh/admin/config/{file}/rollback` + agent restart
+- If improvement confirmed: save to memory as validated pattern with confidence score, increase weight for similar future improvements
+- Improvement history searchable via engineering agent's memory — builds a knowledge base of "what works for which type of agent/problem"
+- No new infrastructure — this is system prompt logic that uses existing tools (blackboard, memory, admin API). The structured format in the blackboard is a convention, not schema-enforced
+
+### Security Summary
+
+The engineering agent introduces no new attack surface beyond what any agent already has:
+
+| Threat | Mitigation |
+|---|---|
+| Engineering agent escapes container | Same hardening as all agents: UID 1000, `no-new-privileges`, 512MB mem, CPU quota. No Docker socket. No host bind mounts |
+| Engineering agent reads secrets | Vault never exposes system credentials (`OPENLEGION_SYSTEM_*`). GitHub PAT is agent-tier, scoped to one repo. Config read endpoint never serves `.env` |
+| Engineering agent escalates permissions | Admin API validates config changes — cannot grant system credential access, cannot add admin to other agents, cannot remove own restrictions (deadman's switch) |
+| Engineering agent breaks the fleet | Config writes create backups (rollback). Code changes require human PR review. Auto-rollback on metric regression |
+| GitHub PAT compromise | PAT scoped to `repo` on one fork. PRs require human merge. Token revocable instantly via GitHub |
+| Engineering agent accesses private agent data | Fleet API requires `fleet_read` permission. Per-agent endpoints check `can_message`. Workspace file access is allowlisted. Raw memory databases are never exposed |
+
+---
+
 ## Backlog
 
 Lower priority items grouped by theme. Implement when convenient or when a specific need arises.
@@ -661,6 +820,7 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 | Sandbox backends | Docker + Sandbox microVMs | None | **Firejail, Bubblewrap, Landlock, Docker** | None | Docker | N/A | None |
 | Observability | **Real-time dashboard (fleet view, multi-chat, streaming broadcast, traces, cost charts)** | Logs only | **Noop, Log, Prometheus, OpenTelemetry** | None | None | N/A | None |
 | Runtime targets | Docker/Sandbox | Local process | **Native, Docker, WASM** | Local | Docker | N/A | Local |
+| Self-improvement | **Engineering agent (containerized, PR-gated)** | None | None | None | None | N/A | None |
 | Binary size / footprint | ~512MB container | ~200MB Python env | **8.8MB binary, 4MB RAM** | Small | ~200MB | N/A | Small |
 
 ### What We Win On (vs OpenClaw)
@@ -702,11 +862,12 @@ ZeroClaw is architecturally different (single-agent Rust binary vs our multi-age
 
 ### Our Moat
 
-Container-isolated multi-agent orchestration with blind credential vault, fleet coordination, hierarchical memory, and self-authoring tools. No competitor combines all five. OpenClaw is closest on individual agent capability but fundamentally cannot match security isolation (in-process agents see credentials) or fleet coordination (no mesh, no blackboard, no DAG workflows). ZeroClaw is closest on raw performance and channel breadth but has no multi-agent orchestration, no fleet coordination, no per-agent budgets, and no DAG workflows.
+Container-isolated multi-agent orchestration with blind credential vault, fleet coordination, hierarchical memory, self-authoring tools, and self-improving fleet intelligence. No competitor combines all six. OpenClaw is closest on individual agent capability but fundamentally cannot match security isolation (in-process agents see credentials) or fleet coordination (no mesh, no blackboard, no DAG workflows). ZeroClaw is closest on raw performance and channel breadth but has no multi-agent orchestration, no fleet coordination, no per-agent budgets, and no DAG workflows. No competitor has a containerized engineering agent that observes fleet performance and proposes improvements through validated APIs and human-reviewed PRs.
 
 ### Next Differentiators
 
 1. **Agent intelligence** (Tier 4) — Close remaining individual agent gaps: extended thinking, compaction, model fallback, web search, hybrid memory scoring, and query-based model routing. Token-level streaming and tool loop detection gaps already closed.
 2. **Real-time observability** (Tier 5) — No competitor offers fleet-level visibility into multi-agent reasoning, tool usage, and collaboration. Served from the existing mesh server — zero additional infrastructure.
-3. **Provider flexibility** (Backlog) — XML tool-calling fallback unlocks the entire local model ecosystem. Combined with query classification, enables hybrid local+cloud deployments.
-4. **Channel reach** (Backlog) — Matrix, Email, Signal expand into privacy-conscious and enterprise markets where ZeroClaw currently leads.
+3. **Self-improving fleet** (Tier 6) — No competitor has a feedback loop where fleet performance data drives automated improvements. The engineering agent observes traces/errors/costs, diagnoses patterns, and applies fixes through validated APIs and human-reviewed PRs. Containerized with the same security hardening as every other agent — the improvement loop respects the security model rather than bypassing it.
+4. **Provider flexibility** (Backlog) — XML tool-calling fallback unlocks the entire local model ecosystem. Combined with query classification, enables hybrid local+cloud deployments.
+5. **Channel reach** (Backlog) — Matrix, Email, Signal expand into privacy-conscious and enterprise markets where ZeroClaw currently leads.
