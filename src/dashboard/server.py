@@ -1,4 +1,4 @@
-"""Dashboard API router: fleet overview, costs, blackboard, traces, management.
+"""Dashboard API router: fleet overview, costs, comms (blackboard + pubsub), traces, management.
 
 Serves the SPA template and static files, plus JSON API endpoints
 consumed by the Alpine.js frontend.  All data comes from live Python
@@ -1249,6 +1249,92 @@ def create_dashboard_router(
             "prefix": prefix,
             "entries": [e.model_dump(mode="json") for e in entries],
         }
+
+    @api_router.get("/api/comms/activity")
+    async def api_comms_activity(limit: int = 100) -> dict:
+        """Recent inter-agent communication: blackboard writes/deletes + pubsub events."""
+        import json as _json
+        limit = max(1, min(limit, 500))
+        activity: list[dict] = []
+
+        # 1. Blackboard event_log (persisted in SQLite)
+        try:
+            rows = blackboard.db.execute(
+                "SELECT event_type, key, agent_id, data, timestamp "
+                "FROM event_log ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            for event_type, key, agent_id, data, ts in rows:
+                entry: dict = {
+                    "source": "blackboard",
+                    "action": event_type,
+                    "key": key,
+                    "agent": agent_id,
+                    "timestamp": ts,
+                }
+                if data:
+                    try:
+                        parsed = _json.loads(data)
+                        # Extract a human-readable preview from the value
+                        if isinstance(parsed, dict):
+                            for f in ("text", "summary", "status", "message",
+                                      "description", "name", "result"):
+                                if f in parsed and isinstance(parsed[f], str):
+                                    entry["preview"] = parsed[f][:200]
+                                    break
+                            if "preview" not in entry:
+                                entry["preview"] = _json.dumps(parsed, default=str)[:200]
+                        else:
+                            entry["preview"] = str(parsed)[:200]
+                    except (ValueError, TypeError):
+                        entry["preview"] = str(data)[:200]
+                activity.append(entry)
+        except Exception:
+            pass  # event_log may not exist yet
+
+        # 2. PubSub events (persisted in SQLite when db_path is set)
+        if pubsub and getattr(pubsub, "_db", None) is not None:
+            try:
+                rows = pubsub._db.execute(
+                    "SELECT topic, data, created_at "
+                    "FROM events ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                for topic, data, ts in rows:
+                    entry = {
+                        "source": "pubsub",
+                        "action": "publish",
+                        "topic": topic,
+                        "timestamp": ts,
+                    }
+                    if data:
+                        try:
+                            parsed = _json.loads(data)
+                            if isinstance(parsed, dict):
+                                entry["agent"] = parsed.get("source", parsed.get("agent", ""))
+                                for f in ("message", "summary", "result", "text"):
+                                    if f in parsed and isinstance(parsed[f], str):
+                                        entry["preview"] = parsed[f][:200]
+                                        break
+                            if "preview" not in entry:
+                                entry["preview"] = str(data)[:200]
+                        except (ValueError, TypeError):
+                            entry["preview"] = str(data)[:200]
+                    activity.append(entry)
+            except Exception:
+                pass
+
+        # Sort merged activity by timestamp descending, then trim
+        activity.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+        activity = activity[:limit]
+
+        # Also return current pubsub subscriptions for context
+        subs: dict[str, list[str]] = {}
+        if pubsub:
+            with pubsub._lock:
+                subs = {t: list(agents) for t, agents in pubsub.subscriptions.items()}
+
+        return {"activity": activity, "subscriptions": subs}
 
     _MAX_BB_KEY_LEN = 512
     _MAX_BB_VALUE_BYTES = 262_144  # 256 KB
