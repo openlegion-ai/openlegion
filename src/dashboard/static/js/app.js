@@ -1,7 +1,7 @@
 /**
  * OpenLegion Dashboard — Alpine.js application.
  *
- * Three panels: Agents, Activity (Traces / Events / Logs), System (Costs / Blackboard / Automation / Integrations).
+ * Three panels: Agents, Activity (Traces / Events / Logs), System (Costs / Comms / Automation / Integrations).
  * Real-time updates via WebSocket + periodic REST polling.
  */
 const _IDENTITY_TABS = [
@@ -71,7 +71,7 @@ function dashboard() {
     addAgentLoading: false,
     agentTemplates: [],
 
-    // Blackboard
+    // Blackboard / Comms
     bbEntries: [],
     bbPrefix: '',
     bbHighlights: [],
@@ -81,6 +81,12 @@ function dashboard() {
     bbNewValue: '{}',
     bbWriterFilter: '',
     bbExpanded: {},
+    commsView: 'activity',  // 'activity' or 'state'
+    commsActivity: [],
+    commsActivityLoading: false,
+    commsSubs: {},
+    commsBadge: 0,
+    _commsLastSeen: 0,
 
     // PROJECT.md (per-project only)
     projectContent: '',
@@ -189,7 +195,7 @@ function dashboard() {
     systemTab: 'costs',
     systemTabs: [
       { id: 'costs', label: 'Costs & Budgets' },
-      { id: 'blackboard', label: 'Blackboard' },
+      { id: 'blackboard', label: 'Comms' },
       { id: 'automation', label: 'Automation' },
       { id: 'integrations', label: 'Integrations' },
     ],
@@ -804,6 +810,7 @@ function dashboard() {
         this.fetchSettings();
         this.fetchCosts();
         this.fetchBlackboard();
+        this.fetchCommsActivity();
         this.fetchCronJobs();
         this.fetchWorkflows();
         if (this.systemTab === 'integrations') {
@@ -911,11 +918,16 @@ function dashboard() {
         }
       }
 
-      // Highlight blackboard writes
+      // Highlight blackboard writes + update comms badge
       if (evt.type === 'blackboard_write' && evt.data && evt.data.key) {
         if (!this.bbHighlights.includes(evt.data.key)) this.bbHighlights.push(evt.data.key);
         setTimeout(() => { const i = this.bbHighlights.indexOf(evt.data.key); if (i !== -1) this.bbHighlights.splice(i, 1); }, 5000);
-        if (this.activeTab === 'system') this.fetchBlackboard();
+        if (this.activeTab === 'system' && this.systemTab === 'blackboard') {
+          this.fetchBlackboard();
+          this.fetchCommsActivity();
+        } else {
+          this.commsBadge++;
+        }
       }
 
       // Re-fetch identity/memory content when workspace files change (debounced, skip if editing)
@@ -1420,6 +1432,21 @@ function dashboard() {
         if (resp.ok) this.bbEntries = (await resp.json()).entries;
       } catch (e) { console.warn('fetchBlackboard failed:', e); }
       this.bbLoading = false;
+    },
+
+    async fetchCommsActivity() {
+      this.commsActivityLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/comms/activity?limit=100`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.commsActivity = data.activity || [];
+          this.commsSubs = data.subscriptions || {};
+          this._commsLastSeen = Date.now();
+          this.commsBadge = 0;
+        }
+      } catch (e) { console.warn('fetchCommsActivity failed:', e); }
+      this.commsActivityLoading = false;
     },
 
     async fetchCosts() {
@@ -2522,7 +2549,7 @@ function dashboard() {
       const tabKeywords = {
         fleet: ['agents', 'fleet', 'cards', 'project'],
         activity: ['activity', 'traces', 'events', 'logs', 'runtime'],
-        system: ['system', 'costs', 'cron', 'automation', 'credentials', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'workflows'],
+        system: ['system', 'costs', 'cron', 'automation', 'credentials', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows'],
       };
       for (const [tabId, keywords] of Object.entries(tabKeywords)) {
         const tab = this.tabs.find(t => t.id === tabId);
@@ -3344,6 +3371,31 @@ function dashboard() {
 
     fullJson(value) {
       return JSON.stringify(value, null, 2);
+    },
+
+    commsActionVerb(item) {
+      if (item.source === 'pubsub') return 'published';
+      if (item.action === 'delete') return 'deleted';
+      if (item.action === 'cas_write') return 'claimed';
+      return 'wrote';
+    },
+
+    commsActionTarget(item) {
+      if (item.source === 'pubsub') return item.topic || '?';
+      return item.key || '?';
+    },
+
+    commsActionClass(item) {
+      if (item.source === 'pubsub') return 'text-purple-400';
+      if (item.action === 'delete') return 'text-red-400';
+      if (item.action === 'cas_write') return 'text-amber-400';
+      return 'text-cyan-400';
+    },
+
+    commsIconClass(item) {
+      if (item.source === 'pubsub') return 'bg-purple-500/20 text-purple-400';
+      if (item.action === 'delete') return 'bg-red-500/20 text-red-400';
+      return 'bg-cyan-500/20 text-cyan-400';
     },
 
     waterfall(evt, allEvents) {
