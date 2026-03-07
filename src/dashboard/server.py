@@ -1251,19 +1251,28 @@ def create_dashboard_router(
         }
 
     @api_router.get("/api/comms/activity")
-    async def api_comms_activity(limit: int = 100) -> dict:
+    async def api_comms_activity(limit: int = 100, project: str = "") -> dict:
         """Recent inter-agent communication: blackboard writes/deletes + pubsub events."""
         import json as _json
         limit = max(1, min(limit, 500))
+        project_prefix = f"projects/{project}/" if project else ""
         activity: list[dict] = []
 
         # 1. Blackboard event_log (persisted in SQLite)
         try:
-            rows = blackboard.db.execute(
-                "SELECT event_type, key, agent_id, data, timestamp "
-                "FROM event_log ORDER BY id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if project_prefix:
+                rows = blackboard.db.execute(
+                    "SELECT event_type, key, agent_id, data, timestamp "
+                    "FROM event_log WHERE key LIKE ? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (project_prefix + "%", limit),
+                ).fetchall()
+            else:
+                rows = blackboard.db.execute(
+                    "SELECT event_type, key, agent_id, data, timestamp "
+                    "FROM event_log ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
             for event_type, key, agent_id, data, ts in rows:
                 entry: dict = {
                     "source": "blackboard",
@@ -1295,11 +1304,19 @@ def create_dashboard_router(
         # 2. PubSub events (persisted in SQLite when db_path is set)
         if pubsub and getattr(pubsub, "_db", None) is not None:
             try:
-                rows = pubsub._db.execute(
-                    "SELECT topic, data, created_at "
-                    "FROM events ORDER BY id DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+                if project_prefix:
+                    rows = pubsub._db.execute(
+                        "SELECT topic, data, created_at "
+                        "FROM events WHERE topic LIKE ? "
+                        "ORDER BY id DESC LIMIT ?",
+                        (project_prefix + "%", limit),
+                    ).fetchall()
+                else:
+                    rows = pubsub._db.execute(
+                        "SELECT topic, data, created_at "
+                        "FROM events ORDER BY id DESC LIMIT ?",
+                        (limit,),
+                    ).fetchall()
                 for topic, data, ts in rows:
                     entry = {
                         "source": "pubsub",
@@ -1332,7 +1349,10 @@ def create_dashboard_router(
         subs: dict[str, list[str]] = {}
         if pubsub:
             with pubsub._lock:
-                subs = {t: list(agents) for t, agents in pubsub.subscriptions.items()}
+                for t, agents in pubsub.subscriptions.items():
+                    if project_prefix and not t.startswith(project_prefix):
+                        continue
+                    subs[t] = list(agents)
 
         return {"activity": activity, "subscriptions": subs}
 

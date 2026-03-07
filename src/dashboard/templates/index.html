@@ -1600,22 +1600,181 @@
                 </div>
               </div>
             </div>
+            <!-- ═══ PROJECT COMMS (only for project agents) ═══ -->
+            <div x-show="_detailAgentProject()" x-cloak>
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="flex items-center justify-between mb-3">
+                  <div class="text-xs text-gray-500 uppercase tracking-wider">Project Comms</div>
+                  <div class="flex items-center gap-2">
+                    <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
+                      <button @click="commsView = 'activity'; fetchCommsActivity()"
+                        class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+                        :class="commsView === 'activity' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
+                        Activity
+                      </button>
+                      <button @click="commsView = 'state'; fetchBlackboard()"
+                        class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+                        :class="commsView === 'state' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
+                        Shared State
+                      </button>
+                    </div>
+                    <button @click="commsView === 'activity' ? fetchCommsActivity() : fetchBlackboard()" class="text-gray-600 hover:text-gray-400 transition-colors" title="Refresh">
+                      <svg class="w-3.5 h-3.5" :class="(commsActivityLoading || bbLoading) && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <!-- Subscriptions summary -->
+                <div x-show="commsView === 'activity' && Object.keys(commsSubs).length > 0" class="flex items-center gap-1.5 flex-wrap mb-3" x-cloak>
+                  <template x-for="[topic, sAgents] in Object.entries(commsSubs).slice(0, 8)" :key="topic">
+                    <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-400/70 border border-purple-500/20"
+                      x-text="topic + ' (' + sAgents.length + ')'"></span>
+                  </template>
+                  <span x-show="Object.keys(commsSubs).length > 8" class="text-[10px] text-gray-600"
+                    x-text="'+' + (Object.keys(commsSubs).length - 8) + ' more'"></span>
+                </div>
+
+                <!-- ═══ ACTIVITY VIEW ═══ -->
+                <div x-show="commsView === 'activity'">
+                  <div class="border border-gray-800 rounded-lg overflow-hidden">
+                    <div class="divide-y divide-gray-800/30">
+                      <template x-for="(item, idx) in commsActivity" :key="idx">
+                        <div class="comms-activity-row">
+                          <div x-show="item.agent" class="agent-avatar agent-avatar-sm flex-shrink-0"
+                            :class="'agent-color-' + agentColorIndex(item.agent)">
+                            <img :src="agentAvatarUrl(item.agent)" :alt="item.agent">
+                          </div>
+                          <div x-show="!item.agent" class="comms-activity-icon bg-gray-700/50 text-gray-500 flex-shrink-0">
+                            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></svg>
+                          </div>
+                          <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-1.5 flex-wrap">
+                              <span class="text-xs font-medium text-gray-300" x-text="item.agent || 'system'"></span>
+                              <span class="text-xs text-gray-600" x-text="commsActionVerb(item)"></span>
+                              <span class="comms-type-badge" :class="item.source === 'pubsub' ? 'comms-type-event' : 'comms-type-bb'"
+                                x-text="item.source === 'pubsub' ? 'event' : (item.action === 'delete' ? 'delete' : 'state')"></span>
+                              <span class="text-xs font-mono truncate" :class="commsActionClass(item)"
+                                x-text="commsActionTarget(item)"></span>
+                            </div>
+                            <div x-show="item.preview" class="text-[11px] text-gray-500 truncate mt-0.5" x-text="item.preview" x-cloak></div>
+                          </div>
+                          <span class="text-[10px] text-gray-600 whitespace-nowrap flex-shrink-0" x-text="timeAgo(item.timestamp)"></span>
+                        </div>
+                      </template>
+                    </div>
+                    <div x-show="commsActivity.length === 0 && commsActivityLoading" class="text-center py-8" x-cloak>
+                      <div class="inline-flex items-center gap-2 text-gray-600">
+                        <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        Loading...
+                      </div>
+                    </div>
+                    <div x-show="commsActivity.length === 0 && !commsActivityLoading" class="text-center py-8 px-6" x-cloak>
+                      <div class="text-gray-600 text-xs">No agent communication yet in this project.</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- ═══ SHARED STATE VIEW ═══ -->
+                <div x-show="commsView === 'state'" x-cloak>
+                  <div class="mb-3 flex gap-2">
+                    <input type="text" x-model="bbPrefix" @keyup.enter="fetchBlackboard()"
+                      placeholder="Filter by prefix (e.g. tasks/, context/)"
+                      class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs flex-1 focus:outline-none focus:border-gray-600 focus:ring-1 focus:ring-gray-600 placeholder-gray-600 transition-colors">
+                    <button @click="fetchBlackboard()" class="bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors">Search</button>
+                  </div>
+                  <div class="flex gap-1.5 flex-wrap mb-3">
+                    <template x-for="ns in ['tasks/', 'context/', 'signals/', 'goals/', 'artifacts/', 'history/']" :key="ns">
+                      <button @click="bbPrefix = (bbPrefix === ns ? '' : ns); fetchBlackboard()"
+                        class="text-[10px] px-1.5 py-0.5 rounded-md border transition-all"
+                        :class="bbPrefix === ns ? 'border-cyan-500/60 bg-cyan-900/20 text-cyan-300' : 'border-gray-800 text-gray-600 hover:text-gray-400'">
+                        <span x-text="ns"></span><span x-show="bbNamespaceCounts[ns] > 0" class="ml-1 opacity-60" x-text="'(' + bbNamespaceCounts[ns] + ')'"></span>
+                      </button>
+                    </template>
+                    <button @click="bbWriteMode = !bbWriteMode" class="ml-auto text-[10px] px-1.5 py-0.5 rounded-md border transition-all"
+                      :class="bbWriteMode ? 'border-indigo-500/40 text-indigo-400' : 'border-gray-800 text-gray-600 hover:text-gray-400'">+ Write</button>
+                  </div>
+                  <!-- Write form -->
+                  <div x-show="bbWriteMode" x-cloak class="border border-gray-800 rounded-lg p-3 mb-3">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div>
+                        <label class="text-[10px] text-gray-500 mb-1 block">Key</label>
+                        <input type="text" x-model="bbNewKey" :disabled="bbWriteLoading" placeholder="context/my_key" class="dash-input w-full text-xs">
+                      </div>
+                      <div>
+                        <label class="text-[10px] text-gray-500 mb-1 block">Value (JSON)</label>
+                        <textarea x-model="bbNewValue" :disabled="bbWriteLoading" class="dash-textarea w-full text-xs" rows="2" placeholder='{"key": "value"}'
+                          :class="bbNewValue && !bbJsonValid.valid ? 'border-red-500/50' : ''"></textarea>
+                        <div x-show="bbNewValue && !bbJsonValid.valid" x-cloak class="text-[10px] text-red-400 mt-1" x-text="bbJsonValid.error"></div>
+                      </div>
+                    </div>
+                    <div class="mt-2 flex gap-2">
+                      <button @click="writeBlackboard()" class="text-[10px] px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1"
+                        :disabled="bbWriteLoading || !bbJsonValid.valid || !bbNewKey.trim()" :class="(bbWriteLoading || !bbJsonValid.valid || !bbNewKey.trim()) && 'opacity-50 cursor-not-allowed'">
+                        <svg x-show="bbWriteLoading" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        <span x-text="bbWriteLoading ? 'Saving...' : 'Save'"></span>
+                      </button>
+                      <button @click="bbWriteMode = false" :disabled="bbWriteLoading" class="text-[10px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors disabled:opacity-50">Cancel</button>
+                    </div>
+                  </div>
+                  <!-- State entries list -->
+                  <div class="border border-gray-800 rounded-lg overflow-hidden">
+                    <div class="divide-y divide-gray-800/40">
+                      <template x-for="entry in filteredBbEntries" :key="entry.key">
+                        <div :class="bbHighlights.includes(entry.key) ? 'flash-yellow' : ''">
+                          <div class="bb-entry-row"
+                            :class="bbExpanded[entry.key] ? 'bb-expanded ' + bbNsAccentClass(entry.key) : ''"
+                            @click="toggleBbExpand(entry.key)">
+                            <svg class="bb-chevron" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" /></svg>
+                            <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(entry.written_by)">
+                              <img :src="agentAvatarUrl(entry.written_by)" :alt="entry.written_by">
+                            </div>
+                            <span x-show="bbNamespaceOf(entry.key)" :class="bbNsBadgeClass(entry.key)" x-text="bbNsName(entry.key)"></span>
+                            <span class="font-mono text-xs text-blue-400 truncate" style="min-width:5rem;max-width:14rem" x-text="bbKeyAfterNs(entry.key)"></span>
+                            <span class="text-gray-500 text-xs truncate flex-1 min-w-0" x-text="valueSummary(entry.value)"></span>
+                            <span class="text-gray-600 text-xs whitespace-nowrap flex-shrink-0" x-text="timeAgo(entry.updated_at)"></span>
+                            <button @click.stop="deleteBlackboard(entry.key)" :disabled="entry.key.startsWith('history/')"
+                              class="text-[10px] px-1.5 py-0.5 rounded text-gray-700 hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0">Delete</button>
+                          </div>
+                          <div class="bb-detail" :class="bbExpanded[entry.key] ? 'bb-detail-open' : ''">
+                            <div class="px-4 pb-3 pt-1">
+                              <div class="flex items-center gap-3 mb-2 text-xs text-gray-500">
+                                <span>Written by <span class="text-gray-400" x-text="entry.written_by"></span></span>
+                                <span class="text-gray-700">&middot;</span>
+                                <span>v<span x-text="entry.version"></span></span>
+                                <span class="text-gray-700">&middot;</span>
+                                <span class="font-mono text-gray-600" x-text="entry.updated_at"></span>
+                              </div>
+                              <pre class="bb-detail-pre custom-scrollbar" x-text="fullJson(entry.value)"></pre>
+                            </div>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                    <div x-show="filteredBbEntries.length === 0 && bbLoading" class="text-center py-8" x-cloak>
+                      <div class="inline-flex items-center gap-2 text-gray-600">
+                        <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        Loading...
+                      </div>
+                    </div>
+                    <div x-show="filteredBbEntries.length === 0 && !bbLoading" class="text-center py-8 px-6" x-cloak>
+                      <div class="text-gray-600 text-xs">No shared state entries in this project yet.</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </template>
       </div>
 
-      <!-- System (Costs + Comms + Automation + Settings) -->
+      <!-- System (Costs + Automation + Settings) -->
       <div x-show="activeTab === 'system'" x-cloak>
         <!-- System sub-tab bar -->
         <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
           <template x-for="st in systemTabs" :key="st.id">
-            <button @click="systemTab = st.id; if (st.id === 'integrations') { fetchChannels(); fetchWebhooks(); fetchSettings(); } if (st.id === 'blackboard') { commsBadge = 0; }"
-              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative"
+            <button @click="systemTab = st.id; if (st.id === 'integrations') { fetchChannels(); fetchWebhooks(); fetchSettings(); }"
+              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
               :class="systemTab === st.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
               <span x-text="st.label"></span>
-              <span x-show="st.id === 'blackboard' && commsBadge > 0" x-cloak
-                class="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 text-[10px] font-bold rounded-full bg-cyan-500 text-white flex items-center justify-center"
-                x-text="commsBadge > 99 ? '99+' : commsBadge"></span>
             </button>
           </template>
         </div>
@@ -1677,197 +1836,6 @@
           </div>
         </div>
         </div><!-- /costs sub-tab -->
-
-        <!-- Comms sub-tab (formerly Blackboard) -->
-        <div x-show="systemTab === 'blackboard'" x-init="$watch('systemTab', v => { if (v === 'blackboard') { fetchCommsActivity(); fetchBlackboard(); commsBadge = 0; } })">
-        <div class="mb-6">
-          <!-- Section header -->
-          <div class="mb-4">
-            <p class="text-xs text-gray-500 leading-relaxed">How your agents share data and coordinate. The <span class="text-cyan-400/80">blackboard</span> holds shared state; <span class="text-purple-400/80">events</span> are signals agents publish to trigger each other.</p>
-          </div>
-
-          <!-- View toggle: Activity / Shared State -->
-          <div class="flex items-center gap-3 mb-4 flex-wrap">
-            <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
-              <button @click="commsView = 'activity'; fetchCommsActivity()"
-                class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
-                :class="commsView === 'activity' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
-                Activity
-              </button>
-              <button @click="commsView = 'state'; fetchBlackboard()"
-                class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
-                :class="commsView === 'state' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
-                Shared State
-              </button>
-            </div>
-            <!-- Subscriptions summary (activity view) -->
-            <div x-show="commsView === 'activity'" class="flex items-center gap-1.5 flex-wrap ml-auto" x-cloak>
-              <template x-for="[topic, agents] in Object.entries(commsSubs).slice(0, 8)" :key="topic">
-                <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-400/70 border border-purple-500/20"
-                  x-text="topic + ' (' + agents.length + ')'"></span>
-              </template>
-              <span x-show="Object.keys(commsSubs).length > 8" class="text-[10px] text-gray-600"
-                x-text="'+' + (Object.keys(commsSubs).length - 8) + ' more'"></span>
-              <button @click="fetchCommsActivity()" class="text-gray-600 hover:text-gray-400 transition-colors ml-1" title="Refresh">
-                <svg class="w-3.5 h-3.5" :class="commsActivityLoading && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-              </button>
-            </div>
-            <!-- State view controls -->
-            <div x-show="commsView === 'state'" class="flex gap-2 ml-auto" x-cloak>
-              <button @click="bbWriteMode = !bbWriteMode" class="bg-gray-800 hover:bg-indigo-900/40 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors" :class="bbWriteMode ? 'text-indigo-400 border border-indigo-500/40' : ''">+ Write</button>
-            </div>
-          </div>
-
-          <!-- ═══ ACTIVITY VIEW ═══ -->
-          <div x-show="commsView === 'activity'">
-            <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-              <!-- Activity timeline -->
-              <div class="divide-y divide-gray-800/30">
-                <template x-for="(item, idx) in commsActivity" :key="idx">
-                  <div class="comms-activity-row">
-                    <!-- Agent avatar -->
-                    <div x-show="item.agent" class="agent-avatar agent-avatar-sm flex-shrink-0"
-                      :class="'agent-color-' + agentColorIndex(item.agent)">
-                      <img :src="agentAvatarUrl(item.agent)" :alt="item.agent">
-                    </div>
-                    <!-- System icon (when no agent) -->
-                    <div x-show="!item.agent" class="comms-activity-icon bg-gray-700/50 text-gray-500 flex-shrink-0">
-                      <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></svg>
-                    </div>
-                    <!-- Content -->
-                    <div class="flex-1 min-w-0">
-                      <div class="flex items-center gap-1.5 flex-wrap">
-                        <span class="text-xs font-medium text-gray-300" x-text="item.agent || 'system'"></span>
-                        <span class="text-xs text-gray-600" x-text="commsActionVerb(item)"></span>
-                        <!-- Action type badge -->
-                        <span class="comms-type-badge" :class="item.source === 'pubsub' ? 'comms-type-event' : 'comms-type-bb'"
-                          x-text="item.source === 'pubsub' ? 'event' : (item.action === 'delete' ? 'delete' : 'state')"></span>
-                        <!-- Key/topic -->
-                        <span class="text-xs font-mono truncate" :class="commsActionClass(item)"
-                          x-text="commsActionTarget(item)"></span>
-                      </div>
-                      <div x-show="item.preview" class="text-[11px] text-gray-500 truncate mt-0.5" x-text="item.preview" x-cloak></div>
-                    </div>
-                    <!-- Timestamp -->
-                    <span class="text-[10px] text-gray-600 whitespace-nowrap flex-shrink-0" x-text="timeAgo(item.timestamp)"></span>
-                  </div>
-                </template>
-              </div>
-              <!-- Loading -->
-              <div x-show="commsActivity.length === 0 && commsActivityLoading" class="text-center py-12" x-cloak>
-                <div class="inline-flex items-center gap-2 text-gray-600">
-                  <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                  Loading...
-                </div>
-              </div>
-              <!-- Empty state -->
-              <div x-show="commsActivity.length === 0 && !commsActivityLoading" class="text-center py-12 px-6" x-cloak>
-                <div class="text-gray-500 mb-2 text-sm">No agent communication yet</div>
-                <div class="text-gray-600 text-xs max-w-sm mx-auto leading-relaxed">
-                  When agents share data via the <span class="text-cyan-400/70">blackboard</span> or publish coordination <span class="text-purple-400/70">events</span>, their activity appears here in real time.
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- ═══ SHARED STATE VIEW ═══ -->
-          <div x-show="commsView === 'state'" x-cloak>
-            <!-- Prefix filter + namespace buttons -->
-            <div class="mb-3 flex gap-2">
-              <input type="text" x-model="bbPrefix" @keyup.enter="fetchBlackboard()"
-                placeholder="Filter by prefix (e.g. tasks/, context/)"
-                class="bg-gray-900 border border-gray-800 rounded-lg px-3 py-2 text-sm flex-1 focus:outline-none focus:border-gray-600 focus:ring-1 focus:ring-gray-600 placeholder-gray-700 transition-colors">
-              <button @click="fetchBlackboard()" class="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg text-sm font-medium transition-colors">Search</button>
-            </div>
-            <div class="flex gap-1.5 flex-wrap mb-3">
-              <template x-for="ns in ['tasks/', 'context/', 'signals/', 'goals/', 'artifacts/', 'history/']" :key="ns">
-                <button @click="bbPrefix = (bbPrefix === ns ? '' : ns); fetchBlackboard()"
-                  class="text-xs px-2 py-1 rounded-md border transition-all"
-                  :class="bbPrefix === ns ? 'border-cyan-500/60 bg-cyan-900/20 text-cyan-300' : 'border-gray-800 text-gray-600 hover:text-gray-400'">
-                  <span x-text="ns"></span><span x-show="bbNamespaceCounts[ns] > 0" class="ml-1 opacity-60" x-text="'(' + bbNamespaceCounts[ns] + ')'"></span>
-                </button>
-              </template>
-              <select x-show="bbWriters.length > 0" x-model="bbWriterFilter"
-                class="text-xs px-2 py-1 rounded-md border border-gray-800 bg-gray-900 text-gray-400 ml-auto">
-                <option value="">All writers</option>
-                <template x-for="w in bbWriters" :key="w">
-                  <option :value="w" x-text="w"></option>
-                </template>
-              </select>
-            </div>
-            <!-- Write form -->
-            <div x-show="bbWriteMode" x-cloak class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div>
-                  <label for="bb-new-key" class="text-xs text-gray-500 mb-1 block">Key</label>
-                  <input id="bb-new-key" type="text" x-model="bbNewKey" :disabled="bbWriteLoading" placeholder="context/my_key" class="dash-input w-full">
-                </div>
-                <div>
-                  <label for="bb-new-value" class="text-xs text-gray-500 mb-1 block">Value (JSON)</label>
-                  <textarea id="bb-new-value" x-model="bbNewValue" :disabled="bbWriteLoading" class="dash-textarea w-full" rows="2" placeholder='{"key": "value"}'
-                    :class="bbNewValue && !bbJsonValid.valid ? 'border-red-500/50' : ''"></textarea>
-                  <div x-show="bbNewValue && !bbJsonValid.valid" x-cloak class="text-[10px] text-red-400 mt-1" x-text="bbJsonValid.error"></div>
-                </div>
-              </div>
-              <div class="mt-3 flex gap-2">
-                <button @click="writeBlackboard()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5"
-                  :disabled="bbWriteLoading || !bbJsonValid.valid || !bbNewKey.trim()" :class="(bbWriteLoading || !bbJsonValid.valid || !bbNewKey.trim()) && 'opacity-50 cursor-not-allowed'">
-                  <svg x-show="bbWriteLoading" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                  <span x-text="bbWriteLoading ? 'Saving...' : 'Save'"></span>
-                </button>
-                <button @click="bbWriteMode = false" :disabled="bbWriteLoading" class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors disabled:opacity-50">Cancel</button>
-              </div>
-            </div>
-            <!-- State entries list -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-              <div class="divide-y divide-gray-800/40">
-                <template x-for="entry in filteredBbEntries" :key="entry.key">
-                  <div :class="bbHighlights.includes(entry.key) ? 'flash-yellow' : ''">
-                    <div class="bb-entry-row"
-                      :class="bbExpanded[entry.key] ? 'bb-expanded ' + bbNsAccentClass(entry.key) : ''"
-                      @click="toggleBbExpand(entry.key)">
-                      <svg class="bb-chevron" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" /></svg>
-                      <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(entry.written_by)">
-                        <img :src="agentAvatarUrl(entry.written_by)" :alt="entry.written_by">
-                      </div>
-                      <span x-show="bbNamespaceOf(entry.key)" :class="bbNsBadgeClass(entry.key)" x-text="bbNsName(entry.key)"></span>
-                      <span class="font-mono text-xs text-blue-400 truncate" style="min-width:5rem;max-width:14rem" x-text="bbKeyAfterNs(entry.key)"></span>
-                      <span class="text-gray-500 text-xs truncate flex-1 min-w-0" x-text="valueSummary(entry.value)"></span>
-                      <span class="text-gray-600 text-xs whitespace-nowrap flex-shrink-0" x-text="timeAgo(entry.updated_at)"></span>
-                      <button @click.stop="deleteBlackboard(entry.key)" :disabled="entry.key.startsWith('history/')"
-                        class="text-[10px] px-1.5 py-0.5 rounded text-gray-700 hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0">Delete</button>
-                    </div>
-                    <div class="bb-detail" :class="bbExpanded[entry.key] ? 'bb-detail-open' : ''">
-                      <div class="px-4 pb-3 pt-1">
-                        <div class="flex items-center gap-3 mb-2 text-xs text-gray-500">
-                          <span>Written by <span class="text-gray-400" x-text="entry.written_by"></span></span>
-                          <span class="text-gray-700">&middot;</span>
-                          <span>v<span x-text="entry.version"></span></span>
-                          <span class="text-gray-700">&middot;</span>
-                          <span class="font-mono text-gray-600" x-text="entry.updated_at"></span>
-                        </div>
-                        <pre class="bb-detail-pre custom-scrollbar" x-text="fullJson(entry.value)"></pre>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-              </div>
-              <div x-show="filteredBbEntries.length === 0 && bbLoading" class="text-center py-12" x-cloak>
-                <div class="inline-flex items-center gap-2 text-gray-600">
-                  <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                  Loading...
-                </div>
-              </div>
-              <div x-show="filteredBbEntries.length === 0 && !bbLoading" class="text-center py-10 px-6" x-cloak>
-                <div class="text-gray-500 mb-2 text-sm">No shared state entries</div>
-                <div class="text-gray-600 text-xs max-w-sm mx-auto leading-relaxed">
-                  Agents store shared data here using namespaced keys. Check the Activity view to see if agents have been communicating.
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        </div><!-- /comms sub-tab -->
 
         <!-- Automation sub-tab -->
         <div x-show="systemTab === 'automation'">

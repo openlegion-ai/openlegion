@@ -85,7 +85,6 @@ function dashboard() {
     commsActivity: [],
     commsActivityLoading: false,
     commsSubs: {},
-    commsBadge: 0,
 
     // PROJECT.md (per-project only)
     projectContent: '',
@@ -194,7 +193,6 @@ function dashboard() {
     systemTab: 'costs',
     systemTabs: [
       { id: 'costs', label: 'Costs & Budgets' },
-      { id: 'blackboard', label: 'Comms' },
       { id: 'automation', label: 'Automation' },
       { id: 'integrations', label: 'Integrations' },
     ],
@@ -392,6 +390,12 @@ function dashboard() {
     closeDetail() {
       this.detailAgent = null;
       this.selectedAgent = null;
+      this.bbEntries = [];
+      this.commsActivity = [];
+      this.commsSubs = {};
+      this.bbPrefix = '';
+      this.bbWriteMode = false;
+      this.commsView = 'activity';
       if (this._detailReturnProject !== null && this._detailReturnProject !== undefined) {
         this.activeProject = this._detailReturnProject;
       }
@@ -808,8 +812,6 @@ function dashboard() {
       if (tab === 'system') {
         this.fetchSettings();
         this.fetchCosts();
-        this.fetchBlackboard();
-        this.fetchCommsActivity();
         this.fetchCronJobs();
         this.fetchWorkflows();
         if (this.systemTab === 'integrations') {
@@ -921,11 +923,9 @@ function dashboard() {
       if (evt.type === 'blackboard_write' && evt.data && evt.data.key) {
         if (!this.bbHighlights.includes(evt.data.key)) this.bbHighlights.push(evt.data.key);
         setTimeout(() => { const i = this.bbHighlights.indexOf(evt.data.key); if (i !== -1) this.bbHighlights.splice(i, 1); }, 5000);
-        if (this.activeTab === 'system' && this.systemTab === 'blackboard') {
+        if (this.detailAgent && this._detailAgentProject()) {
           this.fetchBlackboard();
           this.fetchCommsActivity();
-        } else {
-          this.commsBadge++;
         }
       }
 
@@ -1424,9 +1424,17 @@ function dashboard() {
       return this.projects.find(p => p.name === this.activeProject) || null;
     },
 
+    _detailAgentProject() {
+      // Get the project of the currently viewed agent
+      if (!this.detailAgent) return null;
+      const agent = this.agents.find(a => a.id === this.detailAgent);
+      return agent?.project || null;
+    },
+
     _bbProjectPrefix() {
-      // Agents in a project scope blackboard keys under projects/{name}/
-      return this.activeProject ? `projects/${this.activeProject}/` : '';
+      // Scope blackboard keys to the detail agent's project
+      const proj = this._detailAgentProject();
+      return proj ? `projects/${proj}/` : '';
     },
 
     _bbStripProjectPrefix(key) {
@@ -1456,7 +1464,10 @@ function dashboard() {
     async fetchCommsActivity() {
       this.commsActivityLoading = true;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/comms/activity?limit=100`);
+        const proj = this._detailAgentProject();
+        const params = new URLSearchParams({ limit: '100' });
+        if (proj) params.set('project', proj);
+        const resp = await fetch(`${window.__config.apiBase}/comms/activity?${params}`);
         if (resp.ok) {
           const data = await resp.json();
           const activity = data.activity || [];
@@ -1475,7 +1486,6 @@ function dashboard() {
             subs[clean] = agents;
           }
           this.commsSubs = subs;
-          this.commsBadge = 0;
         }
       } catch (e) { console.warn('fetchCommsActivity failed:', e); }
       this.commsActivityLoading = false;
@@ -1779,7 +1789,8 @@ function dashboard() {
       try { value = JSON.parse(this.bbNewValue); } catch (_) { this.showToast('Invalid JSON'); return; }
       this.bbWriteLoading = true;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/blackboard/${this.bbNewKey}`, {
+        const fullKey = this._bbProjectPrefix() + this.bbNewKey;
+        const resp = await fetch(`${window.__config.apiBase}/blackboard/${fullKey}`, {
           method: 'PUT', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ value }),
         });
@@ -1795,7 +1806,8 @@ function dashboard() {
     async deleteBlackboard(key) {
       this.showConfirm('Delete Entry', `Delete blackboard key "${key}"?`, async () => {
         try {
-          const resp = await fetch(`${window.__config.apiBase}/blackboard/${key}`, { method: 'DELETE' });
+          const fullKey = this._bbProjectPrefix() + key;
+          const resp = await fetch(`${window.__config.apiBase}/blackboard/${fullKey}`, { method: 'DELETE' });
           if (resp.ok) { this.showToast(`Deleted: ${key}`); this.fetchBlackboard(); }
           else { const err = await resp.json(); this.showToast(`Error: ${err.detail}`); }
         } catch (e) { this.showToast(`Error: ${e.message}`); }
@@ -2622,13 +2634,6 @@ function dashboard() {
           results.push({ type: 'cron', label: job.id, desc: `${job.agent} · ${job.schedule}`, action: () => { this.switchTab('system'); this.systemTab = 'automation'; } });
         }
       }
-      // Match blackboard keys
-      for (const entry of this.bbEntries || []) {
-        const key = (entry.key || '').toLowerCase();
-        if (key.includes(q)) {
-          results.push({ type: 'blackboard', label: entry.key, desc: `by ${entry.written_by || 'unknown'}`, action: () => { this.switchTab('system'); this.systemTab = 'blackboard'; } });
-        }
-      }
       // Match workflows
       for (const wf of this.workflows || []) {
         if ((wf.name || '').toLowerCase().includes(q)) {
@@ -2982,6 +2987,12 @@ function dashboard() {
       this.fetchAgentDetail(agentId);
       this.fetchIdentityFiles(agentId);
       this.fetchAgentConfig(agentId);
+      // Fetch comms if agent belongs to a project
+      const agent = this.agents.find(a => a.id === agentId);
+      if (agent?.project) {
+        this.fetchBlackboard();
+        this.fetchCommsActivity();
+      }
       this.activeTab = 'fleet';
       if (!this._skipPush) this._pushUrl(false);
     },
