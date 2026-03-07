@@ -1485,6 +1485,7 @@ function dashboard() {
         avatar: cfg.avatar || 1,
         _showAvatarPicker: false,
         budget_daily: cfg.budget?.daily_usd || '',
+        budget_monthly: cfg.budget?.monthly_usd || '',
         allowed_credentials: credsStr,
         _credMode: credMode,
       };
@@ -1515,8 +1516,14 @@ function dashboard() {
       if (this.editForm.model && this.editForm.model !== cfg.model) body.model = this.editForm.model;
       if (this.editForm.role !== undefined && this.editForm.role !== cfg.role) body.role = this.editForm.role;
       if (this.editForm.avatar && this.editForm.avatar !== (cfg.avatar || 1)) body.avatar = this.editForm.avatar;
-      if (this.editForm.budget_daily && parseFloat(this.editForm.budget_daily) > 0) {
-        body.budget = { daily_usd: parseFloat(this.editForm.budget_daily) };
+      if ((this.editForm.budget_daily && parseFloat(this.editForm.budget_daily) > 0) ||
+          (this.editForm.budget_monthly && parseFloat(this.editForm.budget_monthly) > 0)) {
+        const budget = {};
+        if (this.editForm.budget_daily && parseFloat(this.editForm.budget_daily) > 0)
+          budget.daily_usd = parseFloat(this.editForm.budget_daily);
+        if (this.editForm.budget_monthly && parseFloat(this.editForm.budget_monthly) > 0)
+          budget.monthly_usd = parseFloat(this.editForm.budget_monthly);
+        body.budget = budget;
       }
       // Handle allowed_credentials via the permissions endpoint
       const newCreds = (this.editForm.allowed_credentials || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -1596,11 +1603,14 @@ function dashboard() {
       }, true);
     },
 
-    async updateBudget(agentId, dailyUsd) {
+    async updateBudget(agentId, dailyUsd, monthlyUsd) {
       try {
+        const body = {};
+        if (dailyUsd != null) body.daily_usd = parseFloat(dailyUsd);
+        if (monthlyUsd != null) body.monthly_usd = parseFloat(monthlyUsd);
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/budget`, {
           method: 'PUT', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ daily_usd: parseFloat(dailyUsd) }),
+          body: JSON.stringify(body),
         });
         if (resp.ok) this.showToast(`Budget updated for ${agentId}`);
       } catch (e) { console.warn('updateBudget failed:', e); }
