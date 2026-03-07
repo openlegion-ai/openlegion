@@ -86,7 +86,6 @@ function dashboard() {
     commsActivityLoading: false,
     commsSubs: {},
     commsBadge: 0,
-    _commsLastSeen: 0,
 
     // PROJECT.md (per-project only)
     projectContent: '',
@@ -1442,7 +1441,6 @@ function dashboard() {
           const data = await resp.json();
           this.commsActivity = data.activity || [];
           this.commsSubs = data.subscriptions || {};
-          this._commsLastSeen = Date.now();
           this.commsBadge = 0;
         }
       } catch (e) { console.warn('fetchCommsActivity failed:', e); }
@@ -3381,7 +3379,7 @@ function dashboard() {
     },
 
     commsActionTarget(item) {
-      if (item.source === 'pubsub') return item.topic || '?';
+      if (item.source === 'pubsub') return (item.topic || '?').replace(/^projects\/[^/]+\//, '');
       return item.key || '?';
     },
 
