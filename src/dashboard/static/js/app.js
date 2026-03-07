@@ -1424,11 +1424,31 @@ function dashboard() {
       return this.projects.find(p => p.name === this.activeProject) || null;
     },
 
+    _bbProjectPrefix() {
+      // Agents in a project scope blackboard keys under projects/{name}/
+      return this.activeProject ? `projects/${this.activeProject}/` : '';
+    },
+
+    _bbStripProjectPrefix(key) {
+      const pfx = this._bbProjectPrefix();
+      if (pfx && key.startsWith(pfx)) return key.slice(pfx.length);
+      // If no active project, still strip any projects/*/  prefix for display
+      const m = key.match(/^projects\/[^/]+\/(.*)/);
+      return m ? m[1] : key;
+    },
+
     async fetchBlackboard() {
       this.bbLoading = true;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/blackboard?prefix=${encodeURIComponent(this.bbPrefix)}`);
-        if (resp.ok) this.bbEntries = (await resp.json()).entries;
+        // Prepend project prefix so namespace filters match project-scoped keys
+        const searchPrefix = this._bbProjectPrefix() + this.bbPrefix;
+        const resp = await fetch(`${window.__config.apiBase}/blackboard?prefix=${encodeURIComponent(searchPrefix)}`);
+        if (resp.ok) {
+          const entries = (await resp.json()).entries;
+          // Strip project prefix so display/namespace logic works on the real key
+          for (const e of entries) e.key = this._bbStripProjectPrefix(e.key);
+          this.bbEntries = entries;
+        }
       } catch (e) { console.warn('fetchBlackboard failed:', e); }
       this.bbLoading = false;
     },
@@ -1439,8 +1459,22 @@ function dashboard() {
         const resp = await fetch(`${window.__config.apiBase}/comms/activity?limit=100`);
         if (resp.ok) {
           const data = await resp.json();
-          this.commsActivity = data.activity || [];
-          this.commsSubs = data.subscriptions || {};
+          const activity = data.activity || [];
+          // Strip project prefix from blackboard keys and pubsub topics
+          for (const item of activity) {
+            if (item.key) item.key = this._bbStripProjectPrefix(item.key);
+            if (item.topic) item.topic = this._bbStripProjectPrefix(item.topic);
+          }
+          this.commsActivity = activity;
+          // Strip project prefix from subscription topic names
+          const rawSubs = data.subscriptions || {};
+          const subs = {};
+          const pfx = this._bbProjectPrefix();
+          for (const [topic, agents] of Object.entries(rawSubs)) {
+            const clean = pfx && topic.startsWith(pfx) ? topic.slice(pfx.length) : topic;
+            subs[clean] = agents;
+          }
+          this.commsSubs = subs;
           this.commsBadge = 0;
         }
       } catch (e) { console.warn('fetchCommsActivity failed:', e); }
@@ -3379,7 +3413,7 @@ function dashboard() {
     },
 
     commsActionTarget(item) {
-      if (item.source === 'pubsub') return (item.topic || '?').replace(/^projects\/[^/]+\//, '');
+      if (item.source === 'pubsub') return item.topic || '?';
       return item.key || '?';
     },
 

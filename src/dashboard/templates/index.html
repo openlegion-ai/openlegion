@@ -1704,7 +1704,7 @@
             <div x-show="commsView === 'activity'" class="flex items-center gap-1.5 flex-wrap ml-auto" x-cloak>
               <template x-for="[topic, agents] in Object.entries(commsSubs).slice(0, 8)" :key="topic">
                 <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-400/70 border border-purple-500/20"
-                  x-text="topic.replace(/^projects\/[^/]+\//, '') + ' (' + agents.length + ')'"></span>
+                  x-text="topic + ' (' + agents.length + ')'"></span>
               </template>
               <span x-show="Object.keys(commsSubs).length > 8" class="text-[10px] text-gray-600"
                 x-text="'+' + (Object.keys(commsSubs).length - 8) + ' more'"></span>
