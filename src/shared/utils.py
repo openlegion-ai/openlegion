@@ -66,6 +66,19 @@ def sanitize_for_prompt(text: str) -> str:
     return "".join(out)
 
 
+def friendly_streaming_error(exc: Exception) -> str:
+    """Return a user-friendly message for LLM streaming errors.
+
+    Replaces raw protocol-level error strings (e.g. 'incomplete chunked
+    read') with an actionable message.  Non-protocol errors pass through
+    unchanged.
+    """
+    raw = str(exc)
+    if "incomplete chunked read" in raw or "RemoteProtocolError" in type(exc).__name__:
+        return "Connection to the AI provider was interrupted. Retrying may help."
+    return raw
+
+
 class StructuredFormatter(logging.Formatter):
     """JSON log formatter for structured logging."""
 
