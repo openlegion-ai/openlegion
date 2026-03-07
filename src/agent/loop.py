@@ -79,7 +79,7 @@ async def _llm_call_with_retry(llm_chat_fn, *, system, messages, tools, **kwargs
                     await asyncio.sleep(wait)
                     continue
             raise
-        except (httpx.ConnectError, httpx.TimeoutException) as e:
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
             last_exc = e
             if attempt < _MAX_RETRIES:
                 wait = _BACKOFF_BASE * (2 ** attempt)

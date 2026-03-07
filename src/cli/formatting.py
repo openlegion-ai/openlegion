@@ -34,7 +34,11 @@ def _format_tool_summary(name: str, inp: dict, out: dict) -> str:
     elif name == "browser_screenshot":
         return inp.get("filename", "screenshot.png")
     elif name == "web_search":
-        return inp.get("query", "")
+        query = inp.get("query", "")
+        max_results = inp.get("max_results")
+        if max_results is not None:
+            return f"{query} (max {max_results})"
+        return query
     elif name == "memory_save":
         return inp.get("key", inp.get("content", ""))[:60]
     elif name == "memory_search":
@@ -68,7 +72,12 @@ def _format_tool_result_hint(name: str, out: dict) -> str:
         return out.get("path", "")
     elif name == "web_search":
         results = out.get("results", [])
-        return f"{len(results)} results" if results else ""
+        if not results:
+            return ""
+        provider = out.get("provider", "")
+        if provider:
+            return f"{len(results)} results via {provider}"
+        return f"{len(results)} results"
     return ""
 
 

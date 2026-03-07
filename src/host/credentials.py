@@ -877,7 +877,12 @@ class CredentialVault:
         except Exception as e:
             logger.error(f"OAuth streaming call failed: {e}")
             self._health_tracker.record_failure(model, type(e).__name__, 0)
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            raw = str(e)
+            if "incomplete chunked read" in raw or "RemoteProtocolError" in type(e).__name__:
+                msg = "Connection to the AI provider was interrupted mid-stream. Retrying may help."
+            else:
+                msg = raw
+            yield f"data: {json.dumps({'error': msg})}\n\n"
 
     async def _handle_llm(self, request: APIProxyRequest) -> APIProxyResponse:
         """Unified LLM handler. Auto-detects provider from model prefix via LiteLLM.
@@ -1084,7 +1089,12 @@ class CredentialVault:
             self._health_tracker.record_failure(
                 used_model, type(e).__name__, self._get_status_code(e),
             )
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            raw = str(e)
+            if "incomplete chunked read" in raw or "RemoteProtocolError" in type(e).__name__:
+                msg = "Connection to the AI provider was interrupted mid-stream. Retrying may help."
+            else:
+                msg = raw
+            yield f"data: {json.dumps({'error': msg})}\n\n"
 
     async def _handle_apollo(self, request: APIProxyRequest) -> APIProxyResponse:
         """Handle Apollo.io API calls."""

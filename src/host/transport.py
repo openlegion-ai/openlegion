@@ -185,7 +185,7 @@ class HttpTransport(Transport):
         except httpx.HTTPStatusError as e:
             logger.warning("Stream HTTP %d from agent '%s' %s", e.response.status_code, agent_id, path)
             yield {"error": f"HTTP {e.response.status_code}"}
-        except (httpx.TimeoutException, httpx.ConnectError) as e:
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
             logger.warning("Stream connection failed for agent '%s' %s: %s", agent_id, path, e)
             yield {"error": str(e)}
 

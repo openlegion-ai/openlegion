@@ -767,7 +767,12 @@ def create_dashboard_router(
                             event_bus.emit(etype, agent=agent_id,
                                 data={k: v for k, v in event.items() if k != "type"})
             except Exception as e:
-                yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                raw = str(e)
+                if "incomplete chunked read" in raw or "RemoteProtocolError" in type(e).__name__:
+                    msg = "Connection to the AI provider was interrupted. Please try again."
+                else:
+                    msg = raw
+                yield f"data: {_json.dumps({'type': 'error', 'message': msg})}\n\n"
 
         from starlette.responses import StreamingResponse
         return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -864,7 +869,12 @@ def create_dashboard_router(
                                 event_bus.emit(etype, agent=aid,
                                     data={k: v for k, v in tagged.items() if k != "type"})
             except Exception as e:
-                await queue.put({"type": "error", "agent": aid, "message": str(e)})
+                raw = str(e)
+                if "incomplete chunked read" in raw or "RemoteProtocolError" in type(e).__name__:
+                    msg = "Connection to the AI provider was interrupted. Please try again."
+                else:
+                    msg = raw
+                await queue.put({"type": "error", "agent": aid, "message": msg})
             await queue.put({"type": "agent_done", "agent": aid})
 
         async def event_generator():

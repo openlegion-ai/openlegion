@@ -236,6 +236,19 @@ async def test_llm_retry_on_timeout():
 
 
 @pytest.mark.asyncio
+async def test_llm_retry_on_remote_protocol_error():
+    """Retry on transient protocol disconnects during LLM calls."""
+    success = LLMResponse(content='{"result": {}}', tokens_used=50)
+    mock_fn = AsyncMock(side_effect=[httpx.RemoteProtocolError("incomplete chunked read"), success])
+
+    with patch("src.agent.loop.asyncio.sleep", new_callable=AsyncMock):
+        result = await _llm_call_with_retry(mock_fn, system="s", messages=[], tools=None)
+
+    assert result.tokens_used == 50
+    assert mock_fn.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_llm_retry_on_429():
     """Retry on HTTP 429 status."""
     mock_response = MagicMock()
