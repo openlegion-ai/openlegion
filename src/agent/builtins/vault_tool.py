@@ -86,7 +86,7 @@ async def vault_generate_secret(
         },
         "ref": {
             "type": "string",
-            "description": "Element ref from browser_snapshot (e.g. 'e3')",
+            "description": "Element ref from browser_get_elements (e.g. 'e3')",
             "default": "",
         },
     },
@@ -104,7 +104,7 @@ async def vault_capture_from_page(
     if not name:
         return {"error": "name is required"}
     if not selector and not ref:
-        return {"error": "Provide either 'ref' (from browser_snapshot) or 'selector' (CSS)"}
+        return {"error": "Provide either 'ref' (from browser_get_elements) or 'selector' (CSS)"}
 
     try:
         # Use browser service to extract text from the element
@@ -113,7 +113,7 @@ async def vault_capture_from_page(
             snap = await mesh_client.browser_command("snapshot", {})
             ref_info = snap.get("data", {}).get("refs", {}).get(ref)
             if not ref_info:
-                return {"error": f"Unknown ref '{ref}'. Call browser_snapshot first."}
+                return {"error": f"Unknown ref '{ref}'. Call browser_get_elements first."}
             # Use evaluate to get inner text by role+name
             role = ref_info["role"]
             ename = ref_info.get("name", "")

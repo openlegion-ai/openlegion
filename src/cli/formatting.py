@@ -12,7 +12,7 @@ import click
 
 def _format_tool_summary(name: str, inp: dict, out: dict) -> str:
     """One-line summary of tool INPUT for the REPL."""
-    if name == "exec":
+    if name == "run_command":
         cmd = inp.get("command", "")
         if len(cmd) > 60:
             cmd = cmd[:57] + "..."
@@ -57,7 +57,7 @@ def _format_tool_result_hint(name: str, out: dict) -> str:
         if len(err) > 60:
             err = err[:57] + "..."
         return f"error: {err}"
-    if name == "exec":
+    if name == "run_command":
         code = out.get("exit_code", 0)
         return f"exit {code}" if code != 0 else ""
     elif name == "browser_navigate":

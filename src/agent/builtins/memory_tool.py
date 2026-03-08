@@ -128,10 +128,11 @@ async def memory_search(
 @skill(
     name="memory_save",
     description=(
-        "Save an important fact or note to long-term memory. "
-        "Saved to both the daily session log and the structured fact database, "
-        "so it can be recalled later with memory_search. "
-        "Examples: user preferences, decisions made, key findings."
+        "Save a fact or note to your memory database, searchable later via "
+        "memory_search. Use for discrete facts: user preferences, decisions, "
+        "findings, contact info. Do NOT use this for your operating instructions "
+        "or identity — use update_workspace for that (SOUL.md, INSTRUCTIONS.md, "
+        "USER.md)."
     ),
     parameters={
         "content": {

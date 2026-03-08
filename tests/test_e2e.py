@@ -198,7 +198,7 @@ def test_agent_has_capabilities(e2e_stack):
     assert r.status_code == 200
     caps = r.json()
     assert "read_file" in caps["skills"]
-    assert "exec" in caps["skills"]
+    assert "run_command" in caps["skills"]
     assert "http_request" in caps["skills"]
 
 

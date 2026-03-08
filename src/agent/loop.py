@@ -1134,7 +1134,7 @@ class AgentLoop:
         if has_browser:
             rules += (
                 "\n## Browser\n"
-                "browser_navigate → browser_snapshot (get refs) → "
+                "browser_navigate → browser_get_elements (get refs) → "
                 "browser_click(ref=)/browser_type(ref=). Re-snapshot after changes.\n"
             )
 

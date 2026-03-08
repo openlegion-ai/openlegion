@@ -167,11 +167,12 @@ async def _run_subagent(
 @skill(
     name="spawn_subagent",
     description=(
-        "Spawn a lightweight subagent to handle a subtask in parallel. "
-        "The subagent runs in the same container with its own memory and workspace. "
-        "Use wait_for_subagent to get results when done. "
-        "Max 3 concurrent, max depth 2. "
-        "NOTE: Subagents should not use browser tools (shared browser state)."
+        "Spawn a lightweight subagent in your own container to handle a subtask "
+        "in parallel. Shares your filesystem and environment but has its own "
+        "context window. Use wait_for_subagent to collect results. Max 3 "
+        "concurrent, max depth 2. Cannot use browser tools (shared state "
+        "conflict). For tasks needing isolated containers, separate tools, "
+        "or long autonomy, use spawn_fleet_agent instead."
     ),
     parameters={
         "task": {
@@ -278,8 +279,10 @@ async def list_subagents(*, mesh_client=None) -> dict:
 @skill(
     name="wait_for_subagent",
     description=(
-        "Wait for a subagent to complete and return its result directly. "
-        "Use after spawn_subagent. Returns the subagent's result."
+        "Wait for a subagent to finish and return its result. Returns the "
+        "subagent's final output on success. If the subagent hasn't finished "
+        "within the timeout, returns a timeout error — the subagent keeps "
+        "running and you can call wait_for_subagent again with the same ID."
     ),
     parameters={
         "subagent_id": {

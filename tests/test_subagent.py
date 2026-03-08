@@ -228,7 +228,7 @@ class TestCloneSkillRegistry:
 
         # Should have regular skills (builtins were discovered in setup)
         assert len(clone.skills) > 0
-        assert "exec" in clone.skills
+        assert "run_command" in clone.skills
 
         # Should NOT have unsafe skills
         assert "create_skill" not in clone.skills

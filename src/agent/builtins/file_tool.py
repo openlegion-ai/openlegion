@@ -82,7 +82,12 @@ def _is_protected_workspace_file(resolved: Path) -> bool:
 
 @skill(
     name="read_file",
-    description="Read the contents of a file. Returns the text content.",
+    description=(
+        "Read a file's text content from the /data directory. Returns the "
+        "content as a string. Use offset and limit to read large files in "
+        "chunks. Returns an error if the file does not exist — use list_files "
+        "to check first."
+    ),
     parameters={
         "path": {"type": "string", "description": "File path relative to /data"},
         "offset": {
@@ -119,7 +124,12 @@ def read_file(path: str, offset: int = 0, limit: int = 0) -> dict:
 
 @skill(
     name="write_file",
-    description="Write content to a file. Creates parent directories if needed.",
+    description=(
+        "Write content to a file in the /data directory. Overwrites the file "
+        "if it exists; creates parent directories if needed. Use append=true "
+        "to add to an existing file. For deliverables you want to share with "
+        "teammates or the user, use save_artifact instead."
+    ),
     parameters={
         "path": {"type": "string", "description": "File path relative to /data"},
         "content": {"type": "string", "description": "Content to write"},
@@ -150,7 +160,11 @@ def write_file(path: str, content: str, append: bool = False) -> dict:
 
 @skill(
     name="list_files",
-    description="List files and directories. Supports glob patterns.",
+    description=(
+        "List files and directories in /data. Returns names, sizes, and types "
+        "(file/dir). Use pattern for glob filtering (e.g. '*.py') and "
+        "recursive=true to search subdirectories."
+    ),
     parameters={
         "path": {
             "type": "string",

@@ -190,7 +190,7 @@ def test_chat_has_builtin_tools(chat_stack):
     r = httpx.get(f"{url}/capabilities", timeout=5)
     assert r.status_code == 200
     caps = r.json()
-    assert "exec" in caps["skills"]
+    assert "run_command" in caps["skills"]
     assert "read_file" in caps["skills"]
     assert "write_file" in caps["skills"]
     assert "http_request" in caps["skills"]

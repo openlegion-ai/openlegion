@@ -130,8 +130,10 @@ def create_skill(name: str, code: str, *, workspace_manager=None) -> dict:
 @skill(
     name="reload_skills",
     description=(
-        "Reload all skills including any new ones you've created with create_skill. "
-        "Call this after creating a new skill to make it available for use."
+        "Reload all skills, picking up any new ones from create_skill or "
+        "marketplace installs. Your newly created skill is NOT available "
+        "until you call this. Call once after create_skill — you do not need "
+        "to call it before every tool use."
     ),
     parameters={},
 )

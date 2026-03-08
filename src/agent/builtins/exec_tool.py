@@ -15,15 +15,15 @@ _MAX_TIMEOUT = 300
 
 
 @skill(
-    name="exec",
+    name="run_command",
     description=(
-        "Run a shell command and return stdout+stderr. You have a full Linux "
-        "environment with Python, Node.js, curl, git, and standard tools. "
+        "Run a shell command in your Linux environment and return stdout+stderr. "
+        "You have Python, Node.js, curl, git, and standard tools. "
         "Use for: installing packages, running scripts, processing data, "
         "downloading files, or any system operation. "
-        "Do NOT use exec to modify workspace identity files "
+        "Do NOT use run_command to modify workspace identity files "
         "(SOUL.md, INSTRUCTIONS.md, HEARTBEAT.md, USER.md, MEMORY.md) — "
-        "use the update_workspace tool instead."
+        "use update_workspace instead."
     ),
     parameters={
         "command": {"type": "string", "description": "Shell command to execute"},

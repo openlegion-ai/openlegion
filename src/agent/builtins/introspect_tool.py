@@ -11,15 +11,13 @@ from src.agent.skills import skill
 
 
 @skill(
-    name="introspect",
+    name="get_system_status",
     description=(
-        "Query your runtime configuration and system state from the mesh. "
-        "Returns live data about your permissions, budget, fleet roster, "
-        "cron schedule, or health status. Use this when you need fresh "
-        "numbers (e.g. current budget spend, whether a permission exists) "
-        "rather than relying on the startup snapshot in SYSTEM.md. "
-        "Call with section='all' for a full overview, or a specific section "
-        "to reduce noise."
+        "Query your live runtime status from the mesh: permissions, budget "
+        "(current spend), fleet roster, cron schedule, or health. Use this "
+        "for fresh data instead of relying on the startup snapshot in "
+        "SYSTEM.md. Call with section='all' for everything, or a specific "
+        "section to reduce noise."
     ),
     parameters={
         "section": {

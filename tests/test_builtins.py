@@ -849,11 +849,11 @@ class TestBrowserNavigateHttpClient:
 
 
 class TestBrowserSnapshotHttpClient:
-    """browser_snapshot sends snapshot command through mesh_client."""
+    """browser_get_elements sends snapshot command through mesh_client."""
 
     @pytest.mark.asyncio
     async def test_snapshot_calls_browser_command(self):
-        from src.agent.builtins.browser_tool import browser_snapshot
+        from src.agent.builtins.browser_tool import browser_get_elements
 
         mc = AsyncMock()
         mc.browser_command = AsyncMock(return_value={
@@ -865,7 +865,7 @@ class TestBrowserSnapshotHttpClient:
             ],
         })
 
-        result = await browser_snapshot(mesh_client=mc)
+        result = await browser_get_elements(mesh_client=mc)
 
         mc.browser_command.assert_awaited_once_with("snapshot", {})
         assert result["element_count"] == 3
@@ -1169,8 +1169,8 @@ class TestBrowserNoMeshClient:
 
     @pytest.mark.asyncio
     async def test_snapshot_no_mesh(self):
-        from src.agent.builtins.browser_tool import browser_snapshot
-        result = await browser_snapshot(mesh_client=None)
+        from src.agent.builtins.browser_tool import browser_get_elements
+        result = await browser_get_elements(mesh_client=None)
         assert "error" in result
 
     @pytest.mark.asyncio
@@ -1206,13 +1206,13 @@ class TestBuiltinDiscovery:
         from src.agent.skills import SkillRegistry
 
         registry = SkillRegistry(skills_dir="/nonexistent/path")
-        assert "exec" in registry.skills
+        assert "run_command" in registry.skills
         assert "read_file" in registry.skills
         assert "write_file" in registry.skills
         assert "list_files" in registry.skills
         assert "http_request" in registry.skills
         assert "browser_navigate" in registry.skills
-        assert "browser_snapshot" in registry.skills
+        assert "browser_get_elements" in registry.skills
         assert "browser_reset" in registry.skills
         assert "browser_scroll" in registry.skills
         assert "memory_search" in registry.skills

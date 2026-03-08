@@ -79,7 +79,7 @@ async def _browser_command(mesh_client, action: str, params: dict | None = None)
     description=(
         "Navigate your browser to a URL and return the page text. "
         "Use this to visit any website: sign-up pages, dashboards, search engines, "
-        "web apps. You can then use browser_snapshot to get element refs, "
+        "web apps. You can then use browser_get_elements to get element refs, "
         "then browser_click and browser_type with refs to interact."
     ),
     parameters={
@@ -97,17 +97,19 @@ async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -
 
 
 @skill(
-    name="browser_snapshot",
+    name="browser_get_elements",
     description=(
-        "Get a structured accessibility snapshot of the current page. "
-        "Returns interactive elements (buttons, links, inputs, etc.) with "
-        "ref IDs (e1, e2, ...) that you can pass to browser_click(ref=) "
-        "and browser_type(ref=). Call this after browser_navigate and after "
-        "any action that changes the page."
+        "Get all interactive elements on the current page with ref IDs you "
+        "can use to click and type. Returns buttons, links, inputs, selects, "
+        "etc. as a structured list with ref IDs (e1, e2, ...). Pass these "
+        "refs to browser_click(ref='e3') and browser_type(ref='e5'). Call "
+        "this after browser_navigate and after any action that changes the "
+        "page. This returns structured text, NOT a visual image — use "
+        "browser_screenshot for that."
     ),
     parameters={},
 )
-async def browser_snapshot(*, mesh_client=None) -> dict:
+async def browser_get_elements(*, mesh_client=None) -> dict:
     """Return an accessibility tree snapshot with element refs."""
     return await _browser_command(mesh_client, "snapshot")
 
@@ -134,18 +136,18 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
 @skill(
     name="browser_click",
     description=(
-        "Click an element on the current page. Preferred: use ref from browser_snapshot "
-        "(e.g. ref='e3'). Fallback: use a CSS selector."
+        "Click an element on the current page. Preferred: use ref from "
+        "browser_get_elements (e.g. ref='e3'). Fallback: use a CSS selector."
     ),
     parameters={
         "selector": {
             "type": "string",
-            "description": "CSS selector of the element to click (optional if ref is given)",
+            "description": "CSS selector to click. Not needed if ref is provided.",
             "default": "",
         },
         "ref": {
             "type": "string",
-            "description": "Element ref from browser_snapshot (e.g. 'e1')",
+            "description": "Preferred: element ref from browser_get_elements (e.g. 'e3'). Use this instead of selector when available.",
             "default": "",
         },
     },
@@ -153,7 +155,7 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
 async def browser_click(selector: str = "", ref: str = "", *, mesh_client=None) -> dict:
     """Click an element by ref or CSS selector."""
     if not selector and not ref:
-        return {"error": "Provide either 'ref' (from browser_snapshot) or 'selector' (CSS)"}
+        return {"error": "Provide either 'ref' (from browser_get_elements) or 'selector' (CSS)"}
     return await _browser_command(mesh_client, "click", {"ref": ref, "selector": selector})
 
 
@@ -161,7 +163,7 @@ async def browser_click(selector: str = "", ref: str = "", *, mesh_client=None) 
     name="browser_type",
     description=(
         "Type text into a form field on the current page. Clears the field first, "
-        "then enters the new text. Preferred: use ref from browser_snapshot "
+        "then enters the new text. Preferred: use ref from browser_get_elements "
         "(e.g. ref='e5'). Fallback: use a CSS selector. "
         "Use $CRED{name} handles to type secrets (e.g. text='$CRED{twitter_password}') "
         "— the value is resolved from the vault and never exposed to you."
@@ -169,7 +171,7 @@ async def browser_click(selector: str = "", ref: str = "", *, mesh_client=None) 
     parameters={
         "selector": {
             "type": "string",
-            "description": "CSS selector of the input element (optional if ref is given)",
+            "description": "CSS selector of the input field. Not needed if ref is provided.",
             "default": "",
         },
         "text": {
@@ -181,7 +183,7 @@ async def browser_click(selector: str = "", ref: str = "", *, mesh_client=None) 
         },
         "ref": {
             "type": "string",
-            "description": "Element ref from browser_snapshot (e.g. 'e1')",
+            "description": "Preferred: element ref from browser_get_elements (e.g. 'e5'). Use this instead of selector when available.",
             "default": "",
         },
     },
@@ -193,7 +195,7 @@ async def browser_type(
     if not text:
         return {"error": "The 'text' parameter is required"}
     if not selector and not ref:
-        return {"error": "Provide either 'ref' (from browser_snapshot) or 'selector' (CSS)"}
+        return {"error": "Provide either 'ref' (from browser_get_elements) or 'selector' (CSS)"}
 
     # Resolve $CRED{name} handles agent-side (secrets never transit as names)
     is_credential = False
@@ -228,8 +230,8 @@ async def browser_type(
     description=(
         "Scroll the browser page. Supports scrolling by direction (up/down) "
         "with an optional pixel amount, or scrolling a specific element into view "
-        "using a ref from browser_snapshot. Default scrolls down by one viewport height. "
-        "Call browser_snapshot after scrolling to see the updated page content."
+        "using a ref from browser_get_elements. Default scrolls down by one viewport height. "
+        "Call browser_get_elements after scrolling to see the updated page content."
     ),
     parameters={
         "direction": {
@@ -244,7 +246,7 @@ async def browser_type(
         },
         "ref": {
             "type": "string",
-            "description": "Element ref from browser_snapshot to scroll into view (e.g. 'e5')",
+            "description": "Element ref from browser_get_elements to scroll into view (e.g. 'e5')",
             "default": "",
         },
     },

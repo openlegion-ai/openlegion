@@ -325,9 +325,10 @@ async def claim_task(key: str, claim_value: str, *, mesh_client=None) -> dict:
 @skill(
     name="save_artifact",
     description=(
-        "Save a named output file to your workspace. Use this for deliverables "
-        "like reports, code files, or data exports. In multi-agent projects, "
-        "also shares it with teammates."
+        "Save a deliverable file (report, export, code) to your workspace "
+        "artifacts. Artifacts are visible to the user and shared with teammates "
+        "in multi-agent projects. Use this for finished output you want to "
+        "deliver — NOT for intermediate working files (use write_file for those)."
     ),
     parameters={
         "name": {
@@ -471,11 +472,14 @@ async def remove_cron(job_id: str, *, mesh_client=None) -> dict:
 
 
 @skill(
-    name="spawn_agent",
+    name="spawn_fleet_agent",
     description=(
-        "Spawn a new ephemeral agent to help with a specific task. The agent "
-        "runs in its own isolated container and is automatically cleaned up "
-        "after the TTL expires. Use this to delegate specialized work."
+        "Spawn a new agent in its own isolated container with independent tools, "
+        "memory, and environment. The agent joins the fleet as a peer — it has "
+        "its own browser, filesystem, and mesh identity. Automatically cleaned "
+        "up after TTL. Use this for work that needs isolation, different tools, "
+        "or long-running autonomy. For quick parallel subtasks within your own "
+        "container, use spawn_subagent instead."
     ),
     parameters={
         "role": {
