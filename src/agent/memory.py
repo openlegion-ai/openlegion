@@ -37,6 +37,8 @@ SALIENCE_DECAY_RATE = 0.95
 EmbedFn = Callable[[str], Coroutine[Any, Any, list[float]]]
 CategorizeFn = Callable[[str, str], Coroutine[Any, Any, str]]
 
+# Consecutive embedding failures before disabling vector search
+_EMBED_FAILURE_THRESHOLD = 3
 # Category similarity threshold for auto-assignment
 _CATEGORY_SIM_THRESHOLD = 0.7
 # Recompute category embedding every N new members
@@ -65,6 +67,19 @@ class MemoryStore:
         self._embed_failures = 0
         self.categorize_fn = categorize_fn
         self._init_schema()
+
+    def _record_embed_failure(self, error: Exception, context: str = "Embedding") -> None:
+        """Track consecutive embedding failures; disable after threshold."""
+        self._embed_failures += 1
+        if self._embed_failures >= _EMBED_FAILURE_THRESHOLD:
+            logger.warning(
+                "%s failed %d consecutive times, disabling vector search "
+                "(memory will use keyword matching only): %s",
+                context, self._embed_failures, error,
+            )
+            self.embed_fn = None
+        else:
+            logger.warning("%s failed: %s", context, error)
 
     def _init_schema(self) -> None:
         self.db.executescript("""
@@ -198,16 +213,7 @@ class MemoryStore:
                 embedding = await self.embed_fn(f"{key}: {value}")
                 self._embed_failures = 0  # reset on success
             except Exception as e:
-                self._embed_failures += 1
-                if self._embed_failures >= 3:
-                    logger.warning(
-                        "Embedding failed %d times, disabling vector search "
-                        "(memory_search will use keyword matching only): %s",
-                        self._embed_failures, e,
-                    )
-                    self.embed_fn = None
-                else:
-                    logger.warning("Embedding failed for %s: %s", key, e)
+                self._record_embed_failure(e, "Embedding")
 
         # Run all DB writes in executor to avoid blocking the event loop
         fact_id = await self._run_db(
@@ -274,15 +280,7 @@ class MemoryStore:
             try:
                 query_embedding = await self.embed_fn(query)
             except Exception as e:
-                self._embed_failures += 1
-                if self._embed_failures >= 3:
-                    logger.warning(
-                        "Embedding failed %d times, disabling vector search: %s",
-                        self._embed_failures, e,
-                    )
-                    self.embed_fn = None
-                else:
-                    logger.warning("Vector search failed, falling back to keyword only: %s", e)
+                self._record_embed_failure(e, "Vector search")
 
         return await self._run_db(self._search_sync, query, query_embedding, top_k)
 
@@ -717,15 +715,7 @@ class MemoryStore:
                 if len(results) >= top_k:
                     return results[:top_k]
             except Exception as e:
-                self._embed_failures += 1
-                if self._embed_failures >= 3:
-                    logger.warning(
-                        "Embedding failed %d times, disabling vector search: %s",
-                        self._embed_failures, e,
-                    )
-                    self.embed_fn = None
-                else:
-                    logger.warning("Hierarchical search tier 1/2 failed, falling back to flat: %s", e)
+                self._record_embed_failure(e, "Hierarchical search tier 1/2")
 
         # Tier 3: Flat fallback (already async with executor)
         flat_results = await self.search(query, top_k=top_k)
