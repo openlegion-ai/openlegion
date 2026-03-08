@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.host.cron import CronScheduler, _match_cron_field
+from src.host.cron import CronJob, CronScheduler, _match_cron_field
 
 
 class TestCronFieldMatching:
@@ -625,4 +625,94 @@ class TestEnrichedHeartbeat:
         rules_pos = call_msg.index("Operating Rules")
         custom_pos = call_msg.index("Your Heartbeat Rules")
         assert rules_pos < custom_pos
+
+
+class TestComputeNextRun:
+    """Tests for CronScheduler._compute_next_run."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_interval_with_last_run(self):
+        """next_run = last_run + interval for interval schedules."""
+        sched = CronScheduler(config_path=self.config_path)
+        last = datetime(2026, 3, 9, 10, 0, 0, tzinfo=timezone.utc)
+        job = CronJob(
+            id="cron_test", agent="a", schedule="every 15m",
+            message="ping", last_run=last.isoformat(),
+        )
+        sched._compute_next_run(job)
+        expected = (last + timedelta(minutes=15)).isoformat()
+        assert job.next_run == expected
+
+    def test_interval_no_last_run(self):
+        """next_run = now when no last_run (job is immediately due)."""
+        sched = CronScheduler(config_path=self.config_path)
+        job = CronJob(
+            id="cron_test", agent="a", schedule="every 1h", message="ping",
+        )
+        before = datetime.now(timezone.utc)
+        sched._compute_next_run(job)
+        after = datetime.now(timezone.utc)
+        assert job.next_run is not None
+        next_dt = datetime.fromisoformat(job.next_run)
+        assert before <= next_dt <= after
+
+    def test_cron_expression(self):
+        """Cron expression computes a future next_run."""
+        sched = CronScheduler(config_path=self.config_path)
+        job = CronJob(
+            id="cron_test", agent="a", schedule="0 9 * * *", message="daily",
+        )
+        sched._compute_next_run(job)
+        assert job.next_run is not None
+        next_dt = datetime.fromisoformat(job.next_run)
+        now = datetime.now(timezone.utc)
+        assert next_dt > now
+        assert next_dt.minute == 0
+        assert next_dt.hour == 9
+
+    def test_add_job_sets_next_run(self):
+        """add_job automatically computes next_run."""
+        sched = CronScheduler(config_path=self.config_path)
+        job = sched.add_job(agent="a", schedule="every 30m", message="ping")
+        assert job.next_run is not None
+
+    def test_load_computes_next_run(self):
+        """Loading from disk recomputes next_run for all jobs."""
+        sched = CronScheduler(config_path=self.config_path)
+        job = sched.add_job(agent="a", schedule="every 10m", message="ping")
+        assert job.next_run is not None  # sanity check before reload
+
+        # Reload — should recompute
+        sched2 = CronScheduler(config_path=self.config_path)
+        loaded_job = list(sched2.jobs.values())[0]
+        assert loaded_job.next_run is not None
+
+    @pytest.mark.asyncio
+    async def test_execute_updates_next_run(self):
+        """After execution, next_run advances past now."""
+        dispatch = AsyncMock(return_value="ok")
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+        )
+        job = sched.add_job(agent="a", schedule="every 5m", message="ping")
+        await sched._execute_job(job)
+        assert job.next_run is not None
+        next_dt = datetime.fromisoformat(job.next_run)
+        now = datetime.now(timezone.utc)
+        assert next_dt > now
+
+    @pytest.mark.asyncio
+    async def test_resume_updates_next_run(self):
+        """Resuming a paused job recomputes next_run."""
+        sched = CronScheduler(config_path=self.config_path)
+        job = sched.add_job(agent="a", schedule="every 20m", message="ping")
+        await sched.pause_job(job.id)
+        await sched.resume_job(job.id)
+        assert sched.jobs[job.id].next_run is not None
 

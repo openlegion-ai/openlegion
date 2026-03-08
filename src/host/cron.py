@@ -24,7 +24,7 @@ import shutil
 import tempfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -101,6 +101,7 @@ class CronScheduler:
                 return
             for job_data in data.get("jobs", []):
                 job = CronJob(**job_data)
+                self._compute_next_run(job)
                 self.jobs[job.id] = job
         except Exception as e:
             logger.warning(f"Failed to load cron config: {e}")
@@ -132,6 +133,42 @@ class CronScheduler:
             Path(tmp_path).unlink(missing_ok=True)
             raise
 
+    def _compute_next_run(self, job: CronJob) -> None:
+        """Compute and set next_run for a job based on its schedule."""
+        schedule = job.schedule.strip()
+        now = datetime.now(timezone.utc)
+
+        interval_match = re.match(r"every\s+(\d+)([smhd])", schedule, re.IGNORECASE)
+        if interval_match:
+            amount = int(interval_match.group(1))
+            unit = interval_match.group(2).lower()
+            seconds = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit] * amount
+            if job.last_run:
+                last = datetime.fromisoformat(job.last_run)
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                job.next_run = (last + timedelta(seconds=seconds)).isoformat()
+            else:
+                job.next_run = now.isoformat()
+            return
+
+        parts = schedule.split()
+        if len(parts) == 5:
+            candidate = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+            for _ in range(43200):  # scan up to 30 days
+                if all(
+                    _match_cron_field(f, c)
+                    for f, c in zip(parts, [
+                        candidate.minute, candidate.hour, candidate.day,
+                        candidate.month, candidate.isoweekday() % 7,
+                    ])
+                ):
+                    job.next_run = candidate.isoformat()
+                    return
+                candidate += timedelta(minutes=1)
+
+        job.next_run = None
+
     def add_job(
         self, agent: str, schedule: str, message: str,
         heartbeat: bool = False, **kwargs: Any,
@@ -147,6 +184,7 @@ class CronScheduler:
             heartbeat=heartbeat,
             **kwargs,
         )
+        self._compute_next_run(job)
         self.jobs[job.id] = job
         self._save()
         kind = "heartbeat" if heartbeat else "cron"
@@ -184,6 +222,8 @@ class CronScheduler:
             for k, v in kwargs.items():
                 if k in self._UPDATABLE_FIELDS and hasattr(job, k):
                     setattr(job, k, v)
+            if "schedule" in kwargs:
+                self._compute_next_run(job)
             self._save()
             return job
 
@@ -216,6 +256,7 @@ class CronScheduler:
             if job_id not in self.jobs:
                 return False
             self.jobs[job_id].enabled = True
+            self._compute_next_run(self.jobs[job_id])
             self._save()
             return True
 
@@ -252,6 +293,7 @@ class CronScheduler:
             try:
                 job.last_run = datetime.now(timezone.utc).isoformat()
                 job.run_count += 1
+                self._compute_next_run(job)
                 self._save()
                 if self._trace_store:
                     from src.shared.trace import new_trace_id
