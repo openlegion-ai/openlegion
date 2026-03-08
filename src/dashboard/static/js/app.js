@@ -82,6 +82,7 @@ function dashboard() {
     bbWriterFilter: '',
     bbExpanded: {},
     commsView: 'activity',  // 'activity', 'state', or 'artifacts'
+    commsExpanded: false,
     commsActivity: [],
     commsActivityLoading: false,
     commsSubs: {},
@@ -398,14 +399,6 @@ function dashboard() {
     closeDetail() {
       this.detailAgent = null;
       this.selectedAgent = null;
-      this.bbEntries = [];
-      this.commsActivity = [];
-      this.commsSubs = {};
-      this.bbPrefix = '';
-      this.bbWriteMode = false;
-      this.commsView = 'activity';
-      this.artifactsList = [];
-      this.artifactPreview = null;
       if (this._detailReturnProject !== null && this._detailReturnProject !== undefined) {
         this.activeProject = this._detailReturnProject;
       }
@@ -940,13 +933,13 @@ function dashboard() {
       if (evt.type === 'blackboard_write' && evt.data && evt.data.key) {
         if (!this.bbHighlights.includes(evt.data.key)) this.bbHighlights.push(evt.data.key);
         setTimeout(() => { const i = this.bbHighlights.indexOf(evt.data.key); if (i !== -1) this.bbHighlights.splice(i, 1); }, 5000);
-        if (this.detailAgent && this._detailAgentProject()) {
-          this.fetchBlackboard();
-          this.fetchCommsActivity();
-          // Refresh artifacts if an artifact key was written
-          if (evt.data.key.includes('artifacts/') && this.commsView === 'artifacts') {
-            this.fetchArtifacts();
-          }
+        if (this.activeProject && this.activeTab === 'fleet' && !this.detailAgent) {
+          if (this._commsDebounce) clearTimeout(this._commsDebounce);
+          this._commsDebounce = setTimeout(() => {
+            this.fetchBlackboard();
+            this.fetchCommsActivity();
+            if (evt.data.key.includes('artifacts/')) this.fetchArtifacts();
+          }, 1000);
         }
       }
 
@@ -1317,7 +1310,22 @@ function dashboard() {
       this.projectEditBuffer = '';
       this.projectBannerExpanded = false;
       this.showProjectForm = false;
+      this.commsView = 'activity';
+      this.commsExpanded = false;
+      this.bbPrefix = '';
+      this.bbWriteMode = false;
+      this.bbExpanded = {};
+      this.artifactPreview = null;
+      this.commsActivity = [];
+      this.bbEntries = [];
+      this.commsSubs = {};
+      this.artifactsList = [];
       this.fetchProject();
+      if (name) {
+        this.fetchCommsActivity();
+        this.fetchBlackboard();
+        this.fetchArtifacts();
+      }
     },
 
     openProjectModal() {
@@ -1445,17 +1453,10 @@ function dashboard() {
       return this.projects.find(p => p.name === this.activeProject) || null;
     },
 
-    _detailAgentProject() {
-      // Get the project of the currently viewed agent
-      if (!this.detailAgent) return null;
-      const agent = this.agents.find(a => a.id === this.detailAgent);
-      return agent?.project || null;
-    },
 
     _bbProjectPrefix() {
-      // Scope blackboard keys to the detail agent's project
-      const proj = this._detailAgentProject();
-      return proj ? `projects/${proj}/` : '';
+      // Scope blackboard keys to the active project
+      return this.activeProject ? `projects/${this.activeProject}/` : '';
     },
 
     _bbStripProjectPrefix(key) {
@@ -1485,7 +1486,7 @@ function dashboard() {
     async fetchCommsActivity() {
       this.commsActivityLoading = true;
       try {
-        const proj = this._detailAgentProject();
+        const proj = this.activeProject;
         const params = new URLSearchParams({ limit: '100' });
         if (proj) params.set('project', proj);
         const resp = await fetch(`${window.__config.apiBase}/comms/activity?${params}`);
@@ -1516,7 +1517,8 @@ function dashboard() {
       this.artifactsLoading = true;
       try {
         // Gather artifacts from all agents in the current project
-        const proj = this._detailAgentProject();
+        const proj = this.activeProject;
+        if (!proj) { this.artifactsList = []; this.artifactsLoading = false; return; }
         const projectAgents = this.agents.filter(a => a.project === proj);
         const results = await Promise.allSettled(
           projectAgents.map(async (a) => {
@@ -2687,11 +2689,33 @@ function dashboard() {
 
     // ── Broadcast ────────────────────────────────────────
 
+    get detailAgentCronJobs() {
+      if (!this.detailAgent) return [];
+      return this.cronJobs.filter(j => j.agent === this.detailAgent);
+    },
+
+    addCronForAgent() {
+      // Navigate from agent detail to System > Automation with agent pre-selected
+      const agent = this.detailAgent;
+      this.selectedAgent = null;
+      if (this._detailReturnProject !== null && this._detailReturnProject !== undefined) {
+        this.activeProject = this._detailReturnProject;
+      }
+      this._detailReturnProject = null;
+      this.detailAgent = null;
+      this.cronFormAgent = agent;
+      this.showCronForm = true;
+      this.systemTab = 'automation';
+      this.switchTab('system');
+    },
+
     get broadcastTargets() {
-      // Project selected → project members; no project → all agents
+      // Project selected → project members; no project → standalone agents only
       // Exclude over-limit (locked) agents — they aren't running
-      const base = this.activeProject ? this.filteredAgents : this.agents;
-      return base.filter(a => !a.over_limit);
+      if (this.activeProject) {
+        return this.filteredAgents.filter(a => !a.over_limit);
+      }
+      return this.agents.filter(a => !a.over_limit && !a.project);
     },
 
     sendBroadcast() {
@@ -3148,12 +3172,7 @@ function dashboard() {
       this.fetchAgentDetail(agentId);
       this.fetchIdentityFiles(agentId);
       this.fetchAgentConfig(agentId);
-      // Fetch comms if agent belongs to a project
-      const agent = this.agents.find(a => a.id === agentId);
-      if (agent?.project) {
-        this.fetchBlackboard();
-        this.fetchCommsActivity();
-      }
+      this.fetchCronJobs();
       this.activeTab = 'fleet';
       if (!this._skipPush) this._pushUrl(false);
     },
