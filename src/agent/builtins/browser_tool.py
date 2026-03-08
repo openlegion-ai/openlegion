@@ -147,7 +147,10 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
         },
         "ref": {
             "type": "string",
-            "description": "Preferred: element ref from browser_get_elements (e.g. 'e3'). Use this instead of selector when available.",
+            "description": (
+                "Preferred: element ref from browser_get_elements "
+                "(e.g. 'e3'). Use this instead of selector when available."
+            ),
             "default": "",
         },
     },
@@ -183,7 +186,10 @@ async def browser_click(selector: str = "", ref: str = "", *, mesh_client=None) 
         },
         "ref": {
             "type": "string",
-            "description": "Preferred: element ref from browser_get_elements (e.g. 'e5'). Use this instead of selector when available.",
+            "description": (
+                "Preferred: element ref from browser_get_elements "
+                "(e.g. 'e5'). Use this instead of selector when available."
+            ),
             "default": "",
         },
     },
