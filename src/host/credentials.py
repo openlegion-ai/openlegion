@@ -532,6 +532,22 @@ class CredentialVault:
         """Return diagnostic model-health data."""
         return self._health_tracker.get_status()
 
+    # Allowlist of LLM parameters that agents may pass through to the
+    # provider.  Everything else is silently dropped so that an untrusted
+    # agent cannot inject ``api_key``, ``api_base``, ``custom_llm_provider``,
+    # or other security-sensitive litellm kwargs.
+    _ALLOWED_LLM_PARAMS: frozenset[str] = frozenset({
+        # Standard OpenAI-compatible params
+        "max_tokens", "temperature", "top_p", "stop", "stream",
+        "tools", "tool_choice", "response_format", "seed",
+        "presence_penalty", "frequency_penalty", "logit_bias", "n",
+        "logprobs", "top_logprobs", "user",
+        # Anthropic thinking / extended-thinking
+        "thinking", "max_completion_tokens",
+        # OpenAI reasoning models
+        "reasoning_effort",
+    })
+
     def _prepare_llm_params(
         self, request: APIProxyRequest, model: str,
         api_base: str | None = None,
@@ -539,10 +555,21 @@ class CredentialVault:
     ) -> tuple[list[dict], dict]:
         """Build sanitized messages and extra kwargs for an LLM call.
 
+        Only parameters in ``_ALLOWED_LLM_PARAMS`` are forwarded from the
+        agent request.  This prevents untrusted agents from injecting
+        ``api_key``, ``api_base``, or other credential-bearing kwargs.
+
         Returns ``(sanitized_messages, extra_kwargs)``.
         """
         sanitized = sanitize_for_provider(request.params.get("messages", []), model)
-        extra = {k: v for k, v in request.params.items() if k not in ("model", "messages")}
+        extra: dict = {}
+        for k, v in request.params.items():
+            if k in ("model", "messages"):
+                continue
+            if k in self._ALLOWED_LLM_PARAMS:
+                extra[k] = v
+            else:
+                logger.debug("Dropped non-allowlisted LLM param: %s", k)
         if api_base:
             extra["api_base"] = api_base
         if auth_headers:
