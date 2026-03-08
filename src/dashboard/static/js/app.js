@@ -653,9 +653,9 @@ function dashboard() {
       };
       document.addEventListener('visibilitychange', this._visibilityHandler);
 
-      // Restore chat history from sessionStorage
+      // Restore chat history from localStorage (persists across tabs & browser restarts)
       try {
-        const saved = sessionStorage.getItem('ol_chats');
+        const saved = localStorage.getItem('ol_chats');
         if (saved) {
           const parsed = JSON.parse(saved);
           if (parsed.histories) this.chatHistories = parsed.histories;
@@ -2018,7 +2018,7 @@ function dashboard() {
           openChats: this.openChats,
           activeChatId: this.activeChatId,
         });
-        sessionStorage.setItem('ol_chats', payload);
+        localStorage.setItem('ol_chats', payload);
       } catch (e) {
         // On quota exceeded, evict oldest agent history and retry once
         if (e instanceof DOMException && e.name === 'QuotaExceededError') {
@@ -2164,6 +2164,29 @@ function dashboard() {
 
     // ── Chat slide-over panel ──────────────────────────
 
+    async _loadChatHistory(agentId) {
+      // Fetch server-side chat history when local history is empty.
+      // The agent keeps _chat_messages in memory; this endpoint exposes them.
+      if (this.chatHistories[agentId] && this.chatHistories[agentId].length > 0) return;
+      try {
+        const resp = await fetch(`/dashboard/api/agents/${agentId}/chat/history`, { credentials: 'same-origin' });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data.messages || data.messages.length === 0) return;
+        // Only populate if still empty (avoid race with incoming messages)
+        if (this.chatHistories[agentId] && this.chatHistories[agentId].length > 0) return;
+        this.chatHistories[agentId] = data.messages.map(m => ({
+          role: m.role,
+          content: m.content,
+          streaming: false,
+          phase: 'done',
+          tools: [],
+        }));
+        this._saveChatToSession();
+        this.$nextTick(() => this._scrollChat(agentId));
+      } catch (_) {}
+    },
+
     openChat(agentId) {
       this.chatPanelMinimized = false;
       if (this.openChats.includes(agentId)) {
@@ -2174,10 +2197,14 @@ function dashboard() {
           const input = document.getElementById('chat-slide-input');
           if (input) input.focus();
         });
+        // Load from server if local history is empty
+        this._loadChatHistory(agentId);
         return;
       }
       this.openChats.push(agentId);
       this.activeChatId = agentId;
+      // Load from server if local history is empty
+      this._loadChatHistory(agentId);
       this.$nextTick(() => this._scrollChat(agentId));
     },
 

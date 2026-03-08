@@ -924,6 +924,19 @@ def create_dashboard_router(
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
+    @api_router.get("/api/agents/{agent_id}/chat/history")
+    async def api_chat_history(agent_id: str) -> dict:
+        """Return the agent's current in-memory chat conversation."""
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            result = await transport.request(agent_id, "GET", "/chat/history", timeout=10)
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
     @api_router.post("/api/credentials/validate")
     async def api_validate_credential(request: Request) -> dict:
         """Validate an API key by making a minimal LLM call."""
