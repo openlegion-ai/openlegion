@@ -2066,6 +2066,32 @@
                       <div x-show="ch.pairing_code" class="text-xs text-gray-400">
                         Code: <span class="font-mono text-white select-all" x-text="ch.pairing_code"></span>
                       </div>
+                      <div x-show="ch.type === 'slack'" class="mt-2 space-y-2">
+                        <div class="rounded-md border border-amber-900/40 bg-amber-950/20 px-3 py-2">
+                          <div class="text-[11px] text-amber-300 mb-1">Pairing step</div>
+                          <div class="text-[11px] text-gray-300 leading-relaxed">
+                            Send <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-200">/start &lt;pairing_code&gt;</code>
+                            (or <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-200">!start &lt;pairing_code&gt;</code>)
+                            in Slack to claim owner access.
+                          </div>
+                        </div>
+                        <div class="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
+                          <div class="text-[11px] text-gray-300 mb-1">Required Slack permissions</div>
+                          <div class="text-[11px] text-gray-500 leading-relaxed">
+                            App token:
+                            <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">connections:write</code><br>
+                            Bot scopes:
+                            <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">chat:write</code>,
+                            <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">app_mentions:read</code>,
+                            <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">channels:history</code>,
+                            <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">im:history</code><br>
+                            Events:
+                            <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">message.channels</code>,
+                            <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">message.im</code>,
+                            <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">app_mention</code>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </template>
                 </div>
@@ -2090,6 +2116,23 @@
                         x-model="channelTokens[field.key]">
                     </div>
                   </template>
+                  <div x-show="ch.type === 'slack'" class="rounded-md border border-gray-800 bg-gray-950 px-3 py-2">
+                    <div class="text-[11px] text-gray-300 mb-1">Slack app checklist</div>
+                    <div class="text-[11px] text-gray-500 leading-relaxed">
+                      Socket Mode enabled, app token has
+                      <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">connections:write</code>,
+                      bot scopes include
+                      <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">chat:write</code>,
+                      <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">app_mentions:read</code>,
+                      <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">channels:history</code>,
+                      <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">im:history</code>,
+                      and event subscriptions include
+                      <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">message.channels</code>,
+                      <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">message.im</code>,
+                      <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">app_mention</code>.
+                      Reinstall the app after changing scopes.
+                    </div>
+                  </div>
                   <div class="flex gap-2 pt-1">
                     <button @click="cancelChannelConnect()" :disabled="channelConnecting"
                       class="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors disabled:opacity-50">Cancel</button>
