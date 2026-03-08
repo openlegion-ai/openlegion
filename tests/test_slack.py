@@ -240,6 +240,19 @@ class TestCommandTranslation:
         assert "alpha" in msg
         assert "beta" in msg
 
+    @pytest.mark.asyncio
+    async def test_bot_mention_prefix_is_stripped(self):
+        """Slack <@BOT> mention prefix should not block command parsing."""
+        ch = _make_channel(paired={"owner": "U1", "allowed": []})
+        say = _make_say()
+        event = {"user": "U1", "text": "<@U123ABC> !agents", "channel": "C1", "ts": "1.0"}
+        await ch._on_message(event, say)
+        await asyncio.sleep(0.05)
+        say.assert_called()
+        msg = say.call_args[1]["text"]
+        assert "alpha" in msg
+        assert "beta" in msg
+
 
 # ── workspace filtering (thread_ts) ─────────────────────────────
 

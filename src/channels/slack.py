@@ -28,6 +28,7 @@ logger = setup_logging("channels.slack")
 MAX_SLACK_LEN = 3000
 
 _AT_MENTION_RE = re.compile(r"^@(\w+)\s+(.+)$", re.DOTALL)
+_SLACK_USER_MENTION_PREFIX_RE = re.compile(r"^(?:<@[A-Z0-9]+>\s*)+")
 
 
 def _get_user_key(user_id: str, thread_ts: str | None) -> str:
@@ -69,6 +70,38 @@ class SlackChannel(Channel):
             )
             return
 
+        if not self.app_token.startswith("xapp-"):
+            raise ConnectionError(
+                f"Slack app token must start with 'xapp-' (got '{self.app_token[:6]}...'). "
+                "Generate one under Settings > Basic Information > App-Level Tokens "
+                "with the connections:write scope."
+            )
+
+        # Verify bot token before starting Socket Mode
+        try:
+            from slack_sdk.web.async_client import AsyncWebClient
+
+            client = AsyncWebClient(token=self.bot_token)
+            auth = await client.auth_test()
+            if not auth.get("ok"):
+                raise ConnectionError(
+                    f"Slack bot token rejected: {auth.get('error', 'unknown')}. "
+                    "Check OAuth & Permissions in your Slack app settings."
+                )
+            logger.warning(
+                "Slack auth OK (team=%s, bot=%s)",
+                auth.get("team"), auth.get("bot_id"),
+            )
+        except ConnectionError:
+            raise
+        except Exception as e:
+            if "invalid_auth" in str(e).lower():
+                raise ConnectionError(
+                    f"Slack bot token is invalid: {e}. "
+                    "Reinstall the app or regenerate the bot token."
+                ) from e
+            logger.warning("Could not pre-verify Slack bot token: %s", e)
+
         self._bolt_app = AsyncApp(token=self.bot_token)
         channel_ref = self
 
@@ -76,16 +109,27 @@ class SlackChannel(Channel):
         async def handle_message_event(event, say):
             await channel_ref._on_message(event, say)
 
+        @self._bolt_app.event("app_mention")
+        async def handle_app_mention_event(event, say):
+            await channel_ref._on_message(event, say)
+
         self._handler = AsyncSocketModeHandler(self._bolt_app, self.app_token)
         await self._handler.start_async()
 
+        # Verify Socket Mode is actually connected
+        sm_client = getattr(self._handler, "client", None)
+        if sm_client and getattr(sm_client, "is_connected", lambda: False)():
+            logger.warning("Slack Socket Mode connected")
+        else:
+            logger.warning("Slack Socket Mode handler started (connection state unknown)")
+
         owner = self._pairing.owner
         if owner:
-            logger.info(f"Slack channel started (owner: {owner})")
+            logger.warning(f"Slack channel started (owner: {owner})")
         elif self._pairing.pairing_code:
-            logger.info("Slack channel started (awaiting pairing code)")
+            logger.warning("Slack channel started (awaiting pairing)")
         else:
-            logger.info("Slack channel started (no pairing code -- run setup again)")
+            logger.warning("Slack channel started (no pairing code -- run setup again)")
 
     async def stop(self) -> None:
         if self._handler:
@@ -113,6 +157,10 @@ class SlackChannel(Channel):
 
     async def _on_message(self, event: dict, say) -> None:
         """Handle incoming Slack message events."""
+        logger.warning(
+            "Slack event received: user=%s text=%s",
+            event.get("user", "?"), (event.get("text") or "")[:80],
+        )
         # Ignore bot messages and message subtypes (edits, joins, etc.)
         if event.get("bot_id") or event.get("subtype"):
             return
@@ -121,6 +169,7 @@ class SlackChannel(Channel):
         text = (event.get("text") or "").strip()
         channel_id = event.get("channel", "")
         thread_ts = event.get("thread_ts")
+        text = _SLACK_USER_MENTION_PREFIX_RE.sub("", text).strip()
 
         if not text or not user_id:
             return

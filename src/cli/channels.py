@@ -173,21 +173,51 @@ class ChannelManager:
         name = type(channel).__name__
 
         def _run():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            channel._channel_loop = loop
+            import time
+
             for attempt in range(max_retries):
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                channel._channel_loop = loop
                 try:
                     loop.run_until_complete(channel.start())
                     break
-                except Exception as e:
+                except RuntimeError as e:
+                    if "Event loop stopped" in str(e) and getattr(channel, "_handler", None) is not None:
+                        # slack-bolt background tasks stop the loop after a
+                        # successful Socket Mode connect, racing with
+                        # run_until_complete().  The handler exists so the
+                        # connection succeeded — proceed to run_forever().
+                        break
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
                     if attempt < max_retries - 1:
                         delay = 5 * (attempt + 1)
                         logger.warning(
                             "%s failed to connect (attempt %d/%d): %s. Retrying in %ds...",
                             name, attempt + 1, max_retries, e, delay,
                         )
-                        import time
+                        time.sleep(delay)
+                    else:
+                        logger.error(
+                            "%s failed to connect after %d attempts: %s. "
+                            "Channel will not be available. Check your network connection.",
+                            name, max_retries, e,
+                        )
+                        return
+                except Exception as e:
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
+                    if attempt < max_retries - 1:
+                        delay = 5 * (attempt + 1)
+                        logger.warning(
+                            "%s failed to connect (attempt %d/%d): %s. Retrying in %ds...",
+                            name, attempt + 1, max_retries, e, delay,
+                        )
                         time.sleep(delay)
                     else:
                         logger.error(

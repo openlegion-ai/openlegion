@@ -2213,6 +2213,26 @@
                       <div x-show="ch.pairing_code" class="text-xs text-gray-400">
                         Code: <span class="font-mono text-white select-all" x-text="ch.pairing_code"></span>
                       </div>
+                      <div x-show="ch.type === 'slack'" class="mt-2 space-y-2">
+                        <div class="rounded-md border border-amber-900/40 bg-amber-950/20 px-3 py-2">
+                          <div class="text-[11px] text-amber-300 mb-1">Pairing</div>
+                          <div class="text-[11px] text-gray-300 leading-relaxed">
+                            Invite the bot to a channel (<code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-200">/invite @YourBot</code>), then send
+                            <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-200">!start &lt;pairing_code&gt;</code>
+                            in that channel.
+                          </div>
+                        </div>
+                        <div class="rounded-md border border-gray-800 bg-gray-950 px-3 py-2 space-y-2">
+                          <div class="text-[11px] text-gray-300 font-medium">If the bot doesn&rsquo;t respond, check your Slack app settings (in order):</div>
+                          <ol class="text-[11px] text-gray-500 leading-relaxed list-decimal list-inside space-y-1">
+                            <li><span class="text-gray-400">Settings &gt; Socket Mode</span> &mdash; enabled, app token has <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">connections:write</code></li>
+                            <li><span class="text-gray-400">OAuth &amp; Permissions</span> &mdash; bot scopes: <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">chat:write</code>, <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">app_mentions:read</code>, <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">channels:history</code>, <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">im:history</code></li>
+                            <li><span class="text-gray-400">App Home</span> &mdash; Messages Tab + &ldquo;Allow users to send messages&rdquo;</li>
+                            <li><span class="text-gray-400">Event Subscriptions</span> &mdash; enabled, bot events: <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">message.channels</code>, <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">message.im</code>, <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">app_mention</code></li>
+                            <li><span class="text-gray-400">Install App</span> &mdash; reinstall after any changes</li>
+                          </ol>
+                        </div>
+                      </div>
                     </div>
                   </template>
                 </div>
@@ -2237,6 +2257,39 @@
                         x-model="channelTokens[field.key]">
                     </div>
                   </template>
+                  <div x-show="ch.type === 'slack'" class="rounded-md border border-gray-800 bg-gray-950 px-3 py-2 space-y-2">
+                    <div class="text-[11px] text-gray-300 font-medium">Slack app setup (do these in order)</div>
+                    <ol class="text-[11px] text-gray-500 leading-relaxed list-decimal list-inside space-y-1">
+                      <li>
+                        <span class="text-gray-400">Settings &gt; Socket Mode</span> &mdash;
+                        enable Socket Mode, generate an app token (<code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">xapp-...</code>)
+                        with <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">connections:write</code> scope
+                      </li>
+                      <li>
+                        <span class="text-gray-400">Features &gt; OAuth &amp; Permissions</span> &mdash;
+                        add bot scopes:
+                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">chat:write</code>,
+                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">app_mentions:read</code>,
+                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">channels:history</code>,
+                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">im:history</code>
+                      </li>
+                      <li>
+                        <span class="text-gray-400">Features &gt; App Home</span> &mdash;
+                        enable Messages Tab + &ldquo;Allow users to send messages&rdquo;
+                      </li>
+                      <li>
+                        <span class="text-gray-400">Features &gt; Event Subscriptions</span> &mdash;
+                        enable events, subscribe to bot events:
+                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">message.channels</code>,
+                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">message.im</code>,
+                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">app_mention</code>
+                      </li>
+                      <li>
+                        <span class="text-gray-400">Install App</span> &mdash;
+                        reinstall to workspace after any changes
+                      </li>
+                    </ol>
+                  </div>
                   <div class="flex gap-2 pt-1">
                     <button @click="cancelChannelConnect()" :disabled="channelConnecting"
                       class="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors disabled:opacity-50">Cancel</button>

@@ -144,7 +144,9 @@ def _redirect_host_logs_to_file() -> None:
 
     for name in ["host.health", "host.runtime", "host.mesh", "host.transport",
                  "host.server", "host.costs", "host.cron", "host.credentials",
-                 "host.permissions", "host.lanes"]:
+                 "host.permissions", "host.lanes",
+                 "channels.slack", "channels.telegram", "channels.discord",
+                 "channels.whatsapp", "channels.base"]:
         host_logger = logging.getLogger(name)
         # Replace stderr handlers with file handler
         host_logger.handlers = [file_handler]
