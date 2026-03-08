@@ -44,6 +44,8 @@ function dashboard() {
     agents: [],
     agentStates: {},
     _stateTimers: {},
+    _heartbeatCountdowns: {},
+    _heartbeatTimer: null,
 
     // Events
     events: [],
@@ -633,6 +635,7 @@ function dashboard() {
       this._ws.connect();
 
       this.fetchAgents();
+      this.startHeartbeatTimer();
       this.fetchSettings();
       this.fetchProject();
       this.fetchProjects();
@@ -785,6 +788,7 @@ function dashboard() {
       Object.values(this._stateTimers).forEach(clearTimeout);
       Object.values(this._scrollTimers).forEach(clearTimeout);
       Object.values(this._chatAborts).forEach(c => c?.abort());
+      this.stopHeartbeatTimer();
       if (this._cmdPaletteHandler) document.removeEventListener('keydown', this._cmdPaletteHandler);
       if (this._popstateHandler) window.removeEventListener('popstate', this._popstateHandler);
     },
@@ -870,6 +874,30 @@ function dashboard() {
     healthLabel(status) {
       const map = { healthy: 'Online', unhealthy: 'Degraded', restarting: 'Degraded', failed: 'Offline', unknown: 'Starting' };
       return map[status] || 'Starting';
+    },
+
+    startHeartbeatTimer() {
+      if (this._heartbeatTimer) return;
+      this._heartbeatTimer = setInterval(() => {
+        const updated = {};
+        for (const agent of this.agents) {
+          if (!agent.heartbeat_next_run || !agent.heartbeat_enabled) continue;
+          const nextRun = new Date(agent.heartbeat_next_run).getTime();
+          const diff = nextRun - Date.now();
+          if (diff <= 0) {
+            updated[agent.id] = 'running...';
+          } else {
+            const mins = Math.floor(diff / 60000);
+            const secs = Math.floor((diff % 60000) / 1000);
+            updated[agent.id] = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+          }
+        }
+        this._heartbeatCountdowns = updated;
+      }, 1000);
+    },
+
+    stopHeartbeatTimer() {
+      if (this._heartbeatTimer) { clearInterval(this._heartbeatTimer); this._heartbeatTimer = null; }
     },
 
     // ── WebSocket event handler ───────────────────────────
