@@ -1073,6 +1073,9 @@ class TestDashboardCron:
         assert resp.json()["resumed"] is True
 
     def test_cron_delete_success(self):
+        from src.host.cron import CronJob
+        regular_job = CronJob(id="cron_abc", agent="alpha", schedule="every 1h", message="test")
+        self.components["cron_scheduler"].jobs = {"cron_abc": regular_job}
         self.components["cron_scheduler"].remove_job.return_value = True
         resp = self.client.delete("/dashboard/api/cron/cron_abc")
         assert resp.status_code == 200
@@ -1082,7 +1085,7 @@ class TestDashboardCron:
         self.components["cron_scheduler"].remove_job.assert_called_once_with("cron_abc")
 
     def test_cron_delete_not_found(self):
-        self.components["cron_scheduler"].remove_job.return_value = False
+        self.components["cron_scheduler"].jobs = {}
         resp = self.client.delete("/dashboard/api/cron/nonexistent")
         assert resp.status_code == 404
 
@@ -1097,6 +1100,98 @@ class TestDashboardCron:
         self.client = _make_client(self.components)
         resp = self.client.post("/dashboard/api/cron/abc/run")
         assert resp.status_code == 503
+
+
+# ── Heartbeat info in agents API + heartbeat delete guard ────
+
+
+class TestHeartbeatInAgentsAPI:
+    """GET /api/agents includes heartbeat fields when a heartbeat job exists."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @patch("src.cli.config._load_config")
+    def test_agents_include_heartbeat_fields(self, mock_load):
+        from src.host.cron import CronJob
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+            "agents": {},
+            "_agent_projects": {},
+        }
+        hb_job = CronJob(
+            id="hb_alpha", agent="alpha", schedule="every 15m",
+            message="heartbeat", heartbeat=True, enabled=True,
+            next_run="2026-03-09T12:00:00+00:00",
+        )
+        self.components["cron_scheduler"].find_heartbeat_job.side_effect = (
+            lambda aid: hb_job if aid == "alpha" else None
+        )
+        resp = self.client.get("/dashboard/api/agents")
+        assert resp.status_code == 200
+        agents = resp.json()["agents"]
+        alpha = next(a for a in agents if a["id"] == "alpha")
+        assert alpha["heartbeat_schedule"] == "every 15m"
+        assert alpha["heartbeat_enabled"] is True
+        assert alpha["heartbeat_next_run"] == "2026-03-09T12:00:00+00:00"
+
+    @patch("src.cli.config._load_config")
+    def test_agents_no_heartbeat_fields_when_absent(self, mock_load):
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+            "agents": {},
+            "_agent_projects": {},
+        }
+        self.components["cron_scheduler"].find_heartbeat_job.return_value = None
+        resp = self.client.get("/dashboard/api/agents")
+        assert resp.status_code == 200
+        agents = resp.json()["agents"]
+        alpha = next(a for a in agents if a["id"] == "alpha")
+        assert "heartbeat_schedule" not in alpha
+        assert "heartbeat_enabled" not in alpha
+        assert "heartbeat_next_run" not in alpha
+
+
+class TestHeartbeatDeleteGuard:
+    """DELETE /api/cron/{id} blocks deletion of heartbeat jobs."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_delete_heartbeat_job_returns_403(self):
+        from src.host.cron import CronJob
+        hb_job = CronJob(
+            id="hb_alpha", agent="alpha", schedule="every 15m",
+            message="heartbeat", heartbeat=True,
+        )
+        self.components["cron_scheduler"].jobs = {"hb_alpha": hb_job}
+        resp = self.client.delete("/dashboard/api/cron/hb_alpha")
+        assert resp.status_code == 403
+        assert "Heartbeat" in resp.json()["detail"]
+
+    def test_delete_regular_job_succeeds(self):
+        from src.host.cron import CronJob
+        regular_job = CronJob(
+            id="cron_abc", agent="alpha", schedule="every 1h",
+            message="regular task", heartbeat=False,
+        )
+        self.components["cron_scheduler"].jobs = {"cron_abc": regular_job}
+        self.components["cron_scheduler"].remove_job.return_value = True
+        resp = self.client.delete("/dashboard/api/cron/cron_abc")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
 
 
 # ── V2 Tests: Blackboard Write/Delete ────────────────────────

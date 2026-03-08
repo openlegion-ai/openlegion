@@ -440,25 +440,6 @@
             </div>
           </div>
         </div>
-        <!-- Broadcast inline input -->
-        <div x-show="broadcastTargets.length >= 2" class="bg-gray-900 border border-gray-800 rounded-lg p-3 mb-4" x-cloak>
-          <div class="flex items-center gap-3">
-            <svg class="w-3.5 h-3.5 text-gray-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-            <input id="broadcast-input" type="text" x-model="broadcastMessage" @keydown.enter="sendBroadcast()"
-              :disabled="broadcastSending"
-              class="dash-input flex-1 text-sm"
-              :placeholder="activeProject
-                ? 'Broadcast to ' + broadcastTargets.length + ' ' + activeProject + ' agent' + (broadcastTargets.length !== 1 ? 's' : '') + '...'
-                : 'Broadcast to all ' + broadcastTargets.length + ' agents...'">
-            <span x-show="_broadcastPending" class="text-[10px] text-indigo-400 font-mono shrink-0 whitespace-nowrap"
-              x-text="_broadcastPending ? _broadcastPending.completed + '/' + _broadcastPending.total + ' done' : ''"></span>
-            <button @click="sendBroadcast()" :disabled="broadcastSending || !broadcastMessage.trim()"
-              class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors shrink-0 inline-flex items-center gap-1.5 disabled:opacity-50">
-              <svg x-show="broadcastSending" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-              <span x-text="broadcastSending ? 'Sending...' : 'Send'"></span>
-            </button>
-          </div>
-        </div>
         <!-- ═══ PROJECT COMMS (collapsible, project-level) ═══ -->
         <div x-show="activeProject && agents.length > 0" x-cloak class="mb-4">
           <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
@@ -684,6 +665,25 @@
             </div>
           </div>
         </div>
+        <!-- Broadcast inline input -->
+        <div x-show="broadcastTargets.length >= 2" class="bg-gray-900 border border-gray-800 rounded-lg p-3 mb-4" x-cloak>
+          <div class="flex items-center gap-3">
+            <svg class="w-3.5 h-3.5 text-gray-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+            <input id="broadcast-input" type="text" x-model="broadcastMessage" @keydown.enter="sendBroadcast()"
+              :disabled="broadcastSending"
+              class="dash-input flex-1 text-sm"
+              :placeholder="activeProject
+                ? 'Broadcast to ' + broadcastTargets.length + ' ' + activeProject + ' agent' + (broadcastTargets.length !== 1 ? 's' : '') + '...'
+                : 'Broadcast to all ' + broadcastTargets.length + ' agents...'">
+            <span x-show="_broadcastPending" class="text-[10px] text-indigo-400 font-mono shrink-0 whitespace-nowrap"
+              x-text="_broadcastPending ? _broadcastPending.completed + '/' + _broadcastPending.total + ' done' : ''"></span>
+            <button @click="sendBroadcast()" :disabled="broadcastSending || !broadcastMessage.trim()"
+              class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors shrink-0 inline-flex items-center gap-1.5 disabled:opacity-50">
+              <svg x-show="broadcastSending" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+              <span x-text="broadcastSending ? 'Sending...' : 'Send'"></span>
+            </button>
+          </div>
+        </div>
         <!-- Artifact preview modal (global — outside collapsible) -->
         <div x-show="artifactPreview" x-cloak
           class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
@@ -782,7 +782,7 @@
                         'health-failed': agent.health_status === 'failed',
                         'health-unknown': agent.health_status === 'unknown' || !agent.health_status,
                       }"
-                      x-text="agent.health_status || 'unknown'"
+                      x-text="healthLabel(agent.health_status)"
                     ></span>
                   </template>
                 </div>
@@ -804,6 +804,25 @@
                     }"
                     x-text="agentStates[agent.id] || 'idle'"
                   ></span>
+                </div>
+                <div class="stat-row" x-show="agent.heartbeat_schedule">
+                  <span class="stat-label">
+                    <svg fill="currentColor" viewBox="0 0 24 24" stroke="none" class="w-3 h-3"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+                    Heartbeat
+                  </span>
+                  <span class="text-[11px] font-medium"
+                    :class="agent.heartbeat_enabled ? 'text-pink-400' : 'text-gray-600'">
+                    <template x-if="agent.heartbeat_enabled">
+                      <span>
+                        <span x-text="_heartbeatCountdowns[agent.id] || '...'"></span>
+                        <span class="text-gray-600 font-normal">&middot;</span>
+                        <span class="text-gray-500 font-normal text-[10px]" x-text="agent.heartbeat_schedule"></span>
+                      </span>
+                    </template>
+                    <template x-if="!agent.heartbeat_enabled">
+                      <span>paused</span>
+                    </template>
+                  </span>
                 </div>
                 <div class="stat-row">
                   <span class="stat-label">
@@ -1040,6 +1059,10 @@
                 <div x-show="msg.role === 'user'" class="whitespace-pre-wrap break-words" x-text="msg.content"></div>
                 <div x-show="msg.role !== 'user'" class="chat-markdown break-words" x-html="renderMarkdown(msg.content)"></div>
                 <span x-show="msg.streaming" class="inline-block w-1 h-3 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
+                <div x-show="formatRelativeTime(msg.ts)"
+                  class="text-[9px] mt-0.5 opacity-40"
+                  :class="msg.role === 'user' ? 'text-indigo-200' : 'text-gray-500'"
+                  x-text="formatRelativeTime(msg.ts)"></div>
               </div>
             </div>
           </template>
@@ -1336,11 +1359,11 @@
                     <span class="health-badge shrink-0"
                       :class="{
                         'health-healthy': agentDetail.health?.status === 'healthy',
-                        'health-unhealthy': agentDetail.health?.status === 'unhealthy',
+                        'health-unhealthy': agentDetail.health?.status === 'unhealthy' || agentDetail.health?.status === 'restarting',
                         'health-failed': agentDetail.health?.status === 'failed',
                         'health-unknown': !agentDetail.health?.status || agentDetail.health?.status === 'unknown',
                       }"
-                      x-text="agentDetail.health?.status || 'unknown'"
+                      x-text="healthLabel(agentDetail.health?.status)"
                     ></span>
                   </div>
                   <span class="text-xs text-gray-500" x-text="agentConfigs[selectedAgent]?.role || formatModelName(agentConfigs[selectedAgent]?.model) || ''"></span>
@@ -1889,16 +1912,16 @@
                       </div>
                       <div class="flex gap-1 flex-shrink-0">
                         <button @click="runCronJob(job.id)" :disabled="cronRunLoading[job.id]"
-                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-colors disabled:opacity-50"
+                          class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-900/30 hover:bg-indigo-800/40 text-indigo-300 hover:text-indigo-200 transition-colors disabled:opacity-50"
                           x-text="cronRunLoading[job.id] ? '...' : 'Run'"></button>
                         <button x-show="job.enabled" @click="pauseCronJob(job.id)" :disabled="cronRunLoading[job.id]"
-                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-yellow-900/30 text-gray-400 hover:text-yellow-400 transition-colors disabled:opacity-50"
+                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-yellow-900/30 text-gray-300 hover:text-yellow-400 transition-colors disabled:opacity-50"
                           x-text="cronRunLoading[job.id] ? '...' : 'Pause'"></button>
                         <button x-show="!job.enabled" @click="resumeCronJob(job.id)" :disabled="cronRunLoading[job.id]"
-                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-green-900/30 text-gray-400 hover:text-green-400 transition-colors disabled:opacity-50"
+                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-green-900/30 text-gray-300 hover:text-green-400 transition-colors disabled:opacity-50"
                           x-text="cronRunLoading[job.id] ? '...' : 'Resume'"></button>
-                        <button @click="deleteCronJob(job.id)"
-                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">Del</button>
+                        <button x-show="!job.heartbeat" @click="deleteCronJob(job.id)"
+                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-red-900/30 text-gray-300 hover:text-red-400 transition-colors">Del</button>
                       </div>
                     </div>
                   </template>
@@ -2104,13 +2127,13 @@
                       <td class="py-2.5 px-4 font-mono text-gray-300" x-text="job.run_count"></td>
                       <td class="py-2.5 px-4 font-mono" :class="job.error_count > 0 ? 'text-red-400' : 'text-gray-600'" x-text="job.error_count"></td>
                       <td class="py-2.5 px-4 flex gap-1">
-                        <button @click="runCronJob(job.id)" :disabled="cronRunLoading[job.id]" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Run'"></button>
+                        <button @click="runCronJob(job.id)" :disabled="cronRunLoading[job.id]" class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-900/30 hover:bg-indigo-800/40 text-indigo-300 hover:text-indigo-200 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Run'"></button>
                         <button x-show="job.enabled" @click="pauseCronJob(job.id)" :disabled="cronRunLoading[job.id]"
-                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-yellow-900/30 text-gray-400 hover:text-yellow-400 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Pause'"></button>
+                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-yellow-900/30 text-gray-300 hover:text-yellow-400 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Pause'"></button>
                         <button x-show="!job.enabled" @click="resumeCronJob(job.id)" :disabled="cronRunLoading[job.id]"
-                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-green-900/30 text-gray-400 hover:text-green-400 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Resume'"></button>
-                        <button @click="deleteCronJob(job.id)"
-                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">Delete</button>
+                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-green-900/30 text-gray-300 hover:text-green-400 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Resume'"></button>
+                        <button x-show="!job.heartbeat" @click="deleteCronJob(job.id)"
+                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-red-900/30 text-gray-300 hover:text-red-400 transition-colors">Delete</button>
                       </td>
                     </tr>
                   </template>

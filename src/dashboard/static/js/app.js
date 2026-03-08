@@ -44,6 +44,8 @@ function dashboard() {
     agents: [],
     agentStates: {},
     _stateTimers: {},
+    _heartbeatCountdowns: {},
+    _heartbeatTimer: null,
 
     // Events
     events: [],
@@ -633,6 +635,7 @@ function dashboard() {
       this._ws.connect();
 
       this.fetchAgents();
+      this.startHeartbeatTimer();
       this.fetchSettings();
       this.fetchProject();
       this.fetchProjects();
@@ -785,6 +788,7 @@ function dashboard() {
       Object.values(this._stateTimers).forEach(clearTimeout);
       Object.values(this._scrollTimers).forEach(clearTimeout);
       Object.values(this._chatAborts).forEach(c => c?.abort());
+      this.stopHeartbeatTimer();
       if (this._cmdPaletteHandler) document.removeEventListener('keydown', this._cmdPaletteHandler);
       if (this._popstateHandler) window.removeEventListener('popstate', this._popstateHandler);
     },
@@ -855,6 +859,47 @@ function dashboard() {
       this.toastQueue = this.toastQueue.filter(t => t.id !== id);
     },
 
+    formatRelativeTime(ts) {
+      if (!ts) return '';
+      const diff = Date.now() - ts;
+      if (diff < 60000) return '';  // under 1 min — too fresh to label
+      if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+      const d = new Date(ts);
+      const now = new Date();
+      const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      if (d.toDateString() === now.toDateString()) return time;
+      return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + time;
+    },
+
+    healthLabel(status) {
+      const map = { healthy: 'Online', unhealthy: 'Degraded', restarting: 'Degraded', failed: 'Offline', unknown: 'Starting' };
+      return map[status] || 'Starting';
+    },
+
+    startHeartbeatTimer() {
+      if (this._heartbeatTimer) return;
+      this._heartbeatTimer = setInterval(() => {
+        const updated = {};
+        for (const agent of this.agents) {
+          if (!agent.heartbeat_next_run || !agent.heartbeat_enabled) continue;
+          const nextRun = new Date(agent.heartbeat_next_run).getTime();
+          const diff = nextRun - Date.now();
+          if (diff <= 0) {
+            updated[agent.id] = 'running...';
+          } else {
+            const mins = Math.floor(diff / 60000);
+            const secs = Math.floor((diff % 60000) / 1000);
+            updated[agent.id] = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+          }
+        }
+        this._heartbeatCountdowns = updated;
+      }, 1000);
+    },
+
+    stopHeartbeatTimer() {
+      if (this._heartbeatTimer) { clearInterval(this._heartbeatTimer); this._heartbeatTimer = null; }
+    },
+
     // ── WebSocket event handler ───────────────────────────
 
     onWsEvent(evt) {
@@ -912,6 +957,7 @@ function dashboard() {
             content: evt.data?.message || '',
             streaming: false,
             tools: [],
+            ts: Date.now(),
           });
           this._saveChatToSession();
           if (this.openChats.includes(evt.agent)) {
@@ -1946,7 +1992,12 @@ function dashboard() {
       this.cronRunLoading = { ...this.cronRunLoading, [jobId]: true };
       try {
         const resp = await fetch(`${window.__config.apiBase}/cron/${jobId}/run`, { method: 'POST' });
-        if (resp.ok) this.showToast(`Job ${jobId} triggered`);
+        if (resp.ok) {
+          this.showToast(`Job ${jobId} triggered`);
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Run failed'}`);
+        }
         this.fetchCronJobs();
       } catch (e) { console.warn('runCronJob failed:', e); }
       finally { this.cronRunLoading = { ...this.cronRunLoading, [jobId]: false }; }
@@ -1956,8 +2007,13 @@ function dashboard() {
       if (this.cronRunLoading[jobId]) return;
       this.cronRunLoading = { ...this.cronRunLoading, [jobId]: true };
       try {
-        await fetch(`${window.__config.apiBase}/cron/${jobId}/pause`, { method: 'POST' });
-        this.showToast(`Job ${jobId} paused`);
+        const resp = await fetch(`${window.__config.apiBase}/cron/${jobId}/pause`, { method: 'POST' });
+        if (resp.ok) {
+          this.showToast(`Job ${jobId} paused`);
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Pause failed'}`);
+        }
         this.fetchCronJobs();
       } catch (e) { console.warn('pauseCronJob failed:', e); }
       finally { this.cronRunLoading = { ...this.cronRunLoading, [jobId]: false }; }
@@ -1967,8 +2023,13 @@ function dashboard() {
       if (this.cronRunLoading[jobId]) return;
       this.cronRunLoading = { ...this.cronRunLoading, [jobId]: true };
       try {
-        await fetch(`${window.__config.apiBase}/cron/${jobId}/resume`, { method: 'POST' });
-        this.showToast(`Job ${jobId} resumed`);
+        const resp = await fetch(`${window.__config.apiBase}/cron/${jobId}/resume`, { method: 'POST' });
+        if (resp.ok) {
+          this.showToast(`Job ${jobId} resumed`);
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Resume failed'}`);
+        }
         this.fetchCronJobs();
       } catch (e) { console.warn('resumeCronJob failed:', e); }
       finally { this.cronRunLoading = { ...this.cronRunLoading, [jobId]: false }; }
@@ -2104,6 +2165,7 @@ function dashboard() {
             content: m.content,
             streaming: false,
             phase: (m.phase === 'error' || m.phase === 'done') ? m.phase : 'done',
+            ts: m.ts || 0,
             tools: Array.isArray(m.tools) ? m.tools.map(t => ({
               name: t.name,
               status: t.status === 'running' ? 'done' : (t.status || 'done'),
@@ -2513,7 +2575,7 @@ function dashboard() {
       const msg = (inputValue || '').trim();
       if (!msg) return;
       if (!this.chatHistories[agentId]) this.chatHistories[agentId] = [];
-      this.chatHistories[agentId].push({ role: 'user', content: msg });
+      this.chatHistories[agentId].push({ role: 'user', content: msg, ts: Date.now() });
       this.chatLoadingAgents[agentId] = true;
       this.chatStreamingAgents[agentId] = true;
 
@@ -2525,6 +2587,7 @@ function dashboard() {
         tools: [],
         timeline: [],
         _sawTextDelta: false,
+        ts: Date.now(),
       });
       const idx = this.chatHistories[agentId].length - 1;
       this._pushChatTimelinePhase(this.chatHistories[agentId][idx], 'thinking');
@@ -2674,7 +2737,7 @@ function dashboard() {
       const msg = (message || '').trim();
       if (!msg) return;
       if (!this.chatHistories[agentId]) this.chatHistories[agentId] = [];
-      this.chatHistories[agentId].push({ role: 'user', content: `[steer] ${msg}` });
+      this.chatHistories[agentId].push({ role: 'user', content: `[steer] ${msg}`, ts: Date.now() });
       try {
         await fetch(`${window.__config.apiBase}/agents/${agentId}/steer`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2684,6 +2747,7 @@ function dashboard() {
       } catch (e) {
         this.showToast(`Steer failed: ${e.message}`);
       }
+      this._saveChatToSession();
       this.fetchQueues();
     },
 

@@ -205,6 +205,12 @@ def create_dashboard_router(
                 "avatar": acfg.get("avatar", 1),
                 "project": agent_projects.get(agent_id),
             }
+            if cron_scheduler is not None:
+                hb = cron_scheduler.find_heartbeat_job(agent_id)
+                if hb:
+                    entry["heartbeat_schedule"] = hb.schedule
+                    entry["heartbeat_enabled"] = hb.enabled
+                    entry["heartbeat_next_run"] = hb.next_run
             vnc_url = _browser_vnc_url_for_request(request)
             if vnc_url:
                 entry["vnc_url"] = vnc_url
@@ -1551,6 +1557,11 @@ def create_dashboard_router(
     async def api_cron_delete(job_id: str) -> dict:
         if cron_scheduler is None:
             raise HTTPException(status_code=503, detail="Cron scheduler not available")
+        job = cron_scheduler.jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job.heartbeat:
+            raise HTTPException(status_code=403, detail="Heartbeat jobs cannot be deleted")
         if not cron_scheduler.remove_job(job_id):
             raise HTTPException(status_code=404, detail="Job not found")
         return {"deleted": True, "job_id": job_id}
