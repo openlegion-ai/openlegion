@@ -62,6 +62,7 @@ class MemoryStore:
         sqlite_vec.load(self.db)
         self.db.enable_load_extension(False)
         self.embed_fn = embed_fn
+        self._embed_failures = 0
         self.categorize_fn = categorize_fn
         self._init_schema()
 
@@ -195,8 +196,18 @@ class MemoryStore:
         if self.embed_fn:
             try:
                 embedding = await self.embed_fn(f"{key}: {value}")
+                self._embed_failures = 0  # reset on success
             except Exception as e:
-                logger.warning(f"Embedding failed for {key}: {e}")
+                self._embed_failures += 1
+                if self._embed_failures >= 3:
+                    logger.warning(
+                        "Embedding failed %d times, disabling vector search "
+                        "(memory_search will use keyword matching only): %s",
+                        self._embed_failures, e,
+                    )
+                    self.embed_fn = None
+                else:
+                    logger.warning("Embedding failed for %s: %s", key, e)
 
         # Run all DB writes in executor to avoid blocking the event loop
         fact_id = await self._run_db(
@@ -263,7 +274,15 @@ class MemoryStore:
             try:
                 query_embedding = await self.embed_fn(query)
             except Exception as e:
-                logger.warning("Vector search failed, falling back to keyword only: %s", e)
+                self._embed_failures += 1
+                if self._embed_failures >= 3:
+                    logger.warning(
+                        "Embedding failed %d times, disabling vector search: %s",
+                        self._embed_failures, e,
+                    )
+                    self.embed_fn = None
+                else:
+                    logger.warning("Vector search failed, falling back to keyword only: %s", e)
 
         return await self._run_db(self._search_sync, query, query_embedding, top_k)
 
@@ -698,7 +717,15 @@ class MemoryStore:
                 if len(results) >= top_k:
                     return results[:top_k]
             except Exception as e:
-                logger.warning("Hierarchical search tier 1/2 failed, falling back to flat: %s", e)
+                self._embed_failures += 1
+                if self._embed_failures >= 3:
+                    logger.warning(
+                        "Embedding failed %d times, disabling vector search: %s",
+                        self._embed_failures, e,
+                    )
+                    self.embed_fn = None
+                else:
+                    logger.warning("Hierarchical search tier 1/2 failed, falling back to flat: %s", e)
 
         # Tier 3: Flat fallback (already async with executor)
         flat_results = await self.search(query, top_k=top_k)
