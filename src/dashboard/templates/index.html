@@ -208,7 +208,7 @@
       </div>
       <div class="flex items-center gap-4">
         <!-- Fleet total cost (click to System > Costs) -->
-        <div class="text-xs text-gray-400 hidden sm:block cursor-pointer hover:text-gray-200 transition-colors" x-show="fleetTotalCost > 0" @click="switchTab('system'); systemTab = 'costs'">
+        <div class="text-xs text-gray-400 hidden sm:block cursor-pointer hover:text-gray-200 transition-colors" x-show="fleetTotalCost > 0" @click="systemTab = 'costs'; switchTab('system')">
           Today: <span class="text-gray-200 font-medium" x-text="formatCost(fleetTotalCost)"></span>
         </div>
         <!-- Command palette trigger -->
@@ -1771,7 +1771,7 @@
         <!-- System sub-tab bar -->
         <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
           <template x-for="st in systemTabs" :key="st.id">
-            <button @click="systemTab = st.id; if (st.id === 'integrations') { fetchChannels(); fetchWebhooks(); fetchSettings(); }"
+            <button @click="systemTab = st.id; _pushUrl(false); if (st.id === 'integrations') { fetchChannels(); fetchWebhooks(); fetchSettings(); }"
               class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
               :class="systemTab === st.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
               <span x-text="st.label"></span>

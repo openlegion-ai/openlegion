@@ -309,7 +309,7 @@ function dashboard() {
         if (this.activityView === 'logs') return '/activity/logs';
         return '/activity';
       }
-      if (this.activeTab === 'system') return '/system';
+      if (this.activeTab === 'system') return '/system/' + (this.systemTab || 'costs');
       return '/';
     },
 
@@ -323,13 +323,16 @@ function dashboard() {
         if (this.activityView === 'logs') return 'Logs \u2014 OpenLegion';
         return 'Traces \u2014 OpenLegion';
       }
-      if (this.activeTab === 'system') return 'System \u2014 OpenLegion';
+      if (this.activeTab === 'system') {
+        const st = this.systemTabs.find(t => t.id === this.systemTab);
+        return (st ? st.label : 'System') + ' \u2014 OpenLegion';
+      }
       return 'Agents \u2014 OpenLegion';
     },
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'fleet', activityView: 'traces', agentId: null, identityTab: 'config' };
+      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'costs', agentId: null, identityTab: 'config' };
       if (!clean) return route;
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
@@ -343,7 +346,11 @@ function dashboard() {
       if (clean === 'activity/events') { route.tab = 'activity'; route.activityView = 'events'; }
       else if (clean === 'activity/logs') { route.tab = 'activity'; route.activityView = 'logs'; }
       else if (clean === 'activity') { route.tab = 'activity'; }
-      else if (clean === 'system') { route.tab = 'system'; }
+      else if (clean.startsWith('system')) {
+        route.tab = 'system';
+        const sub = clean.split('/')[1];
+        if (sub && ['costs', 'automation', 'integrations'].includes(sub)) route.systemTab = sub;
+      }
       return route;
     },
 
@@ -381,6 +388,12 @@ function dashboard() {
           }
           if (route.tab === 'activity' && this.activityView !== route.activityView) {
             this.setActivityView(route.activityView);
+          }
+          if (route.tab === 'system' && this.systemTab !== route.systemTab) {
+            this.systemTab = route.systemTab;
+            if (route.systemTab === 'integrations') {
+              this.fetchChannels(); this.fetchWebhooks(); this.fetchSettings();
+            }
           }
         }
       } finally {
@@ -696,7 +709,7 @@ function dashboard() {
 
       // Deep link restoration: parse initial URL and apply route
       const initRoute = this._parsePath(window.location.pathname);
-      const isDeepLink = initRoute.agentId || initRoute.tab !== 'fleet' || initRoute.activityView !== 'traces';
+      const isDeepLink = initRoute.agentId || initRoute.tab !== 'fleet' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
       if (isDeepLink) {
         this.$nextTick(() => {
           this._applyRoute(initRoute);
@@ -2697,27 +2710,27 @@ function dashboard() {
         const agent = (job.agent || '').toLowerCase();
         const message = (job.message || '').toLowerCase();
         if (id.includes(q) || agent.includes(q) || message.includes(q)) {
-          results.push({ type: 'cron', label: job.id, desc: `${job.agent} · ${job.schedule}`, action: () => { this.switchTab('system'); this.systemTab = 'automation'; } });
+          results.push({ type: 'cron', label: job.id, desc: `${job.agent} · ${job.schedule}`, action: () => { this.systemTab = 'automation'; this.switchTab('system'); } });
         }
       }
       // Match workflows
       for (const wf of this.workflows || []) {
         if ((wf.name || '').toLowerCase().includes(q)) {
-          results.push({ type: 'action', label: `Run ${wf.name}`, desc: `Workflow · ${wf.steps} steps`, action: () => { this.switchTab('system'); this.systemTab = 'automation'; this.runWorkflow(wf.name); } });
+          results.push({ type: 'action', label: `Run ${wf.name}`, desc: `Workflow · ${wf.steps} steps`, action: () => { this.systemTab = 'automation'; this.switchTab('system'); this.runWorkflow(wf.name); } });
         }
       }
       // Match credentials
       for (const name of this.settingsData?.credentials?.names || []) {
         if (name.toLowerCase().includes(q)) {
-          results.push({ type: 'action', label: name, desc: 'Credential', action: () => { this.switchTab('system'); this.systemTab = 'integrations'; } });
+          results.push({ type: 'action', label: name, desc: 'Credential', action: () => { this.systemTab = 'integrations'; this.switchTab('system'); } });
         }
       }
       // System quick actions
       const sysActions = [
         { label: 'View Logs', desc: 'Open runtime logs', keywords: ['logs', 'runtime', 'debug'], action: () => { this.switchTab('activity'); this.setActivityView('logs'); } },
-        { label: 'Add Credential', desc: 'Add new API key', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.switchTab('system'); this.systemTab = 'integrations'; this.showCredForm = true; } },
-        { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.switchTab('system'); this.systemTab = 'integrations'; this.fetchWebhooks(); } },
-        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.switchTab('system'); this.systemTab = 'integrations'; this.fetchChannels(); } },
+        { label: 'Add Credential', desc: 'Add new API key', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.showCredForm = true; } },
+        { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchWebhooks(); } },
+        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchChannels(); } },
       ];
       for (const act of sysActions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
