@@ -686,7 +686,7 @@ class TestComputeNextRun:
         """Loading from disk recomputes next_run for all jobs."""
         sched = CronScheduler(config_path=self.config_path)
         job = sched.add_job(agent="a", schedule="every 10m", message="ping")
-        original_next = job.next_run
+        assert job.next_run is not None  # sanity check before reload
 
         # Reload — should recompute
         sched2 = CronScheduler(config_path=self.config_path)
