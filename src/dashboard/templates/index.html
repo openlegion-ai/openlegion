@@ -1623,6 +1623,10 @@
                           <div class="text-xs text-gray-500 mb-1">Budget ($/day)</div>
                           <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.budget?.daily_usd ? formatCost(agentConfigs[selectedAgent].budget.daily_usd) : '-'"></div>
                         </div>
+                        <div class="bg-gray-800/50 rounded p-3">
+                          <div class="text-xs text-gray-500 mb-1">Thinking</div>
+                          <div class="text-sm font-mono" :class="(agentConfigs[selectedAgent]?.thinking || 'off') !== 'off' ? 'text-indigo-400' : 'text-gray-500'" x-text="(agentConfigs[selectedAgent]?.thinking || 'off').charAt(0).toUpperCase() + (agentConfigs[selectedAgent]?.thinking || 'off').slice(1)"></div>
+                        </div>
                         <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
                           <div class="text-xs text-gray-500 mb-1">Credential Access</div>
                           <div class="text-sm text-gray-200 font-mono mb-2">
@@ -1666,7 +1670,8 @@
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                           <div>
                             <label class="text-xs text-gray-500 mb-1 block">Model</label>
-                            <select x-model="editForm.model" class="dash-select w-full">
+                            <select x-model="editForm.model" class="dash-select w-full"
+                              @change="if (thinkingOptionsForModel(editForm.model).length === 0) editForm.thinking = 'off'">
                               <template x-for="m in availableModels" :key="m">
                                 <option :value="m" x-text="m"></option>
                               </template>
@@ -1703,6 +1708,19 @@
                           <div>
                             <label class="text-xs text-gray-500 mb-1 block">Budget ($/month)</label>
                             <input type="number" step="1" min="1" x-model="editForm.budget_monthly" class="dash-input w-full" placeholder="200.0">
+                          </div>
+                          <div>
+                            <label class="text-xs text-gray-500 mb-1 block">Thinking</label>
+                            <template x-if="thinkingOptionsForModel(editForm.model).length > 0">
+                              <select x-model="editForm.thinking" class="dash-select w-full">
+                                <template x-for="opt in thinkingOptionsForModel(editForm.model)" :key="opt.value">
+                                  <option :value="opt.value" x-text="opt.label"></option>
+                                </template>
+                              </select>
+                            </template>
+                            <template x-if="thinkingOptionsForModel(editForm.model).length === 0">
+                              <div class="dash-input w-full text-gray-500 cursor-not-allowed">Not supported for this model</div>
+                            </template>
                           </div>
                           <div class="md:col-span-2">
                             <label class="text-xs text-gray-500 mb-1.5 block">Credential Access</label>

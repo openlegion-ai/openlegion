@@ -1757,6 +1757,7 @@ function dashboard() {
         _showAvatarPicker: false,
         budget_daily: cfg.budget?.daily_usd || '',
         budget_monthly: cfg.budget?.monthly_usd || '',
+        thinking: cfg.thinking || 'off',
         allowed_credentials: credsStr,
         _credMode: credMode,
       };
@@ -1766,6 +1767,27 @@ function dashboard() {
     cancelConfigEdit() {
       this.configEditing = false;
       this.editForm = {};
+    },
+
+    thinkingOptionsForModel(model) {
+      if (!model) return [];
+      if (model.startsWith('anthropic/')) {
+        return [
+          { value: 'off', label: 'Off' },
+          { value: 'low', label: 'Low (5K budget tokens)' },
+          { value: 'medium', label: 'Medium (10K budget tokens)' },
+          { value: 'high', label: 'High (25K budget tokens)' },
+        ];
+      }
+      if (model.startsWith('openai/o') || model.startsWith('o1') || model.startsWith('o3') || model.startsWith('o4')) {
+        return [
+          { value: 'off', label: 'Off' },
+          { value: 'low', label: 'Low' },
+          { value: 'medium', label: 'Medium' },
+          { value: 'high', label: 'High' },
+        ];
+      }
+      return [];
     },
 
     async saveConfigFromDetail(agentId) {
@@ -1795,6 +1817,9 @@ function dashboard() {
         if (this.editForm.budget_monthly && parseFloat(this.editForm.budget_monthly) > 0)
           budget.monthly_usd = parseFloat(this.editForm.budget_monthly);
         body.budget = budget;
+      }
+      if (this.editForm.thinking !== undefined && this.editForm.thinking !== (cfg.thinking || 'off')) {
+        body.thinking = this.editForm.thinking;
       }
       // Handle allowed_credentials via the permissions endpoint
       const newCreds = (this.editForm.allowed_credentials || '').split(',').map(s => s.trim()).filter(Boolean);
