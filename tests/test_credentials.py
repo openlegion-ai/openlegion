@@ -1852,7 +1852,8 @@ async def test_oauth_stream_skips_cost_tracking(monkeypatch):
     # Mock _oauth_chat_stream to yield a simple done event
     async def mock_stream(request, api_key, model):
         yield f"data: {_json.dumps({'type': 'text_delta', 'content': 'hi'})}\n\n"
-        yield f"data: {_json.dumps({'type': 'done', 'content': 'hi', 'tokens_used': 100, 'model': model, 'tool_calls': []})}\n\n"
+        done = {'type': 'done', 'content': 'hi', 'tokens_used': 100, 'model': model, 'tool_calls': []}
+        yield f"data: {_json.dumps(done)}\n\n"
 
     v._oauth_chat_stream = mock_stream
 
@@ -1883,7 +1884,8 @@ async def test_oauth_stream_skips_preflight_even_when_over_budget(monkeypatch):
     v = CredentialVault(cost_tracker=cost_tracker)
 
     async def mock_stream(request, api_key, model):
-        yield f"data: {_json.dumps({'type': 'done', 'content': 'ok', 'tokens_used': 10, 'model': model, 'tool_calls': []})}\n\n"
+        done = {'type': 'done', 'content': 'ok', 'tokens_used': 10, 'model': model, 'tool_calls': []}
+        yield f"data: {_json.dumps(done)}\n\n"
 
     v._oauth_chat_stream = mock_stream
 
