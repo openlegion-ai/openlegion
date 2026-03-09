@@ -821,6 +821,10 @@ class AgentLoop:
                     correction=user_message,
                 )
 
+        # Persist clean user message to transcript before enrichment
+        if self.workspace:
+            self.workspace.append_chat_message("user", user_message)
+
         if not self._chat_messages and self.workspace:
             memory_hits = self.workspace.search(user_message, max_results=3)
             if memory_hits:
@@ -837,6 +841,10 @@ class AgentLoop:
         if steered:
             combined = "\n\n".join(steered)
             self._chat_messages[-1]["content"] += f"\n\n[Additional context]: {combined}"
+            # Persist steers as separate transcript entries
+            if self.workspace:
+                for s in steered:
+                    self.workspace.append_chat_message("user", f"[steer] {s}")
 
         roster = [] if self.mesh_client.is_standalone else await self._fetch_fleet_roster()
         introspect_data = await self._fetch_introspect_cached()
@@ -962,6 +970,9 @@ class AgentLoop:
         if steered:
             combined = "\n\n".join(f"[User interjection]: {s}" for s in steered)
             self._chat_messages.append({"role": "user", "content": combined})
+            if self.workspace:
+                for s in steered:
+                    self.workspace.append_chat_message("user", f"[steer] {s}")
 
     @staticmethod
     def _resolve_content(llm_response) -> str:
@@ -984,16 +995,15 @@ class AgentLoop:
             if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
                 if self._chat_auto_continues >= self._MAX_SESSION_CONTINUES:
                     self.state = "idle"
-                    return {
-                        "response": (
-                            "Chat session has reached its absolute limit "
-                            f"({self._MAX_SESSION_CONTINUES} continuations × "
-                            f"{self.CHAT_MAX_TOTAL_ROUNDS} rounds). "
-                            "Please reset the chat to continue."
-                        ),
-                        "tool_outputs": [],
-                        "tokens_used": 0,
-                    }
+                    msg = (
+                        "Chat session has reached its absolute limit "
+                        f"({self._MAX_SESSION_CONTINUES} continuations × "
+                        f"{self.CHAT_MAX_TOTAL_ROUNDS} rounds). "
+                        "Please reset the chat to continue."
+                    )
+                    if self.workspace:
+                        self.workspace.append_chat_message("assistant", msg)
+                    return {"response": msg, "tool_outputs": [], "tokens_used": 0}
                 await self._auto_continue_session(system)
 
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
@@ -1020,8 +1030,11 @@ class AgentLoop:
                 terminate_msg = self._check_tool_loop_terminate(llm_response.tool_calls)
                 if terminate_msg:
                     self.state = "idle"
+                    msg = f"Stopped: {terminate_msg}"
+                    if self.workspace:
+                        self.workspace.append_chat_message("assistant", msg)
                     return {
-                        "response": f"Stopped: {terminate_msg}",
+                        "response": msg,
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
                     }
@@ -1063,7 +1076,10 @@ class AgentLoop:
         except Exception as e:
             self.state = "idle"
             logger.error(f"Chat failed: {e}", exc_info=True)
-            return {"response": f"Error: {e}", "tool_outputs": tool_outputs, "tokens_used": total_tokens}
+            msg = f"Error: {e}"
+            if self.workspace:
+                self.workspace.append_chat_message("assistant", msg)
+            return {"response": msg, "tool_outputs": tool_outputs, "tokens_used": total_tokens}
 
     def _log_chat_turn(self, user_msg: str, assistant_msg: str) -> None:
         """Append a rich summary of the chat turn to the daily log."""
@@ -1105,11 +1121,25 @@ class AgentLoop:
         parts.append(f"Response: {response_summary}")
         self.workspace.append_daily_log(" | ".join(parts))
 
+        # Persist assistant response to transcript
+        self.workspace.append_chat_message(
+            "assistant", assistant_msg,
+            tool_names=tool_names or None,
+        )
+
     def get_chat_messages(self) -> list[dict]:
         """Return chat messages suitable for history restoration.
 
-        Filters out internal tool-result messages and sanitizes content.
+        Reads from the persistent transcript file so history survives
+        context compaction, container restarts, and is accessible from
+        any device.  Falls back to filtering in-memory messages when
+        the workspace is unavailable (tests, no transcript yet).
         """
+        if self.workspace:
+            transcript = self.workspace.load_chat_transcript()
+            if transcript:
+                return transcript
+        # Fallback: filter in-memory messages
         result = []
         for m in self._chat_messages:
             role = m.get("role", "unknown")
@@ -1133,6 +1163,9 @@ class AgentLoop:
                     )
                 except Exception as e:
                     logger.warning("Failed to flush memory on chat reset: %s", e)
+            # Archive transcript before clearing in-memory state
+            if self.workspace:
+                self.workspace.archive_chat_transcript()
             self._chat_messages = []
             self._chat_total_rounds = 0
             self._chat_auto_continues = 0
@@ -1296,6 +1329,8 @@ class AgentLoop:
                         f"{self.CHAT_MAX_TOTAL_ROUNDS} rounds). "
                         "Please reset the chat to continue."
                     )
+                    if self.workspace:
+                        self.workspace.append_chat_message("assistant", msg)
                     yield {"type": "text_delta", "content": msg}
                     yield {"type": "done", "response": msg, "tool_outputs": [], "tokens_used": 0}
                     return
@@ -1352,9 +1387,12 @@ class AgentLoop:
                 terminate_msg = self._check_tool_loop_terminate(llm_response.tool_calls)
                 if terminate_msg:
                     self.state = "idle"
+                    msg = f"Stopped: {terminate_msg}"
+                    if self.workspace:
+                        self.workspace.append_chat_message("assistant", msg)
                     yield {
                         "type": "done",
-                        "response": f"Stopped: {terminate_msg}",
+                        "response": msg,
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
                     }
@@ -1402,9 +1440,12 @@ class AgentLoop:
         except Exception as e:
             self.state = "idle"
             logger.error(f"Streaming chat failed: {e}", exc_info=True)
+            msg = f"Error: {e}"
+            if self.workspace:
+                self.workspace.append_chat_message("assistant", msg)
             yield {
                 "type": "done",
-                "response": f"Error: {e}",
+                "response": msg,
                 "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens,
             }

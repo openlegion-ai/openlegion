@@ -31,11 +31,14 @@ logger = setup_logging("agent.builtins.mesh_tool")
         },
     },
 )
-async def notify_user(message: str, *, mesh_client=None) -> dict:
+async def notify_user(message: str, *, mesh_client=None, workspace_manager=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     try:
         await mesh_client.notify_user(message)
+        # Persist to chat transcript so notifications survive across devices
+        if workspace_manager:
+            workspace_manager.append_chat_message("notification", message)
         return {"sent": True}
     except Exception as e:
         return {"error": f"Failed to notify user: {e}"}

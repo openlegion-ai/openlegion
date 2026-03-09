@@ -151,10 +151,12 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
     @app.get("/chat/history")
     async def chat_history() -> dict:
-        """Return the current chat conversation messages.
+        """Return the persistent chat transcript.
 
-        Returns the agent's in-memory chat messages so the dashboard
-        can restore conversation history across page reloads and new tabs.
+        Reads from the workspace transcript file so conversation history
+        survives context compaction, container restarts, and is accessible
+        from any device.  Falls back to in-memory messages when the
+        transcript is unavailable.
         """
         messages = loop.get_chat_messages()
         return {"messages": messages, "count": len(messages)}

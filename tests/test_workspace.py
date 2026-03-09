@@ -772,3 +772,118 @@ class TestBootstrapIncludesSystemMd:
             assert "System Architecture" not in bootstrap
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestChatTranscript:
+    """Tests for persistent chat transcript (JSONL)."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.ws = WorkspaceManager(workspace_dir=self._tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_append_and_load_messages(self):
+        self.ws.append_chat_message("user", "Hello")
+        self.ws.append_chat_message("assistant", "Hi there!")
+        msgs = self.ws.load_chat_transcript()
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "user"
+        assert msgs[0]["content"] == "Hello"
+        assert msgs[1]["role"] == "assistant"
+        assert msgs[1]["content"] == "Hi there!"
+        assert "ts" in msgs[0]
+
+    def test_tool_names_included(self):
+        self.ws.append_chat_message(
+            "assistant", "Done!", tool_names=["browser_navigate", "exec_command"],
+        )
+        msgs = self.ws.load_chat_transcript()
+        assert msgs[0]["tools"] == ["browser_navigate", "exec_command"]
+
+    def test_tool_names_omitted_when_none(self):
+        self.ws.append_chat_message("user", "Hello")
+        msgs = self.ws.load_chat_transcript()
+        assert "tools" not in msgs[0]
+
+    def test_notification_role(self):
+        self.ws.append_chat_message("notification", "Task complete")
+        msgs = self.ws.load_chat_transcript()
+        assert msgs[0]["role"] == "notification"
+        assert msgs[0]["content"] == "Task complete"
+
+    def test_load_empty_transcript(self):
+        msgs = self.ws.load_chat_transcript()
+        assert msgs == []
+
+    def test_load_with_limit(self):
+        for i in range(10):
+            self.ws.append_chat_message("user", f"Message {i}")
+        msgs = self.ws.load_chat_transcript(limit=3)
+        assert len(msgs) == 3
+        assert msgs[0]["content"] == "Message 7"
+        assert msgs[2]["content"] == "Message 9"
+
+    def test_archive_creates_file(self):
+        self.ws.append_chat_message("user", "Hello")
+        self.ws.archive_chat_transcript()
+
+        # Original is gone
+        path = Path(self._tmpdir) / "chat_transcript.jsonl"
+        assert not path.exists()
+
+        # Archive exists
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        assert archive_dir.exists()
+        archives = list(archive_dir.glob("*.jsonl"))
+        assert len(archives) == 1
+
+    def test_archive_empty_transcript(self):
+        """Archiving when no transcript exists should not error."""
+        self.ws.archive_chat_transcript()
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        assert not archive_dir.exists()
+
+    def test_load_after_archive_returns_empty(self):
+        self.ws.append_chat_message("user", "Hello")
+        self.ws.archive_chat_transcript()
+        msgs = self.ws.load_chat_transcript()
+        assert msgs == []
+
+    def test_new_messages_after_archive(self):
+        self.ws.append_chat_message("user", "Session 1")
+        self.ws.archive_chat_transcript()
+        self.ws.append_chat_message("user", "Session 2")
+        msgs = self.ws.load_chat_transcript()
+        assert len(msgs) == 1
+        assert msgs[0]["content"] == "Session 2"
+
+    def test_malformed_lines_skipped(self):
+        path = Path(self._tmpdir) / "chat_transcript.jsonl"
+        path.write_text(
+            '{"role":"user","content":"Good","ts":1}\n'
+            'not valid json\n'
+            '{"role":"assistant","content":"OK","ts":2}\n'
+        )
+        msgs = self.ws.load_chat_transcript()
+        assert len(msgs) == 2
+
+    def test_rotation_drops_oldest_half(self):
+        """When transcript exceeds _MAX_TRANSCRIPT_SIZE, oldest half is dropped."""
+        # Use a tiny limit for testing
+        original_max = WorkspaceManager._MAX_TRANSCRIPT_SIZE
+        try:
+            WorkspaceManager._MAX_TRANSCRIPT_SIZE = 200  # bytes
+            for i in range(20):
+                self.ws.append_chat_message("user", f"Message {i}")
+            msgs = self.ws.load_chat_transcript()
+            # Should have fewer than 20 after rotation
+            assert len(msgs) < 20
+            # Most recent messages should be preserved
+            assert msgs[-1]["content"] == "Message 19"
+            # Oldest messages should be gone
+            contents = [m["content"] for m in msgs]
+            assert "Message 0" not in contents
+        finally:
+            WorkspaceManager._MAX_TRANSCRIPT_SIZE = original_max

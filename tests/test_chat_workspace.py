@@ -19,7 +19,7 @@ import pytest
 from src.agent.context import ContextManager
 from src.agent.loop import AgentLoop
 from src.agent.workspace import WorkspaceManager
-from src.shared.types import LLMResponse, ToolCallInfo
+from src.shared.types import SILENT_REPLY_TOKEN, LLMResponse, ToolCallInfo
 
 
 def _make_loop_with_workspace(
@@ -233,3 +233,168 @@ class TestCrossSessionMemory:
         results = ws.search("Kubernetes deployment")
         assert len(results) > 0
         assert any("Kubernetes" in r["snippet"] for r in results)
+
+
+class TestChatTranscriptIntegration:
+    """Verify chat messages are persisted to the workspace transcript."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_chat_persists_user_and_assistant(self):
+        loop = _make_loop_with_workspace(self._tmpdir)
+        await loop.chat("Hello agent")
+
+        transcript = loop.workspace.load_chat_transcript()
+        assert len(transcript) == 2
+        assert transcript[0]["role"] == "user"
+        assert transcript[0]["content"] == "Hello agent"
+        assert transcript[1]["role"] == "assistant"
+        assert transcript[1]["content"] == "Hello!"
+
+    @pytest.mark.asyncio
+    async def test_chat_persists_tool_names(self):
+        tool_response = LLMResponse(
+            content="",
+            tool_calls=[ToolCallInfo(name="memory_search", arguments={"query": "test"})],
+            tokens_used=30,
+        )
+        final_response = LLMResponse(content="Found it!", tokens_used=20)
+
+        loop = _make_loop_with_workspace(
+            self._tmpdir, llm_responses=[tool_response, final_response],
+        )
+        loop.skills.execute = AsyncMock(return_value={"results": []})
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"type": "function", "function": {"name": "memory_search"}}],
+        )
+
+        await loop.chat("Search for test")
+
+        transcript = loop.workspace.load_chat_transcript()
+        assistant_msg = [m for m in transcript if m["role"] == "assistant"][0]
+        assert "memory_search" in assistant_msg.get("tools", [])
+
+    @pytest.mark.asyncio
+    async def test_reset_archives_transcript(self):
+        loop = _make_loop_with_workspace(self._tmpdir)
+        await loop.chat("Hello")
+        await loop.reset_chat()
+
+        # Transcript should be archived, not present
+        assert loop.workspace.load_chat_transcript() == []
+
+        # Archive file should exist
+        archive_dir = Path(self._tmpdir) / "chat_archive"
+        assert archive_dir.exists()
+        assert len(list(archive_dir.glob("*.jsonl"))) == 1
+
+    @pytest.mark.asyncio
+    async def test_get_chat_messages_reads_transcript(self):
+        loop = _make_loop_with_workspace(self._tmpdir)
+        await loop.chat("Hello")
+
+        # get_chat_messages should return transcript data
+        messages = loop.get_chat_messages()
+        assert len(messages) == 2
+        assert messages[0]["role"] == "user"
+        assert messages[1]["role"] == "assistant"
+        assert "ts" in messages[0]  # transcript entries have timestamps
+
+    @pytest.mark.asyncio
+    async def test_transcript_survives_container_restart(self):
+        """Simulate container restart: new AgentLoop, same workspace dir."""
+        loop1 = _make_loop_with_workspace(self._tmpdir)
+        await loop1.chat("Hello from session 1")
+
+        # New loop = simulated container restart
+        loop2 = _make_loop_with_workspace(self._tmpdir)
+        assert len(loop2._chat_messages) == 0  # in-memory is empty
+
+        # But transcript is available
+        messages = loop2.get_chat_messages()
+        assert len(messages) == 2
+        assert messages[0]["content"] == "Hello from session 1"
+
+    @pytest.mark.asyncio
+    async def test_multiple_turns_accumulate(self):
+        responses = [
+            LLMResponse(content="First reply", tokens_used=50),
+            LLMResponse(content="Second reply", tokens_used=50),
+        ]
+        loop = _make_loop_with_workspace(self._tmpdir, llm_responses=responses)
+
+        await loop.chat("First message")
+        await loop.chat("Second message")
+
+        transcript = loop.workspace.load_chat_transcript()
+        assert len(transcript) == 4
+        assert transcript[0]["content"] == "First message"
+        assert transcript[1]["content"] == "First reply"
+        assert transcript[2]["content"] == "Second message"
+        assert transcript[3]["content"] == "Second reply"
+
+    @pytest.mark.asyncio
+    async def test_fallback_when_no_workspace(self):
+        """Without workspace, get_chat_messages falls back to in-memory."""
+        memory = MagicMock()
+        memory.get_high_salience_facts = MagicMock(return_value=[])
+        memory.search = AsyncMock(return_value=[])
+        memory.log_action = AsyncMock()
+        memory.get_tool_history = MagicMock(return_value=[])
+
+        skills = MagicMock()
+        skills.get_tool_definitions = MagicMock(return_value=[])
+        skills.get_descriptions = MagicMock(return_value="none")
+        skills.list_skills = MagicMock(return_value=[])
+
+        llm = MagicMock()
+        llm.chat = AsyncMock(return_value=LLMResponse(content="Reply", tokens_used=10))
+        llm.default_model = "test"
+
+        mesh = MagicMock()
+        mesh.send_system_message = AsyncMock(return_value={})
+
+        loop = AgentLoop(
+            agent_id="no_ws", role="test",
+            memory=memory, skills=skills, llm=llm, mesh_client=mesh,
+            workspace=None,
+        )
+        await loop.chat("Hello")
+        messages = loop.get_chat_messages()
+        # Falls back to in-memory filtering
+        assert len(messages) >= 1
+        assert any(m["role"] == "user" for m in messages)
+
+    @pytest.mark.asyncio
+    async def test_silent_response_persists_user_only(self):
+        """SILENT_REPLY_TOKEN responses persist user message but not empty assistant."""
+        loop = _make_loop_with_workspace(
+            self._tmpdir,
+            llm_responses=[LLMResponse(content=SILENT_REPLY_TOKEN, tokens_used=10)],
+        )
+        await loop.chat("Background ack")
+
+        transcript = loop.workspace.load_chat_transcript()
+        assert len(transcript) == 1
+        assert transcript[0]["role"] == "user"
+        assert transcript[0]["content"] == "Background ack"
+
+    @pytest.mark.asyncio
+    async def test_error_path_persists_to_transcript(self):
+        """When chat raises an exception, the error response is persisted."""
+        loop = _make_loop_with_workspace(self._tmpdir)
+        loop.llm.chat = AsyncMock(side_effect=ValueError("LLM exploded"))
+
+        result = await loop.chat("Trigger error")
+
+        assert "Error:" in result["response"]
+        transcript = loop.workspace.load_chat_transcript()
+        assert len(transcript) == 2
+        assert transcript[0]["role"] == "user"
+        assert transcript[1]["role"] == "assistant"
+        assert "LLM exploded" in transcript[1]["content"]

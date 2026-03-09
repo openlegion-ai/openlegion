@@ -23,8 +23,10 @@ files (SOUL.md, INSTRUCTIONS.md, USER.md) are per-agent.
 
 from __future__ import annotations
 
+import json
 import math
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -98,6 +100,8 @@ class WorkspaceManager:
     LEARNINGS_DIR = "learnings"
     ERRORS_FILE = "learnings/errors.md"
     CORRECTIONS_FILE = "learnings/corrections.md"
+    CHAT_TRANSCRIPT = "chat_transcript.jsonl"
+    CHAT_ARCHIVE_DIR = "chat_archive"
 
     def __init__(
         self,
@@ -398,6 +402,75 @@ class WorkspaceManager:
     def load_heartbeat_rules(self) -> str:
         """Load HEARTBEAT.md content for autonomous operation."""
         return self._read_file(self.HEARTBEAT_FILE) or ""
+
+    # ── Chat transcript ───────────────────────────────────────
+
+    _MAX_TRANSCRIPT_SIZE = 2_000_000  # 2 MB — rotate if larger
+
+    def append_chat_message(
+        self, role: str, content: str, *, tool_names: list[str] | None = None,
+    ) -> None:
+        """Append a message to the persistent chat transcript (JSONL).
+
+        Rotates (drops oldest half) when the file exceeds _MAX_TRANSCRIPT_SIZE
+        to prevent unbounded growth in long-running sessions.
+        """
+        path = self.root / self.CHAT_TRANSCRIPT
+        entry: dict = {"role": role, "content": content, "ts": time.time()}
+        if tool_names:
+            entry["tools"] = tool_names
+        try:
+            with path.open("a") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+            # Rotate if too large — keep newest half
+            if path.stat().st_size > self._MAX_TRANSCRIPT_SIZE:
+                lines = path.read_text(errors="replace").strip().split("\n")
+                half = len(lines) // 2
+                path.write_text("\n".join(lines[half:]) + "\n")
+        except Exception as e:
+            logger.debug("Failed to write chat transcript: %s", e)
+
+    def load_chat_transcript(self, limit: int = 200) -> list[dict]:
+        """Load recent messages from the persistent chat transcript."""
+        path = self.root / self.CHAT_TRANSCRIPT
+        if not path.exists():
+            return []
+        try:
+            text = path.read_text(errors="replace").strip()
+            if not text:
+                return []
+            lines = text.split("\n")
+            messages = []
+            for line in lines[-limit:]:
+                if not line.strip():
+                    continue
+                try:
+                    messages.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            return messages
+        except Exception as e:
+            logger.debug("Failed to read chat transcript: %s", e)
+            return []
+
+    def archive_chat_transcript(self) -> None:
+        """Archive the current transcript on chat reset."""
+        path = self.root / self.CHAT_TRANSCRIPT
+        if not path.exists():
+            return
+        try:
+            if path.stat().st_size == 0:
+                path.unlink(missing_ok=True)
+                return
+        except OSError:
+            return
+        archive_dir = self.root / self.CHAT_ARCHIVE_DIR
+        archive_dir.mkdir(exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+        try:
+            path.rename(archive_dir / f"{ts}.jsonl")
+        except Exception as e:
+            logger.debug("Failed to archive chat transcript: %s", e)
 
     def _rotate_if_large(self, path: Path) -> None:
         """Trim old entries when a learning file exceeds the size limit."""

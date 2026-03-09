@@ -156,6 +156,7 @@ function dashboard() {
     chatLoadingAgents: {},     // { agentId: true/false }
     chatStreamingAgents: {},   // { agentId: true/false }
     _chatAborts: {},           // { agentId: AbortController }
+    _chatFetchedAt: {},        // { agentId: timestamp } — debounce refetches
     activeChatId: '',          // Currently active chat tab
     chatPanelMinimized: false, // Whether the slide-over is minimized to pill
     chatUnread: {},            // { agentId: count } — unread notifications while minimized
@@ -2363,16 +2364,25 @@ function dashboard() {
     // ── Chat slide-over panel ──────────────────────────
 
     async _loadChatHistory(agentId) {
-      // Fetch server-side chat history when local history is empty.
-      // The agent keeps _chat_messages in memory; this endpoint exposes them.
-      if (this.chatHistories[agentId] && this.chatHistories[agentId].length > 0) return;
+      // Always fetch from server — the persistent transcript is the
+      // source of truth, ensuring history is consistent across devices.
+      // Skip if streaming (avoid clobber) or fetched recently (debounce tab switches).
+      if (this.chatStreamingAgents[agentId]) return;
+      const now = Date.now();
+      if (this._chatFetchedAt[agentId] && (now - this._chatFetchedAt[agentId]) < 5000) return;
+      this._chatFetchedAt[agentId] = now;
       try {
         const resp = await fetch(`/dashboard/api/agents/${agentId}/chat/history`, { credentials: 'same-origin' });
         if (!resp.ok) return;
         const data = await resp.json();
-        if (!data.messages || data.messages.length === 0) return;
-        // Only populate if still empty (avoid race with incoming messages)
-        if (this.chatHistories[agentId] && this.chatHistories[agentId].length > 0) return;
+        if (!data.messages || data.messages.length === 0) {
+          // Server transcript is empty (reset or fresh agent) — clear stale local data
+          if (this.chatHistories[agentId]?.length > 0) {
+            this.chatHistories[agentId] = [];
+            this._saveChatToSession();
+          }
+          return;
+        }
         this.chatHistories[agentId] = data.messages.map(m => ({
           role: m.role,
           content: m.content,
@@ -2428,6 +2438,7 @@ function dashboard() {
       this.chatHistories[agentId] = [];
       this.chatLoadingAgents[agentId] = false;
       this.chatStreamingAgents[agentId] = false;
+      delete this._chatFetchedAt[agentId];
       this._saveChatToSession();
     },
 
