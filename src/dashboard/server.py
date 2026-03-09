@@ -72,6 +72,17 @@ def _parse_positive_float(value: Any, field: str, fallback: float) -> float:
     return result
 
 
+def _log_cron_task_exception(task: object) -> None:
+    """Log unhandled exceptions from fire-and-forget cron tasks."""
+    import asyncio
+    t = task if isinstance(task, asyncio.Task) else None
+    if t is None or t.cancelled():
+        return
+    exc = t.exception()
+    if exc:
+        logger.error("Background cron job failed: %s", exc, exc_info=exc)
+
+
 def create_dashboard_router(
     blackboard: Blackboard,
     health_monitor: HealthMonitor | None,
@@ -1518,10 +1529,15 @@ def create_dashboard_router(
     async def api_cron_run(job_id: str) -> dict:
         if cron_scheduler is None:
             raise HTTPException(status_code=503, detail="Cron scheduler not available")
-        result = await cron_scheduler.run_job(job_id)
-        if result is None and job_id not in cron_scheduler.jobs:
+        if job_id not in cron_scheduler.jobs:
             raise HTTPException(status_code=404, detail="Job not found")
-        return {"executed": True, "job_id": job_id, "result": result}
+        # Fire-and-forget: dispatch in background so the HTTP response returns
+        # immediately.  Agent execution can take minutes; blocking the request
+        # made the dashboard Run button appear stuck.
+        import asyncio
+        task = asyncio.create_task(cron_scheduler.run_job(job_id))
+        task.add_done_callback(_log_cron_task_exception)
+        return {"triggered": True, "job_id": job_id}
 
     @api_router.put("/api/cron/{job_id}")
     async def api_cron_update(job_id: str, request: Request) -> dict:

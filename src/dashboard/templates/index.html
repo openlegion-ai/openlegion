@@ -1917,12 +1917,12 @@
                         <button @click="runCronJob(job.id)" :disabled="cronRunLoading[job.id]"
                           class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-900/30 hover:bg-indigo-800/40 text-indigo-300 hover:text-indigo-200 transition-colors disabled:opacity-50"
                           x-text="cronRunLoading[job.id] ? '...' : 'Run'"></button>
-                        <button x-show="job.enabled" @click="pauseCronJob(job.id)" :disabled="cronRunLoading[job.id]"
+                        <button x-show="job.enabled" @click="pauseCronJob(job.id)" :disabled="cronPauseLoading[job.id]"
                           class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-yellow-900/30 text-gray-300 hover:text-yellow-400 transition-colors disabled:opacity-50"
-                          x-text="cronRunLoading[job.id] ? '...' : 'Pause'"></button>
-                        <button x-show="!job.enabled" @click="resumeCronJob(job.id)" :disabled="cronRunLoading[job.id]"
+                          x-text="cronPauseLoading[job.id] ? '...' : 'Pause'"></button>
+                        <button x-show="!job.enabled" @click="resumeCronJob(job.id)" :disabled="cronPauseLoading[job.id]"
                           class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-green-900/30 text-gray-300 hover:text-green-400 transition-colors disabled:opacity-50"
-                          x-text="cronRunLoading[job.id] ? '...' : 'Resume'"></button>
+                          x-text="cronPauseLoading[job.id] ? '...' : 'Resume'"></button>
                         <button x-show="!job.heartbeat" @click="deleteCronJob(job.id)"
                           class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-red-900/30 text-gray-300 hover:text-red-400 transition-colors">Del</button>
                       </div>
@@ -2131,10 +2131,10 @@
                       <td class="py-2.5 px-4 font-mono" :class="job.error_count > 0 ? 'text-red-400' : 'text-gray-600'" x-text="job.error_count"></td>
                       <td class="py-2.5 px-4 flex gap-1">
                         <button @click="runCronJob(job.id)" :disabled="cronRunLoading[job.id]" class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-900/30 hover:bg-indigo-800/40 text-indigo-300 hover:text-indigo-200 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Run'"></button>
-                        <button x-show="job.enabled" @click="pauseCronJob(job.id)" :disabled="cronRunLoading[job.id]"
-                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-yellow-900/30 text-gray-300 hover:text-yellow-400 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Pause'"></button>
-                        <button x-show="!job.enabled" @click="resumeCronJob(job.id)" :disabled="cronRunLoading[job.id]"
-                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-green-900/30 text-gray-300 hover:text-green-400 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Resume'"></button>
+                        <button x-show="job.enabled" @click="pauseCronJob(job.id)" :disabled="cronPauseLoading[job.id]"
+                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-yellow-900/30 text-gray-300 hover:text-yellow-400 transition-colors disabled:opacity-50" x-text="cronPauseLoading[job.id] ? '...' : 'Pause'"></button>
+                        <button x-show="!job.enabled" @click="resumeCronJob(job.id)" :disabled="cronPauseLoading[job.id]"
+                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-green-900/30 text-gray-300 hover:text-green-400 transition-colors disabled:opacity-50" x-text="cronPauseLoading[job.id] ? '...' : 'Resume'"></button>
                         <button x-show="!job.heartbeat" @click="deleteCronJob(job.id)"
                           class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-red-900/30 text-gray-300 hover:text-red-400 transition-colors">Delete</button>
                       </td>
