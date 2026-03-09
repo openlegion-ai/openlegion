@@ -259,6 +259,7 @@ function dashboard() {
     // Loading states for double-submit prevention
     bbWriteLoading: false,
     cronRunLoading: {},
+    cronPauseLoading: {},
     cronEditSaving: false,
     workflowRunLoading: {},
     credSaving: false,
@@ -2004,8 +2005,8 @@ function dashboard() {
     },
 
     async pauseCronJob(jobId) {
-      if (this.cronRunLoading[jobId]) return;
-      this.cronRunLoading = { ...this.cronRunLoading, [jobId]: true };
+      if (this.cronPauseLoading[jobId]) return;
+      this.cronPauseLoading = { ...this.cronPauseLoading, [jobId]: true };
       try {
         const resp = await fetch(`${window.__config.apiBase}/cron/${jobId}/pause`, { method: 'POST' });
         if (resp.ok) {
@@ -2016,12 +2017,12 @@ function dashboard() {
         }
         this.fetchCronJobs();
       } catch (e) { console.warn('pauseCronJob failed:', e); }
-      finally { this.cronRunLoading = { ...this.cronRunLoading, [jobId]: false }; }
+      finally { this.cronPauseLoading = { ...this.cronPauseLoading, [jobId]: false }; }
     },
 
     async resumeCronJob(jobId) {
-      if (this.cronRunLoading[jobId]) return;
-      this.cronRunLoading = { ...this.cronRunLoading, [jobId]: true };
+      if (this.cronPauseLoading[jobId]) return;
+      this.cronPauseLoading = { ...this.cronPauseLoading, [jobId]: true };
       try {
         const resp = await fetch(`${window.__config.apiBase}/cron/${jobId}/resume`, { method: 'POST' });
         if (resp.ok) {
@@ -2032,7 +2033,7 @@ function dashboard() {
         }
         this.fetchCronJobs();
       } catch (e) { console.warn('resumeCronJob failed:', e); }
-      finally { this.cronRunLoading = { ...this.cronRunLoading, [jobId]: false }; }
+      finally { this.cronPauseLoading = { ...this.cronPauseLoading, [jobId]: false }; }
     },
 
     async fetchWorkflows() {

@@ -1059,7 +1059,7 @@ class TestDashboardCron:
         self.components["cron_scheduler"].jobs = {"cron_abc": True}
         resp = self.client.post("/dashboard/api/cron/cron_abc/run")
         assert resp.status_code == 200
-        assert resp.json()["executed"] is True
+        assert resp.json()["triggered"] is True
 
     def test_cron_pause_resume(self):
         self.components["cron_scheduler"].pause_job = AsyncMock(return_value=True)
