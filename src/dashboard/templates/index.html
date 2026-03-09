@@ -208,7 +208,7 @@
       </div>
       <div class="flex items-center gap-4">
         <!-- Fleet total cost (click to System > Costs) -->
-        <div class="text-xs text-gray-400 hidden sm:block cursor-pointer hover:text-gray-200 transition-colors" x-show="fleetTotalCost > 0" @click="systemTab = 'costs'; switchTab('system')">
+        <div class="text-xs text-gray-400 hidden sm:block cursor-pointer hover:text-gray-200 transition-colors" x-show="fleetTotalCost > 0" @click="switchTab('system'); systemTab = 'costs'">
           Today: <span class="text-gray-200 font-medium" x-text="formatCost(fleetTotalCost)"></span>
         </div>
         <!-- Command palette trigger -->
@@ -440,238 +440,6 @@
             </div>
           </div>
         </div>
-        <!-- ═══ PROJECT COMMS (collapsible, project-level) ═══ -->
-        <div x-show="activeProject && agents.length > 0" x-cloak class="mb-4">
-          <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-            <!-- Comms header — always visible -->
-            <div class="flex items-center justify-between px-4 py-2.5 cursor-pointer select-none"
-              @click="commsExpanded = !commsExpanded; if (commsExpanded && commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()">
-              <div class="flex items-center gap-2">
-                <svg class="w-3 h-3 text-gray-600 transition-transform duration-200" :class="commsExpanded && 'rotate-90'" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd"/></svg>
-                <span class="text-xs text-gray-500 uppercase tracking-wider">Project Comms</span>
-                <span x-show="commsActivity.length > 0" class="text-[10px] text-gray-600 font-mono" x-text="commsActivity.length + ' events'"></span>
-              </div>
-              <div class="flex items-center gap-2" @click.stop>
-                <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
-                  <button @click="commsExpanded = true; commsView = 'activity'; fetchCommsActivity()"
-                    class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                    :class="commsView === 'activity' && commsExpanded ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
-                    Activity
-                  </button>
-                  <button @click="commsExpanded = true; commsView = 'state'; fetchBlackboard()"
-                    class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                    :class="commsView === 'state' && commsExpanded ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
-                    Shared State
-                  </button>
-                  <button @click="commsExpanded = true; commsView = 'artifacts'; fetchArtifacts()"
-                    class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                    :class="commsView === 'artifacts' && commsExpanded ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
-                    Artifacts
-                  </button>
-                </div>
-                <button @click="commsView === 'activity' ? fetchCommsActivity() : (commsView === 'artifacts' ? fetchArtifacts() : fetchBlackboard())" class="text-gray-600 hover:text-gray-400 transition-colors" title="Refresh">
-                  <svg class="w-3.5 h-3.5" :class="(commsActivityLoading || bbLoading || artifactsLoading) && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-                </button>
-              </div>
-            </div>
-            <!-- Comms body — collapsible -->
-            <div x-show="commsExpanded" x-transition x-cloak class="px-4 pb-4">
-              <!-- Subscriptions summary -->
-              <div x-show="commsView === 'activity' && Object.keys(commsSubs).length > 0" class="flex items-center gap-1.5 flex-wrap mb-3" x-cloak>
-                <template x-for="[topic, sAgents] in Object.entries(commsSubs).slice(0, 8)" :key="topic">
-                  <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-400/70 border border-purple-500/20"
-                    x-text="topic + ' (' + sAgents.length + ')'"></span>
-                </template>
-                <span x-show="Object.keys(commsSubs).length > 8" class="text-[10px] text-gray-600"
-                  x-text="'+' + (Object.keys(commsSubs).length - 8) + ' more'"></span>
-              </div>
-
-              <!-- ═══ ACTIVITY VIEW ═══ -->
-              <div x-show="commsView === 'activity'">
-                <div class="border border-gray-800 rounded-lg overflow-hidden max-h-80 overflow-y-auto custom-scrollbar">
-                  <div class="divide-y divide-gray-800/30">
-                    <template x-for="(item, idx) in commsActivity" :key="idx">
-                      <div class="comms-activity-row">
-                        <div x-show="item.agent && item.agent !== 'dashboard'" class="agent-avatar agent-avatar-sm flex-shrink-0"
-                          :class="'agent-color-' + agentColorIndex(item.agent)">
-                          <img :src="agentAvatarUrl(item.agent)" :alt="item.agent">
-                        </div>
-                        <div x-show="item.agent === 'dashboard'" class="comms-activity-icon bg-gray-700/50 text-gray-400 flex-shrink-0">
-                          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
-                        </div>
-                        <div x-show="!item.agent" class="comms-activity-icon bg-gray-700/50 text-gray-500 flex-shrink-0">
-                          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></svg>
-                        </div>
-                        <div class="flex-1 min-w-0">
-                          <div class="flex items-center gap-1.5 flex-wrap">
-                            <span class="text-xs font-medium text-gray-300" x-text="item.agent || 'system'"></span>
-                            <span class="text-xs text-gray-600" x-text="commsActionVerb(item)"></span>
-                            <span class="comms-type-badge" :class="item.source === 'pubsub' ? 'comms-type-event' : 'comms-type-bb'"
-                              x-text="item.source === 'pubsub' ? 'event' : (item.action === 'delete' ? 'delete' : 'state')"></span>
-                            <span class="text-xs font-mono truncate" :class="commsActionClass(item)"
-                              x-text="commsActionTarget(item)"></span>
-                          </div>
-                          <div x-show="item.preview" class="text-[11px] text-gray-500 truncate mt-0.5" x-text="item.preview" x-cloak></div>
-                        </div>
-                        <span class="text-[10px] text-gray-600 whitespace-nowrap flex-shrink-0" x-text="timeAgo(item.timestamp)"></span>
-                      </div>
-                    </template>
-                  </div>
-                  <div x-show="commsActivity.length === 0 && commsActivityLoading" class="text-center py-8" x-cloak>
-                    <div class="inline-flex items-center gap-2 text-gray-600">
-                      <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                      Loading...
-                    </div>
-                  </div>
-                  <div x-show="commsActivity.length === 0 && !commsActivityLoading" class="text-center py-8 px-6" x-cloak>
-                    <div class="text-gray-600 text-xs">No agent communication yet in this project.</div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- ═══ SHARED STATE VIEW ═══ -->
-              <div x-show="commsView === 'state'" x-cloak>
-                <div class="mb-3 flex gap-2">
-                  <input type="text" x-model="bbPrefix" @keyup.enter="fetchBlackboard()"
-                    placeholder="Filter by prefix (e.g. status/, research/)"
-                    class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs flex-1 focus:outline-none focus:border-gray-600 focus:ring-1 focus:ring-gray-600 placeholder-gray-600 transition-colors">
-                  <button @click="fetchBlackboard()" class="bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors">Search</button>
-                </div>
-                <div class="flex gap-1.5 flex-wrap mb-3">
-                  <template x-for="ns in ['status/', 'tasks/', 'research/', 'drafts/', 'artifacts/', 'alerts/']" :key="ns">
-                    <button @click="bbPrefix = (bbPrefix === ns ? '' : ns); fetchBlackboard()"
-                      class="text-[10px] px-1.5 py-0.5 rounded-md border transition-all"
-                      :class="bbPrefix === ns ? 'border-cyan-500/60 bg-cyan-900/20 text-cyan-300' : 'border-gray-800 text-gray-600 hover:text-gray-400'">
-                      <span x-text="ns"></span><span x-show="bbNamespaceCounts[ns] > 0" class="ml-1 opacity-60" x-text="'(' + bbNamespaceCounts[ns] + ')'"></span>
-                    </button>
-                  </template>
-                  <button @click="bbWriteMode = !bbWriteMode" class="ml-auto text-[10px] px-1.5 py-0.5 rounded-md border transition-all"
-                    :class="bbWriteMode ? 'border-indigo-500/40 text-indigo-400' : 'border-gray-800 text-gray-600 hover:text-gray-400'">+ Write</button>
-                </div>
-                <!-- Write form -->
-                <div x-show="bbWriteMode" x-cloak class="border border-gray-800 rounded-lg p-3 mb-3">
-                  <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-                    <div>
-                      <label class="text-[10px] text-gray-500 mb-1 block">Key</label>
-                      <input type="text" x-model="bbNewKey" :disabled="bbWriteLoading" placeholder="status/my_agent" class="dash-input w-full text-xs">
-                    </div>
-                    <div>
-                      <label class="text-[10px] text-gray-500 mb-1 block">Value (JSON)</label>
-                      <textarea x-model="bbNewValue" :disabled="bbWriteLoading" class="dash-textarea w-full text-xs" rows="2" placeholder='{"key": "value"}'
-                        :class="bbNewValue && !bbJsonValid.valid ? 'border-red-500/50' : ''"></textarea>
-                      <div x-show="bbNewValue && !bbJsonValid.valid" x-cloak class="text-[10px] text-red-400 mt-1" x-text="bbJsonValid.error"></div>
-                    </div>
-                  </div>
-                  <div class="mt-2 flex gap-2">
-                    <button @click="writeBlackboard()" class="text-[10px] px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1"
-                      :disabled="bbWriteLoading || !bbJsonValid.valid || !bbNewKey.trim()" :class="(bbWriteLoading || !bbJsonValid.valid || !bbNewKey.trim()) && 'opacity-50 cursor-not-allowed'">
-                      <svg x-show="bbWriteLoading" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                      <span x-text="bbWriteLoading ? 'Saving...' : 'Save'"></span>
-                    </button>
-                    <button @click="bbWriteMode = false" :disabled="bbWriteLoading" class="text-[10px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors disabled:opacity-50">Cancel</button>
-                  </div>
-                </div>
-                <!-- State entries list -->
-                <div class="border border-gray-800 rounded-lg overflow-hidden max-h-96 overflow-y-auto custom-scrollbar">
-                  <div class="divide-y divide-gray-800/40">
-                    <template x-for="entry in filteredBbEntries" :key="entry.key">
-                      <div :class="bbHighlights.includes(entry.key) ? 'flash-yellow' : ''">
-                        <div class="bb-entry-row"
-                          :class="bbExpanded[entry.key] ? 'bb-expanded ' + bbNsAccentClass(entry.key) : ''"
-                          @click="toggleBbExpand(entry.key)">
-                          <svg class="bb-chevron" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" /></svg>
-                          <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(entry.written_by)">
-                            <img :src="agentAvatarUrl(entry.written_by)" :alt="entry.written_by">
-                          </div>
-                          <span x-show="bbNamespaceOf(entry.key)" :class="bbNsBadgeClass(entry.key)" x-text="bbNsName(entry.key)"></span>
-                          <span class="font-mono text-xs text-blue-400 truncate" style="min-width:5rem;max-width:14rem" x-text="bbKeyAfterNs(entry.key)"></span>
-                          <span class="text-gray-500 text-xs truncate flex-1 min-w-0" x-text="valueSummary(entry.value)"></span>
-                          <span class="text-gray-600 text-xs whitespace-nowrap flex-shrink-0" x-text="timeAgo(entry.updated_at)"></span>
-                          <button @click.stop="deleteBlackboard(entry.key)" :disabled="entry.key.startsWith('history/')"
-                            class="text-[10px] px-1.5 py-0.5 rounded text-gray-700 hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0">Delete</button>
-                        </div>
-                        <div class="bb-detail" :class="bbExpanded[entry.key] ? 'bb-detail-open' : ''">
-                          <div class="px-4 pb-3 pt-1">
-                            <div class="flex items-center gap-3 mb-2 text-xs text-gray-500">
-                              <span>Written by <span class="text-gray-400" x-text="entry.written_by"></span></span>
-                              <span class="text-gray-700">&middot;</span>
-                              <span>v<span x-text="entry.version"></span></span>
-                              <span class="text-gray-700">&middot;</span>
-                              <span class="font-mono text-gray-600" x-text="entry.updated_at"></span>
-                            </div>
-                            <pre class="bb-detail-pre custom-scrollbar" x-text="fullJson(entry.value)"></pre>
-                          </div>
-                        </div>
-                      </div>
-                    </template>
-                  </div>
-                  <div x-show="filteredBbEntries.length === 0 && bbLoading" class="text-center py-8" x-cloak>
-                    <div class="inline-flex items-center gap-2 text-gray-600">
-                      <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                      Loading...
-                    </div>
-                  </div>
-                  <div x-show="filteredBbEntries.length === 0 && !bbLoading" class="text-center py-8 px-6" x-cloak>
-                    <div class="text-gray-600 text-xs">No shared state entries in this project yet.</div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- ═══ ARTIFACTS VIEW ═══ -->
-              <div x-show="commsView === 'artifacts'" x-cloak>
-                <div class="border border-gray-800 rounded-lg overflow-hidden max-h-80 overflow-y-auto custom-scrollbar">
-                  <div class="divide-y divide-gray-800/40">
-                    <template x-for="art in artifactsList" :key="art.agent + '/' + art.name">
-                      <div class="px-3 py-2.5 flex items-center gap-3 hover:bg-gray-800/30 transition-colors">
-                        <div class="agent-avatar agent-avatar-sm flex-shrink-0"
-                          :class="'agent-color-' + agentColorIndex(art.agent)">
-                          <img :src="agentAvatarUrl(art.agent)" :alt="art.agent">
-                        </div>
-                        <div class="flex-shrink-0 w-5 h-5 flex items-center justify-center">
-                          <svg x-show="artifactIsText(art.name)" class="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
-                          <svg x-show="!artifactIsText(art.name)" class="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13"/></svg>
-                        </div>
-                        <div class="flex-1 min-w-0">
-                          <div class="text-xs font-mono text-blue-400 truncate" x-text="art.name"></div>
-                          <div class="text-[10px] text-gray-600 mt-0.5">
-                            <span x-text="art.agent"></span>
-                            <span class="text-gray-700 mx-1">&middot;</span>
-                            <span x-text="formatFileSize(art.size)"></span>
-                          </div>
-                        </div>
-                        <button @click="previewArtifact(art)"
-                          class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors flex-shrink-0"
-                          :class="art.size > 2097152 && 'opacity-40 cursor-not-allowed'"
-                          :disabled="art.size > 2097152">
-                          Preview
-                        </button>
-                        <button @click="downloadArtifact(art)"
-                          class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors flex-shrink-0"
-                          :class="art.size > 2097152 && 'opacity-40 cursor-not-allowed'"
-                          :disabled="art.size > 2097152">
-                          Download
-                        </button>
-                        <button @click="deleteArtifact(art)"
-                          class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors flex-shrink-0">
-                          Del
-                        </button>
-                      </div>
-                    </template>
-                  </div>
-                  <div x-show="artifactsList.length === 0 && artifactsLoading" class="text-center py-8" x-cloak>
-                    <div class="inline-flex items-center gap-2 text-gray-600">
-                      <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                      Loading...
-                    </div>
-                  </div>
-                  <div x-show="artifactsList.length === 0 && !artifactsLoading" class="text-center py-8 px-6" x-cloak>
-                    <div class="text-gray-600 text-xs">No artifacts saved yet. Agents create artifacts using the save_artifact tool.</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
         <!-- Broadcast inline input -->
         <div x-show="broadcastTargets.length >= 2" class="bg-gray-900 border border-gray-800 rounded-lg p-3 mb-4" x-cloak>
           <div class="flex items-center gap-3">
@@ -689,43 +457,6 @@
               <svg x-show="broadcastSending" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
               <span x-text="broadcastSending ? 'Sending...' : 'Send'"></span>
             </button>
-          </div>
-        </div>
-        <!-- Artifact preview modal (global — outside collapsible) -->
-        <div x-show="artifactPreview" x-cloak
-          class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-          @click.self="artifactPreview = null" @keydown.escape.window="artifactPreview = null">
-          <div class="bg-gray-900 border border-gray-700 rounded-lg shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col mx-4">
-            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-800">
-              <div class="flex items-center gap-2 min-w-0">
-                <span class="text-xs font-mono text-blue-400 truncate" x-text="artifactPreview?.name"></span>
-                <span class="text-[10px] text-gray-600" x-text="formatFileSize(artifactPreview?.size || 0)"></span>
-              </div>
-              <div class="flex items-center gap-2 flex-shrink-0">
-                <button @click="downloadArtifact(artifactPreview)"
-                  class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors">
-                  Download
-                </button>
-                <button @click="deleteArtifact(artifactPreview)"
-                  class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">
-                  Delete
-                </button>
-                <button @click="artifactPreview = null" class="text-gray-500 hover:text-gray-300 transition-colors">
-                  <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-                </button>
-              </div>
-            </div>
-            <div class="flex-1 overflow-auto p-4">
-              <div x-show="artifactPreviewLoading" class="flex items-center justify-center py-12">
-                <svg class="animate-spin h-5 w-5 text-gray-500" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-              </div>
-              <div x-show="!artifactPreviewLoading && artifactPreviewContent !== null" x-cloak>
-                <!-- Rendered markdown -->
-                <div x-show="artifactPreview?.name?.endsWith('.md')" class="prose prose-invert prose-sm max-w-none" x-html="renderMarkdown(artifactPreviewContent)"></div>
-                <!-- Plain text / code -->
-                <pre x-show="!artifactPreview?.name?.endsWith('.md')" class="text-xs text-gray-300 font-mono whitespace-pre-wrap break-words" x-text="artifactPreviewContent"></pre>
-              </div>
-            </div>
           </div>
         </div>
         <div class="grid gap-4 mb-4"
@@ -793,7 +524,7 @@
                         'health-failed': agent.health_status === 'failed',
                         'health-unknown': agent.health_status === 'unknown' || !agent.health_status,
                       }"
-                      x-text="healthLabel(agent.health_status)"
+                      x-text="agent.health_status || 'unknown'"
                     ></span>
                   </template>
                 </div>
@@ -815,25 +546,6 @@
                     }"
                     x-text="agentStates[agent.id] || 'idle'"
                   ></span>
-                </div>
-                <div class="stat-row" x-show="agent.heartbeat_schedule">
-                  <span class="stat-label">
-                    <svg fill="currentColor" viewBox="0 0 24 24" stroke="none" class="w-3 h-3"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-                    Heartbeat
-                  </span>
-                  <span class="text-[11px] font-medium"
-                    :class="agent.heartbeat_enabled ? 'text-pink-400' : 'text-gray-600'">
-                    <template x-if="agent.heartbeat_enabled">
-                      <span>
-                        <span x-text="_heartbeatCountdowns[agent.id] || '...'"></span>
-                        <span class="text-gray-600 font-normal">&middot;</span>
-                        <span class="text-gray-500 font-normal text-[10px]" x-text="agent.heartbeat_schedule"></span>
-                      </span>
-                    </template>
-                    <template x-if="!agent.heartbeat_enabled">
-                      <span>paused</span>
-                    </template>
-                  </span>
                 </div>
                 <div class="stat-row">
                   <span class="stat-label">
@@ -1070,10 +782,6 @@
                 <div x-show="msg.role === 'user'" class="whitespace-pre-wrap break-words" x-text="msg.content"></div>
                 <div x-show="msg.role !== 'user'" class="chat-markdown break-words" x-html="renderMarkdown(msg.content)"></div>
                 <span x-show="msg.streaming" class="inline-block w-1 h-3 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
-                <div x-show="formatRelativeTime(msg.ts)"
-                  class="text-[9px] mt-0.5 opacity-40"
-                  :class="msg.role === 'user' ? 'text-indigo-200' : 'text-gray-500'"
-                  x-text="formatRelativeTime(msg.ts)"></div>
               </div>
             </div>
           </template>
@@ -1370,11 +1078,11 @@
                     <span class="health-badge shrink-0"
                       :class="{
                         'health-healthy': agentDetail.health?.status === 'healthy',
-                        'health-unhealthy': agentDetail.health?.status === 'unhealthy' || agentDetail.health?.status === 'restarting',
+                        'health-unhealthy': agentDetail.health?.status === 'unhealthy',
                         'health-failed': agentDetail.health?.status === 'failed',
                         'health-unknown': !agentDetail.health?.status || agentDetail.health?.status === 'unknown',
                       }"
-                      x-text="healthLabel(agentDetail.health?.status)"
+                      x-text="agentDetail.health?.status || 'unknown'"
                     ></span>
                   </div>
                   <span class="text-xs text-gray-500" x-text="agentConfigs[selectedAgent]?.role || formatModelName(agentConfigs[selectedAgent]?.model) || ''"></span>
@@ -1622,6 +1330,12 @@
                           <div class="text-xs text-gray-500 mb-1">Budget ($/day)</div>
                           <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.budget?.daily_usd ? formatCost(agentConfigs[selectedAgent].budget.daily_usd) : '-'"></div>
                         </div>
+                        <div class="bg-gray-800/50 rounded p-3">
+                          <div class="text-xs text-gray-500 mb-1">Thinking</div>
+                          <div class="text-sm font-mono"
+                            :class="(agentConfigs[selectedAgent]?.thinking || 'off') === 'off' ? 'text-gray-500' : 'text-blue-400'"
+                            x-text="agentConfigs[selectedAgent]?.thinking || 'off'"></div>
+                        </div>
                         <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
                           <div class="text-xs text-gray-500 mb-1">Credential Access</div>
                           <div class="text-sm text-gray-200 font-mono mb-2">
@@ -1702,6 +1416,16 @@
                           <div>
                             <label class="text-xs text-gray-500 mb-1 block">Budget ($/month)</label>
                             <input type="number" step="1" min="1" x-model="editForm.budget_monthly" class="dash-input w-full" placeholder="200.0">
+                          </div>
+                          <div>
+                            <label class="text-xs text-gray-500 mb-1 block">Thinking</label>
+                            <select x-model="editForm.thinking" class="dash-select w-full">
+                              <option value="off">off</option>
+                              <option value="low">low</option>
+                              <option value="medium">medium</option>
+                              <option value="high">high</option>
+                            </select>
+                            <div class="text-[10px] text-gray-600 mt-1">Changing thinking requires an agent restart.</div>
                           </div>
                           <div class="md:col-span-2">
                             <label class="text-xs text-gray-500 mb-1.5 block">Credential Access</label>
@@ -1892,54 +1616,165 @@
                 </div>
               </div>
             </div>
-            <!-- ═══ AGENT AUTOMATIONS (cron jobs for this agent) ═══ -->
-            <div>
+            <!-- ═══ PROJECT COMMS (only for project agents) ═══ -->
+            <div x-show="_detailAgentProject()" x-cloak>
               <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
                 <div class="flex items-center justify-between mb-3">
-                  <div class="text-xs text-gray-500 uppercase tracking-wider">Automations</div>
-                  <button @click="addCronForAgent()"
-                    class="text-[10px] px-2 py-1 rounded border border-gray-700 hover:border-indigo-500/50 text-gray-400 hover:text-indigo-300 transition-colors">+ New Job</button>
+                  <div class="text-xs text-gray-500 uppercase tracking-wider">Project Comms</div>
+                  <div class="flex items-center gap-2">
+                    <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
+                      <button @click="commsView = 'activity'; fetchCommsActivity()"
+                        class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+                        :class="commsView === 'activity' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
+                        Activity
+                      </button>
+                      <button @click="commsView = 'state'; fetchBlackboard()"
+                        class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+                        :class="commsView === 'state' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
+                        Shared State
+                      </button>
+                    </div>
+                    <button @click="commsView === 'activity' ? fetchCommsActivity() : fetchBlackboard()" class="text-gray-600 hover:text-gray-400 transition-colors" title="Refresh">
+                      <svg class="w-3.5 h-3.5" :class="(commsActivityLoading || bbLoading) && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                    </button>
+                  </div>
                 </div>
-                <div x-show="detailAgentCronJobs.length > 0" class="space-y-2">
-                  <template x-for="job in detailAgentCronJobs" :key="job.id">
-                    <div class="flex items-center gap-3 p-2.5 rounded-lg border border-gray-800/60 hover:border-gray-700/60 transition-colors">
-                      <div class="flex-shrink-0">
-                        <span x-show="job.heartbeat" class="text-pink-400 heartbeat-indicator text-[10px]">heartbeat</span>
-                        <span x-show="!job.heartbeat" class="text-gray-600 text-[10px]">cron</span>
-                      </div>
-                      <div class="flex-1 min-w-0">
-                        <div class="flex items-center gap-2">
-                          <span class="font-mono text-xs text-gray-300" x-text="job.schedule"></span>
-                          <span class="text-[10px] px-1.5 py-0.5 rounded-full"
-                            :class="job.enabled ? 'bg-green-900/30 text-green-400' : 'bg-gray-800/50 text-gray-500'"
-                            x-text="job.enabled ? 'active' : 'paused'"></span>
+                <!-- Subscriptions summary -->
+                <div x-show="commsView === 'activity' && Object.keys(commsSubs).length > 0" class="flex items-center gap-1.5 flex-wrap mb-3" x-cloak>
+                  <template x-for="[topic, sAgents] in Object.entries(commsSubs).slice(0, 8)" :key="topic">
+                    <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-400/70 border border-purple-500/20"
+                      x-text="topic + ' (' + sAgents.length + ')'"></span>
+                  </template>
+                  <span x-show="Object.keys(commsSubs).length > 8" class="text-[10px] text-gray-600"
+                    x-text="'+' + (Object.keys(commsSubs).length - 8) + ' more'"></span>
+                </div>
+
+                <!-- ═══ ACTIVITY VIEW ═══ -->
+                <div x-show="commsView === 'activity'">
+                  <div class="border border-gray-800 rounded-lg overflow-hidden">
+                    <div class="divide-y divide-gray-800/30">
+                      <template x-for="(item, idx) in commsActivity" :key="idx">
+                        <div class="comms-activity-row">
+                          <div x-show="item.agent" class="agent-avatar agent-avatar-sm flex-shrink-0"
+                            :class="'agent-color-' + agentColorIndex(item.agent)">
+                            <img :src="agentAvatarUrl(item.agent)" :alt="item.agent">
+                          </div>
+                          <div x-show="!item.agent" class="comms-activity-icon bg-gray-700/50 text-gray-500 flex-shrink-0">
+                            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></svg>
+                          </div>
+                          <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-1.5 flex-wrap">
+                              <span class="text-xs font-medium text-gray-300" x-text="item.agent || 'system'"></span>
+                              <span class="text-xs text-gray-600" x-text="commsActionVerb(item)"></span>
+                              <span class="comms-type-badge" :class="item.source === 'pubsub' ? 'comms-type-event' : 'comms-type-bb'"
+                                x-text="item.source === 'pubsub' ? 'event' : (item.action === 'delete' ? 'delete' : 'state')"></span>
+                              <span class="text-xs font-mono truncate" :class="commsActionClass(item)"
+                                x-text="commsActionTarget(item)"></span>
+                            </div>
+                            <div x-show="item.preview" class="text-[11px] text-gray-500 truncate mt-0.5" x-text="item.preview" x-cloak></div>
+                          </div>
+                          <span class="text-[10px] text-gray-600 whitespace-nowrap flex-shrink-0" x-text="timeAgo(item.timestamp)"></span>
                         </div>
-                        <div class="text-[11px] text-gray-500 truncate mt-0.5" x-text="job.message"></div>
-                        <div class="text-[10px] text-gray-600 mt-0.5">
-                          <span x-text="job.run_count + ' runs'"></span>
-                          <span x-show="job.error_count > 0" class="text-red-400 ml-2" x-text="job.error_count + ' errors'"></span>
-                          <span x-show="job.last_run" class="ml-2" x-text="'Last: ' + job.last_run"></span>
-                        </div>
-                      </div>
-                      <div class="flex gap-1 flex-shrink-0">
-                        <button @click="runCronJob(job.id)" :disabled="cronRunLoading[job.id]"
-                          class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-900/30 hover:bg-indigo-800/40 text-indigo-300 hover:text-indigo-200 transition-colors disabled:opacity-50"
-                          x-text="cronRunLoading[job.id] ? '...' : 'Run'"></button>
-                        <button x-show="job.enabled" @click="pauseCronJob(job.id)" :disabled="cronPauseLoading[job.id]"
-                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-yellow-900/30 text-gray-300 hover:text-yellow-400 transition-colors disabled:opacity-50"
-                          x-text="cronPauseLoading[job.id] ? '...' : 'Pause'"></button>
-                        <button x-show="!job.enabled" @click="resumeCronJob(job.id)" :disabled="cronPauseLoading[job.id]"
-                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-green-900/30 text-gray-300 hover:text-green-400 transition-colors disabled:opacity-50"
-                          x-text="cronPauseLoading[job.id] ? '...' : 'Resume'"></button>
-                        <button x-show="!job.heartbeat" @click="deleteCronJob(job.id)"
-                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-red-900/30 text-gray-300 hover:text-red-400 transition-colors">Del</button>
+                      </template>
+                    </div>
+                    <div x-show="commsActivity.length === 0 && commsActivityLoading" class="text-center py-8" x-cloak>
+                      <div class="inline-flex items-center gap-2 text-gray-600">
+                        <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        Loading...
                       </div>
                     </div>
-                  </template>
+                    <div x-show="commsActivity.length === 0 && !commsActivityLoading" class="text-center py-8 px-6" x-cloak>
+                      <div class="text-gray-600 text-xs">No agent communication yet in this project.</div>
+                    </div>
+                  </div>
                 </div>
-                <div x-show="detailAgentCronJobs.length === 0" class="text-center py-6">
-                  <div class="text-gray-600 text-xs">No automations configured for this agent.</div>
-                  <div class="text-gray-700 text-[10px] mt-1">Add heartbeat rules or cron jobs to automate tasks.</div>
+
+                <!-- ═══ SHARED STATE VIEW ═══ -->
+                <div x-show="commsView === 'state'" x-cloak>
+                  <div class="mb-3 flex gap-2">
+                    <input type="text" x-model="bbPrefix" @keyup.enter="fetchBlackboard()"
+                      placeholder="Filter by prefix (e.g. tasks/, context/)"
+                      class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs flex-1 focus:outline-none focus:border-gray-600 focus:ring-1 focus:ring-gray-600 placeholder-gray-600 transition-colors">
+                    <button @click="fetchBlackboard()" class="bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors">Search</button>
+                  </div>
+                  <div class="flex gap-1.5 flex-wrap mb-3">
+                    <template x-for="ns in ['tasks/', 'context/', 'signals/', 'goals/', 'artifacts/', 'history/']" :key="ns">
+                      <button @click="bbPrefix = (bbPrefix === ns ? '' : ns); fetchBlackboard()"
+                        class="text-[10px] px-1.5 py-0.5 rounded-md border transition-all"
+                        :class="bbPrefix === ns ? 'border-cyan-500/60 bg-cyan-900/20 text-cyan-300' : 'border-gray-800 text-gray-600 hover:text-gray-400'">
+                        <span x-text="ns"></span><span x-show="bbNamespaceCounts[ns] > 0" class="ml-1 opacity-60" x-text="'(' + bbNamespaceCounts[ns] + ')'"></span>
+                      </button>
+                    </template>
+                    <button @click="bbWriteMode = !bbWriteMode" class="ml-auto text-[10px] px-1.5 py-0.5 rounded-md border transition-all"
+                      :class="bbWriteMode ? 'border-indigo-500/40 text-indigo-400' : 'border-gray-800 text-gray-600 hover:text-gray-400'">+ Write</button>
+                  </div>
+                  <!-- Write form -->
+                  <div x-show="bbWriteMode" x-cloak class="border border-gray-800 rounded-lg p-3 mb-3">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div>
+                        <label class="text-[10px] text-gray-500 mb-1 block">Key</label>
+                        <input type="text" x-model="bbNewKey" :disabled="bbWriteLoading" placeholder="context/my_key" class="dash-input w-full text-xs">
+                      </div>
+                      <div>
+                        <label class="text-[10px] text-gray-500 mb-1 block">Value (JSON)</label>
+                        <textarea x-model="bbNewValue" :disabled="bbWriteLoading" class="dash-textarea w-full text-xs" rows="2" placeholder='{"key": "value"}'
+                          :class="bbNewValue && !bbJsonValid.valid ? 'border-red-500/50' : ''"></textarea>
+                        <div x-show="bbNewValue && !bbJsonValid.valid" x-cloak class="text-[10px] text-red-400 mt-1" x-text="bbJsonValid.error"></div>
+                      </div>
+                    </div>
+                    <div class="mt-2 flex gap-2">
+                      <button @click="writeBlackboard()" class="text-[10px] px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1"
+                        :disabled="bbWriteLoading || !bbJsonValid.valid || !bbNewKey.trim()" :class="(bbWriteLoading || !bbJsonValid.valid || !bbNewKey.trim()) && 'opacity-50 cursor-not-allowed'">
+                        <svg x-show="bbWriteLoading" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        <span x-text="bbWriteLoading ? 'Saving...' : 'Save'"></span>
+                      </button>
+                      <button @click="bbWriteMode = false" :disabled="bbWriteLoading" class="text-[10px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors disabled:opacity-50">Cancel</button>
+                    </div>
+                  </div>
+                  <!-- State entries list -->
+                  <div class="border border-gray-800 rounded-lg overflow-hidden">
+                    <div class="divide-y divide-gray-800/40">
+                      <template x-for="entry in filteredBbEntries" :key="entry.key">
+                        <div :class="bbHighlights.includes(entry.key) ? 'flash-yellow' : ''">
+                          <div class="bb-entry-row"
+                            :class="bbExpanded[entry.key] ? 'bb-expanded ' + bbNsAccentClass(entry.key) : ''"
+                            @click="toggleBbExpand(entry.key)">
+                            <svg class="bb-chevron" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" /></svg>
+                            <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(entry.written_by)">
+                              <img :src="agentAvatarUrl(entry.written_by)" :alt="entry.written_by">
+                            </div>
+                            <span x-show="bbNamespaceOf(entry.key)" :class="bbNsBadgeClass(entry.key)" x-text="bbNsName(entry.key)"></span>
+                            <span class="font-mono text-xs text-blue-400 truncate" style="min-width:5rem;max-width:14rem" x-text="bbKeyAfterNs(entry.key)"></span>
+                            <span class="text-gray-500 text-xs truncate flex-1 min-w-0" x-text="valueSummary(entry.value)"></span>
+                            <span class="text-gray-600 text-xs whitespace-nowrap flex-shrink-0" x-text="timeAgo(entry.updated_at)"></span>
+                            <button @click.stop="deleteBlackboard(entry.key)" :disabled="entry.key.startsWith('history/')"
+                              class="text-[10px] px-1.5 py-0.5 rounded text-gray-700 hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0">Delete</button>
+                          </div>
+                          <div class="bb-detail" :class="bbExpanded[entry.key] ? 'bb-detail-open' : ''">
+                            <div class="px-4 pb-3 pt-1">
+                              <div class="flex items-center gap-3 mb-2 text-xs text-gray-500">
+                                <span>Written by <span class="text-gray-400" x-text="entry.written_by"></span></span>
+                                <span class="text-gray-700">&middot;</span>
+                                <span>v<span x-text="entry.version"></span></span>
+                                <span class="text-gray-700">&middot;</span>
+                                <span class="font-mono text-gray-600" x-text="entry.updated_at"></span>
+                              </div>
+                              <pre class="bb-detail-pre custom-scrollbar" x-text="fullJson(entry.value)"></pre>
+                            </div>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                    <div x-show="filteredBbEntries.length === 0 && bbLoading" class="text-center py-8" x-cloak>
+                      <div class="inline-flex items-center gap-2 text-gray-600">
+                        <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        Loading...
+                      </div>
+                    </div>
+                    <div x-show="filteredBbEntries.length === 0 && !bbLoading" class="text-center py-8 px-6" x-cloak>
+                      <div class="text-gray-600 text-xs">No shared state entries in this project yet.</div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1952,7 +1787,7 @@
         <!-- System sub-tab bar -->
         <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
           <template x-for="st in systemTabs" :key="st.id">
-            <button @click="systemTab = st.id; _pushUrl(false); if (st.id === 'integrations') { fetchChannels(); fetchWebhooks(); fetchSettings(); }"
+            <button @click="systemTab = st.id; if (st.id === 'integrations') { fetchChannels(); fetchWebhooks(); fetchSettings(); }"
               class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
               :class="systemTab === st.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
               <span x-text="st.label"></span>
@@ -2012,42 +1847,6 @@
                   </div>
                 </template>
                 <div x-show="!costData.agents || costData.agents.length === 0" class="text-gray-600 text-sm py-4 text-center">Budgets appear once agents incur costs</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Storage -->
-        <div class="mt-6" x-show="storageData">
-          <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Storage</div>
-          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <!-- Disk usage -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-              <div class="flex items-center justify-between mb-3">
-                <div class="text-xs text-gray-500 uppercase tracking-wider">Disk</div>
-                <div class="text-xs text-gray-400 font-mono" x-text="formatBytes(storageData.disk?.used) + ' / ' + formatBytes(storageData.disk?.total)"></div>
-              </div>
-              <div class="w-full bg-gray-800 rounded-full h-2 mb-2">
-                <div class="h-2 rounded-full transition-all duration-500"
-                  :class="storageData.disk?.total > 0 && (storageData.disk.used / storageData.disk.total) > 0.9 ? 'bg-red-500' : (storageData.disk?.total > 0 && (storageData.disk.used / storageData.disk.total) > 0.75 ? 'bg-amber-500' : 'bg-indigo-500')"
-                  :style="'width:' + (storageData.disk?.total > 0 ? Math.min(100, (storageData.disk.used / storageData.disk.total) * 100) : 0) + '%'"></div>
-              </div>
-              <div class="text-xs text-gray-500" x-text="formatBytes(storageData.disk?.free) + ' free'"></div>
-            </div>
-            <!-- Engine breakdown -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-              <div class="flex items-center justify-between mb-3">
-                <div class="text-xs text-gray-500 uppercase tracking-wider">Engine Data</div>
-                <div class="text-xs text-gray-400 font-mono" x-text="formatBytes(storageData.engine?.total)"></div>
-              </div>
-              <div class="space-y-2">
-                <template x-for="[label, key] in [['Databases', 'databases'], ['Agent Data', 'agent_data'], ['Logs', 'logs'], ['Config', 'config'], ['Other', 'other']]" :key="key">
-                  <div x-show="storageData.engine?.[key] > 0" class="flex items-center justify-between text-xs">
-                    <span class="text-gray-400" x-text="label"></span>
-                    <span class="text-gray-300 font-mono" x-text="formatBytes(storageData.engine?.[key])"></span>
-                  </div>
-                </template>
-                <div x-show="!storageData.engine?.total" class="text-gray-600 text-xs">No data yet</div>
               </div>
             </div>
           </div>
@@ -2174,13 +1973,13 @@
                       <td class="py-2.5 px-4 font-mono text-gray-300" x-text="job.run_count"></td>
                       <td class="py-2.5 px-4 font-mono" :class="job.error_count > 0 ? 'text-red-400' : 'text-gray-600'" x-text="job.error_count"></td>
                       <td class="py-2.5 px-4 flex gap-1">
-                        <button @click="runCronJob(job.id)" :disabled="cronRunLoading[job.id]" class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-900/30 hover:bg-indigo-800/40 text-indigo-300 hover:text-indigo-200 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Run'"></button>
-                        <button x-show="job.enabled" @click="pauseCronJob(job.id)" :disabled="cronPauseLoading[job.id]"
-                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-yellow-900/30 text-gray-300 hover:text-yellow-400 transition-colors disabled:opacity-50" x-text="cronPauseLoading[job.id] ? '...' : 'Pause'"></button>
-                        <button x-show="!job.enabled" @click="resumeCronJob(job.id)" :disabled="cronPauseLoading[job.id]"
-                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-green-900/30 text-gray-300 hover:text-green-400 transition-colors disabled:opacity-50" x-text="cronPauseLoading[job.id] ? '...' : 'Resume'"></button>
-                        <button x-show="!job.heartbeat" @click="deleteCronJob(job.id)"
-                          class="text-[11px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-red-900/30 text-gray-300 hover:text-red-400 transition-colors">Delete</button>
+                        <button @click="runCronJob(job.id)" :disabled="cronRunLoading[job.id]" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Run'"></button>
+                        <button x-show="job.enabled" @click="pauseCronJob(job.id)" :disabled="cronRunLoading[job.id]"
+                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-yellow-900/30 text-gray-400 hover:text-yellow-400 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Pause'"></button>
+                        <button x-show="!job.enabled" @click="resumeCronJob(job.id)" :disabled="cronRunLoading[job.id]"
+                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-green-900/30 text-gray-400 hover:text-green-400 transition-colors disabled:opacity-50" x-text="cronRunLoading[job.id] ? '...' : 'Resume'"></button>
+                        <button @click="deleteCronJob(job.id)"
+                          class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">Delete</button>
                       </td>
                     </tr>
                   </template>
@@ -2283,26 +2082,6 @@
                       <div x-show="ch.pairing_code" class="text-xs text-gray-400">
                         Code: <span class="font-mono text-white select-all" x-text="ch.pairing_code"></span>
                       </div>
-                      <div x-show="ch.type === 'slack'" class="mt-2 space-y-2">
-                        <div class="rounded-md border border-amber-900/40 bg-amber-950/20 px-3 py-2">
-                          <div class="text-[11px] text-amber-300 mb-1">Pairing</div>
-                          <div class="text-[11px] text-gray-300 leading-relaxed">
-                            Invite the bot to a channel (<code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-200">/invite @YourBot</code>), then send
-                            <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-200">!start &lt;pairing_code&gt;</code>
-                            in that channel.
-                          </div>
-                        </div>
-                        <div class="rounded-md border border-gray-800 bg-gray-950 px-3 py-2 space-y-2">
-                          <div class="text-[11px] text-gray-300 font-medium">If the bot doesn&rsquo;t respond, check your Slack app settings (in order):</div>
-                          <ol class="text-[11px] text-gray-500 leading-relaxed list-decimal list-inside space-y-1">
-                            <li><span class="text-gray-400">Settings &gt; Socket Mode</span> &mdash; enabled, app token has <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">connections:write</code></li>
-                            <li><span class="text-gray-400">OAuth &amp; Permissions</span> &mdash; bot scopes: <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">chat:write</code>, <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">app_mentions:read</code>, <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">channels:history</code>, <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">im:history</code></li>
-                            <li><span class="text-gray-400">App Home</span> &mdash; Messages Tab + &ldquo;Allow users to send messages&rdquo;</li>
-                            <li><span class="text-gray-400">Event Subscriptions</span> &mdash; enabled, bot events: <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">message.channels</code>, <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">message.im</code>, <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">app_mention</code></li>
-                            <li><span class="text-gray-400">Install App</span> &mdash; reinstall after any changes</li>
-                          </ol>
-                        </div>
-                      </div>
                     </div>
                   </template>
                 </div>
@@ -2327,39 +2106,6 @@
                         x-model="channelTokens[field.key]">
                     </div>
                   </template>
-                  <div x-show="ch.type === 'slack'" class="rounded-md border border-gray-800 bg-gray-950 px-3 py-2 space-y-2">
-                    <div class="text-[11px] text-gray-300 font-medium">Slack app setup (do these in order)</div>
-                    <ol class="text-[11px] text-gray-500 leading-relaxed list-decimal list-inside space-y-1">
-                      <li>
-                        <span class="text-gray-400">Settings &gt; Socket Mode</span> &mdash;
-                        enable Socket Mode, generate an app token (<code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">xapp-...</code>)
-                        with <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">connections:write</code> scope
-                      </li>
-                      <li>
-                        <span class="text-gray-400">Features &gt; OAuth &amp; Permissions</span> &mdash;
-                        add bot scopes:
-                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">chat:write</code>,
-                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">app_mentions:read</code>,
-                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">channels:history</code>,
-                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">im:history</code>
-                      </li>
-                      <li>
-                        <span class="text-gray-400">Features &gt; App Home</span> &mdash;
-                        enable Messages Tab + &ldquo;Allow users to send messages&rdquo;
-                      </li>
-                      <li>
-                        <span class="text-gray-400">Features &gt; Event Subscriptions</span> &mdash;
-                        enable events, subscribe to bot events:
-                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">message.channels</code>,
-                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">message.im</code>,
-                        <code class="font-mono bg-gray-800 px-1 py-0.5 rounded text-gray-300">app_mention</code>
-                      </li>
-                      <li>
-                        <span class="text-gray-400">Install App</span> &mdash;
-                        reinstall to workspace after any changes
-                      </li>
-                    </ol>
-                  </div>
                   <div class="flex gap-2 pt-1">
                     <button @click="cancelChannelConnect()" :disabled="channelConnecting"
                       class="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg transition-colors disabled:opacity-50">Cancel</button>

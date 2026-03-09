@@ -324,7 +324,7 @@ function dashboard() {
         if (this.activityView === 'logs') return '/activity/logs';
         return '/activity';
       }
-      if (this.activeTab === 'system') return '/system/' + (this.systemTab || 'costs');
+      if (this.activeTab === 'system') return '/system';
       return '/';
     },
 
@@ -338,16 +338,13 @@ function dashboard() {
         if (this.activityView === 'logs') return 'Logs \u2014 OpenLegion';
         return 'Traces \u2014 OpenLegion';
       }
-      if (this.activeTab === 'system') {
-        const st = this.systemTabs.find(t => t.id === this.systemTab);
-        return (st ? st.label : 'System') + ' \u2014 OpenLegion';
-      }
+      if (this.activeTab === 'system') return 'System \u2014 OpenLegion';
       return 'Agents \u2014 OpenLegion';
     },
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'costs', agentId: null, identityTab: 'config' };
+      const route = { tab: 'fleet', activityView: 'traces', agentId: null, identityTab: 'config' };
       if (!clean) return route;
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
@@ -361,11 +358,7 @@ function dashboard() {
       if (clean === 'activity/events') { route.tab = 'activity'; route.activityView = 'events'; }
       else if (clean === 'activity/logs') { route.tab = 'activity'; route.activityView = 'logs'; }
       else if (clean === 'activity') { route.tab = 'activity'; }
-      else if (clean.startsWith('system')) {
-        route.tab = 'system';
-        const sub = clean.split('/')[1];
-        if (sub && ['costs', 'automation', 'integrations'].includes(sub)) route.systemTab = sub;
-      }
+      else if (clean === 'system') { route.tab = 'system'; }
       return route;
     },
 
@@ -403,12 +396,6 @@ function dashboard() {
           }
           if (route.tab === 'activity' && this.activityView !== route.activityView) {
             this.setActivityView(route.activityView);
-          }
-          if (route.tab === 'system' && this.systemTab !== route.systemTab) {
-            this.systemTab = route.systemTab;
-            if (route.systemTab === 'integrations') {
-              this.fetchChannels(); this.fetchWebhooks(); this.fetchSettings();
-            }
           }
         }
       } finally {
@@ -689,11 +676,6 @@ function dashboard() {
         console.debug('chat history fetch skipped:', e.message || e);
       }
 
-      // Sync restored open chats from server so cross-device history is fresh
-      for (const agentId of this.openChats) {
-        this._loadChatHistory(agentId);
-      }
-
       // Command palette: Cmd+K / Ctrl+K + tab shortcuts 1/2/3
       this._cmdPaletteHandler = (e) => {
         if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -724,7 +706,7 @@ function dashboard() {
 
       // Deep link restoration: parse initial URL and apply route
       const initRoute = this._parsePath(window.location.pathname);
-      const isDeepLink = initRoute.agentId || initRoute.tab !== 'fleet' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
+      const isDeepLink = initRoute.agentId || initRoute.tab !== 'fleet' || initRoute.activityView !== 'traces';
       if (isDeepLink) {
         this.$nextTick(() => {
           this._applyRoute(initRoute);
@@ -791,11 +773,6 @@ function dashboard() {
           // Refresh agent detail if we're viewing one
           if (this.detailAgent) {
             this.fetchAgentDetail(this.detailAgent);
-          }
-          // Sync open chat histories from server (cross-device consistency)
-          for (const agentId of this.openChats) {
-            delete this._chatFetchedAt[agentId];
-            this._loadChatHistory(agentId);
           }
         }
       });
@@ -1757,6 +1734,7 @@ function dashboard() {
         _showAvatarPicker: false,
         budget_daily: cfg.budget?.daily_usd || '',
         budget_monthly: cfg.budget?.monthly_usd || '',
+        thinking: cfg.thinking || 'off',
         allowed_credentials: credsStr,
         _credMode: credMode,
       };
@@ -1795,6 +1773,9 @@ function dashboard() {
         if (this.editForm.budget_monthly && parseFloat(this.editForm.budget_monthly) > 0)
           budget.monthly_usd = parseFloat(this.editForm.budget_monthly);
         body.budget = budget;
+      }
+      if (this.editForm.thinking && this.editForm.thinking !== (cfg.thinking || 'off')) {
+        body.thinking = this.editForm.thinking;
       }
       // Handle allowed_credentials via the permissions endpoint
       const newCreds = (this.editForm.allowed_credentials || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -2418,6 +2399,7 @@ function dashboard() {
         if (!resp.ok) return;
         const data = await resp.json();
         if (!data.messages || data.messages.length === 0) {
+          // Server transcript is empty (reset or fresh agent) — clear stale local data
           if (this.chatHistories[agentId]?.length > 0) {
             this.chatHistories[agentId] = [];
             this._saveChatToSession();
@@ -2429,16 +2411,11 @@ function dashboard() {
           content: m.content,
           streaming: false,
           phase: 'done',
-          ts: m.ts || 0,
-          tools: Array.isArray(m.tools) ? m.tools.map(t =>
-            typeof t === 'string' ? { name: t, status: 'done', inputPreview: '', outputPreview: '' } : t
-          ) : [],
+          tools: [],
         }));
         this._saveChatToSession();
         this.$nextTick(() => this._scrollChat(agentId));
-      } catch (e) {
-        console.debug('_loadChatHistory failed for', agentId, e.message || e);
-      }
+      } catch (_) {}
     },
 
     openChat(agentId) {
@@ -2959,27 +2936,27 @@ function dashboard() {
         const agent = (job.agent || '').toLowerCase();
         const message = (job.message || '').toLowerCase();
         if (id.includes(q) || agent.includes(q) || message.includes(q)) {
-          results.push({ type: 'cron', label: job.id, desc: `${job.agent} · ${job.schedule}`, action: () => { this.systemTab = 'automation'; this.switchTab('system'); } });
+          results.push({ type: 'cron', label: job.id, desc: `${job.agent} · ${job.schedule}`, action: () => { this.switchTab('system'); this.systemTab = 'automation'; } });
         }
       }
       // Match workflows
       for (const wf of this.workflows || []) {
         if ((wf.name || '').toLowerCase().includes(q)) {
-          results.push({ type: 'action', label: `Run ${wf.name}`, desc: `Workflow · ${wf.steps} steps`, action: () => { this.systemTab = 'automation'; this.switchTab('system'); this.runWorkflow(wf.name); } });
+          results.push({ type: 'action', label: `Run ${wf.name}`, desc: `Workflow · ${wf.steps} steps`, action: () => { this.switchTab('system'); this.systemTab = 'automation'; this.runWorkflow(wf.name); } });
         }
       }
       // Match credentials
       for (const name of this.settingsData?.credentials?.names || []) {
         if (name.toLowerCase().includes(q)) {
-          results.push({ type: 'action', label: name, desc: 'Credential', action: () => { this.systemTab = 'integrations'; this.switchTab('system'); } });
+          results.push({ type: 'action', label: name, desc: 'Credential', action: () => { this.switchTab('system'); this.systemTab = 'integrations'; } });
         }
       }
       // System quick actions
       const sysActions = [
         { label: 'View Logs', desc: 'Open runtime logs', keywords: ['logs', 'runtime', 'debug'], action: () => { this.switchTab('activity'); this.setActivityView('logs'); } },
-        { label: 'Add Credential', desc: 'Add new API key', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.showCredForm = true; } },
-        { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchWebhooks(); } },
-        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchChannels(); } },
+        { label: 'Add Credential', desc: 'Add new API key', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.switchTab('system'); this.systemTab = 'integrations'; this.showCredForm = true; } },
+        { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.switchTab('system'); this.systemTab = 'integrations'; this.fetchWebhooks(); } },
+        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.switchTab('system'); this.systemTab = 'integrations'; this.fetchChannels(); } },
       ];
       for (const act of sysActions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
