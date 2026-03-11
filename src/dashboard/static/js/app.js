@@ -153,7 +153,7 @@ function dashboard() {
     // Storage
     storageData: null,
 
-    // Slide-over chat panel
+    // Messenger-style chat panel
     openChats: [],             // Array of agent IDs with open chat panels
     chatHistories: {},         // Preserved — keyed by agent ID
     chatLoadingAgents: {},     // { agentId: true/false }
@@ -161,7 +161,8 @@ function dashboard() {
     _chatAborts: {},           // { agentId: AbortController }
     _chatFetchedAt: {},        // { agentId: timestamp } — debounce refetches
     activeChatId: '',          // Currently active chat tab
-    chatPanelMinimized: false, // Whether the slide-over is minimized to pill
+    chatPanelMinimized: false, // Whether the chat panel is minimized to pill
+    chatFullScreen: false,     // Whether the chat panel is expanded to full screen
     chatUnread: {},            // { agentId: count } — unread notifications while minimized
 
     // Identity panel
@@ -1771,7 +1772,8 @@ function dashboard() {
 
     thinkingOptionsForModel(model) {
       if (!model) return [];
-      if (model.startsWith('anthropic/')) {
+      const m = model.startsWith('openrouter/') ? model.slice('openrouter/'.length) : model;
+      if (m.startsWith('anthropic/')) {
         return [
           { value: 'off', label: 'Off' },
           { value: 'low', label: 'Low (5K budget tokens)' },
@@ -1779,7 +1781,7 @@ function dashboard() {
           { value: 'high', label: 'High (25K budget tokens)' },
         ];
       }
-      if (model.startsWith('openai/o') || model.startsWith('o1') || model.startsWith('o3') || model.startsWith('o4')) {
+      if (m.startsWith('openai/o') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('o4')) {
         return [
           { value: 'off', label: 'Off' },
           { value: 'low', label: 'Low' },

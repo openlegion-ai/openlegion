@@ -624,6 +624,53 @@ select:focus-visible,
   letter-spacing: -0.01em;
 }
 
+/* ── Messenger chat panel ─────────────────────────── */
+
+.messenger-panel {
+  transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.messenger-half {
+  width: 50vw;
+  min-width: 480px;
+  max-width: 100vw;
+}
+
+.messenger-full {
+  width: 100vw;
+}
+
+.messenger-sidebar {
+  width: 220px;
+  min-width: 220px;
+  background: rgba(14, 14, 20, 0.6);
+}
+
+.messenger-contact {
+  position: relative;
+}
+
+.messenger-contact:hover .messenger-close-btn {
+  opacity: 1;
+}
+
+@media (max-width: 640px) {
+  .messenger-half {
+    width: 100vw;
+    min-width: 0;
+  }
+  .messenger-sidebar {
+    width: 56px;
+    min-width: 56px;
+  }
+  .messenger-sidebar .messenger-contact > div.flex-1 {
+    display: none;
+  }
+  .messenger-sidebar > div:first-child span {
+    display: none;
+  }
+}
+
 /* ── Chat slide-over panel ────────────────────────── */
 
 .chat-phase-pill {
