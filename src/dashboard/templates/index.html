@@ -842,13 +842,6 @@
                   </span>
                   <span class="stat-value" x-text="formatCost(agent.daily_cost)"></span>
                 </div>
-                <div class="stat-row">
-                  <span class="stat-label">
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                    Tokens
-                  </span>
-                  <span class="stat-value" x-text="agent.daily_tokens.toLocaleString()"></span>
-                </div>
               </div>
 
               <!-- Agent actions: Chat + heartbeat Pause/Resume (hidden when locked) -->
@@ -900,10 +893,15 @@
                     <div class="h-3 bg-gray-800/60 rounded w-32"></div>
                   </div>
                 </div>
-                <div class="space-y-2">
-                  <div class="h-3 bg-gray-800/40 rounded w-full"></div>
-                  <div class="h-3 bg-gray-800/40 rounded w-3/4"></div>
-                  <div class="h-3 bg-gray-800/40 rounded w-1/2"></div>
+                <div class="space-y-0">
+                  <div class="flex items-center justify-between py-1.5 border-b border-gray-800/20">
+                    <div class="h-3 bg-gray-800/40 rounded w-16"></div>
+                    <div class="h-3 bg-gray-800/40 rounded w-10"></div>
+                  </div>
+                  <div class="flex items-center justify-between py-1.5">
+                    <div class="h-3 bg-gray-800/40 rounded w-20"></div>
+                    <div class="h-3 bg-gray-800/40 rounded w-12"></div>
+                  </div>
                 </div>
               </div>
             </template>
