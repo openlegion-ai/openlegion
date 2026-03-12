@@ -841,7 +841,10 @@ def create_mesh_app(
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
-        return {"id": job.id, "agent": job.agent, "schedule": job.schedule, "heartbeat": job.heartbeat, "tool_name": job.tool_name}
+        return {
+            "id": job.id, "agent": job.agent, "schedule": job.schedule,
+            "heartbeat": job.heartbeat, "tool_name": job.tool_name,
+        }
 
     @app.get("/mesh/cron")
     async def list_cron_jobs(request: Request, agent_id: str | None = None) -> list[dict]:
