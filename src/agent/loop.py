@@ -960,9 +960,14 @@ class AgentLoop:
     async def _compact_chat_context(self, system: str) -> None:
         """Run context compaction and drain any pending steer messages."""
         if self.context_manager:
-            self._chat_messages = await self.context_manager.maybe_compact(
+            self._chat_messages, compacted = await self.context_manager.maybe_compact(
                 system, self._chat_messages,
             )
+            if compacted and self.workspace:
+                self.workspace.append_chat_message(
+                    "system",
+                    "Context compacted — key facts saved to memory, conversation summarized.",
+                )
         else:
             self._chat_messages = self._trim_context(self._chat_messages, max_tokens=_FALLBACK_MAX_TOKENS)
 
@@ -1068,6 +1073,7 @@ class AgentLoop:
                 "response": content,
                 "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens,
+                "tool_limit_reached": True,
             }
 
         except asyncio.CancelledError:
@@ -1432,6 +1438,7 @@ class AgentLoop:
                 "response": content,
                 "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens,
+                "tool_limit_reached": True,
             }
 
         except asyncio.CancelledError:
