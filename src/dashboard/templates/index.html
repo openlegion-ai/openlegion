@@ -1845,13 +1845,35 @@
                     <div x-show="agentCapabilities !== null && agentCapabilities.length === 0" class="py-6 text-center text-gray-600 text-sm">
                       No tools available for this agent.
                     </div>
-                    <div x-show="agentCapabilities !== null && agentCapabilities.length > 0" class="space-y-1.5">
-                      <template x-for="tool in (agentCapabilities || [])" :key="tool.name || tool">
-                        <div class="bg-gray-800/50 rounded px-3 py-2 border border-gray-800">
-                          <div class="text-xs font-mono text-indigo-400" x-text="tool.name || tool"></div>
-                          <div x-show="tool.description" class="text-[11px] text-gray-500 mt-0.5" x-text="tool.description"></div>
+                    <div x-show="agentCapabilities !== null && agentCapabilities.length > 0">
+                      <!-- Tool count + legend -->
+                      <div class="flex items-center justify-between mb-2">
+                        <span class="text-[10px] text-gray-600" x-text="(agentCapabilities || []).length + ' tools available'"></span>
+                        <div class="flex items-center gap-2 text-[10px] text-gray-600">
+                          <span class="flex items-center gap-1"><span class="inline-block w-1.5 h-1.5 rounded-full bg-indigo-500"></span>built-in</span>
+                          <span class="flex items-center gap-1"><span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>custom</span>
+                          <span class="flex items-center gap-1"><span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span>mcp</span>
                         </div>
-                      </template>
+                      </div>
+                      <div class="space-y-1.5">
+                        <template x-for="tool in (agentCapabilities || [])" :key="tool.name || tool">
+                          <div class="bg-gray-800/50 rounded px-3 py-2 border border-gray-800">
+                            <div class="flex items-center gap-2">
+                              <span class="text-xs font-mono text-indigo-400 flex-1 min-w-0 truncate" x-text="tool.name || tool"></span>
+                              <!-- Source badge -->
+                              <span class="flex-shrink-0 text-[10px] px-1.5 py-0.5 rounded font-medium leading-none"
+                                :class="{
+                                  'bg-indigo-900/50 text-indigo-400 border border-indigo-800/50': tool.source === 'builtin',
+                                  'bg-emerald-900/50 text-emerald-400 border border-emerald-800/50': tool.source === 'custom',
+                                  'bg-amber-900/50 text-amber-400 border border-amber-800/50': tool.source === 'mcp',
+                                }"
+                                x-text="tool.source || 'custom'">
+                              </span>
+                            </div>
+                            <div x-show="tool.description" class="text-[11px] text-gray-500 mt-0.5" x-text="tool.description"></div>
+                          </div>
+                        </template>
+                      </div>
                     </div>
                   </div>
                 </div>

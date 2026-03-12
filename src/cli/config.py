@@ -422,6 +422,7 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
         "blackboard_write": [],
         "allowed_apis": ["llm"],
         "allowed_credentials": ["*"],
+        "can_manage_cron": True,
     }
 
     # Merge template permissions into defaults
@@ -438,13 +439,32 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
 
 
 def _ensure_all_agent_permissions() -> None:
-    """Backfill permissions for agents missing from permissions.json."""
+    """Backfill permissions for agents missing from permissions.json, and
+    forward-migrate any missing boolean capability flags for existing agents."""
     cfg = _load_config()
     perms = _load_permissions()
     existing = set(perms.get("permissions", {}).keys())
     for name in cfg.get("agents", {}):
         if name not in existing:
             _add_agent_permissions(name)
+
+    # Reload after potentially writing new agents so the migration sees all
+    # agents, including ones just added above.
+    perms = _load_permissions()
+
+    # Forward-migrate: add any capability flags that were introduced after an
+    # agent's initial permissions entry was created.
+    _CAPABILITY_DEFAULTS: dict = {"can_manage_cron": True}
+    changed = False
+    for agent_id, agent_perms in perms.get("permissions", {}).items():
+        if agent_id == "default":
+            continue
+        for flag, default_val in _CAPABILITY_DEFAULTS.items():
+            if flag not in agent_perms:
+                agent_perms[flag] = default_val
+                changed = True
+    if changed:
+        _save_permissions(perms)
 
 
 def _set_collaborative_permissions() -> None:

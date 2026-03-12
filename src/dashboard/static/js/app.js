@@ -1222,9 +1222,11 @@ function dashboard() {
           const data = await resp.json();
           // Agent returns tool_definitions (OpenAI format: {type, function: {name, description}})
           const defs = data.tool_definitions || [];
+          const sources = data.tool_sources || {};
           this.agentCapabilities = defs.map(t => ({
             name: t.function?.name || t.name || '?',
             description: t.function?.description || t.description || '',
+            source: sources[t.function?.name || t.name] || 'custom',
           }));
         }
       } catch (e) { console.warn('fetchAgentCapabilities failed:', e); }

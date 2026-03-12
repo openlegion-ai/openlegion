@@ -56,8 +56,10 @@ class SkillRegistry:
         self.skills_dir = skills_dir
         self._mcp_client = mcp_client
         self.skills: dict[str, dict] = {}
+        self._builtin_names: frozenset[str] = frozenset()
         with _skill_staging_lock:
             self._discover_builtins()
+            self._builtin_names = frozenset(_skill_staging.keys())
             self._discover(skills_dir)
             self._discover(self.CUSTOM_SKILLS_DIR)
             self._discover(self.MARKETPLACE_SKILLS_DIR)
@@ -107,6 +109,7 @@ class SkillRegistry:
         with _skill_staging_lock:
             _skill_staging.clear()
             self._discover_builtins()
+            self._builtin_names = frozenset(_skill_staging.keys())
             self._discover(self.skills_dir)
             self._discover(self.CUSTOM_SKILLS_DIR)
             self._discover(self.MARKETPLACE_SKILLS_DIR)
@@ -162,6 +165,24 @@ class SkillRegistry:
         if inspect.iscoroutinefunction(func):
             return await func(**call_args)
         return await asyncio.get_running_loop().run_in_executor(None, lambda: func(**call_args))
+
+    def get_tool_sources(self, exclude: frozenset[str] | None = None) -> dict[str, str]:
+        """Return a mapping of skill name → source tag.
+
+        Tags: ``"builtin"`` (core platform tools), ``"mcp"`` (MCP server tools),
+        ``"custom"`` (agent-created or marketplace skills).
+        """
+        result = {}
+        for name, info in self.skills.items():
+            if exclude and name in exclude:
+                continue
+            if info.get("function") == "mcp":
+                result[name] = "mcp"
+            elif name in self._builtin_names:
+                result[name] = "builtin"
+            else:
+                result[name] = "custom"
+        return result
 
     def list_skills(self, exclude: frozenset[str] | None = None) -> list[str]:
         """Return list of available skill names."""
