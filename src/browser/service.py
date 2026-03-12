@@ -404,25 +404,27 @@ class BrowserManager:
         inst.touch()
         async with inst.lock:
             try:
+                # Always click to focus, then optionally select-all to clear.
+                # Never use fill() — it atomically sets the DOM value and bypasses
+                # the keyboard event chain, so React/Vue apps (e.g. X's tweet
+                # composer) don't see individual keystrokes and won't activate
+                # submit buttons or update their controlled-component state.
                 if ref and ref in inst.refs:
                     locator = self._locator_from_ref(inst, ref)
                     if not locator:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
-                    if clear:
-                        await locator.fill(text)
-                    else:
-                        await locator.click(timeout=5000)
-                        await self._type_with_variance(inst.page, text)
+                    await locator.click(timeout=5000)
                 elif selector:
-                    if clear:
-                        await inst.page.fill(selector, text)
-                    else:
-                        await inst.page.click(selector, timeout=5000)
-                        await self._type_with_variance(inst.page, text)
+                    await inst.page.click(selector, timeout=5000)
                 else:
                     return {"success": False, "error": "Must provide ref or selector"}
 
-                # Only track credential values for redaction, not all typed text
+                if clear:
+                    await inst.page.keyboard.press("Control+a")
+                    await asyncio.sleep(0.05)
+
+                await self._type_with_variance(inst.page, text)
+
                 if is_credential:
                     self.redactor.track_resolved_value(agent_id, text)
                     if ref:
@@ -462,9 +464,20 @@ class BrowserManager:
                 return {"success": False, "error": str(e)}
 
     async def _type_with_variance(self, page, text: str) -> None:
-        """Type text character-by-character with human-like inter-key delays."""
+        """Type text character-by-character with human-like inter-key delays.
+
+        Uses keyboard.type() for printable characters so that the full
+        keydown/keypress/input/keyup event sequence is dispatched with correct
+        char codes — required for React/Vue controlled components to update.
+        keyboard.press() is reserved for named control keys (Enter, Tab).
+        """
         for char in text:
-            await page.keyboard.press(char)
+            if char == "\n":
+                await page.keyboard.press("Enter")
+            elif char == "\t":
+                await page.keyboard.press("Tab")
+            else:
+                await page.keyboard.type(char)
             await asyncio.sleep(keystroke_delay(char))
 
     async def scroll(self, agent_id: str, direction: str = "down",
