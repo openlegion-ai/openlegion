@@ -423,7 +423,7 @@ class AgentLoop:
                         })
 
                     if self.context_manager:
-                        messages = await self.context_manager.maybe_compact(system_prompt, messages)
+                        messages, _ = await self.context_manager.maybe_compact(system_prompt, messages)
                     else:
                         messages = self._trim_context(messages, max_tokens=_FALLBACK_MAX_TOKENS)
 
@@ -778,6 +778,11 @@ class AgentLoop:
             )
         self._chat_total_rounds = 0
         self._loop_detector.reset()
+        if self.workspace:
+            self.workspace.append_chat_message(
+                "system",
+                f"Session continued — conversation summarized after {self.CHAT_MAX_TOTAL_ROUNDS} turns.",
+            )
 
     async def chat(self, user_message: str, *, trace_id: str | None = None) -> dict:
         """Handle a single chat turn with persistent conversation history.
