@@ -36,10 +36,25 @@ def keystroke_delay(char: str) -> float:
 
     Letters: μ=0.08, σ=0.025, range 0.04–0.20.
     Symbols/digits: μ=0.11, σ=0.03, range 0.04–0.20.
+    Spaces: μ=0.06, σ=0.02, range 0.03–0.12 (faster, word boundary rhythm).
     """
+    if char == " ":
+        return _clamped_gauss(0.06, 0.02, 0.03, 0.12)
     if char.isalpha():
         return _clamped_gauss(0.08, 0.025, 0.04, 0.20)
     return _clamped_gauss(0.11, 0.03, 0.04, 0.20)
+
+
+def think_pause() -> float:
+    """Mid-typing hesitation (seconds).
+
+    Simulates the natural 0.3–1.5 s pauses humans make while composing text —
+    e.g. after finishing a clause or before a difficult word.
+    Apply stochastically (≈5 % of characters) rather than on every keystroke.
+
+    μ=0.65, σ=0.25, range 0.30–1.50.
+    """
+    return _clamped_gauss(0.65, 0.25, 0.30, 1.50)
 
 
 # ── Scroll timing ─────────────────────────────────────────────

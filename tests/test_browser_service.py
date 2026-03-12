@@ -318,8 +318,80 @@ class TestStealthConfig:
         assert opts["user_data_dir"] == "/tmp/profile"
         assert "proxy" not in opts
 
+    def test_default_os_is_windows(self):
+        """Default OS fingerprint must be windows, not linux."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["os"] == "windows"
+
+    def test_os_override_via_env(self):
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {"BROWSER_OS": "macos"}):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["os"] == "macos"
+
+    def test_invalid_os_falls_back_to_windows(self):
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {"BROWSER_OS": "solaris"}):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["os"] == "windows"
+
+    def test_locale_and_timezone_set(self):
+        from src.browser.stealth import build_launch_options
+        env = {"BROWSER_LOCALE": "de-DE", "BROWSER_TIMEZONE": "Europe/Berlin"}
+        with patch.dict("os.environ", env):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["locale"] == "de-DE"
+
+    def test_webrtc_disabled_in_prefs(self):
+        """WebRTC must be disabled to prevent container IP leak."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        prefs = opts["firefox_user_prefs"]
+        assert prefs["media.peerconnection.enabled"] is False
+        assert prefs["media.peerconnection.turn.disable"] is True
+
+    def test_rfp_is_off(self):
+        """privacy.resistFingerprinting must be False — RFP values are detectable."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["firefox_user_prefs"]["privacy.resistFingerprinting"] is False
+
+    def test_disk_cache_enabled(self):
+        """Real browsers have disk cache — missing cache is a bot signal."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        prefs = opts["firefox_user_prefs"]
+        assert prefs["browser.cache.disk.enable"] is True
+        assert prefs["browser.cache.memory.enable"] is True
+
+    def test_geoip_only_with_proxy(self):
+        """GeoIP must only be enabled when a proxy is configured."""
+        from src.browser.stealth import build_launch_options
+        # No proxy — geoip should not be set
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert "geoip" not in opts
+        # With proxy — geoip should be True
+        env = {"BROWSER_PROXY_URL": "http://proxy.example.com:8080"}
+        with patch.dict("os.environ", env):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts.get("geoip") is True
+
+    def test_resolution_within_valid_range(self):
+        """Window resolution should be a realistic desktop size."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        w, h = opts["window"]
+        assert 1280 <= w <= 3840
+        assert 720 <= h <= 2160
+
     def test_build_launch_options_with_proxy(self):
-        from src.browser.stealth import build_launch_options  # noqa: F401
         env = {
             "BROWSER_PROXY_URL": "http://proxy.example.com:8080",
             "BROWSER_PROXY_USER": "user",
@@ -965,6 +1037,20 @@ class TestHumanTiming:
         alpha = [keystroke_delay("a") for _ in range(1000)]
         symbol = [keystroke_delay("@") for _ in range(1000)]
         assert sum(symbol) / len(symbol) > sum(alpha) / len(alpha)
+
+    def test_keystroke_delay_space_faster_than_alpha(self):
+        """Space should be faster than alpha (word-boundary rhythm)."""
+        from src.browser.timing import keystroke_delay
+        alpha = [keystroke_delay("a") for _ in range(1000)]
+        space = [keystroke_delay(" ") for _ in range(1000)]
+        assert sum(space) / len(space) < sum(alpha) / len(alpha)
+
+    def test_think_pause_range(self):
+        from src.browser.timing import think_pause
+        samples = [think_pause() for _ in range(1000)]
+        assert all(0.30 <= s <= 1.50 for s in samples)
+        mean = sum(samples) / len(samples)
+        assert 0.50 <= mean <= 0.80
 
     def test_scroll_pause_range(self):
         from src.browser.timing import scroll_pause
