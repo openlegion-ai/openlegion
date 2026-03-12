@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import random
 import re
 import subprocess
 import time
@@ -23,6 +24,7 @@ from src.browser.timing import (
     navigation_jitter,
     scroll_increment,
     scroll_pause,
+    think_pause,
 )
 from src.shared.utils import setup_logging
 
@@ -499,8 +501,16 @@ class BrowserManager:
         execCommand returns False on elements that don't support it (regular
         <input>/<textarea>), in which case we fall back to keyboard.type().
         keyboard.press() handles newlines and tabs as named keys.
+
+        ~5 % of characters are preceded by a think_pause (0.3–1.5 s) to
+        simulate natural composing hesitations between clauses.
         """
         for char in text:
+            # Occasional mid-typing pause — models human composing hesitations.
+            # Roughly once every 20 characters on average.
+            if random.random() < 0.05:
+                await asyncio.sleep(think_pause())
+
             if char == "\n":
                 await page.keyboard.press("Enter")
             elif char == "\t":

@@ -230,7 +230,8 @@ class TestBrowserManagerCredentialTracking:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
-        await mgr.type_text("a1", selector="input", text="hello world", is_credential=False)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            await mgr.type_text("a1", selector="input", text="hello world", is_credential=False)
         assert "hello world" not in mgr.redactor._resolved_values.get("a1", set())
 
     @pytest.mark.asyncio
@@ -246,7 +247,8 @@ class TestBrowserManagerCredentialTracking:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
-        await mgr.type_text("a1", selector="input", text="secret-password", is_credential=True)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            await mgr.type_text("a1", selector="input", text="secret-password", is_credential=True)
         assert "secret-password" in mgr.redactor._resolved_values.get("a1", set())
 
 
@@ -270,7 +272,8 @@ class TestTypeTextClearBehavior:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
-        await mgr.type_text("a1", selector="input", text="hello", clear=True)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            await mgr.type_text("a1", selector="input", text="hello", clear=True)
         mock_page.click.assert_called_once_with("input", timeout=10000)
         mock_page.keyboard.press.assert_any_call("Control+a")
         assert mock_page.evaluate.await_count == len("hello")
@@ -288,7 +291,8 @@ class TestTypeTextClearBehavior:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
-        await mgr.type_text("a1", selector="input", text="ab", clear=False)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            await mgr.type_text("a1", selector="input", text="ab", clear=False)
         mock_page.click.assert_called_once_with("input", timeout=10000)
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert "Control+a" not in press_calls
@@ -318,8 +322,80 @@ class TestStealthConfig:
         assert opts["user_data_dir"] == "/tmp/profile"
         assert "proxy" not in opts
 
+    def test_default_os_is_windows(self):
+        """Default OS fingerprint must be windows, not linux."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["os"] == "windows"
+
+    def test_os_override_via_env(self):
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {"BROWSER_OS": "macos"}):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["os"] == "macos"
+
+    def test_invalid_os_falls_back_to_windows(self):
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {"BROWSER_OS": "solaris"}):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["os"] == "windows"
+
+    def test_locale_and_timezone_set(self):
+        from src.browser.stealth import build_launch_options
+        env = {"BROWSER_LOCALE": "de-DE", "BROWSER_TIMEZONE": "Europe/Berlin"}
+        with patch.dict("os.environ", env):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["locale"] == "de-DE"
+
+    def test_webrtc_disabled_in_prefs(self):
+        """WebRTC must be disabled to prevent container IP leak."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        prefs = opts["firefox_user_prefs"]
+        assert prefs["media.peerconnection.enabled"] is False
+        assert prefs["media.peerconnection.turn.disable"] is True
+
+    def test_rfp_is_off(self):
+        """privacy.resistFingerprinting must be False — RFP values are detectable."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["firefox_user_prefs"]["privacy.resistFingerprinting"] is False
+
+    def test_disk_cache_enabled(self):
+        """Real browsers have disk cache — missing cache is a bot signal."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        prefs = opts["firefox_user_prefs"]
+        assert prefs["browser.cache.disk.enable"] is True
+        assert prefs["browser.cache.memory.enable"] is True
+
+    def test_geoip_only_with_proxy(self):
+        """GeoIP must only be enabled when a proxy is configured."""
+        from src.browser.stealth import build_launch_options
+        # No proxy — geoip should not be set
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert "geoip" not in opts
+        # With proxy — geoip should be True
+        env = {"BROWSER_PROXY_URL": "http://proxy.example.com:8080"}
+        with patch.dict("os.environ", env):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts.get("geoip") is True
+
+    def test_resolution_within_valid_range(self):
+        """Window resolution should be a realistic desktop size."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        w, h = opts["window"]
+        assert 1280 <= w <= 3840
+        assert 720 <= h <= 2160
+
     def test_build_launch_options_with_proxy(self):
-        from src.browser.stealth import build_launch_options  # noqa: F401
         env = {
             "BROWSER_PROXY_URL": "http://proxy.example.com:8080",
             "BROWSER_PROXY_USER": "user",
@@ -812,7 +888,8 @@ class TestTypeTextWithRef:
         inst.refs = {"e0": {"role": "textbox", "name": "Email"}}
         mgr._instances["a1"] = inst
 
-        result = await mgr.type_text("a1", ref="e0", text="test@example.com", clear=True)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            result = await mgr.type_text("a1", ref="e0", text="test@example.com", clear=True)
         assert result["success"] is True
         mock_locator.click.assert_called_once_with(timeout=10000)
         mock_page.keyboard.press.assert_any_call("Control+a")
@@ -834,7 +911,8 @@ class TestTypeTextWithRef:
         inst.refs = {"e0": {"role": "textbox", "name": "Email"}}
         mgr._instances["a1"] = inst
 
-        result = await mgr.type_text("a1", ref="e0", text="ab", clear=False)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            result = await mgr.type_text("a1", ref="e0", text="ab", clear=False)
         assert result["success"] is True
         mock_locator.click.assert_called_once_with(timeout=10000)
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
@@ -857,7 +935,8 @@ class TestTypeTextWithRef:
         inst.refs = {"e0": {"role": "textbox", "name": "Password"}}
         mgr._instances["a1"] = inst
 
-        await mgr.type_text("a1", ref="e0", text="secret123", is_credential=True)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            await mgr.type_text("a1", ref="e0", text="secret123", is_credential=True)
         assert "e0" in inst.credential_filled_refs
         assert "secret123" in mgr.redactor._resolved_values.get("a1", set())
 
@@ -965,6 +1044,20 @@ class TestHumanTiming:
         alpha = [keystroke_delay("a") for _ in range(1000)]
         symbol = [keystroke_delay("@") for _ in range(1000)]
         assert sum(symbol) / len(symbol) > sum(alpha) / len(alpha)
+
+    def test_keystroke_delay_space_faster_than_alpha(self):
+        """Space should be faster than alpha (word-boundary rhythm)."""
+        from src.browser.timing import keystroke_delay
+        alpha = [keystroke_delay("a") for _ in range(1000)]
+        space = [keystroke_delay(" ") for _ in range(1000)]
+        assert sum(space) / len(space) < sum(alpha) / len(alpha)
+
+    def test_think_pause_range(self):
+        from src.browser.timing import think_pause
+        samples = [think_pause() for _ in range(1000)]
+        assert all(0.30 <= s <= 1.50 for s in samples)
+        mean = sum(samples) / len(samples)
+        assert 0.50 <= mean <= 0.80
 
     def test_scroll_pause_range(self):
         from src.browser.timing import scroll_pause
@@ -1160,8 +1253,10 @@ class TestTypeWithVariance:
         async def capture_sleep(t):
             delays.append(t)
 
-        with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
-            await mgr._type_with_variance(mock_page, "Hi!")
+        # Suppress random think_pause so evaluate count is deterministic
+        with patch("src.browser.service.random.random", return_value=1.0):
+            with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
+                await mgr._type_with_variance(mock_page, "Hi!")
 
         # All 3 printable chars go through evaluate(execCommand)
         assert mock_page.evaluate.await_count == 3
@@ -1186,8 +1281,9 @@ class TestTypeWithVariance:
         # execCommand returns False (plain <input>/<textarea>)
         mock_page.evaluate = AsyncMock(return_value=False)
 
-        with patch("src.browser.service.asyncio.sleep"):
-            await mgr._type_with_variance(mock_page, "ab")
+        with patch("src.browser.service.random.random", return_value=1.0):
+            with patch("src.browser.service.asyncio.sleep"):
+                await mgr._type_with_variance(mock_page, "ab")
 
         assert mock_page.evaluate.await_count == 2
         assert mock_page.keyboard.type.await_count == 2
@@ -1206,8 +1302,9 @@ class TestTypeWithVariance:
         mock_page.keyboard.press = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=True)
 
-        with patch("src.browser.service.asyncio.sleep"):
-            await mgr._type_with_variance(mock_page, "a\nb\tc")
+        with patch("src.browser.service.random.random", return_value=1.0):
+            with patch("src.browser.service.asyncio.sleep"):
+                await mgr._type_with_variance(mock_page, "a\nb\tc")
 
         # a, b, c use execCommand; \n and \t use press
         assert mock_page.evaluate.await_count == 3
