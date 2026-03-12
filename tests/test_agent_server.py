@@ -20,9 +20,14 @@ def _make_app(workspace_dir: str | None = None) -> tuple:
     loop.agent_id = "test_agent"
     loop.role = "researcher"
     loop.state = "idle"
+    loop._excluded_tools = frozenset()
+    loop.memory = None
+    loop.mesh_client = MagicMock()
     loop.skills = MagicMock()
     loop.skills.list_skills = MagicMock(return_value=[])
     loop.skills.get_tool_definitions = MagicMock(return_value=[])
+    loop.skills.get_tool_sources = MagicMock(return_value={})
+    loop.skills.execute = AsyncMock(return_value={"ok": True})
 
     if workspace_dir:
         from src.agent.workspace import WorkspaceManager
@@ -446,3 +451,83 @@ class TestArtifactDelete:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.delete("/artifacts/file.txt")
             assert resp.status_code == 503
+
+
+class TestInvokeTool:
+    """Tests for POST /invoke — direct tool execution without LLM."""
+
+    @pytest.mark.asyncio
+    async def test_invoke_success(self):
+        app, loop = _make_app()
+        loop.skills.execute = AsyncMock(return_value={"number": 42})
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/invoke", json={"tool": "random_number", "params": {}})
+        assert resp.status_code == 200
+        assert resp.json() == {"result": {"number": 42}}
+        loop.skills.execute.assert_called_once_with(
+            "random_number", {},
+            mesh_client=loop.mesh_client,
+            workspace_manager=loop.workspace,
+            memory_store=loop.memory,
+        )
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_params(self):
+        app, loop = _make_app()
+        loop.skills.execute = AsyncMock(return_value={"sent": True})
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/invoke", json={"tool": "notify_user", "params": {"message": "hello"}}
+            )
+        assert resp.status_code == 200
+        loop.skills.execute.assert_called_once_with(
+            "notify_user", {"message": "hello"},
+            mesh_client=loop.mesh_client,
+            workspace_manager=loop.workspace,
+            memory_store=loop.memory,
+        )
+
+    @pytest.mark.asyncio
+    async def test_invoke_missing_name_returns_400(self):
+        app, _ = _make_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/invoke", json={"params": {}})
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_invoke_params_not_dict_returns_400(self):
+        app, _ = _make_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/invoke", json={"tool": "notify_user", "params": "not-a-dict"})
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_invoke_unknown_tool_returns_404(self):
+        app, loop = _make_app()
+        loop.skills.execute = AsyncMock(side_effect=ValueError("Unknown skill: missing_tool"))
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/invoke", json={"tool": "missing_tool", "params": {}})
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_invoke_excluded_tool_returns_403(self):
+        app, loop = _make_app()
+        loop._excluded_tools = frozenset({"blackboard_read"})
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/invoke", json={"tool": "blackboard_read", "params": {}})
+        assert resp.status_code == 403
+        loop.skills.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invoke_tool_runtime_error_returns_error_dict(self):
+        app, loop = _make_app()
+        loop.skills.execute = AsyncMock(side_effect=RuntimeError("tool exploded"))
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/invoke", json={"tool": "broken_tool", "params": {}})
+        assert resp.status_code == 200
+        assert "error" in resp.json()

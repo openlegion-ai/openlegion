@@ -486,7 +486,14 @@ async def set_cron(
 
         if tool_name:
             # Normalise: treat "{}" as no params (cleaner stored state)
-            params_str = tool_params.strip() if tool_params and tool_params.strip() not in ("", "{}") else None
+            raw = tool_params.strip() if tool_params else ""
+            params_str: str | None = None
+            if raw and raw != "{}":
+                try:
+                    json.loads(raw)
+                except json.JSONDecodeError:
+                    return {"error": "tool_params must be valid JSON (e.g. '{\"key\": \"value\"}')"}
+                params_str = raw
             result = await mesh_client.create_cron(
                 schedule=schedule,
                 tool_name=tool_name,

@@ -627,6 +627,108 @@ class TestEnrichedHeartbeat:
         assert rules_pos < custom_pos
 
 
+class TestToolInvoke:
+    """Tests for tool-type cron jobs — direct tool execution without LLM."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_tool_job_calls_invoke_fn_not_dispatch(self):
+        invoke = AsyncMock(return_value={"result": 42})
+        dispatch = AsyncMock(return_value="should not be called")
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch, invoke_fn=invoke,
+        )
+        job = sched.add_job(agent="test", schedule="every 1m", tool_name="random_number")
+
+        result = await sched._execute_job(job)
+        invoke.assert_called_once_with("test", "random_number", {})
+        dispatch.assert_not_called()
+        assert job.run_count == 1
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_tool_job_passes_parsed_params(self):
+        invoke = AsyncMock(return_value={"sent": True})
+        sched = CronScheduler(config_path=self.config_path, invoke_fn=invoke)
+        job = sched.add_job(
+            agent="test", schedule="every 1m",
+            tool_name="notify_user", tool_params='{"message": "hello"}',
+        )
+
+        await sched._execute_job(job)
+        invoke.assert_called_once_with("test", "notify_user", {"message": "hello"})
+
+    @pytest.mark.asyncio
+    async def test_tool_job_invalid_params_json_falls_back_to_empty_dict(self):
+        invoke = AsyncMock(return_value={"sent": True})
+        sched = CronScheduler(config_path=self.config_path, invoke_fn=invoke)
+        job = sched.add_job(
+            agent="test", schedule="every 1m",
+            tool_name="notify_user", tool_params="not-valid-json",
+        )
+
+        await sched._execute_job(job)
+        invoke.assert_called_once_with("test", "notify_user", {})
+
+    @pytest.mark.asyncio
+    async def test_tool_job_no_invoke_fn_returns_none_does_not_dispatch(self):
+        """tool_name set but invoke_fn is None → skip cleanly, never dispatch."""
+        dispatch = AsyncMock(return_value="should not be called")
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch, invoke_fn=None,
+        )
+        job = sched.add_job(agent="test", schedule="every 1m", tool_name="some_tool")
+
+        result = await sched._execute_job(job)
+        assert result is None
+        dispatch.assert_not_called()
+        assert job.run_count == 1
+
+    @pytest.mark.asyncio
+    async def test_tool_job_invoke_error_increments_error_count(self):
+        invoke = AsyncMock(side_effect=RuntimeError("tool failed"))
+        sched = CronScheduler(config_path=self.config_path, invoke_fn=invoke)
+        job = sched.add_job(agent="test", schedule="every 1m", tool_name="broken_tool")
+
+        result = await sched._execute_job(job)
+        assert result is None
+        assert job.error_count == 1
+
+    def test_tool_job_persists_and_reloads(self):
+        sched = CronScheduler(config_path=self.config_path)
+        sched.add_job(
+            agent="test", schedule="every 5m",
+            tool_name="notify_user", tool_params='{"message": "ping"}',
+        )
+
+        sched2 = CronScheduler(config_path=self.config_path)
+        loaded = list(sched2.jobs.values())[0]
+        assert loaded.tool_name == "notify_user"
+        assert loaded.tool_params == '{"message": "ping"}'
+        assert loaded.message == ""
+
+    @pytest.mark.asyncio
+    async def test_update_job_tool_params(self):
+        sched = CronScheduler(config_path=self.config_path)
+        job = sched.add_job(
+            agent="test", schedule="every 5m",
+            tool_name="notify_user", tool_params='{"message": "old"}',
+        )
+
+        updated = await sched.update_job(job.id, tool_params='{"message": "new"}')
+        assert updated is not None
+        assert updated.tool_params == '{"message": "new"}'
+
+        sched2 = CronScheduler(config_path=self.config_path)
+        assert list(sched2.jobs.values())[0].tool_params == '{"message": "new"}'
+
+
 class TestComputeNextRun:
     """Tests for CronScheduler._compute_next_run."""
 

@@ -829,6 +829,11 @@ def create_mesh_app(
             raise HTTPException(400, "agent_id and schedule are required")
         if tool_name and message:
             raise HTTPException(400, "tool_name and message are mutually exclusive — use one or the other")
+        if tool_params:
+            try:
+                json.loads(tool_params)
+            except (json.JSONDecodeError, TypeError):
+                raise HTTPException(400, "tool_params must be a valid JSON string (e.g. '{\"key\": \"value\"}')")
         try:
             job = cron_scheduler.add_job(
                 agent=agent_id, schedule=schedule, message=message, heartbeat=heartbeat,

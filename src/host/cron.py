@@ -1,7 +1,8 @@
 """Cron scheduler for autonomous agent triggering.
 
 Runs in the mesh host (not agent containers) so schedules survive
-container restarts. Dispatches messages to agents via POST /chat.
+container restarts. Dispatches messages to agents via POST /chat or
+invokes tools directly via POST /invoke (no LLM involved).
 
 Supports:
   - Standard 5-field cron expressions: "0 9 * * 1-5"
@@ -196,7 +197,12 @@ class CronScheduler:
         self._compute_next_run(job)
         self.jobs[job.id] = job
         self._save()
-        kind = "heartbeat" if heartbeat else "cron"
+        if heartbeat:
+            kind = "heartbeat"
+        elif tool_name:
+            kind = "tool"
+        else:
+            kind = "message"
         logger.info(f"Added {kind} job {job.id}: agent={agent} schedule={schedule}")
         return job
 
@@ -313,7 +319,13 @@ class CronScheduler:
                     )
 
                 response = None
-                if job.tool_name and self.invoke_fn:
+                if job.tool_name:
+                    if not self.invoke_fn:
+                        logger.error(
+                            "Cron %s: tool '%s' configured but no invoke_fn available — skipping",
+                            job.id, job.tool_name,
+                        )
+                        return None
                     params: dict = {}
                     if job.tool_params:
                         try:

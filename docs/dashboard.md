@@ -91,9 +91,9 @@ Click the **Restart** button on any agent card. A confirmation dialog prevents a
 
 From the agent detail view (click an agent in Agents), budget bars show current daily and monthly usage. Budget can also be updated via the Fleet tab edit form.
 
-## Agent Identity Panel
+## Agent Settings Panel
 
-The agent detail view features a tabbed **Agent Identity** panel for viewing and editing an agent's identity, instructions, and behavioral context. The panel appears above the spend and budget sidebar since identity is the primary concern when drilling into an agent.
+The agent detail view features a tabbed **Agent Settings** panel for viewing and editing an agent's identity, instructions, and behavioral context. The panel appears above the spend and budget sidebar since identity is the primary concern when drilling into an agent.
 
 ### Tabs
 
@@ -110,7 +110,7 @@ Each file card shows an access badge: **Shared** (teal) for files both you and t
 ### Usage
 
 1. Click an agent card to open the detail view
-2. The **Agent Identity** panel shows 5 tabs — Identity is selected by default
+2. The **Agent Settings** panel shows 5 tabs — Identity is selected by default
 3. File cards with default/scaffold content show a "default" pill and a "Customize" button with a friendly prompt
 4. Once customized, a description subtitle and character budget bar appear (indigo → amber at 80% → red at 95%)
 5. Click **Edit** (or **Customize** for default files) to open the inline editor

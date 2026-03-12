@@ -5,7 +5,8 @@ Exposes endpoints for the mesh/orchestrator to interact with:
   POST /cancel   - cancel current task
   GET  /status   - agent health check
   GET  /result   - last task result
-  GET  /capabilities - list available skills
+  GET  /capabilities - list available skills and tool definitions
+  POST /invoke   - execute a named tool directly (no LLM)
   GET  /workspace - list workspace files
   GET  /workspace/{filename} - read workspace file
   PUT  /workspace/{filename} - write workspace file
@@ -139,12 +140,11 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
         if not name:
             raise HTTPException(400, "tool name is required")
+        if not isinstance(params, dict):
+            raise HTTPException(400, "params must be a JSON object")
         excluded = loop._excluded_tools or frozenset()
         if name in excluded:
             raise HTTPException(403, f"Tool '{name}' is not available to this agent")
-        if name not in loop.skills.skills:
-            if not (getattr(loop.skills, "_mcp_client", None) and loop.skills._mcp_client.has_tool(name)):
-                raise HTTPException(404, f"Unknown tool: '{name}'")
 
         try:
             result = await loop.skills.execute(
@@ -154,6 +154,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
                 memory_store=loop.memory,
             )
             return {"result": result}
+        except ValueError as e:
+            raise HTTPException(404, str(e))
         except Exception as e:
             logger.warning("invoke_tool '%s' failed: %s", name, e)
             return {"error": str(e)}

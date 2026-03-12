@@ -153,7 +153,7 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
 7. **Multi-channel** — connect agents to Telegram, Discord, Slack, and WhatsApp. Also accessible via CLI and API.
 
-8. **Real-time dashboard** — web-based fleet observability with consolidated navigation, slide-over chat panels, keyboard command palette, grouped request traces, live event streaming, streaming broadcast with real-time per-agent responses, LLM prompt/response previews, agent management, agent identity editor (personality, instructions, preferences, heartbeat rules, memory, activity logs, learnings), cost charts, cron management, and embedded KasmVNC viewer for persistent browser agents.
+8. **Real-time dashboard** — web-based fleet observability with consolidated navigation, slide-over chat panels, keyboard command palette, grouped request traces, live event streaming, streaming broadcast with real-time per-agent responses, LLM prompt/response previews, agent management, agent settings editor (personality, instructions, preferences, heartbeat rules, memory, activity logs, learnings), cost charts, cron management, and embedded KasmVNC viewer for persistent browser agents.
 
 9. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly budget enforcement.
 
