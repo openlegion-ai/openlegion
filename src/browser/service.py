@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import random
 import re
 import subprocess
 import time
@@ -504,11 +505,10 @@ class BrowserManager:
         ~5 % of characters are preceded by a think_pause (0.3–1.5 s) to
         simulate natural composing hesitations between clauses.
         """
-        import random as _random
         for char in text:
             # Occasional mid-typing pause — models human composing hesitations.
             # Roughly once every 20 characters on average.
-            if _random.random() < 0.05:
+            if random.random() < 0.05:
                 await asyncio.sleep(think_pause())
 
             if char == "\n":

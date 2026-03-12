@@ -230,7 +230,8 @@ class TestBrowserManagerCredentialTracking:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
-        await mgr.type_text("a1", selector="input", text="hello world", is_credential=False)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            await mgr.type_text("a1", selector="input", text="hello world", is_credential=False)
         assert "hello world" not in mgr.redactor._resolved_values.get("a1", set())
 
     @pytest.mark.asyncio
@@ -246,7 +247,8 @@ class TestBrowserManagerCredentialTracking:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
-        await mgr.type_text("a1", selector="input", text="secret-password", is_credential=True)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            await mgr.type_text("a1", selector="input", text="secret-password", is_credential=True)
         assert "secret-password" in mgr.redactor._resolved_values.get("a1", set())
 
 
@@ -270,7 +272,8 @@ class TestTypeTextClearBehavior:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
-        await mgr.type_text("a1", selector="input", text="hello", clear=True)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            await mgr.type_text("a1", selector="input", text="hello", clear=True)
         mock_page.click.assert_called_once_with("input", timeout=10000)
         mock_page.keyboard.press.assert_any_call("Control+a")
         assert mock_page.evaluate.await_count == len("hello")
@@ -288,7 +291,8 @@ class TestTypeTextClearBehavior:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
-        await mgr.type_text("a1", selector="input", text="ab", clear=False)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            await mgr.type_text("a1", selector="input", text="ab", clear=False)
         mock_page.click.assert_called_once_with("input", timeout=10000)
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert "Control+a" not in press_calls
@@ -884,7 +888,8 @@ class TestTypeTextWithRef:
         inst.refs = {"e0": {"role": "textbox", "name": "Email"}}
         mgr._instances["a1"] = inst
 
-        result = await mgr.type_text("a1", ref="e0", text="test@example.com", clear=True)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            result = await mgr.type_text("a1", ref="e0", text="test@example.com", clear=True)
         assert result["success"] is True
         mock_locator.click.assert_called_once_with(timeout=10000)
         mock_page.keyboard.press.assert_any_call("Control+a")
@@ -906,7 +911,8 @@ class TestTypeTextWithRef:
         inst.refs = {"e0": {"role": "textbox", "name": "Email"}}
         mgr._instances["a1"] = inst
 
-        result = await mgr.type_text("a1", ref="e0", text="ab", clear=False)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            result = await mgr.type_text("a1", ref="e0", text="ab", clear=False)
         assert result["success"] is True
         mock_locator.click.assert_called_once_with(timeout=10000)
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
@@ -929,7 +935,8 @@ class TestTypeTextWithRef:
         inst.refs = {"e0": {"role": "textbox", "name": "Password"}}
         mgr._instances["a1"] = inst
 
-        await mgr.type_text("a1", ref="e0", text="secret123", is_credential=True)
+        with patch("src.browser.service.random.random", return_value=1.0):
+            await mgr.type_text("a1", ref="e0", text="secret123", is_credential=True)
         assert "e0" in inst.credential_filled_refs
         assert "secret123" in mgr.redactor._resolved_values.get("a1", set())
 
@@ -1246,8 +1253,10 @@ class TestTypeWithVariance:
         async def capture_sleep(t):
             delays.append(t)
 
-        with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
-            await mgr._type_with_variance(mock_page, "Hi!")
+        # Suppress random think_pause so evaluate count is deterministic
+        with patch("src.browser.service.random.random", return_value=1.0):
+            with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
+                await mgr._type_with_variance(mock_page, "Hi!")
 
         # All 3 printable chars go through evaluate(execCommand)
         assert mock_page.evaluate.await_count == 3
@@ -1272,8 +1281,9 @@ class TestTypeWithVariance:
         # execCommand returns False (plain <input>/<textarea>)
         mock_page.evaluate = AsyncMock(return_value=False)
 
-        with patch("src.browser.service.asyncio.sleep"):
-            await mgr._type_with_variance(mock_page, "ab")
+        with patch("src.browser.service.random.random", return_value=1.0):
+            with patch("src.browser.service.asyncio.sleep"):
+                await mgr._type_with_variance(mock_page, "ab")
 
         assert mock_page.evaluate.await_count == 2
         assert mock_page.keyboard.type.await_count == 2
@@ -1292,8 +1302,9 @@ class TestTypeWithVariance:
         mock_page.keyboard.press = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=True)
 
-        with patch("src.browser.service.asyncio.sleep"):
-            await mgr._type_with_variance(mock_page, "a\nb\tc")
+        with patch("src.browser.service.random.random", return_value=1.0):
+            with patch("src.browser.service.asyncio.sleep"):
+                await mgr._type_with_variance(mock_page, "a\nb\tc")
 
         # a, b, c use execCommand; \n and \t use press
         assert mock_page.evaluate.await_count == 3

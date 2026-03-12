@@ -136,6 +136,7 @@ def build_launch_options(agent_id: str, profile_dir: str) -> dict:
         "humanize": True,        # Camoufox mouse-curves + micro-delays
         "os": os_hint,
         "locale": locale,        # navigator.language / Accept-Language header
+        "timezone": timezone,    # Intl.DateTimeFormat default timezone
         "window": resolution,
     }
 
