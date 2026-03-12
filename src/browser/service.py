@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
+import subprocess
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -223,12 +224,32 @@ class BrowserManager:
 
         Auto-starts the browser if it isn't running yet, so the user
         always sees a window when they click "Browser" in the dashboard.
+
+        Two-layer raise:
+        1. bring_to_front() — browser-protocol level (activates the tab)
+        2. xdotool windowmap + windowraise — X11 level (unmaps if iconic,
+           then raises in the stacking order so VNC actually sees it)
         """
         inst = await self.get_or_start(agent_id)
         async with inst.lock:
             try:
                 await inst.page.bring_to_front()
                 inst.touch()
+                # Raise at the X11 window-manager level. bring_to_front()
+                # only works at the browser-protocol layer; on X11 with
+                # Openbox the OS window can still be below the root window
+                # (e.g. after a popup closes without returning focus).
+                # windowmap handles the minimised/iconic case; windowraise
+                # moves it to the top of the stacking order.
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: subprocess.run(
+                        ["xdotool", "search", "--class", "firefox",
+                         "windowmap", "--sync", "windowraise", "windowfocus"],
+                        capture_output=True, timeout=3,
+                    ),
+                )
                 return True
             except Exception as e:
                 logger.debug("Focus failed for '%s': %s", agent_id, e)
