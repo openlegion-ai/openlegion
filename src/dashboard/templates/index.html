@@ -1376,16 +1376,49 @@
                   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                   Browser
                 </button>
-                <span class="w-px h-5 bg-gray-700/60"></span>
-                <button @click="restartAgent(selectedAgent)" :disabled="_restartingAgents[selectedAgent] === true" class="action-btn action-btn-warn px-3 py-1.5 disabled:opacity-50">
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-                  Restart
-                </button>
-                <button @click="resetAgent(selectedAgent)" class="action-btn action-btn-danger px-3 py-1.5"
-                  title="Start a fresh conversation. Key memories are preserved.">
-                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/></svg>
-                  Reset Conversation
-                </button>
+                <!-- Agent actions dropdown -->
+                <div class="relative" x-data="{ _menuOpen: false }">
+                  <button @click="_menuOpen = !_menuOpen"
+                    class="action-btn action-btn-warn px-2.5 py-1.5"
+                    :class="_menuOpen && 'bg-gray-800/60 text-gray-300'"
+                    aria-label="Agent actions" title="Agent actions">
+                    <svg width="14" height="14" fill="currentColor" viewBox="0 0 20 20"><circle cx="10" cy="4" r="1.5"/><circle cx="10" cy="10" r="1.5"/><circle cx="10" cy="16" r="1.5"/></svg>
+                  </button>
+                  <div x-show="_menuOpen" x-cloak
+                    @click.outside="_menuOpen = false"
+                    @keydown.escape.window="_menuOpen = false"
+                    class="absolute right-0 top-full mt-1.5 w-56 rounded-xl bg-gray-900 border border-gray-800 shadow-2xl z-30 py-1.5 overflow-hidden">
+                    <!-- Reset Conversation -->
+                    <button @click="_menuOpen = false; resetAgent(selectedAgent)"
+                      class="w-full flex items-start gap-3 px-3.5 py-2.5 text-left hover:bg-gray-800/70 transition-colors group">
+                      <svg class="w-3.5 h-3.5 mt-0.5 shrink-0 text-gray-500 group-hover:text-gray-300 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                      <div>
+                        <div class="text-xs font-medium text-gray-200">Reset Conversation</div>
+                        <div class="text-[11px] text-gray-500 mt-0.5">Clears chat history, keeps memories &amp; skills</div>
+                      </div>
+                    </button>
+                    <!-- Restart Agent -->
+                    <button @click="_menuOpen = false; restartAgent(selectedAgent)"
+                      :disabled="_restartingAgents[selectedAgent] === true"
+                      class="w-full flex items-start gap-3 px-3.5 py-2.5 text-left hover:bg-gray-800/70 transition-colors group disabled:opacity-40 disabled:cursor-default">
+                      <svg class="w-3.5 h-3.5 mt-0.5 shrink-0 text-gray-500 group-hover:text-gray-300 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                      <div>
+                        <div class="text-xs font-medium text-gray-200">Restart Agent</div>
+                        <div class="text-[11px] text-gray-500 mt-0.5">Restarts the container process</div>
+                      </div>
+                    </button>
+                    <div class="border-t border-gray-800/70 my-1"></div>
+                    <!-- Delete Agent -->
+                    <button @click="_menuOpen = false; removeAgent(selectedAgent)"
+                      class="w-full flex items-start gap-3 px-3.5 py-2.5 text-left hover:bg-red-900/20 transition-colors group">
+                      <svg class="w-3.5 h-3.5 mt-0.5 shrink-0 text-red-500/60 group-hover:text-red-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+                      <div>
+                        <div class="text-xs font-medium text-red-400">Delete Agent</div>
+                        <div class="text-[11px] text-red-500/50 mt-0.5">Permanently removes agent and config</div>
+                      </div>
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
             <!-- Inline KasmVNC Browser Viewer -->
@@ -1820,19 +1853,6 @@
                           <button @click="cancelConfigEdit()" :disabled="configSaving"
                             class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors disabled:opacity-50">Cancel</button>
                         </div>
-                      </div>
-                    </div>
-                    <!-- Danger zone (hidden while config is loading) -->
-                    <div x-show="agentConfigs[selectedAgent]" class="mt-6 pt-4 border-t border-gray-800/60">
-                      <div class="flex items-center justify-between">
-                        <div>
-                          <div class="text-xs text-gray-500">Remove Agent</div>
-                          <div class="text-[11px] text-gray-600">Stop container and delete config. This cannot be undone.</div>
-                        </div>
-                        <button @click="removeAgent(selectedAgent)"
-                          class="text-xs px-3 py-1.5 rounded bg-red-900/30 hover:bg-red-900/60 text-red-400 hover:text-red-300 border border-red-900/40 hover:border-red-800/50 transition-colors">
-                          Remove
-                        </button>
                       </div>
                     </div>
                   </div>

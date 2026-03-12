@@ -2184,7 +2184,7 @@ function dashboard() {
     },
 
     async removeAgent(agentId) {
-      this.showConfirm('Remove Agent', `Remove agent "${agentId}"? This will stop the container and remove its config.`, async () => {
+      this.showConfirm('Delete Agent', `Delete agent "${agentId}"? This will stop the container and permanently remove its config.`, async () => {
         try {
           const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}`, { method: 'DELETE' });
           if (resp.ok) {
