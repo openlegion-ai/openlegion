@@ -215,7 +215,11 @@ function dashboard() {
     // System tab — collapsible infrastructure
     systemInfraExpanded: false,
 
-    // PROJECT.md banner on Agents tab
+    // Unified Project Hub (replaces separate PROJECT.md + Comms + Broadcast panels)
+    projectHubExpanded: false,
+    projectHubTab: 'docs',  // 'docs' | 'activity' | 'state' | 'artifacts' | 'broadcast'
+
+    // PROJECT.md banner on Agents tab (kept for backward compat, not used by template)
     projectBannerExpanded: false,
 
     // Credentials
@@ -1386,6 +1390,8 @@ function dashboard() {
       this.projectEditing = false;
       this.projectEditBuffer = '';
       this.projectBannerExpanded = false;
+      this.projectHubExpanded = false;
+      this.projectHubTab = 'docs';
       this.showProjectForm = false;
       this.commsView = 'activity';
       this.commsExpanded = false;
@@ -2979,8 +2985,8 @@ function dashboard() {
       // Quick actions
       const actions = [
         { label: 'Add Agent', desc: 'Open add agent form', keywords: ['add', 'agent', 'new', 'create'], action: () => { this.switchTab('fleet'); this.openAddAgentModal(); } },
-        { label: 'Broadcast', desc: this.activeProject ? `Broadcast to ${this.activeProject} agents` : (this.projects.length > 0 ? 'Broadcast to standalone agents' : 'Send message to all agents'), keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); this.$nextTick(() => document.getElementById('broadcast-input')?.focus()); } },
-        ...(this.activeProject ? [{ label: 'Edit PROJECT.md', desc: `Edit ${this.activeProject} project context`, keywords: ['project', 'edit', 'context'], action: () => { this.switchTab('fleet'); this.projectBannerExpanded = true; this.startProjectEdit(); } }] : []),
+        { label: 'Broadcast', desc: this.activeProject ? `Broadcast to ${this.activeProject} agents` : (this.projects.length > 0 ? 'Broadcast to standalone agents' : 'Send message to all agents'), keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); if (this.activeProject) { this.projectHubExpanded = true; this.projectHubTab = 'broadcast'; this.$nextTick(() => document.getElementById('broadcast-input')?.focus()); } else { this.$nextTick(() => document.getElementById('broadcast-standalone-input')?.focus()); } } },
+        ...(this.activeProject ? [{ label: 'Edit PROJECT.md', desc: `Edit ${this.activeProject} project context`, keywords: ['project', 'edit', 'context'], action: () => { this.switchTab('fleet'); this.projectHubExpanded = true; this.projectHubTab = 'docs'; this.$nextTick(() => this.startProjectEdit()); } }] : []),
       ];
       for (const act of actions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {

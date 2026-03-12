@@ -990,6 +990,52 @@ select:focus-visible,
   }
 }
 
+/* ── Project tabs — horizontally scrollable strip ─── */
+
+.project-tabs-scroll {
+  display: flex;
+  gap: 2px;
+  background: rgba(31, 31, 58, 0.4);
+  border-radius: 0.5rem;
+  padding: 2px;
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.project-tabs-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* Prevent flex children from compressing below their natural size */
+.project-tabs-scroll > * {
+  flex-shrink: 0;
+}
+
+/* ── Project Hub mobile tab strip ────────────────── */
+
+.project-hub-tabs {
+  /* Border is rendered by the individual tab buttons (border-b-2),
+     not the strip itself — avoids the -mb-px gap artifact. */
+  display: flex;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  /* Hairline separator below the whole strip */
+  border-bottom: 1px solid rgba(31, 31, 47, 0.6);
+}
+
+.project-hub-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.project-hub-tabs > button {
+  flex-shrink: 0;
+  /* Stack the button's own bottom border above the strip border */
+  margin-bottom: -1px;
+}
+
 /* ── Mobile responsiveness ───────────────────────── */
 
 /* Prevent horizontal overflow from any element.
