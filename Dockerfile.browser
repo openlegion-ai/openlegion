@@ -50,12 +50,31 @@ RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 RUN mkdir -p /data/profiles && chown -R browser:browser /data
 VOLUME /data
 
-# Openbox config: single desktop, no scroll-to-switch, no decorations
+# Openbox config:
+#   - focusLast: when a popup/child window closes, return focus to Firefox
+#     (without this, Openbox falls back to the root window = blue background)
+#   - empty <keyboard>: disable all default Openbox keybindings so VNC
+#     keyboard input (Super+D, A-F4, etc.) never accidentally minimises/closes
+#     the browser window
+#   - focusNew + focus=yes: every new window (OAuth redirect, dialog) is
+#     immediately focused and maximised
 RUN mkdir -p /home/browser/.config/openbox \
     && printf '<?xml version="1.0" encoding="UTF-8"?>\n\
 <openbox_config xmlns="http://openbox.org/3.4/rc">\n\
   <desktops><number>1</number></desktops>\n\
-  <applications><application class="*"><decor>no</decor><maximized>true</maximized></application></applications>\n\
+  <focus>\n\
+    <focusNew>yes</focusNew>\n\
+    <followMouse>no</followMouse>\n\
+    <focusLast>yes</focusLast>\n\
+  </focus>\n\
+  <keyboard></keyboard>\n\
+  <applications>\n\
+    <application class="*">\n\
+      <decor>no</decor>\n\
+      <maximized>true</maximized>\n\
+      <focus>yes</focus>\n\
+    </application>\n\
+  </applications>\n\
 </openbox_config>\n' > /home/browser/.config/openbox/rc.xml \
     && chown -R browser:browser /home/browser/.config
 
