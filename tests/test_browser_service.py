@@ -223,8 +223,10 @@ class TestBrowserManagerCredentialTracking:
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
-        mock_page = MagicMock()
-        mock_page.fill = AsyncMock()
+        mock_page = AsyncMock()
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+        mock_page.keyboard.type = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
@@ -237,8 +239,10 @@ class TestBrowserManagerCredentialTracking:
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
-        mock_page = MagicMock()
-        mock_page.fill = AsyncMock()
+        mock_page = AsyncMock()
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+        mock_page.keyboard.type = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
@@ -250,35 +254,45 @@ class TestTypeTextClearBehavior:
     """Tests for type_text clear parameter."""
 
     @pytest.mark.asyncio
-    async def test_clear_true_uses_fill(self):
-        """clear=True (default) should use fill() which replaces content."""
-        from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+    async def test_clear_true_clicks_selects_all_then_types(self):
+        """clear=True should click, Ctrl+A to select all, then type char-by-char.
 
-        mock_page = MagicMock()
-        mock_page.fill = AsyncMock()
-        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        mgr._instances["a1"] = inst
-
-        await mgr.type_text("a1", selector="input", text="hello", clear=True)
-        mock_page.fill.assert_called_once_with("input", "hello")
-
-    @pytest.mark.asyncio
-    async def test_clear_false_uses_type_with_variance(self):
-        """clear=False should click then type char-by-char with variance."""
+        Must NOT use fill() — fill() is atomic and bypasses the keyboard event
+        chain that React/Vue controlled components rely on to update state.
+        """
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
         mock_page = AsyncMock()
-        mock_page.click = AsyncMock()
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
+        mock_page.keyboard.type = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        await mgr.type_text("a1", selector="input", text="hello", clear=True)
+        mock_page.click.assert_called_once_with("input", timeout=5000)
+        mock_page.keyboard.press.assert_any_call("Control+a")
+        assert mock_page.keyboard.type.await_count == len("hello")
+
+    @pytest.mark.asyncio
+    async def test_clear_false_types_without_select_all(self):
+        """clear=False should click then type char-by-char without Ctrl+A."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+        mock_page.keyboard.type = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
         await mgr.type_text("a1", selector="input", text="ab", clear=False)
         mock_page.click.assert_called_once_with("input", timeout=5000)
-        assert mock_page.keyboard.press.await_count == 2
+        press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
+        assert "Control+a" not in press_calls
+        assert mock_page.keyboard.type.await_count == 2
 
 
 class TestCamoufoxInstanceLock:
@@ -788,16 +802,21 @@ class TestTypeTextWithRef:
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
         mock_page = MagicMock()
-        mock_locator = MagicMock()
-        mock_locator.fill = AsyncMock()
+        mock_locator = AsyncMock()
+        mock_locator.click = AsyncMock()
         mock_page.get_by_role.return_value = mock_locator
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+        mock_page.keyboard.type = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.refs = {"e0": {"role": "textbox", "name": "Email"}}
         mgr._instances["a1"] = inst
 
         result = await mgr.type_text("a1", ref="e0", text="test@example.com", clear=True)
         assert result["success"] is True
-        mock_locator.fill.assert_called_once_with("test@example.com")
+        mock_locator.click.assert_called_once_with(timeout=5000)
+        mock_page.keyboard.press.assert_any_call("Control+a")
+        assert mock_page.keyboard.type.await_count == len("test@example.com")
 
     @pytest.mark.asyncio
     async def test_type_by_ref_no_clear(self):
@@ -810,6 +829,7 @@ class TestTypeTextWithRef:
         mock_page.get_by_role.return_value = mock_locator
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
+        mock_page.keyboard.type = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.refs = {"e0": {"role": "textbox", "name": "Email"}}
         mgr._instances["a1"] = inst
@@ -817,7 +837,9 @@ class TestTypeTextWithRef:
         result = await mgr.type_text("a1", ref="e0", text="ab", clear=False)
         assert result["success"] is True
         mock_locator.click.assert_called_once_with(timeout=5000)
-        assert mock_page.keyboard.press.await_count == 2
+        press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
+        assert "Control+a" not in press_calls
+        assert mock_page.keyboard.type.await_count == 2
 
     @pytest.mark.asyncio
     async def test_type_by_ref_credential_tracks_ref(self):
@@ -825,9 +847,12 @@ class TestTypeTextWithRef:
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
         mock_page = MagicMock()
-        mock_locator = MagicMock()
-        mock_locator.fill = AsyncMock()
+        mock_locator = AsyncMock()
+        mock_locator.click = AsyncMock()
         mock_page.get_by_role.return_value = mock_locator
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+        mock_page.keyboard.type = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.refs = {"e0": {"role": "textbox", "name": "Password"}}
         mgr._instances["a1"] = inst
@@ -1115,7 +1140,7 @@ class TestClickRandomDelay:
 
 
 class TestTypeWithVariance:
-    """Verify per-char keyboard.press calls with varying delays."""
+    """Verify per-char keyboard.type calls with varying delays."""
 
     @pytest.mark.asyncio
     async def test_type_with_variance_calls_per_char(self):
@@ -1124,6 +1149,7 @@ class TestTypeWithVariance:
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
         mock_page = AsyncMock()
         mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.type = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
 
         delays = []
@@ -1134,9 +1160,31 @@ class TestTypeWithVariance:
         with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
             await mgr._type_with_variance(mock_page, "Hi!")
 
-        # 3 chars → 3 press calls, 3 sleep calls
-        assert mock_page.keyboard.press.await_count == 3
-        chars_pressed = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
-        assert chars_pressed == ["H", "i", "!"]
+        # H, i, ! are all printable — use keyboard.type, not press
+        assert mock_page.keyboard.type.await_count == 3
+        assert mock_page.keyboard.press.await_count == 0
+        chars_typed = [c[0][0] for c in mock_page.keyboard.type.call_args_list]
+        assert chars_typed == ["H", "i", "!"]
         assert len(delays) == 3
         assert all(0.04 <= d <= 0.20 for d in delays)
+
+    @pytest.mark.asyncio
+    async def test_type_with_variance_handles_special_keys(self):
+        """\\n and \\t should use keyboard.press, not keyboard.type."""
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.type = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+
+        with patch("src.browser.service.asyncio.sleep"):
+            await mgr._type_with_variance(mock_page, "a\nb\tc")
+
+        # a, b, c use type; \n and \t use press
+        assert mock_page.keyboard.type.await_count == 3
+        assert mock_page.keyboard.press.await_count == 2
+        press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
+        assert "Enter" in press_calls
+        assert "Tab" in press_calls
