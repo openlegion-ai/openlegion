@@ -173,11 +173,11 @@ def create_dashboard_router(
             # Route through /vnc/ path — proxy must forward to the VNC port
             scheme = forwarded_proto
             host = request.headers.get("host", "127.0.0.1:8420")
-            return f"{scheme}://{host}/vnc/index.html?autoconnect=true&path=vnc/websockify&resize=scale&quality=7&enable_perf_stats=0"
+            return f"{scheme}://{host}/vnc/index.html?autoconnect=true&reconnect=true&reconnect_delay=2000&path=vnc/websockify&resize=scale&quality=7&enable_perf_stats=0"
 
         # Direct access (local dev) — route through mesh proxy
         host = request.headers.get("host", "127.0.0.1:8420")
-        return f"http://{host}/vnc/index.html?autoconnect=true&path=vnc/websockify&resize=scale&quality=7&enable_perf_stats=0"
+        return f"http://{host}/vnc/index.html?autoconnect=true&reconnect=true&reconnect_delay=2000&path=vnc/websockify&resize=scale&quality=7&enable_perf_stats=0"
 
     # ── Fleet overview ───────────────────────────────────────
 
