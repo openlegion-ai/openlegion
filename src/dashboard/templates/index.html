@@ -256,9 +256,10 @@
       <!-- Fleet Overview (merged: Fleet + Agents + Queues) -->
       <div x-show="activeTab === 'fleet' && !detailAgent" x-cloak>
         <!-- Project switcher + Add Agent row -->
-        <div x-show="agents.length > 0" class="flex flex-wrap items-center justify-between gap-3 mb-3" x-cloak>
-          <div class="flex items-center gap-2">
-            <div x-show="projects.length > 0" class="flex gap-0.5 bg-gray-800/40 rounded-lg p-0.5 w-fit">
+        <div x-show="agents.length > 0" class="flex items-center gap-2 mb-3 min-w-0" x-cloak>
+          <div class="flex items-center gap-2 flex-1 min-w-0 overflow-hidden">
+            <!-- Scrollable project tabs -->
+            <div x-show="projects.length > 0" class="project-tabs-scroll">
               <button @click="switchProject(null)"
                 class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
                 :class="!activeProject
@@ -283,14 +284,14 @@
                 </button>
               </template>
             </div>
-            <div class="relative group/proj">
+            <div class="relative group/proj flex-shrink-0">
               <button @click="openProjectModal()"
                 :disabled="atProjectLimit"
                 :class="atProjectLimit ? 'opacity-50 cursor-not-allowed' : ''"
-                class="px-2.5 py-1 rounded-md text-xs text-gray-500 hover:text-white hover:bg-gray-700 transition-colors flex items-center gap-1"
+                class="px-2.5 py-1 rounded-md text-xs text-gray-500 hover:text-white hover:bg-gray-700 transition-colors flex items-center gap-1 whitespace-nowrap"
                 :title="atProjectLimit ? '' : 'Create project'">
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                New Project
+                New
               </button>
               <div x-show="atProjectLimit" x-cloak
                 class="hidden group-hover/proj:block absolute top-full mt-1.5 left-0 z-50 w-52 px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 shadow-xl text-xs text-gray-300 whitespace-normal pointer-events-none">
@@ -300,9 +301,9 @@
               </div>
             </div>
           </div>
-          <div class="relative group/agent">
+          <div class="relative group/agent flex-shrink-0">
             <button @click="openAddAgentModal()"
-              class="text-xs px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5"
+              class="text-xs px-3 py-1.5 rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
               :class="atAgentLimit
                 ? 'bg-gray-800 text-gray-400 opacity-50 cursor-not-allowed'
                 : addAgentMode ? 'bg-indigo-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white'"
@@ -321,19 +322,19 @@
           </div>
         </div>
         <!-- Fleet summary bar -->
-        <div class="flex items-center justify-between mb-4" x-show="filteredAgents.length > 0" x-cloak>
-          <h2 class="text-sm font-medium text-gray-400 flex items-center gap-1.5">
-            <svg class="w-4 h-4 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        <div class="flex items-center justify-between mb-4 gap-2 min-w-0" x-show="filteredAgents.length > 0" x-cloak>
+          <h2 class="text-sm font-medium text-gray-400 flex items-center gap-1 sm:gap-1.5 flex-wrap min-w-0">
+            <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
             <span x-text="filteredAgents.length"></span><template x-if="maxAgents > 0"><span class="text-gray-600">/<span x-text="maxAgents"></span></span></template> agent<span x-show="filteredAgents.length !== 1">s</span>
-            <span class="text-gray-600 mx-0.5">&middot;</span>
-            <span x-text="formatCost(filteredFleetCost)"></span> today
-            <span class="text-gray-600 mx-0.5">&middot;</span>
+            <span class="text-gray-600 mx-0.5 hidden sm:inline">&middot;</span>
+            <span class="hidden sm:inline" x-text="formatCost(filteredFleetCost)"></span><span class="hidden sm:inline"> today</span>
+            <span class="text-gray-600 mx-0.5 hidden sm:inline">&middot;</span>
             <span x-text="filteredFleetTokens.toLocaleString()"></span> tokens
           </h2>
           <div class="text-xs text-gray-600" x-text="'Updated ' + timeAgo(lastRefresh)"></div>
         </div>
         <!-- Fleet health summary strip -->
-        <div x-show="filteredAgents.length > 0" class="flex items-center gap-3 text-xs text-gray-500 mb-3" x-cloak>
+        <div x-show="filteredAgents.length > 0" class="flex items-center flex-wrap gap-2 sm:gap-3 text-xs text-gray-500 mb-3" x-cloak>
           <template x-if="fleetHealthCounts.healthy > 0">
             <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-400 inline-block"></span><span x-text="fleetHealthCounts.healthy + ' healthy'"></span></span>
           </template>
@@ -353,170 +354,249 @@
             </span>
           </template>
         </div>
-        <!-- Project management row (when a project is selected) -->
-        <div x-show="activeProject && activeProjectData" x-cloak class="flex items-center gap-3 mb-3 text-xs">
-          <span x-show="activeProjectData?.description" class="text-gray-500 truncate max-w-xs" :title="activeProjectData?.description" x-text="activeProjectData?.description"></span>
-          <span x-show="activeProjectData?.description" class="text-gray-700">&middot;</span>
-          <span class="text-gray-500" x-text="(activeProjectData?.members || []).length + ' member' + ((activeProjectData?.members || []).length !== 1 ? 's' : '')"></span>
-          <!-- Add member dropdown -->
-          <div class="relative" x-data="{ open: false }">
-            <button @click="open = !open" class="text-gray-400 hover:text-white transition-colors"
-              :disabled="activeProjectData?.over_limit"
-              :class="activeProjectData?.over_limit ? 'opacity-50 cursor-not-allowed' : ''">+ Add member</button>
-            <div x-show="open" @click.outside="open = false" x-cloak
-              class="absolute left-0 top-6 z-20 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[160px]">
-              <template x-for="a in unassignedAgents" :key="a.id">
-                <button @click="addMember(activeProject, a.id); open = false"
-                  class="block w-full text-left px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-700 hover:text-white"
-                  x-text="a.id"></button>
-              </template>
-              <div x-show="unassignedAgents.length === 0" class="px-3 py-1.5 text-gray-600 text-xs">No unassigned agents</div>
-            </div>
-          </div>
-          <!-- Member chips -->
-          <template x-for="m in (activeProjectData?.members || [])" :key="m">
-            <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-800/80 text-gray-400 border border-gray-700/40">
-              <span x-text="m"></span>
-              <button @click="removeMember(activeProject, m)" class="text-gray-600 hover:text-red-400 transition-colors" title="Remove from project">&times;</button>
-            </span>
-          </template>
-          <span class="flex-1"></span>
-          <button @click="deleteProject(activeProject)"
-            class="px-2 py-0.5 rounded text-gray-600 hover:text-red-400 hover:bg-red-900/20 border border-transparent hover:border-red-800/40 transition-colors"
-            title="Delete project">Delete project</button>
-        </div>
-        <!-- PROJECT.md collapsible banner (only when a project is selected) -->
-        <div x-show="activeProject && agents.length > 0" class="bg-gray-900 border border-gray-800 rounded-lg mb-4" x-cloak>
-          <div class="flex items-center justify-between px-4 py-2.5 cursor-pointer select-none" @click="projectBannerExpanded = !projectBannerExpanded">
-            <div class="flex items-center gap-2">
-              <svg class="w-3 h-3 text-gray-600 transition-transform duration-200" :class="projectBannerExpanded && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-              <span class="text-xs font-medium text-gray-400">PROJECT.md</span>
-              <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/30"
-                x-text="activeProject"></span>
-              <span x-show="projectExists" class="text-[10px] text-gray-600" x-text="projectContent.length.toLocaleString() + ' chars'"></span>
-              <span x-show="!projectExists && !projectLoading" class="text-[10px] text-gray-700 italic"
-                x-text="activeProject + '/project.md not created'"></span>
-            </div>
-            <div class="flex items-center gap-2" @click.stop>
-              <span x-show="projectLoading" class="text-gray-600 text-xs">
-                <svg class="animate-spin h-3 w-3 inline" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-              </span>
-              <button x-show="!projectEditing && !projectLoading" @click="projectBannerExpanded = true; startProjectEdit()"
-                class="text-xs px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
-            </div>
-          </div>
-          <div x-show="projectBannerExpanded" x-transition class="px-4 pb-4">
-            <div class="text-xs text-gray-600 mb-2" x-text="'Project context for ' + activeProject + ' members. Changes push to project members only.'"></div>
-            <!-- Read-only view -->
-            <div x-show="!projectEditing && !projectLoading">
-              <div x-show="!projectContent && !projectExists" class="text-gray-600 text-sm py-3 text-center">No PROJECT.md found. Click Edit to create one.</div>
-              <div x-show="!projectContent && projectExists" class="text-gray-600 text-sm py-3 text-center">PROJECT.md is empty. Click Edit to add content.</div>
-              <pre x-show="projectContent"
-                class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-48 overflow-y-auto custom-scrollbar"
-                x-text="projectContent"></pre>
-            </div>
-            <!-- Edit mode -->
-            <div x-show="projectEditing">
-              <textarea x-model="projectEditBuffer"
-                @keydown.ctrl.s.prevent="saveProject()"
-                @keydown.meta.s.prevent="saveProject()"
-                class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
-                rows="10" spellcheck="false" placeholder="# Project Context&#10;&#10;Describe your project goals, architecture, team conventions..."></textarea>
-              <div class="flex items-center justify-between mt-2">
-                <span class="text-xs text-gray-600" x-text="projectEditBuffer.length.toLocaleString() + ' chars'"></span>
-                <div class="flex gap-2">
-                  <button @click="saveProject()" :disabled="projectSaving"
-                    class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-50 transition-colors">
-                    <span x-text="projectSaving ? 'Saving...' : 'Save'"></span>
-                  </button>
-                  <button @click="cancelProjectEdit()" :disabled="projectSaving"
-                    class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors disabled:opacity-50">Cancel</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <!-- ═══ PROJECT COMMS (collapsible, project-level) ═══ -->
+        <!-- ═══ PROJECT HUB (unified: Context · Activity · State · Files · Broadcast) ═══ -->
         <div x-show="activeProject && agents.length > 0" x-cloak class="mb-4">
-          <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-            <!-- Comms header — always visible -->
-            <div class="flex items-center justify-between px-4 py-2.5 cursor-pointer select-none"
-              @click="commsExpanded = !commsExpanded; if (commsExpanded && commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()">
-              <div class="flex items-center gap-2">
-                <svg class="w-3 h-3 text-gray-600 transition-transform duration-200" :class="commsExpanded && 'rotate-90'" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd"/></svg>
-                <span class="text-xs text-gray-500 uppercase tracking-wider">Project Comms</span>
-                <span x-show="commsActivity.length > 0" class="text-[10px] text-gray-600 font-mono" x-text="commsActivity.length + ' events'"></span>
-              </div>
-              <div class="flex items-center gap-2" @click.stop>
-                <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5">
-                  <button @click="commsExpanded = true; commsView = 'activity'; fetchCommsActivity()"
-                    class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                    :class="commsView === 'activity' && commsExpanded ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
-                    Activity
-                  </button>
-                  <button @click="commsExpanded = true; commsView = 'state'; fetchBlackboard()"
-                    class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                    :class="commsView === 'state' && commsExpanded ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
-                    Shared State
-                  </button>
-                  <button @click="commsExpanded = true; commsView = 'artifacts'; fetchArtifacts()"
-                    class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
-                    :class="commsView === 'artifacts' && commsExpanded ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
-                    Artifacts
-                  </button>
-                </div>
-                <button @click="commsView === 'activity' ? fetchCommsActivity() : (commsView === 'artifacts' ? fetchArtifacts() : fetchBlackboard())" class="text-gray-600 hover:text-gray-400 transition-colors" title="Refresh">
-                  <svg class="w-3.5 h-3.5" :class="(commsActivityLoading || bbLoading || artifactsLoading) && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+          <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+            <!-- Hub header — always visible -->
+            <div class="flex items-center gap-2 px-3 sm:px-4 py-2.5 cursor-pointer select-none min-w-0"
+              @click="projectHubExpanded = !projectHubExpanded">
+              <svg class="w-3 h-3 text-gray-600 transition-transform duration-200 flex-shrink-0"
+                :class="projectHubExpanded && 'rotate-90'"
+                fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+              </svg>
+              <span class="text-xs font-medium text-gray-400 flex-shrink-0">Project</span>
+              <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/30 truncate max-w-[7rem] flex-shrink-0"
+                x-text="activeProject"></span>
+              <span class="text-[10px] text-gray-600 flex-shrink-0 hidden sm:block"
+                x-text="(activeProjectData?.members || []).length + ' member' + ((activeProjectData?.members || []).length !== 1 ? 's' : '')"></span>
+              <span x-show="activeProjectData?.description" class="text-[10px] text-gray-700 truncate hidden md:block"
+                :title="activeProjectData?.description" x-text="activeProjectData?.description"></span>
+              <!-- Tab pills — desktop only, click stops propagation to header toggle -->
+              <div class="hidden sm:flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Project sections">
+                <button @click="projectHubExpanded = true; projectHubTab = 'docs'"
+                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+                  :class="projectHubExpanded && projectHubTab === 'docs' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'docs'">
+                  Context
+                </button>
+                <button @click="projectHubExpanded = true; projectHubTab = 'activity'; if (commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()"
+                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+                  :class="projectHubExpanded && projectHubTab === 'activity' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'activity'">
+                  Activity<span x-show="commsActivity.length > 0" class="ml-1 opacity-50 font-mono text-[10px]" x-text="'(' + commsActivity.length + ')'"></span>
+                </button>
+                <button @click="projectHubExpanded = true; projectHubTab = 'state'; fetchBlackboard()"
+                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+                  :class="projectHubExpanded && projectHubTab === 'state' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'state'">
+                  State
+                </button>
+                <button @click="projectHubExpanded = true; projectHubTab = 'artifacts'; fetchArtifacts()"
+                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+                  :class="projectHubExpanded && projectHubTab === 'artifacts' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'artifacts'">
+                  Files
+                </button>
+                <button @click="projectHubExpanded = true; projectHubTab = 'broadcast'"
+                  class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
+                  :class="projectHubExpanded && projectHubTab === 'broadcast' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
+                  role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'broadcast'">
+                  Broadcast
                 </button>
               </div>
-            </div>
-            <!-- Comms body — collapsible -->
-            <div x-show="commsExpanded" x-transition x-cloak class="px-4 pb-4">
-              <!-- Subscriptions summary -->
-              <div x-show="commsView === 'activity' && Object.keys(commsSubs).length > 0" class="flex items-center gap-1.5 flex-wrap mb-3" x-cloak>
-                <template x-for="[topic, sAgents] in Object.entries(commsSubs).slice(0, 8)" :key="topic">
-                  <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-400/70 border border-purple-500/20"
-                    x-text="topic + ' (' + sAgents.length + ')'"></span>
-                </template>
-                <span x-show="Object.keys(commsSubs).length > 8" class="text-[10px] text-gray-600"
-                  x-text="'+' + (Object.keys(commsSubs).length - 8) + ' more'"></span>
-              </div>
-
-              <!-- ═══ ACTIVITY VIEW ═══ -->
-              <div x-show="commsView === 'activity'">
-                <div class="border border-gray-800 rounded-lg overflow-hidden max-h-80 overflow-y-auto custom-scrollbar">
-                  <div class="divide-y divide-gray-800/30">
-                    <template x-for="(item, idx) in commsActivity" :key="idx">
-                      <div class="comms-activity-row">
-                        <div x-show="item.agent && item.agent !== 'dashboard'" class="agent-avatar agent-avatar-sm flex-shrink-0"
-                          :class="'agent-color-' + agentColorIndex(item.agent)">
-                          <img :src="agentAvatarUrl(item.agent)" :alt="item.agent">
-                        </div>
-                        <div x-show="item.agent === 'dashboard'" class="comms-activity-icon bg-gray-700/50 text-gray-400 flex-shrink-0">
-                          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
-                        </div>
-                        <div x-show="!item.agent" class="comms-activity-icon bg-gray-700/50 text-gray-500 flex-shrink-0">
-                          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></svg>
-                        </div>
-                        <div class="flex-1 min-w-0">
-                          <div class="flex items-center gap-1.5 flex-wrap">
-                            <span class="text-xs font-medium text-gray-300" x-text="item.agent || 'system'"></span>
-                            <span class="text-xs text-gray-600" x-text="commsActionVerb(item)"></span>
-                            <span class="comms-type-badge" :class="item.source === 'pubsub' ? 'comms-type-event' : 'comms-type-bb'"
-                              x-text="item.source === 'pubsub' ? 'event' : (item.action === 'delete' ? 'delete' : 'state')"></span>
-                            <span class="text-xs font-mono truncate" :class="commsActionClass(item)"
-                              x-text="commsActionTarget(item)"></span>
-                          </div>
-                          <div x-show="item.preview" class="text-[11px] text-gray-500 truncate mt-0.5" x-text="item.preview" x-cloak></div>
-                        </div>
-                        <span class="text-[10px] text-gray-600 whitespace-nowrap flex-shrink-0" x-text="timeAgo(item.timestamp)"></span>
+              <!-- Project options kebab menu -->
+              <div class="relative flex-shrink-0 ml-auto sm:ml-0" x-data="{ open: false }" @click.stop @keydown.escape.window="open = false">
+                <button @click="open = !open"
+                  class="p-1.5 rounded-md text-gray-600 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+                  aria-label="Project options">
+                  <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                    <circle cx="10" cy="5" r="1.25"/><circle cx="10" cy="10" r="1.25"/><circle cx="10" cy="15" r="1.25"/>
+                  </svg>
+                </button>
+                <div x-show="open" @click.outside="open = false" x-cloak
+                  class="absolute right-0 top-8 z-30 bg-gray-800 border border-gray-700 rounded-xl shadow-2xl py-1.5 min-w-[200px]">
+                  <!-- Members section -->
+                  <div class="px-3 pb-2 pt-1">
+                    <p class="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Members</p>
+                    <template x-for="m in (activeProjectData?.members || [])" :key="m">
+                      <div class="flex items-center justify-between py-0.5 gap-2">
+                        <span class="text-xs text-gray-300 truncate" x-text="m"></span>
+                        <button @click="removeMember(activeProject, m)"
+                          class="text-gray-600 hover:text-red-400 transition-colors flex-shrink-0 text-xs leading-none"
+                          title="Remove">&times;</button>
                       </div>
                     </template>
+                    <div x-show="(activeProjectData?.members || []).length === 0" class="text-xs text-gray-600 py-0.5">No members yet</div>
                   </div>
+                  <!-- Add member sub-dropdown -->
+                  <div class="border-t border-gray-700/50 px-3 py-2" x-data="{ addOpen: false }">
+                    <button @click="addOpen = !addOpen"
+                      class="w-full text-left text-xs transition-colors"
+                      :class="activeProjectData?.over_limit ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white'"
+                      :disabled="activeProjectData?.over_limit">
+                      + Add member
+                    </button>
+                    <div x-show="addOpen" x-cloak class="mt-2 max-h-28 overflow-y-auto custom-scrollbar">
+                      <template x-for="a in unassignedAgents" :key="a.id">
+                        <button @click="addMember(activeProject, a.id); addOpen = false; open = false"
+                          class="block w-full text-left py-1 text-xs text-gray-300 hover:text-white transition-colors truncate"
+                          x-text="a.id"></button>
+                      </template>
+                      <div x-show="unassignedAgents.length === 0" class="text-xs text-gray-600 py-1">No unassigned agents</div>
+                    </div>
+                  </div>
+                  <!-- Delete project -->
+                  <div class="border-t border-gray-700/50">
+                    <button @click="deleteProject(activeProject); open = false"
+                      class="w-full text-left px-3 py-2 text-xs text-red-400 hover:bg-red-900/20 transition-colors rounded-b-xl">
+                      Delete project
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Hub body — collapsible -->
+            <div x-show="projectHubExpanded" x-transition class="border-t border-gray-800/60">
+              <!-- Mobile tab strip (sm:hidden) -->
+              <div class="project-hub-tabs sm:hidden" role="tablist" aria-label="Project sections">
+                <button @click="projectHubTab = 'docs'"
+                  class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
+                  :class="projectHubTab === 'docs' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="projectHubTab === 'docs'">
+                  Context
+                </button>
+                <button @click="projectHubTab = 'activity'; if (commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()"
+                  class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
+                  :class="projectHubTab === 'activity' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="projectHubTab === 'activity'">
+                  Activity
+                </button>
+                <button @click="projectHubTab = 'state'; fetchBlackboard()"
+                  class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
+                  :class="projectHubTab === 'state' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="projectHubTab === 'state'">
+                  State
+                </button>
+                <button @click="projectHubTab = 'artifacts'; fetchArtifacts()"
+                  class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
+                  :class="projectHubTab === 'artifacts' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="projectHubTab === 'artifacts'">
+                  Files
+                </button>
+                <button @click="projectHubTab = 'broadcast'"
+                  class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
+                  :class="projectHubTab === 'broadcast' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="projectHubTab === 'broadcast'">
+                  Broadcast
+                </button>
+              </div>
+
+              <!-- ── CONTEXT (PROJECT.md) ── -->
+              <div x-show="projectHubTab === 'docs'" class="px-4 py-3">
+                <p class="text-xs text-gray-600 mb-3"
+                  x-text="'Shared context pushed to all ' + activeProject + ' members automatically.'"></p>
+                <!-- Read-only view -->
+                <div x-show="!projectEditing && !projectLoading">
+                  <div x-show="!projectContent && !projectExists" class="text-gray-600 text-sm py-4 text-center">
+                    No PROJECT.md yet.
+                    <button @click="startProjectEdit()" class="text-indigo-400 hover:text-indigo-300 transition-colors ml-1">Create one</button>
+                  </div>
+                  <div x-show="!projectContent && projectExists" class="text-gray-600 text-sm py-4 text-center">
+                    PROJECT.md is empty.
+                    <button @click="startProjectEdit()" class="text-indigo-400 hover:text-indigo-300 transition-colors ml-1">Add content</button>
+                  </div>
+                  <div x-show="projectContent" class="relative">
+                    <pre class="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-52 overflow-y-auto custom-scrollbar"
+                      x-text="projectContent"></pre>
+                    <div class="flex items-center justify-between mt-2">
+                      <span class="text-[10px] text-gray-600" x-text="projectContent.length.toLocaleString() + ' chars'"></span>
+                      <button @click="startProjectEdit()"
+                        class="text-xs px-3 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">
+                        Edit
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <!-- Loading spinner -->
+                <div x-show="projectLoading" class="flex items-center gap-2 text-gray-600 py-4">
+                  <svg class="animate-spin h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                  <span class="text-xs">Loading…</span>
+                </div>
+                <!-- Edit mode -->
+                <div x-show="projectEditing">
+                  <textarea x-model="projectEditBuffer"
+                    @keydown.ctrl.s.prevent="saveProject()"
+                    @keydown.meta.s.prevent="saveProject()"
+                    class="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
+                    rows="10" spellcheck="false"
+                    placeholder="# Project Context&#10;&#10;Describe your project goals, architecture, team conventions..."></textarea>
+                  <div class="flex items-center justify-between mt-2">
+                    <span class="text-xs text-gray-600" x-text="projectEditBuffer.length.toLocaleString() + ' chars'"></span>
+                    <div class="flex gap-2">
+                      <button @click="saveProject()" :disabled="projectSaving"
+                        class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-50 transition-colors">
+                        <span x-text="projectSaving ? 'Saving…' : 'Save'"></span>
+                      </button>
+                      <button @click="cancelProjectEdit()" :disabled="projectSaving"
+                        class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg disabled:opacity-50 transition-colors">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- ── ACTIVITY ── -->
+              <div x-show="projectHubTab === 'activity'" x-cloak>
+                <!-- Activity header row: subs + refresh -->
+                <div class="flex items-center gap-2 px-4 pt-3 pb-2">
+                  <div x-show="Object.keys(commsSubs).length > 0" class="flex items-center gap-1.5 flex-wrap flex-1 min-w-0" x-cloak>
+                    <template x-for="[topic, sAgents] in Object.entries(commsSubs).slice(0, 8)" :key="topic">
+                      <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-400/70 border border-purple-500/20"
+                        x-text="topic + ' (' + sAgents.length + ')'"></span>
+                    </template>
+                    <span x-show="Object.keys(commsSubs).length > 8" class="text-[10px] text-gray-600"
+                      x-text="'+' + (Object.keys(commsSubs).length - 8) + ' more'"></span>
+                  </div>
+                  <div x-show="Object.keys(commsSubs).length === 0" class="flex-1" x-cloak></div>
+                  <button @click="fetchCommsActivity()" title="Refresh activity"
+                    class="flex-shrink-0 text-gray-600 hover:text-gray-400 transition-colors ml-auto">
+                    <svg class="w-3.5 h-3.5" :class="commsActivityLoading && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                  </button>
+                </div>
+                <div class="max-h-80 overflow-y-auto custom-scrollbar divide-y divide-gray-800/30">
+                  <template x-for="(item, idx) in commsActivity" :key="idx">
+                    <div class="comms-activity-row">
+                      <div x-show="item.agent && item.agent !== 'dashboard'" class="agent-avatar agent-avatar-sm flex-shrink-0"
+                        :class="'agent-color-' + agentColorIndex(item.agent)">
+                        <img :src="agentAvatarUrl(item.agent)" :alt="item.agent">
+                      </div>
+                      <div x-show="item.agent === 'dashboard'" class="comms-activity-icon bg-gray-700/50 text-gray-400 flex-shrink-0">
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                      </div>
+                      <div x-show="!item.agent" class="comms-activity-icon bg-gray-700/50 text-gray-500 flex-shrink-0">
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></svg>
+                      </div>
+                      <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-1.5 flex-wrap">
+                          <span class="text-xs font-medium text-gray-300" x-text="item.agent || 'system'"></span>
+                          <span class="text-xs text-gray-600" x-text="commsActionVerb(item)"></span>
+                          <span class="comms-type-badge" :class="item.source === 'pubsub' ? 'comms-type-event' : 'comms-type-bb'"
+                            x-text="item.source === 'pubsub' ? 'event' : (item.action === 'delete' ? 'delete' : 'state')"></span>
+                          <span class="text-xs font-mono truncate" :class="commsActionClass(item)"
+                            x-text="commsActionTarget(item)"></span>
+                        </div>
+                        <div x-show="item.preview" class="text-[11px] text-gray-500 truncate mt-0.5" x-text="item.preview" x-cloak></div>
+                      </div>
+                      <span class="text-[10px] text-gray-600 whitespace-nowrap flex-shrink-0" x-text="timeAgo(item.timestamp)"></span>
+                    </div>
+                  </template>
                   <div x-show="commsActivity.length === 0 && commsActivityLoading" class="text-center py-8" x-cloak>
                     <div class="inline-flex items-center gap-2 text-gray-600">
                       <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                      Loading...
+                      Loading…
                     </div>
                   </div>
                   <div x-show="commsActivity.length === 0 && !commsActivityLoading" class="text-center py-8 px-6" x-cloak>
@@ -525,13 +605,16 @@
                 </div>
               </div>
 
-              <!-- ═══ SHARED STATE VIEW ═══ -->
-              <div x-show="commsView === 'state'" x-cloak>
+              <!-- ── SHARED STATE (Blackboard) ── -->
+              <div x-show="projectHubTab === 'state'" x-cloak class="p-4">
                 <div class="mb-3 flex gap-2">
                   <input type="text" x-model="bbPrefix" @keyup.enter="fetchBlackboard()"
-                    placeholder="Filter by prefix (e.g. status/, research/)"
-                    class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs flex-1 focus:outline-none focus:border-gray-600 focus:ring-1 focus:ring-gray-600 placeholder-gray-600 transition-colors">
-                  <button @click="fetchBlackboard()" class="bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors">Search</button>
+                    placeholder="Filter by prefix…"
+                    class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs flex-1 min-w-0 focus:outline-none focus:border-gray-600 focus:ring-1 focus:ring-gray-600 placeholder-gray-600 transition-colors">
+                  <button @click="fetchBlackboard()" class="bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex-shrink-0 inline-flex items-center gap-1.5">
+                    <svg class="w-3 h-3" :class="bbLoading && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                    Search
+                  </button>
                 </div>
                 <div class="flex gap-1.5 flex-wrap mb-3">
                   <template x-for="ns in ['status/', 'tasks/', 'research/', 'drafts/', 'artifacts/', 'alerts/']" :key="ns">
@@ -546,7 +629,7 @@
                 </div>
                 <!-- Write form -->
                 <div x-show="bbWriteMode" x-cloak class="border border-gray-800 rounded-lg p-3 mb-3">
-                  <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <div>
                       <label class="text-[10px] text-gray-500 mb-1 block">Key</label>
                       <input type="text" x-model="bbNewKey" :disabled="bbWriteLoading" placeholder="status/my_agent" class="dash-input w-full text-xs">
@@ -562,7 +645,7 @@
                     <button @click="writeBlackboard()" class="text-[10px] px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1"
                       :disabled="bbWriteLoading || !bbJsonValid.valid || !bbNewKey.trim()" :class="(bbWriteLoading || !bbJsonValid.valid || !bbNewKey.trim()) && 'opacity-50 cursor-not-allowed'">
                       <svg x-show="bbWriteLoading" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                      <span x-text="bbWriteLoading ? 'Saving...' : 'Save'"></span>
+                      <span x-text="bbWriteLoading ? 'Saving…' : 'Save'"></span>
                     </button>
                     <button @click="bbWriteMode = false" :disabled="bbWriteLoading" class="text-[10px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors disabled:opacity-50">Cancel</button>
                   </div>
@@ -576,24 +659,26 @@
                           :class="bbExpanded[entry.key] ? 'bb-expanded ' + bbNsAccentClass(entry.key) : ''"
                           @click="toggleBbExpand(entry.key)">
                           <svg class="bb-chevron" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd" /></svg>
-                          <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(entry.written_by)">
+                          <div class="agent-avatar agent-avatar-sm flex-shrink-0" :class="'agent-color-' + agentColorIndex(entry.written_by)">
                             <img :src="agentAvatarUrl(entry.written_by)" :alt="entry.written_by">
                           </div>
-                          <span x-show="bbNamespaceOf(entry.key)" :class="bbNsBadgeClass(entry.key)" x-text="bbNsName(entry.key)"></span>
-                          <span class="font-mono text-xs text-blue-400 truncate" style="min-width:5rem;max-width:14rem" x-text="bbKeyAfterNs(entry.key)"></span>
-                          <span class="text-gray-500 text-xs truncate flex-1 min-w-0" x-text="valueSummary(entry.value)"></span>
-                          <span class="text-gray-600 text-xs whitespace-nowrap flex-shrink-0" x-text="timeAgo(entry.updated_at)"></span>
+                          <span x-show="bbNamespaceOf(entry.key)" :class="bbNsBadgeClass(entry.key)" x-text="bbNsName(entry.key)" class="flex-shrink-0"></span>
+                          <span class="font-mono text-xs text-blue-400 truncate flex-1 min-w-0" x-text="bbKeyAfterNs(entry.key)"></span>
+                          <span class="text-gray-500 text-xs truncate flex-shrink-0 hidden sm:block" style="max-width:10rem" x-text="valueSummary(entry.value)"></span>
+                          <span class="text-gray-600 text-[10px] whitespace-nowrap flex-shrink-0 hidden sm:block" x-text="timeAgo(entry.updated_at)"></span>
                           <button @click.stop="deleteBlackboard(entry.key)" :disabled="entry.key.startsWith('history/')"
-                            class="text-[10px] px-1.5 py-0.5 rounded text-gray-700 hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0">Delete</button>
+                            class="text-[10px] px-1.5 py-0.5 rounded text-gray-700 hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0">Del</button>
                         </div>
                         <div class="bb-detail" :class="bbExpanded[entry.key] ? 'bb-detail-open' : ''">
                           <div class="px-4 pb-3 pt-1">
-                            <div class="flex items-center gap-3 mb-2 text-xs text-gray-500">
-                              <span>Written by <span class="text-gray-400" x-text="entry.written_by"></span></span>
+                            <div class="flex items-center gap-2 flex-wrap mb-2 text-xs text-gray-500">
+                              <span>by <span class="text-gray-400" x-text="entry.written_by"></span></span>
                               <span class="text-gray-700">&middot;</span>
                               <span>v<span x-text="entry.version"></span></span>
                               <span class="text-gray-700">&middot;</span>
-                              <span class="font-mono text-gray-600" x-text="entry.updated_at"></span>
+                              <span class="font-mono text-gray-600 text-[10px]" x-text="entry.updated_at"></span>
+                              <!-- value summary visible on mobile only (hidden from row) -->
+                              <span class="text-gray-500 sm:hidden" x-text="valueSummary(entry.value)"></span>
                             </div>
                             <pre class="bb-detail-pre custom-scrollbar" x-text="fullJson(entry.value)"></pre>
                           </div>
@@ -604,7 +689,7 @@
                   <div x-show="filteredBbEntries.length === 0 && bbLoading" class="text-center py-8" x-cloak>
                     <div class="inline-flex items-center gap-2 text-gray-600">
                       <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                      Loading...
+                      Loading…
                     </div>
                   </div>
                   <div x-show="filteredBbEntries.length === 0 && !bbLoading" class="text-center py-8 px-6" x-cloak>
@@ -613,77 +698,110 @@
                 </div>
               </div>
 
-              <!-- ═══ ARTIFACTS VIEW ═══ -->
-              <div x-show="commsView === 'artifacts'" x-cloak>
-                <div class="border border-gray-800 rounded-lg overflow-hidden max-h-80 overflow-y-auto custom-scrollbar">
-                  <div class="divide-y divide-gray-800/40">
-                    <template x-for="art in artifactsList" :key="art.agent + '/' + art.name">
-                      <div class="px-3 py-2.5 flex items-center gap-3 hover:bg-gray-800/30 transition-colors">
-                        <div class="agent-avatar agent-avatar-sm flex-shrink-0"
-                          :class="'agent-color-' + agentColorIndex(art.agent)">
-                          <img :src="agentAvatarUrl(art.agent)" :alt="art.agent">
+              <!-- ── FILES (Artifacts) ── -->
+              <div x-show="projectHubTab === 'artifacts'" x-cloak>
+                <!-- Files header row -->
+                <div class="flex items-center justify-between px-4 pt-3 pb-2">
+                  <span class="text-[10px] text-gray-600 font-mono" x-show="artifactsList.length > 0" x-text="artifactsList.length + ' file' + (artifactsList.length !== 1 ? 's' : '')"></span>
+                  <div x-show="artifactsList.length === 0" x-cloak></div>
+                  <button @click="fetchArtifacts()" title="Refresh files"
+                    class="ml-auto text-gray-600 hover:text-gray-400 transition-colors">
+                    <svg class="w-3.5 h-3.5" :class="artifactsLoading && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                  </button>
+                </div>
+                <div class="max-h-80 overflow-y-auto custom-scrollbar divide-y divide-gray-800/40">
+                  <template x-for="art in artifactsList" :key="art.agent + '/' + art.name">
+                    <div class="px-3 py-2.5 flex items-center gap-2 sm:gap-3 hover:bg-gray-800/30 transition-colors">
+                      <div class="agent-avatar agent-avatar-sm flex-shrink-0"
+                        :class="'agent-color-' + agentColorIndex(art.agent)">
+                        <img :src="agentAvatarUrl(art.agent)" :alt="art.agent">
+                      </div>
+                      <div class="flex-1 min-w-0">
+                        <div class="text-xs font-mono text-blue-400 truncate" x-text="art.name"></div>
+                        <div class="text-[10px] text-gray-600 mt-0.5 flex items-center gap-1">
+                          <span class="truncate" x-text="art.agent"></span>
+                          <span class="text-gray-700 flex-shrink-0">&middot;</span>
+                          <span class="flex-shrink-0" x-text="formatFileSize(art.size)"></span>
                         </div>
-                        <div class="flex-shrink-0 w-5 h-5 flex items-center justify-center">
-                          <svg x-show="artifactIsText(art.name)" class="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
-                          <svg x-show="!artifactIsText(art.name)" class="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13"/></svg>
-                        </div>
-                        <div class="flex-1 min-w-0">
-                          <div class="text-xs font-mono text-blue-400 truncate" x-text="art.name"></div>
-                          <div class="text-[10px] text-gray-600 mt-0.5">
-                            <span x-text="art.agent"></span>
-                            <span class="text-gray-700 mx-1">&middot;</span>
-                            <span x-text="formatFileSize(art.size)"></span>
-                          </div>
-                        </div>
+                      </div>
+                      <div class="flex items-center gap-1 flex-shrink-0">
                         <button @click="previewArtifact(art)"
-                          class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors flex-shrink-0"
+                          class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors"
                           :class="art.size > 2097152 && 'opacity-40 cursor-not-allowed'"
                           :disabled="art.size > 2097152">
-                          Preview
+                          View
                         </button>
                         <button @click="downloadArtifact(art)"
-                          class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors flex-shrink-0"
+                          class="text-[10px] p-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors"
                           :class="art.size > 2097152 && 'opacity-40 cursor-not-allowed'"
-                          :disabled="art.size > 2097152">
-                          Download
+                          :disabled="art.size > 2097152"
+                          title="Download">
+                          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
                         </button>
                         <button @click="deleteArtifact(art)"
-                          class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors flex-shrink-0">
-                          Del
+                          class="text-[10px] p-1 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors"
+                          title="Delete">
+                          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
                         </button>
                       </div>
-                    </template>
-                  </div>
+                    </div>
+                  </template>
                   <div x-show="artifactsList.length === 0 && artifactsLoading" class="text-center py-8" x-cloak>
                     <div class="inline-flex items-center gap-2 text-gray-600">
                       <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                      Loading...
+                      Loading…
                     </div>
                   </div>
                   <div x-show="artifactsList.length === 0 && !artifactsLoading" class="text-center py-8 px-6" x-cloak>
-                    <div class="text-gray-600 text-xs">No artifacts saved yet. Agents create artifacts using the save_artifact tool.</div>
+                    <div class="text-gray-600 text-xs">No artifacts yet. Agents create them using <span class="font-mono text-gray-500">save_artifact</span>.</div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- ── BROADCAST ── -->
+              <div x-show="projectHubTab === 'broadcast'" class="px-4 py-3">
+                <!-- No eligible targets -->
+                <div x-show="broadcastTargets.length === 0" x-cloak class="text-center py-6">
+                  <p class="text-xs text-gray-600">No running agents to broadcast to.</p>
+                  <p class="text-[10px] text-gray-700 mt-1">Add agents to this project or wait for them to start.</p>
+                </div>
+                <!-- Has targets -->
+                <div x-show="broadcastTargets.length > 0" x-cloak>
+                  <p class="text-xs text-gray-500 mb-3"
+                    x-text="'Send a message to all ' + broadcastTargets.length + ' agent' + (broadcastTargets.length !== 1 ? 's' : '') + ' in ' + activeProject + '.'">
+                  </p>
+                  <div class="flex gap-2">
+                    <input id="broadcast-input" type="text" x-model="broadcastMessage" @keydown.enter="sendBroadcast()"
+                      :disabled="broadcastSending"
+                      class="dash-input flex-1 min-w-0 text-sm"
+                      placeholder="Type a message and press Enter…">
+                    <span x-show="_broadcastPending" x-cloak class="text-[10px] text-indigo-400 font-mono flex-shrink-0 self-center whitespace-nowrap"
+                      x-text="_broadcastPending ? _broadcastPending.completed + '/' + _broadcastPending.total : ''"></span>
+                    <button @click="sendBroadcast()" :disabled="broadcastSending || !broadcastMessage.trim()"
+                      class="text-xs px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors flex-shrink-0 inline-flex items-center gap-1.5 disabled:opacity-50">
+                      <svg x-show="broadcastSending" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                      <span x-text="broadcastSending ? 'Sending…' : 'Send'"></span>
+                    </button>
                   </div>
                 </div>
               </div>
             </div>
           </div>
         </div>
-        <!-- Broadcast inline input -->
-        <div x-show="broadcastTargets.length >= 2" class="bg-gray-900 border border-gray-800 rounded-lg p-3 mb-4" x-cloak>
+        <!-- Standalone broadcast bar (no active project, 2+ agents) -->
+        <div x-show="!activeProject && broadcastTargets.length >= 2" x-cloak class="bg-gray-900 border border-gray-800 rounded-xl p-3 mb-4">
           <div class="flex items-center gap-3">
-            <svg class="w-3.5 h-3.5 text-gray-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-            <input id="broadcast-input" type="text" x-model="broadcastMessage" @keydown.enter="sendBroadcast()"
+            <svg class="w-3.5 h-3.5 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+            <input id="broadcast-standalone-input" type="text" x-model="broadcastMessage" @keydown.enter="sendBroadcast()"
               :disabled="broadcastSending"
-              class="dash-input flex-1 text-sm"
-              :placeholder="activeProject
-                ? 'Broadcast to ' + broadcastTargets.length + ' ' + activeProject + ' agent' + (broadcastTargets.length !== 1 ? 's' : '') + '...'
-                : 'Broadcast to all ' + broadcastTargets.length + ' agents...'">
-            <span x-show="_broadcastPending" class="text-[10px] text-indigo-400 font-mono shrink-0 whitespace-nowrap"
+              class="dash-input flex-1 min-w-0 text-sm"
+              :placeholder="'Broadcast to all ' + broadcastTargets.length + ' agents…'">
+            <span x-show="_broadcastPending" x-cloak class="text-[10px] text-indigo-400 font-mono flex-shrink-0 whitespace-nowrap"
               x-text="_broadcastPending ? _broadcastPending.completed + '/' + _broadcastPending.total + ' done' : ''"></span>
             <button @click="sendBroadcast()" :disabled="broadcastSending || !broadcastMessage.trim()"
-              class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors shrink-0 inline-flex items-center gap-1.5 disabled:opacity-50">
+              class="text-xs px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors flex-shrink-0 inline-flex items-center gap-1.5 disabled:opacity-50">
               <svg x-show="broadcastSending" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-              <span x-text="broadcastSending ? 'Sending...' : 'Send'"></span>
+              <span x-text="broadcastSending ? 'Sending…' : 'Send'"></span>
             </button>
           </div>
         </div>
