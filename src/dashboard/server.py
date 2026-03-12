@@ -215,6 +215,7 @@ def create_dashboard_router(
                 "role": acfg.get("role", ""),
                 "model": acfg.get("model", default_model),
                 "avatar": acfg.get("avatar", 1),
+                "color": acfg.get("color"),
                 "project": agent_projects.get(agent_id),
             }
             if cron_scheduler is not None:
@@ -247,6 +248,7 @@ def create_dashboard_router(
                     "role": acfg.get("role", ""),
                     "model": acfg.get("model", default_model),
                     "avatar": acfg.get("avatar", 1),
+                    "color": acfg.get("color"),
                     "project": agent_projects.get(agent_id),
                 }
                 agents.append(entry)
@@ -290,7 +292,9 @@ def create_dashboard_router(
         role = body.get("role", "").strip()
         model = body.get("model", "").strip()
         avatar = body.get("avatar", 1)
+        color = body.get("color")
         template = body.get("template", "").strip()
+        project = body.get("project", "").strip()
 
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
@@ -315,6 +319,14 @@ def create_dashboard_router(
                 raise HTTPException(status_code=400, detail="Avatar must be between 1 and 50")
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="Avatar must be an integer between 1 and 50")
+
+        if color is not None:
+            try:
+                color = int(color)
+                if color < 0 or color > 15:
+                    raise HTTPException(status_code=400, detail="Color must be between 0 and 15")
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail="Color must be an integer between 0 and 15")
 
         if template:
             if not re.match(r"^[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]*$", template):
@@ -358,6 +370,8 @@ def create_dashboard_router(
             else:
                 _create_agent(name, role, model)
             _update_agent_field(name, "avatar", avatar)
+            if color is not None:
+                _update_agent_field(name, "color", color)
             if permissions is not None:
                 permissions.reload()
 
@@ -402,10 +416,21 @@ def create_dashboard_router(
                 hb_schedule = cfg.get("mesh", {}).get("heartbeat_schedule")
                 cron_scheduler.ensure_heartbeat(name, hb_schedule)
             ready = await runtime.wait_for_agent(name, timeout=60)
+            if project:
+                if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", project):
+                    logger.warning("Skipping invalid project name '%s' for agent '%s'", project, name)
+                    project = ""
+                else:
+                    from src.cli.config import _add_agent_to_project
+                    try:
+                        _add_agent_to_project(project, name)
+                    except ValueError:
+                        logger.warning("Project '%s' not found; agent '%s' created standalone", project, name)
+                        project = ""
             if event_bus is not None:
                 event_bus.emit("agent_state", agent=name,
                     data={"state": "added", "role": role, "ready": ready})
-            return {"created": True, "agent": name, "ready": ready}
+            return {"created": True, "agent": name, "ready": ready, "project": project or None}
         except HTTPException:
             raise
         except Exception as e:
@@ -531,6 +556,7 @@ def create_dashboard_router(
             "model": agent_cfg.get("model", default_model),
             "role": agent_cfg.get("role", ""),
             "avatar": agent_cfg.get("avatar", 1),
+            "color": agent_cfg.get("color"),
             "budget": agent_cfg.get("budget", {}),
             "thinking": agent_cfg.get("thinking", "off") or "off",
             "mcp_servers": agent_cfg.get("mcp_servers") or [],
@@ -580,6 +606,21 @@ def create_dashboard_router(
                 updated.append("avatar")
             except (ValueError, TypeError):
                 raise HTTPException(status_code=400, detail="Avatar must be an integer between 1 and 50")
+
+        if "color" in body:
+            raw_color = body["color"]
+            if raw_color is None:
+                _update_agent_field(agent_id, "color", None)
+                updated.append("color")
+            else:
+                try:
+                    cv = int(raw_color)
+                    if cv < 0 or cv > 15:
+                        raise HTTPException(status_code=400, detail="Color must be between 0 and 15")
+                    _update_agent_field(agent_id, "color", cv)
+                    updated.append("color")
+                except (ValueError, TypeError):
+                    raise HTTPException(status_code=400, detail="Color must be an integer between 0 and 15")
 
         if "budget" in body:
             budget_val = body["budget"]

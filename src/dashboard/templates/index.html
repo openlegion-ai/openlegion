@@ -1601,8 +1601,23 @@
                           </div>
                         </div>
                         <div class="bg-gray-800/50 rounded p-3">
-                          <div class="text-xs text-gray-500 mb-1">Budget ($/day)</div>
-                          <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.budget?.daily_usd ? formatCost(agentConfigs[selectedAgent].budget.daily_usd) : '-'"></div>
+                          <div class="text-xs text-gray-500 mb-1">Color</div>
+                          <div class="flex items-center gap-2">
+                            <span class="w-5 h-5 rounded-full flex-shrink-0" :class="'agent-color-' + agentColorIndex(selectedAgent)"></span>
+                            <span class="text-sm text-gray-400"
+                              x-text="agentConfigs[selectedAgent]?.color != null
+                                ? 'Color ' + agentConfigs[selectedAgent].color
+                                : 'Color ' + agentColorIndex(selectedAgent) + ' (auto)'">
+                            </span>
+                          </div>
+                        </div>
+                        <div class="bg-gray-800/50 rounded p-3">
+                          <div class="text-xs text-gray-500 mb-1">Budget (daily / monthly)</div>
+                          <div class="text-sm text-gray-200 font-mono">
+                            <span x-text="agentConfigs[selectedAgent]?.budget?.daily_usd ? formatCost(agentConfigs[selectedAgent].budget.daily_usd) + '/day' : '-/day'"></span>
+                            <span class="text-gray-600 mx-1">·</span>
+                            <span x-text="agentConfigs[selectedAgent]?.budget?.monthly_usd ? formatCost(agentConfigs[selectedAgent].budget.monthly_usd) + '/mo' : '-/mo'"></span>
+                          </div>
                         </div>
                         <div class="bg-gray-800/50 rounded p-3">
                           <div class="text-xs text-gray-500 mb-1">Thinking</div>
@@ -1664,7 +1679,7 @@
                           </div>
                           <div class="relative">
                             <label class="text-xs text-gray-500 mb-1 block">Avatar</label>
-                            <button type="button" @click="editForm._showAvatarPicker = !editForm._showAvatarPicker"
+                            <button type="button" @click="editForm._showAvatarPicker = !editForm._showAvatarPicker; editForm._showColorPicker = false"
                               class="dash-input flex items-center gap-2 cursor-pointer text-left">
                               <img :src="`/dashboard/static/avatars/${editForm.avatar || 1}.svg?v={{ v }}`" class="w-5 h-5 rounded" :alt="'Avatar ' + editForm.avatar">
                               <span class="text-xs text-gray-400" x-text="'#' + (editForm.avatar || 1)"></span>
@@ -1680,6 +1695,45 @@
                                   </button>
                                 </template>
                               </div>
+                            </div>
+                          </div>
+                          <!-- Color picker -->
+                          <div class="relative">
+                            <label class="text-xs text-gray-500 mb-1 block">Color</label>
+                            <button type="button" @click="editForm._showColorPicker = !editForm._showColorPicker; editForm._showAvatarPicker = false"
+                              class="dash-input flex items-center gap-2 cursor-pointer text-left w-full">
+                              <template x-if="editForm.color === null">
+                                <span class="flex items-center gap-1.5">
+                                  <span class="w-4 h-4 rounded-full border border-dashed border-gray-500 flex-shrink-0"></span>
+                                  <span class="text-xs text-gray-400">Auto-assign</span>
+                                </span>
+                              </template>
+                              <template x-if="editForm.color !== null">
+                                <span class="flex items-center gap-1.5">
+                                  <span class="w-4 h-4 rounded-full flex-shrink-0" :class="'agent-color-' + editForm.color"></span>
+                                  <span class="text-xs text-gray-400" x-text="'Color ' + editForm.color"></span>
+                                </span>
+                              </template>
+                            </button>
+                            <div x-show="editForm._showColorPicker" x-cloak @click.outside="editForm._showColorPicker = false"
+                              class="absolute z-50 mt-1 p-2.5 bg-gray-800 border border-gray-700 rounded-lg shadow-xl">
+                              <div class="text-[10px] text-gray-500 mb-2">Pick a color or let the system assign one</div>
+                              <div class="flex flex-wrap gap-1.5 mb-2">
+                                <template x-for="i in 16" :key="i - 1">
+                                  <button type="button"
+                                    @click="editForm.color = i - 1; editForm._showColorPicker = false"
+                                    class="w-6 h-6 rounded-full border-2 transition-all hover:scale-110"
+                                    :class="[`agent-color-${i - 1}`, editForm.color === (i - 1) ? 'border-white scale-110' : 'border-transparent']"
+                                    :title="'Color ' + (i - 1)">
+                                  </button>
+                                </template>
+                              </div>
+                              <button type="button"
+                                @click="editForm.color = null; editForm._showColorPicker = false"
+                                class="text-[10px] px-2 py-1 rounded w-full text-left transition-colors"
+                                :class="editForm.color === null ? 'bg-gray-600 text-gray-200' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'">
+                                &#10003; Auto-assign
+                              </button>
                             </div>
                           </div>
                           <div>
@@ -2659,7 +2713,7 @@
             </div>
             <div class="relative">
               <label class="text-xs text-gray-500 mb-1 block">Avatar</label>
-              <button type="button" @click="addAgentForm._showPicker = !addAgentForm._showPicker"
+              <button type="button" @click="addAgentForm._showPicker = !addAgentForm._showPicker; addAgentForm._showColorPicker = false"
                 class="dash-input w-full flex items-center gap-2 cursor-pointer text-left">
                 <img :src="`/dashboard/static/avatars/${addAgentForm.avatar}.svg?v={{ v }}`" class="w-5 h-5 rounded" :alt="'Avatar ' + addAgentForm.avatar">
                 <span class="text-xs text-gray-400" x-text="'#' + addAgentForm.avatar"></span>
@@ -2676,6 +2730,59 @@
                   </template>
                 </div>
               </div>
+            </div>
+          </div>
+          <!-- Color + Project row -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+            <!-- Color picker -->
+            <div class="relative">
+              <label class="text-xs text-gray-500 mb-1 block">Color</label>
+              <button type="button" @click="addAgentForm._showColorPicker = !addAgentForm._showColorPicker; addAgentForm._showPicker = false"
+                :disabled="addAgentLoading"
+                class="dash-input w-full flex items-center gap-2 cursor-pointer text-left">
+                <template x-if="addAgentForm.color === null">
+                  <span class="flex items-center gap-1.5">
+                    <span class="w-4 h-4 rounded-full border border-dashed border-gray-500 flex-shrink-0"></span>
+                    <span class="text-xs text-gray-400">Auto-assign</span>
+                  </span>
+                </template>
+                <template x-if="addAgentForm.color !== null">
+                  <span class="flex items-center gap-1.5">
+                    <span class="w-4 h-4 rounded-full flex-shrink-0" :class="'agent-color-' + addAgentForm.color"></span>
+                    <span class="text-xs text-gray-400" x-text="'Color ' + addAgentForm.color"></span>
+                  </span>
+                </template>
+              </button>
+              <div x-show="addAgentForm._showColorPicker" x-cloak @click.outside="addAgentForm._showColorPicker = false"
+                class="absolute z-50 mt-1 p-2.5 bg-gray-800 border border-gray-700 rounded-lg shadow-xl">
+                <div class="text-[10px] text-gray-500 mb-2">Pick a color or let the system assign one</div>
+                <div class="flex flex-wrap gap-1.5 mb-2">
+                  <template x-for="i in 16" :key="i - 1">
+                    <button type="button"
+                      @click="addAgentForm.color = i - 1; addAgentForm._showColorPicker = false"
+                      class="w-6 h-6 rounded-full border-2 transition-all hover:scale-110"
+                      :class="[`agent-color-${i - 1}`, addAgentForm.color === (i - 1) ? 'border-white scale-110' : 'border-transparent']"
+                      :title="'Color ' + (i - 1)">
+                    </button>
+                  </template>
+                </div>
+                <button type="button"
+                  @click="addAgentForm.color = null; addAgentForm._showColorPicker = false"
+                  class="text-[10px] px-2 py-1 rounded w-full text-left transition-colors"
+                  :class="addAgentForm.color === null ? 'bg-gray-600 text-gray-200' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'">
+                  &#10003; Auto-assign
+                </button>
+              </div>
+            </div>
+            <!-- Project picker (only shown when projects exist) -->
+            <div x-show="projects.length > 0">
+              <label class="text-xs text-gray-500 mb-1 block">Project</label>
+              <select x-model="addAgentForm.project" :disabled="addAgentLoading" class="dash-select w-full">
+                <option value="">None (standalone)</option>
+                <template x-for="p in projects" :key="p.name">
+                  <option :value="p.name" x-text="p.name"></option>
+                </template>
+              </select>
             </div>
           </div>
           <div class="flex gap-2 mt-4">
