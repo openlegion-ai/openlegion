@@ -35,6 +35,33 @@ _TEMPLATES_DIR = _HERE / "templates"
 _STATIC_DIR = _HERE / "static"
 
 
+def _get_builtin_tool_names() -> frozenset[str]:
+    """Return the names of all built-in agent tools by scanning the builtins package.
+
+    Uses a regex over source files rather than executing code, so it is safe to
+    call from the dashboard host process without any side effects.  Result is
+    cached in a module-level variable after the first call.
+    """
+    if _get_builtin_tool_names._cache is not None:
+        return _get_builtin_tool_names._cache
+    builtins_dir = Path(__file__).parent.parent / "agent" / "builtins"
+    names: set[str] = set()
+    if builtins_dir.exists():
+        for py_file in builtins_dir.glob("**/*.py"):
+            if py_file.name.startswith("_"):
+                continue
+            try:
+                text = py_file.read_text()
+                names.update(re.findall(r'@skill\s*\(\s*name\s*=\s*["\']([^"\']+)["\']', text))
+            except OSError:
+                pass
+    _get_builtin_tool_names._cache = frozenset(names)
+    return _get_builtin_tool_names._cache
+
+
+_get_builtin_tool_names._cache = None  # type: ignore[attr-defined]
+
+
 def _compute_asset_version() -> str:
     """Hash all static files + the template to produce a cache-bust version string.
 
@@ -783,9 +810,27 @@ def create_dashboard_router(
         if transport is None:
             raise HTTPException(status_code=503, detail="Transport not available")
         try:
-            return await transport.request(agent_id, "GET", "/capabilities", timeout=10)
+            data = await transport.request(agent_id, "GET", "/capabilities", timeout=10)
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
+        # Backfill tool_sources for agents running pre-badge code (no container
+        # restart required).  The host process has access to the builtins package
+        # and can classify tools without executing agent-side code.
+        if "tool_sources" not in data:
+            builtins = _get_builtin_tool_names()
+            sources: dict[str, str] = {}
+            for tool in data.get("tool_definitions", []):
+                name = (tool.get("function") or {}).get("name") or tool.get("name")
+                if not name:
+                    continue
+                if tool.get("function") == "mcp":
+                    sources[name] = "mcp"
+                elif name in builtins:
+                    sources[name] = "builtin"
+                else:
+                    sources[name] = "custom"
+            data["tool_sources"] = sources
+        return data
 
     # ── Chat with agent ────────────────────────────────────
 
