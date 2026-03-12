@@ -3184,10 +3184,15 @@
           </div>
         </div>
         <!-- Input area -->
-        <div class="px-4 py-3 border-t border-gray-800/80 shrink-0" x-data="{
+        <div class="px-4 py-3 border-t border-gray-800/80 shrink-0 relative"
+          @dragover.prevent="if ($event.dataTransfer.types.includes('Files')) dragOver = true"
+          @dragleave="if (!$el.contains($event.relatedTarget)) dragOver = false"
+          @drop.prevent="dragOver = false; if ($event.dataTransfer.files[0]) attachFile($event.dataTransfer.files[0])"
+          x-data="{
           chatInput: '',
           pendingFile: null,
           pendingFileUploading: false,
+          dragOver: false,
           speechActive: false,
           _recognition: null,
           sendMsg() {
@@ -3268,6 +3273,15 @@
               </div>
             </div>
           </template>
+          <!-- Drag-over overlay -->
+          <template x-if="dragOver">
+            <div class="absolute inset-0 flex items-center justify-center rounded-lg bg-indigo-900/25 border-2 border-dashed border-indigo-500/60 pointer-events-none z-10 mx-1 my-1">
+              <div class="flex items-center gap-1.5 text-indigo-300 text-xs font-medium select-none">
+                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+                Drop to attach
+              </div>
+            </div>
+          </template>
           <!-- Input row -->
           <div class="chat-input-wrap">
             <!-- Hidden file input -->
@@ -3295,6 +3309,7 @@
               :disabled="chatLoadingAgents[activeChatId] === true"
               @keydown.enter="if (!$event.shiftKey && (chatInput.trim() || pendingFile)) { $event.preventDefault(); sendMsg(); }"
               @input="$el.style.height = 'auto'; $el.style.height = Math.min($el.scrollHeight, 120) + 'px'"
+              @paste="if ($event.clipboardData.files[0]) { $event.preventDefault(); attachFile($event.clipboardData.files[0]); }"
               class="chat-slide-textarea"
               :placeholder="speechActive ? 'Listening…' : (isAgentBusy(activeChatId) ? 'Steer agent…' : 'Message…')"></textarea>
             <button @click="sendMsg()"
