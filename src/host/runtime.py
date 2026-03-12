@@ -145,6 +145,12 @@ class DockerBackend(RuntimeBackend):
         self.browser_vnc_url: str | None = None
         self.browser_auth_token: str = ""
         self._browser_container = None
+        # User-managed uploads directory.  Mounted read-only in every agent
+        # container at /data/uploads and in the browser container at /app/uploads.
+        # The browser service serves /app/uploads at GET /uploads/{path} so the
+        # VNC browser can navigate to http://localhost:8500/uploads/<file>.
+        self.uploads_dir = self.project_root / ".openlegion" / "uploads"
+        self.uploads_dir.mkdir(parents=True, exist_ok=True)
         self._cleanup_stale()
 
         # User-defined bridge network for agent containers.
@@ -269,6 +275,10 @@ class DockerBackend(RuntimeBackend):
                 mp_path = marketplace_dir.as_posix()
             volumes[mp_path] = {"bind": "/app/marketplace_skills", "mode": "ro"}
 
+        # Read-only uploads: user-managed files agents can read but never write.
+        uploads_path = str(self.uploads_dir.as_posix() if platform.system() == "Windows" else self.uploads_dir)
+        volumes[uploads_path] = {"bind": "/data/uploads", "mode": "ro"}
+
         # Slim agent containers (no browser). 384MB / 0.15 CPU.
         # Agents are mostly I/O-bound (waiting on LLM APIs).
         # Browser ops are handled by the shared browser service container.
@@ -361,11 +371,15 @@ class DockerBackend(RuntimeBackend):
             vnc_port = self._next_port
             self._next_port += 1
 
+        uploads_path = str(self.uploads_dir.as_posix() if platform.system() == "Windows" else self.uploads_dir)
         run_kwargs: dict[str, Any] = {
             "detach": True,
             "name": "openlegion_browser",
             "environment": environment,
-            "volumes": {"openlegion_browser_data": {"bind": "/data", "mode": "rw"}},
+            "volumes": {
+                "openlegion_browser_data": {"bind": "/data", "mode": "rw"},
+                uploads_path: {"bind": "/app/uploads", "mode": "ro"},
+            },
             "mem_limit": browser_mem,
             "cpu_quota": 100000,
             "shm_size": "512m",

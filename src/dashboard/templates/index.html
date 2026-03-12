@@ -1876,6 +1876,103 @@
                       </div>
                     </div>
                   </div>
+
+                  <!-- ═══ FILES TAB ═══ -->
+                  <div x-show="identityTab === 'files'">
+                    <!-- Header row: path breadcrumb + refresh -->
+                    <div class="flex items-center gap-2 mb-2 min-w-0">
+                      <button x-show="agentFilesPath && agentFilesPath !== '.'"
+                        @click="fetchAgentFiles(selectedAgent, agentFilesParentPath(agentFilesPath))"
+                        class="text-gray-500 hover:text-white transition-colors flex-shrink-0"
+                        title="Up one level">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+                      </button>
+                      <span class="text-[10px] font-mono text-gray-500 truncate flex-1 min-w-0"
+                        x-text="'/data' + (agentFilesPath === '.' ? '' : '/' + agentFilesPath)"></span>
+                      <button @click="fetchAgentFiles(selectedAgent, agentFilesPath)"
+                        class="flex-shrink-0 text-gray-600 hover:text-gray-400 transition-colors"
+                        title="Refresh">
+                        <svg class="w-3.5 h-3.5" :class="agentFilesLoading && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                      </button>
+                    </div>
+
+                    <!-- Loading spinner -->
+                    <div x-show="agentFilesLoading" class="py-6 text-center text-gray-600 text-sm">
+                      <svg class="animate-spin h-4 w-4 inline mr-1" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                      Loading…
+                    </div>
+
+                    <!-- Empty state -->
+                    <div x-show="!agentFilesLoading && agentFiles.length === 0" class="py-6 text-center text-gray-600 text-sm">
+                      No files in this directory.
+                    </div>
+
+                    <!-- File list -->
+                    <div x-show="!agentFilesLoading && agentFiles.length > 0"
+                      class="border border-gray-800 rounded-lg overflow-hidden divide-y divide-gray-800/50 max-h-72 overflow-y-auto custom-scrollbar">
+                      <template x-for="entry in agentFiles" :key="entry.path">
+                        <div class="flex items-center gap-2 px-3 py-2 hover:bg-gray-800/40 transition-colors group">
+                          <!-- Icon -->
+                          <svg x-show="entry.type === 'dir'" class="w-3.5 h-3.5 text-yellow-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
+                          <svg x-show="entry.type === 'file'" class="w-3.5 h-3.5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
+                          <!-- Name -->
+                          <span class="text-xs font-mono truncate flex-1 min-w-0 cursor-pointer"
+                            :class="entry.type === 'dir' ? 'text-gray-300 hover:text-white' : 'text-gray-400'"
+                            @click="entry.type === 'dir'
+                              ? fetchAgentFiles(selectedAgent, entry.path)
+                              : previewAgentFile(selectedAgent, entry.path)"
+                            x-text="entry.path.split('/').pop()">
+                          </span>
+                          <!-- Size (files only) -->
+                          <span x-show="entry.type === 'file'" class="text-[10px] text-gray-600 flex-shrink-0"
+                            x-text="formatFileSize(entry.size)"></span>
+                          <!-- Actions (files only, shown on hover) -->
+                          <div x-show="entry.type === 'file'" class="flex items-center gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button @click="previewAgentFile(selectedAgent, entry.path)"
+                              class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors"
+                              title="Preview">View</button>
+                            <button @click="downloadAgentFile(selectedAgent, entry.path)"
+                              class="p-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors"
+                              title="Download">
+                              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                            </button>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+
+                    <!-- Inline file preview -->
+                    <div x-show="agentFilePreview || agentFilePreviewLoading" class="mt-3">
+                      <div x-show="agentFilePreviewLoading" class="py-4 text-center text-gray-600 text-xs">Loading preview…</div>
+                      <template x-if="agentFilePreview">
+                        <div>
+                          <div class="flex items-center justify-between mb-1.5">
+                            <span class="text-[10px] font-mono text-gray-500 truncate" x-text="agentFilePreview.path"></span>
+                            <div class="flex items-center gap-2 flex-shrink-0">
+                              <span class="text-[10px] text-gray-600" x-text="formatFileSize(agentFilePreview.size)"></span>
+                              <button @click="agentFilePreview = null"
+                                class="text-gray-600 hover:text-gray-400 transition-colors text-sm leading-none">&times;</button>
+                            </div>
+                          </div>
+                          <!-- Binary: show info only -->
+                          <div x-show="agentFilePreview.encoding === 'base64'" class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-xs text-gray-500 text-center">
+                            Binary file (<span x-text="agentFilePreview.mime_type"></span>)
+                            <button @click="downloadAgentFile(selectedAgent, agentFilePreview.path)"
+                              class="ml-2 text-indigo-400 hover:text-indigo-300 transition-colors">Download</button>
+                          </div>
+                          <!-- Text: show content -->
+                          <pre x-show="agentFilePreview.encoding !== 'base64'"
+                            class="bg-gray-800/50 border border-gray-700/50 rounded p-3 text-xs text-gray-300 font-mono whitespace-pre-wrap break-words max-h-64 overflow-y-auto custom-scrollbar"
+                            x-text="agentFilePreview.content"></pre>
+                          <div x-show="agentFilePreview.truncated" class="text-[10px] text-amber-600 mt-1">
+                            File truncated at 500 KB. Download for full content.
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                  <!-- END FILES TAB -->
+
                 </div>
               </div>
               <!-- Right column: Spend & Budget (combined) -->
@@ -2028,7 +2125,7 @@
         <!-- System sub-tab bar -->
         <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
           <template x-for="st in systemTabs" :key="st.id">
-            <button @click="systemTab = st.id; _pushUrl(false); if (st.id === 'integrations') { fetchChannels(); fetchWebhooks(); fetchSettings(); }"
+            <button @click="systemTab = st.id; _pushUrl(false); if (st.id === 'integrations') { fetchChannels(); fetchWebhooks(); fetchSettings(); } if (st.id === 'uploads') { fetchUploads(); }"
               class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
               :class="systemTab === st.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
               <span x-text="st.label"></span>
@@ -2625,6 +2722,69 @@
           </div>
         </div>
         </div><!-- /integrations sub-tab -->
+
+        <!-- ═══ UPLOADS SUB-TAB ═══ -->
+        <div x-show="systemTab === 'uploads'" x-init="if (systemTab === 'uploads') fetchUploads()">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
+            <div class="flex items-center justify-between mb-1">
+              <div class="text-xs text-gray-500 uppercase tracking-wider">Shared Uploads</div>
+              <button @click="fetchUploads()" class="text-gray-600 hover:text-gray-400 transition-colors" title="Refresh">
+                <svg class="w-3.5 h-3.5" :class="uploadsLoading && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              </button>
+            </div>
+            <p class="text-[11px] text-gray-600 mb-4">
+              Files uploaded here are available to all agents at <code class="text-indigo-400 font-mono">read_file("uploads/filename")</code> (read-only).
+              The VNC browser can navigate to <code class="text-indigo-400 font-mono">http://localhost:8500/uploads/filename</code>.
+            </p>
+
+            <!-- Upload dropzone -->
+            <div
+              class="border-2 border-dashed border-gray-700 hover:border-indigo-600 rounded-lg p-6 text-center mb-4 transition-colors cursor-pointer relative"
+              @click="$refs.uploadInput.click()"
+              @dragover.prevent
+              @drop.prevent="handleUploadFiles($event.dataTransfer.files)">
+              <input type="file" multiple x-ref="uploadInput" class="hidden"
+                @change="handleUploadFiles($event.target.files); $event.target.value = ''">
+              <svg class="w-8 h-8 text-gray-700 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
+              <div x-show="!uploadsUploading" class="text-sm text-gray-500">Drop files here or <span class="text-indigo-400">browse</span></div>
+              <div x-show="uploadsUploading" class="text-sm text-gray-500 flex items-center justify-center gap-2">
+                <svg class="animate-spin h-4 w-4 text-indigo-400" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                Uploading…
+              </div>
+            </div>
+
+            <!-- Error banner -->
+            <div x-show="uploadsError" class="mb-3 text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded px-3 py-2" x-text="uploadsError"></div>
+
+            <!-- File list -->
+            <div x-show="uploadsLoading && uploadsList.length === 0" class="py-4 text-center text-gray-600 text-sm">
+              <svg class="animate-spin h-4 w-4 inline mr-1" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+              Loading…
+            </div>
+            <div x-show="!uploadsLoading && uploadsList.length === 0 && !uploadsError" class="py-4 text-center text-gray-600 text-sm italic">
+              No files uploaded yet.
+            </div>
+            <div x-show="uploadsList.length > 0"
+              class="border border-gray-800 rounded-lg overflow-hidden divide-y divide-gray-800/50 max-h-96 overflow-y-auto custom-scrollbar">
+              <template x-for="file in uploadsList" :key="file.name">
+                <div class="flex items-center gap-2 px-3 py-2.5 hover:bg-gray-800/40 transition-colors group">
+                  <svg class="w-3.5 h-3.5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
+                  <span class="text-xs font-mono text-gray-300 truncate flex-1 min-w-0" x-text="file.name"></span>
+                  <span class="text-[10px] text-gray-600 flex-shrink-0" x-text="formatFileSize(file.size)"></span>
+                  <div class="flex items-center gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button @click="downloadUpload(file.name)"
+                      class="text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Download</button>
+                    <button @click="showConfirm('Delete upload?', 'Remove \'' + file.name + '\' from uploads?', () => deleteUpload(file.name), true)"
+                      class="p-1 rounded bg-gray-800 hover:bg-red-900/40 text-gray-500 hover:text-red-400 transition-colors" title="Delete">
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                    </button>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div><!-- /uploads sub-tab -->
+
       </div>
 
       <!-- Create project modal -->

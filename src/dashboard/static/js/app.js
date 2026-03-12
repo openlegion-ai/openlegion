@@ -10,6 +10,7 @@ const _IDENTITY_TABS = [
   { id: 'memory', label: 'Memory', file: null, access: 'agent' },
   { id: 'logs', label: 'Logs', file: null, access: 'auto' },
   { id: 'capabilities', label: 'Tools', file: null, access: 'auto' },
+  { id: 'files', label: 'Files', file: null, access: 'auto' },
 ];
 
 const _IDENTITY_FILE_MAP = {
@@ -188,6 +189,19 @@ function dashboard() {
     identityLearnings: null,
     identityLearningsLoading: false,
 
+    // Files tab
+    agentFiles: [],
+    agentFilesLoading: false,
+    agentFilesPath: '.',
+    agentFilePreview: null,   // { path, content, mime_type, encoding, size }
+    agentFilePreviewLoading: false,
+
+    // Uploads panel (System tab)
+    uploadsList: [],
+    uploadsLoading: false,
+    uploadsUploading: false,
+    uploadsError: null,
+
     // Broadcast
     broadcastMessage: '',
     _broadcastPending: null,
@@ -210,6 +224,7 @@ function dashboard() {
       { id: 'costs', label: 'Costs & Budgets' },
       { id: 'automation', label: 'Automation' },
       { id: 'integrations', label: 'Integrations' },
+      { id: 'uploads', label: 'Uploads' },
     ],
 
     // System tab — collapsible infrastructure
@@ -1175,6 +1190,9 @@ function dashboard() {
       this.identityEditBuffer = '';
       this.identityLogs = null;
       this.identityLearnings = null;
+      this.agentFiles = [];
+      this.agentFilesPath = '.';
+      this.agentFilePreview = null;
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace`);
         if (resp.ok) this.identityFiles = (await resp.json()).files || [];
@@ -1212,6 +1230,9 @@ function dashboard() {
       if (tab.id === 'capabilities') {
         await this.fetchAgentCapabilities(agentId);
       }
+      if (tab.id === 'files') {
+        await this.fetchAgentFiles(agentId, '.');
+      }
     },
 
     async fetchAgentCapabilities(agentId) {
@@ -1230,6 +1251,139 @@ function dashboard() {
           }));
         }
       } catch (e) { console.warn('fetchAgentCapabilities failed:', e); }
+    },
+
+    async fetchAgentFiles(agentId, path) {
+      this.agentFilesPath = path || '.';
+      this.agentFiles = [];
+      this.agentFilesLoading = true;
+      try {
+        const resp = await fetch(
+          `${window.__config.apiBase}/agents/${agentId}/files?path=${encodeURIComponent(this.agentFilesPath)}`
+        );
+        if (resp.ok) {
+          const data = await resp.json();
+          this.agentFiles = data.entries || [];
+        }
+      } catch (e) { console.warn('fetchAgentFiles failed:', e); }
+      this.agentFilesLoading = false;
+    },
+
+    _encodeFilePath(path) {
+      // Encode each segment individually to preserve slashes as path separators.
+      // encodeURIComponent('/') = '%2F' which breaks {path:path} routing.
+      return path.split('/').map(encodeURIComponent).join('/');
+    },
+
+    async previewAgentFile(agentId, path) {
+      this.agentFilePreview = null;
+      this.agentFilePreviewLoading = true;
+      try {
+        const resp = await fetch(
+          `${window.__config.apiBase}/agents/${agentId}/files/${this._encodeFilePath(path)}`
+        );
+        if (resp.ok) {
+          this.agentFilePreview = await resp.json();
+        }
+      } catch (e) { console.warn('previewAgentFile failed:', e); }
+      this.agentFilePreviewLoading = false;
+    },
+
+    downloadAgentFile(agentId, path) {
+      const url = `${window.__config.apiBase}/agents/${agentId}/files/${this._encodeFilePath(path)}`;
+      fetch(url).then(r => r.json()).then(data => {
+        let blob;
+        if (data.encoding === 'base64') {
+          const bin = atob(data.content);
+          const arr = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+          blob = new Blob([arr], { type: data.mime_type || 'application/octet-stream' });
+        } else {
+          blob = new Blob([data.content], { type: data.mime_type || 'text/plain' });
+        }
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = path.split('/').pop();
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }).catch(e => this.showToast(`Download failed: ${e.message}`));
+    },
+
+    agentFilesParentPath(path) {
+      if (!path || path === '.') return null;
+      const parts = path.split('/');
+      parts.pop();
+      return parts.length ? parts.join('/') : '.';
+    },
+
+    formatFileSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    },
+
+    async fetchUploads() {
+      this.uploadsLoading = true;
+      this.uploadsError = null;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/uploads`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.uploadsList = data.uploads || [];
+        } else {
+          this.uploadsError = `Failed to list uploads (${resp.status})`;
+        }
+      } catch (e) {
+        this.uploadsError = e.message;
+      }
+      this.uploadsLoading = false;
+    },
+
+    async handleUploadFiles(files) {
+      if (!files || files.length === 0) return;
+      this.uploadsUploading = true;
+      this.uploadsError = null;
+      for (const file of files) {
+        try {
+          const resp = await fetch(
+            `${window.__config.apiBase}/uploads/${encodeURIComponent(file.name)}`,
+            { method: 'POST', body: file, headers: { 'Content-Type': file.type || 'application/octet-stream' } }
+          );
+          if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            this.uploadsError = `Upload failed for "${file.name}": ${err.detail || resp.status}`;
+          }
+        } catch (e) {
+          this.uploadsError = `Upload failed for "${file.name}": ${e.message}`;
+        }
+      }
+      this.uploadsUploading = false;
+      await this.fetchUploads();
+    },
+
+    downloadUpload(name) {
+      const url = `${window.__config.apiBase}/uploads/${encodeURIComponent(name)}/download`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name.split('/').pop();
+      a.click();
+    },
+
+    async deleteUpload(name) {
+      try {
+        const resp = await fetch(
+          `${window.__config.apiBase}/uploads/${encodeURIComponent(name)}`,
+          { method: 'DELETE' }
+        );
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          this.uploadsError = `Delete failed: ${err.detail || resp.status}`;
+          return;
+        }
+        this.uploadsList = this.uploadsList.filter(u => u.name !== name);
+      } catch (e) {
+        this.uploadsError = e.message;
+      }
     },
 
     async switchIdentityTab(agentId, tabId) {
@@ -3377,6 +3531,9 @@ function dashboard() {
       this.configEditing = false;
       this.identityLogs = null;
       this.identityLearnings = null;
+      this.agentFiles = [];
+      this.agentFilesPath = '.';
+      this.agentFilePreview = null;
       this.fetchAgentDetail(agentId);
       this.fetchIdentityFiles(agentId);
       this.fetchAgentConfig(agentId);
