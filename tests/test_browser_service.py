@@ -276,7 +276,10 @@ class TestTypeTextClearBehavior:
             await mgr.type_text("a1", selector="input", text="hello", clear=True)
         mock_page.click.assert_called_once_with("input", timeout=10000)
         mock_page.keyboard.press.assert_any_call("Control+a")
-        assert mock_page.evaluate.await_count == len("hello")
+        # Printable chars now go through keyboard.press, not evaluate
+        press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
+        assert all(c in press_calls for c in list("hello"))
+        assert mock_page.evaluate.await_count == 0
 
     @pytest.mark.asyncio
     async def test_clear_false_types_without_select_all(self):
@@ -296,7 +299,9 @@ class TestTypeTextClearBehavior:
         mock_page.click.assert_called_once_with("input", timeout=10000)
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert "Control+a" not in press_calls
-        assert mock_page.evaluate.await_count == 2
+        # keyboard.press used for each char, not evaluate
+        assert "a" in press_calls and "b" in press_calls
+        assert mock_page.evaluate.await_count == 0
 
 
 class TestCamoufoxInstanceLock:
@@ -946,7 +951,11 @@ class TestTypeTextWithRef:
         assert result["success"] is True
         mock_locator.click.assert_called_once_with(timeout=10000)
         mock_page.keyboard.press.assert_any_call("Control+a")
-        assert mock_page.evaluate.await_count == len("test@example.com")
+        # Each printable char uses keyboard.press, not evaluate
+        press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
+        for ch in "test@example.com":
+            assert ch in press_calls
+        assert mock_page.evaluate.await_count == 0
 
     @pytest.mark.asyncio
     async def test_type_by_ref_no_clear(self):
@@ -970,7 +979,8 @@ class TestTypeTextWithRef:
         mock_locator.click.assert_called_once_with(timeout=10000)
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert "Control+a" not in press_calls
-        assert mock_page.evaluate.await_count == 2
+        assert "a" in press_calls and "b" in press_calls
+        assert mock_page.evaluate.await_count == 0
 
     @pytest.mark.asyncio
     async def test_type_by_ref_credential_tracks_ref(self):
@@ -1298,8 +1308,14 @@ class TestTypeWithVariance:
     """Verify per-char execCommand calls with keyboard.type fallback and varying delays."""
 
     @pytest.mark.asyncio
-    async def test_type_with_variance_uses_exec_command(self):
-        """Printable chars use execCommand('insertText') so React sees beforeinput."""
+    async def test_type_with_variance_uses_keyboard_press(self):
+        """Printable chars use keyboard.press(char) so browser fires trusted beforeinput.
+
+        execCommand('insertText') in Firefox sets isTrusted=false on the resulting
+        beforeinput event, which Lexical/React controlled components ignore.
+        keyboard.press() sends a real CDP keyDown event; the browser generates
+        the beforeinput with isTrusted=true, enabling submit buttons on SPAs.
+        """
         from src.browser.service import BrowserManager
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
@@ -1307,54 +1323,52 @@ class TestTypeWithVariance:
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.type = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
-        # execCommand returns True (contenteditable)
-        mock_page.evaluate = AsyncMock(return_value=True)
+        mock_page.evaluate = AsyncMock()
 
         delays = []
 
         async def capture_sleep(t):
             delays.append(t)
 
-        # Suppress random think_pause so evaluate count is deterministic
         with patch("src.browser.service.random.random", return_value=1.0):
             with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
                 await mgr._type_with_variance(mock_page, "Hi!")
 
-        # All 3 printable chars go through evaluate(execCommand)
-        assert mock_page.evaluate.await_count == 3
+        # All 3 printable chars go through keyboard.press, not evaluate/type
+        assert mock_page.keyboard.press.await_count == 3
+        assert mock_page.evaluate.await_count == 0
         assert mock_page.keyboard.type.await_count == 0
-        assert mock_page.keyboard.press.await_count == 0
-        # Verify execCommand is called with each character
-        eval_chars = [c[0][1] for c in mock_page.evaluate.call_args_list]
-        assert eval_chars == ["H", "i", "!"]
+        press_chars = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
+        assert press_chars == ["H", "i", "!"]
         assert len(delays) == 3
         assert all(0.04 <= d <= 0.20 for d in delays)
 
     @pytest.mark.asyncio
     async def test_type_with_variance_falls_back_to_keyboard_type(self):
-        """When execCommand returns False (plain input), fall back to keyboard.type."""
+        """If keyboard.press() raises (char outside key map), fall back to keyboard.type."""
         from src.browser.service import BrowserManager
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
         mock_page = AsyncMock()
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.type = AsyncMock()
-        mock_page.keyboard.press = AsyncMock()
-        # execCommand returns False (plain <input>/<textarea>)
-        mock_page.evaluate = AsyncMock(return_value=False)
+        # Simulate keyboard.press failing for unmapped characters
+        mock_page.keyboard.press = AsyncMock(side_effect=Exception("Unknown key"))
+        mock_page.evaluate = AsyncMock()
 
         with patch("src.browser.service.random.random", return_value=1.0):
             with patch("src.browser.service.asyncio.sleep"):
                 await mgr._type_with_variance(mock_page, "ab")
 
-        assert mock_page.evaluate.await_count == 2
+        # Both chars fell back to keyboard.type after press raised
         assert mock_page.keyboard.type.await_count == 2
         chars_typed = [c[0][0] for c in mock_page.keyboard.type.call_args_list]
         assert chars_typed == ["a", "b"]
+        assert mock_page.evaluate.await_count == 0
 
     @pytest.mark.asyncio
     async def test_type_with_variance_handles_special_keys(self):
-        """\\n and \\t should use keyboard.press, not execCommand."""
+        """\\n uses keyboard.press('Enter'), \\t uses keyboard.press('Tab')."""
         from src.browser.service import BrowserManager
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
@@ -1362,18 +1376,17 @@ class TestTypeWithVariance:
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.type = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
-        mock_page.evaluate = AsyncMock(return_value=True)
+        mock_page.evaluate = AsyncMock()
 
         with patch("src.browser.service.random.random", return_value=1.0):
             with patch("src.browser.service.asyncio.sleep"):
                 await mgr._type_with_variance(mock_page, "a\nb\tc")
 
-        # a, b, c use execCommand; \n and \t use press
-        assert mock_page.evaluate.await_count == 3
-        assert mock_page.keyboard.press.await_count == 2
+        # a, b, c → keyboard.press(char); \n → press('Enter'); \t → press('Tab')
+        assert mock_page.keyboard.press.await_count == 5
+        assert mock_page.evaluate.await_count == 0
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
-        assert "Enter" in press_calls
-        assert "Tab" in press_calls
+        assert press_calls == ["a", "Enter", "b", "Tab", "c"]
 
 
 class TestNavigateWaitUntil:

@@ -528,20 +528,31 @@ class BrowserManager:
     async def _type_with_variance(self, page, text: str) -> None:
         """Type text character-by-character with human-like inter-key delays.
 
-        Uses execCommand('insertText') for printable characters so that the
-        browser fires the full beforeinput → DOM-update → input event chain in
-        W3C order. React/Vue controlled components (including X's contenteditable
-        tweet composer) listen to beforeinput to update state; keyboard.type()
-        skips beforeinput, leaving React's state stale and submit buttons disabled.
+        Uses keyboard.press(char) for every printable character so Playwright
+        sends real CDP keyDown/keyUp events.  The browser — not injected JS —
+        generates the resulting beforeinput and input events, which carry
+        isTrusted=true.  React/Lexical controlled contenteditable elements
+        (e.g. X's tweet composer) only update their state — and enable submit
+        buttons — when beforeinput.isTrusted is true.
 
-        execCommand returns False on elements that don't support it (regular
-        <input>/<textarea>), in which case we fall back to keyboard.type().
-        keyboard.press() handles newlines and tabs as named keys.
+        Why not execCommand('insertText')?  In Firefox (Camoufox's base) the
+        event fired by execCommand has isTrusted=false, so Lexical ignores it:
+        text appears in the DOM visually but the Post button stays disabled.
+
+        Why not keyboard.type(char)?  Playwright's type() uses CDP
+        Input.insertText which injects text without any key events — no keydown,
+        no beforeinput.  Same problem.
+
+        keyboard.press(char) → CDP Input.dispatchKeyEvent(keyDown + keyUp) →
+        browser generates trusted beforeinput → Lexical/React state updates →
+        Post button becomes enabled.
+
+        Fallback: if keyboard.press() raises (character outside Playwright's key
+        map, e.g. accented letters, emoji), use keyboard.type() so the character
+        at least appears.
 
         Think-pauses are weighted to word/clause boundaries: 12 % probability
-        before the first character of each new word (after a space or punctuation)
-        vs 2.5 % mid-word.  This models the natural hesitation a human feels
-        when about to start a new word or clause, not a uniform random rhythm.
+        before the first character of each new word, 2.5 % mid-word.
         """
         prev_char = ""
         for char in text:
@@ -556,11 +567,13 @@ class BrowserManager:
             elif char == "\t":
                 await page.keyboard.press("Tab")
             else:
-                inserted = await page.evaluate(
-                    "c => document.execCommand('insertText', false, c)", char
-                )
-                if not inserted:
-                    # execCommand not supported (plain <input>/<textarea>)
+                # Real key events → isTrusted=true beforeinput → framework
+                # state updates (Post button lights up on X, etc.)
+                try:
+                    await page.keyboard.press(char)
+                except Exception:
+                    # Outside Playwright's key map — fall back, text appears
+                    # but framework state may not update.
                     await page.keyboard.type(char)
             await asyncio.sleep(keystroke_delay(char))
             prev_char = char
