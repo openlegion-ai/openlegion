@@ -2144,7 +2144,7 @@ def create_dashboard_router(
     _MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
     def _safe_upload_path(name: str) -> Path:
-        """Resolve upload path, blocking traversal, absolute paths, and null bytes.
+        r"""Resolve upload path, blocking traversal, absolute paths, and null bytes.
 
         Two-stage check:
           1. Structural: reject absolute paths and any '..' component
@@ -2206,6 +2206,7 @@ def create_dashboard_router(
     async def api_download_upload(name: str):
         """Download a file from the uploads directory with correct Content-Type."""
         import mimetypes
+
         from fastapi.responses import Response
         path = _safe_upload_path(name)
         if not path.exists() or not path.is_file():

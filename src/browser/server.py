@@ -144,6 +144,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         """Serve a user-uploaded file so the VNC browser can navigate to it."""
         import mimetypes
         from pathlib import Path
+
         from fastapi.responses import Response
 
         root = Path(_UPLOADS_ROOT)

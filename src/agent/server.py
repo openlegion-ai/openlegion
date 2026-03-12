@@ -480,6 +480,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         """Read any file from /data. Text returned as-is; binary base64-encoded."""
         import base64
         import mimetypes
+
         from src.agent.builtins.file_tool import _MAX_READ, _safe_path
         try:
             safe = _safe_path(path)
