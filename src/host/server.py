@@ -1231,9 +1231,35 @@ def create_mesh_app(
                     except Exception as e:
                         _server_logger.warning("VNC upstream→client error: %s", e)
 
+                async def browser_keepalive():
+                    """Touch all browser instances every 5 min while VNC is open.
+
+                    Prevents idle cleanup from killing a browser that a user
+                    is actively viewing without any agent operations running.
+                    """
+                    svc_url = getattr(container_manager, "browser_service_url", None)
+                    svc_token = getattr(container_manager, "browser_auth_token", "")
+                    if not svc_url:
+                        return
+                    try:
+                        import httpx as _httpx
+                        async with _httpx.AsyncClient(timeout=5) as _client:
+                            while True:
+                                await asyncio.sleep(300)
+                                try:
+                                    await _client.post(
+                                        f"{svc_url}/browser/keepalive",
+                                        headers={"Authorization": f"Bearer {svc_token}"},
+                                    )
+                                except Exception:
+                                    pass
+                    except asyncio.CancelledError:
+                        pass
+
                 tasks = [
                     asyncio.create_task(client_to_upstream()),
                     asyncio.create_task(upstream_to_client()),
+                    asyncio.create_task(browser_keepalive()),
                 ]
                 _done, pending = await asyncio.wait(
                     tasks, return_when=asyncio.FIRST_COMPLETED,

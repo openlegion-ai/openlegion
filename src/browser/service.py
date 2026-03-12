@@ -109,6 +109,18 @@ class BrowserManager:
                 logger.info("Stopping idle browser for '%s'", agent_id)
                 await self._stop_instance(agent_id)
 
+    async def touch_all(self) -> int:
+        """Reset the idle timer for every running browser instance.
+
+        Called by the VNC keepalive while a user is actively viewing the
+        display, so a watched browser is never killed by the idle cleanup.
+        Returns the number of instances touched.
+        """
+        async with self._lock:
+            for inst in self._instances.values():
+                inst.touch()
+            return len(self._instances)
+
     async def get_or_start(self, agent_id: str) -> CamoufoxInstance:
         """Get existing browser or start a new one for the agent."""
         if not _AGENT_ID_RE.match(agent_id):
