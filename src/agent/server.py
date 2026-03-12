@@ -109,12 +109,18 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
     @app.get("/capabilities")
     async def get_capabilities() -> dict:
-        """Return agent capabilities and tool definitions."""
+        """Return agent capabilities and tool definitions.
+
+        Respects the same exclude filter used when calling the LLM, so the
+        dashboard accurately reflects what the agent can actually use.
+        """
+        exc = loop._excluded_tools
         return {
             "agent_id": loop.agent_id,
             "role": loop.role,
-            "skills": loop.skills.list_skills(),
-            "tool_definitions": loop.skills.get_tool_definitions(),
+            "skills": loop.skills.list_skills(exclude=exc),
+            "tool_definitions": loop.skills.get_tool_definitions(exclude=exc),
+            "tool_sources": loop.skills.get_tool_sources(exclude=exc),
         }
 
     @app.post("/chat", response_model=ChatResponse)
