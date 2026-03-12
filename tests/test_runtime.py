@@ -419,6 +419,7 @@ def _make_docker_backend(**overrides):
     backend.browser_vnc_url = None
     backend.browser_auth_token = ""
     backend._browser_container = None
+    backend.uploads_dir = __import__("pathlib").Path("/tmp/openlegion_uploads")
     backend._network_name = "openlegion_agents"
     backend._network = MagicMock()
     for k, v in overrides.items():
