@@ -763,7 +763,6 @@ class TestEnsureAllAgentPermissions:
             "can_manage_cron": True,
         }
         perms_file.write_text(json.dumps({"permissions": {"dave": already_migrated}}))
-        original_mtime = perms_file.stat().st_mtime
 
         with patch("src.cli.config.AGENTS_FILE", agents_yaml), \
              patch("src.cli.config.CONFIG_FILE", tmp_path / "mesh.yaml"), \
