@@ -56,10 +56,13 @@ class SkillRegistry:
         self.skills_dir = skills_dir
         self._mcp_client = mcp_client
         self.skills: dict[str, dict] = {}
-        self._builtin_names: frozenset[str] = frozenset()
+        self._builtin_functions: frozenset = frozenset()
         with _skill_staging_lock:
             self._discover_builtins()
-            self._builtin_names = frozenset(_skill_staging.keys())
+            self._builtin_functions = frozenset(
+                info["function"] for info in _skill_staging.values()
+                if callable(info.get("function"))
+            )
             self._discover(skills_dir)
             self._discover(self.CUSTOM_SKILLS_DIR)
             self._discover(self.MARKETPLACE_SKILLS_DIR)
@@ -109,7 +112,10 @@ class SkillRegistry:
         with _skill_staging_lock:
             _skill_staging.clear()
             self._discover_builtins()
-            self._builtin_names = frozenset(_skill_staging.keys())
+            self._builtin_functions = frozenset(
+                info["function"] for info in _skill_staging.values()
+                if callable(info.get("function"))
+            )
             self._discover(self.skills_dir)
             self._discover(self.CUSTOM_SKILLS_DIR)
             self._discover(self.MARKETPLACE_SKILLS_DIR)
@@ -171,14 +177,19 @@ class SkillRegistry:
 
         Tags: ``"builtin"`` (core platform tools), ``"mcp"`` (MCP server tools),
         ``"custom"`` (agent-created or marketplace skills).
+
+        Uses function-object identity rather than name lookup so that a custom
+        skill that overrides a builtin by the same name is correctly tagged
+        ``"custom"``.
         """
         result = {}
         for name, info in self.skills.items():
             if exclude and name in exclude:
                 continue
-            if info.get("function") == "mcp":
+            func = info.get("function")
+            if func == "mcp":
                 result[name] = "mcp"
-            elif name in self._builtin_names:
+            elif func in self._builtin_functions:
                 result[name] = "builtin"
             else:
                 result[name] = "custom"

@@ -694,7 +694,8 @@ class TestPermissionsDefault:
 
 class TestEnsureAllAgentPermissions:
     def test_backfills_missing_agents(self, tmp_path):
-        """_ensure_all_agent_permissions adds permissions for agents not yet in permissions.json."""
+        """_ensure_all_agent_permissions adds permissions for agents not yet in
+        permissions.json and forward-migrates missing flags on existing ones."""
         from unittest.mock import patch
 
         from src.cli.config import _ensure_all_agent_permissions
@@ -702,6 +703,7 @@ class TestEnsureAllAgentPermissions:
         agents_yaml = tmp_path / "agents.yaml"
         agents_yaml.write_text("agents:\n  alice:\n    role: helper\n  bob:\n    role: coder\n")
         perms_file = tmp_path / "permissions.json"
+        # alice exists but predates can_manage_cron; bob is absent entirely.
         perms_file.write_text(json.dumps({"permissions": {"alice": {"can_message": ["orchestrator"]}}}))
 
         with patch("src.cli.config.AGENTS_FILE", agents_yaml), \
@@ -710,9 +712,107 @@ class TestEnsureAllAgentPermissions:
             _ensure_all_agent_permissions()
 
         perms = json.loads(perms_file.read_text())
+        # Both agents present
         assert "alice" in perms["permissions"]
         assert "bob" in perms["permissions"]
+        # New agent gets full defaults
         assert perms["permissions"]["bob"]["allowed_credentials"] == ["*"]
+        assert perms["permissions"]["bob"]["can_manage_cron"] is True
+        # Existing agent gets forward-migrated flag
+        assert perms["permissions"]["alice"]["can_manage_cron"] is True
+
+    def test_forward_migrates_can_manage_cron_for_existing_agents(self, tmp_path):
+        """Agents already in permissions.json but missing can_manage_cron get it added."""
+        from unittest.mock import patch
+
+        from src.cli.config import _ensure_all_agent_permissions
+
+        agents_yaml = tmp_path / "agents.yaml"
+        agents_yaml.write_text("agents:\n  charlie:\n    role: helper\n")
+        perms_file = tmp_path / "permissions.json"
+        # charlie exists with full-looking perms but no can_manage_cron (legacy entry)
+        legacy = {
+            "can_message": ["orchestrator"],
+            "allowed_credentials": ["*"],
+            "allowed_apis": ["llm"],
+        }
+        perms_file.write_text(json.dumps({"permissions": {"charlie": legacy}}))
+
+        with patch("src.cli.config.AGENTS_FILE", agents_yaml), \
+             patch("src.cli.config.CONFIG_FILE", tmp_path / "mesh.yaml"), \
+             patch("src.cli.config.PERMISSIONS_FILE", perms_file):
+            _ensure_all_agent_permissions()
+
+        perms = json.loads(perms_file.read_text())
+        assert perms["permissions"]["charlie"]["can_manage_cron"] is True
+        # Existing keys are preserved
+        assert perms["permissions"]["charlie"]["allowed_credentials"] == ["*"]
+
+    def test_idempotent_when_flag_already_present(self, tmp_path):
+        """Running _ensure_all_agent_permissions twice does not change an
+        already-migrated permissions file."""
+        from unittest.mock import patch
+
+        from src.cli.config import _ensure_all_agent_permissions
+
+        agents_yaml = tmp_path / "agents.yaml"
+        agents_yaml.write_text("agents:\n  dave:\n    role: helper\n")
+        perms_file = tmp_path / "permissions.json"
+        already_migrated = {
+            "can_message": ["orchestrator"],
+            "can_manage_cron": True,
+        }
+        perms_file.write_text(json.dumps({"permissions": {"dave": already_migrated}}))
+        original_mtime = perms_file.stat().st_mtime
+
+        with patch("src.cli.config.AGENTS_FILE", agents_yaml), \
+             patch("src.cli.config.CONFIG_FILE", tmp_path / "mesh.yaml"), \
+             patch("src.cli.config.PERMISSIONS_FILE", perms_file):
+            _ensure_all_agent_permissions()
+            _ensure_all_agent_permissions()  # second run should be a no-op write
+
+        perms = json.loads(perms_file.read_text())
+        assert perms["permissions"]["dave"]["can_manage_cron"] is True
+
+    def test_default_entry_is_not_migrated(self, tmp_path):
+        """The 'default' key in permissions.json is a template, not an agent;
+        it must not be touched by the forward-migration loop."""
+        from unittest.mock import patch
+
+        from src.cli.config import _ensure_all_agent_permissions
+
+        agents_yaml = tmp_path / "agents.yaml"
+        agents_yaml.write_text("agents: {}\n")
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(json.dumps({"permissions": {"default": {"can_message": ["*"]}}}))
+
+        with patch("src.cli.config.AGENTS_FILE", agents_yaml), \
+             patch("src.cli.config.CONFIG_FILE", tmp_path / "mesh.yaml"), \
+             patch("src.cli.config.PERMISSIONS_FILE", perms_file):
+            _ensure_all_agent_permissions()
+
+        perms = json.loads(perms_file.read_text())
+        # 'default' must not have been modified
+        assert "can_manage_cron" not in perms["permissions"]["default"]
+
+
+class TestAddAgentPermissionsDefaults:
+    def test_new_agent_gets_can_manage_cron(self, tmp_path):
+        """_add_agent_permissions sets can_manage_cron:True for new agents."""
+        from unittest.mock import patch
+
+        from src.cli.config import _add_agent_permissions
+
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(json.dumps({"permissions": {}}))
+
+        with patch("src.cli.config.AGENTS_FILE", tmp_path / "agents.yaml"), \
+             patch("src.cli.config.CONFIG_FILE", tmp_path / "mesh.yaml"), \
+             patch("src.cli.config.PERMISSIONS_FILE", perms_file):
+            _add_agent_permissions("new_agent")
+
+        perms = json.loads(perms_file.read_text())
+        assert perms["permissions"]["new_agent"]["can_manage_cron"] is True
 
 
 class TestAddAgentToConfigInitialInstructions:

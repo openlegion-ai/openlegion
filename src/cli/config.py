@@ -136,6 +136,13 @@ CHANNEL_TYPES = {
     },
 }
 
+# Permission flags that every agent should have. Entries here are
+# forward-migrated onto existing agents at startup by
+# _ensure_all_agent_permissions — add new flags here when introducing them.
+_AGENT_PERMISSION_DEFAULTS: dict[str, object] = {
+    "can_manage_cron": True,
+}
+
 # ── Config loading ──────────────────────────────────────────
 
 
@@ -452,14 +459,13 @@ def _ensure_all_agent_permissions() -> None:
     # agents, including ones just added above.
     perms = _load_permissions()
 
-    # Forward-migrate: add any capability flags that were introduced after an
-    # agent's initial permissions entry was created.
-    _CAPABILITY_DEFAULTS: dict = {"can_manage_cron": True}
+    # Forward-migrate: add any permission flags introduced after an agent's
+    # initial permissions entry was created (keyed in _AGENT_PERMISSION_DEFAULTS).
     changed = False
     for agent_id, agent_perms in perms.get("permissions", {}).items():
         if agent_id == "default":
             continue
-        for flag, default_val in _CAPABILITY_DEFAULTS.items():
+        for flag, default_val in _AGENT_PERMISSION_DEFAULTS.items():
             if flag not in agent_perms:
                 agent_perms[flag] = default_val
                 changed = True

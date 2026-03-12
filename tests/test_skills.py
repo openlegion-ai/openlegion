@@ -483,3 +483,117 @@ async def test_execute_filters_hallucinated_params_async():
 
     result = await registry.execute("async_no_args", {"raw": ""})
     assert result == {"async_ok": True}
+
+
+class TestGetToolSources:
+    """Tests for SkillRegistry.get_tool_sources()."""
+
+    def setup_method(self):
+        _skill_staging.clear()
+
+    def _make_registry(self, builtin_fns=(), extra_skills=None):
+        """Build a registry with explicit builtin function refs."""
+        registry = SkillRegistry.__new__(SkillRegistry)
+        registry.skills = dict(_skill_staging)
+        if extra_skills:
+            registry.skills.update(extra_skills)
+        registry._builtin_functions = frozenset(builtin_fns)
+        return registry
+
+    def test_builtin_tagged_correctly(self):
+        """Skills whose function object is in _builtin_functions → 'builtin'."""
+        @skill(name="core_tool", description="core", parameters={})
+        def core_fn():
+            return {}
+
+        registry = self._make_registry(builtin_fns=[core_fn])
+        sources = registry.get_tool_sources()
+        assert sources["core_tool"] == "builtin"
+
+    def test_custom_tagged_correctly(self):
+        """Skills not in _builtin_functions and not MCP → 'custom'."""
+        @skill(name="agent_tool", description="custom", parameters={})
+        def agent_fn():
+            return {}
+
+        registry = self._make_registry(builtin_fns=[])
+        sources = registry.get_tool_sources()
+        assert sources["agent_tool"] == "custom"
+
+    def test_mcp_tagged_correctly(self):
+        """Skills with function='mcp' sentinel → 'mcp'."""
+        mcp_entry = {
+            "name": "ext_search",
+            "description": "MCP tool",
+            "parameters": {"type": "object", "properties": {}},
+            "function": "mcp",
+        }
+        registry = self._make_registry(extra_skills={"ext_search": mcp_entry})
+        sources = registry.get_tool_sources()
+        assert sources["ext_search"] == "mcp"
+
+    def test_exclude_removes_entries(self):
+        """Excluded skills do not appear in the returned mapping."""
+        @skill(name="visible", description="shown", parameters={})
+        def vis_fn():
+            return {}
+
+        @skill(name="hidden", description="excluded", parameters={})
+        def hid_fn():
+            return {}
+
+        registry = self._make_registry()
+        sources = registry.get_tool_sources(exclude=frozenset({"hidden"}))
+        assert "visible" in sources
+        assert "hidden" not in sources
+
+    def test_custom_override_of_builtin_name(self):
+        """A custom skill using the same name as a builtin is tagged 'custom',
+        not 'builtin', because the function object differs."""
+        @skill(name="read_file", description="original builtin", parameters={})
+        def original_builtin():
+            return {}
+
+        original_fn_ref = original_builtin  # capture the builtin function
+
+        # Simulate a custom skill overriding the same name
+        @skill(name="read_file", description="custom override", parameters={})
+        def custom_override():
+            return {}
+
+        # registry.skills now has custom_override for "read_file"
+        registry = self._make_registry(builtin_fns=[original_fn_ref])
+        sources = registry.get_tool_sources()
+        assert sources["read_file"] == "custom"
+
+    def test_mixed_sources(self):
+        """Registry with builtin, custom, and mcp tools returns correct tags."""
+        @skill(name="builtin_a", description="b", parameters={})
+        def builtin_a_fn():
+            return {}
+
+        @skill(name="custom_b", description="c", parameters={})
+        def custom_b_fn():
+            return {}
+
+        mcp_entry = {
+            "name": "mcp_c",
+            "description": "mcp",
+            "parameters": {"type": "object", "properties": {}},
+            "function": "mcp",
+        }
+        registry = self._make_registry(
+            builtin_fns=[builtin_a_fn],
+            extra_skills={"mcp_c": mcp_entry},
+        )
+        sources = registry.get_tool_sources()
+        assert sources["builtin_a"] == "builtin"
+        assert sources["custom_b"] == "custom"
+        assert sources["mcp_c"] == "mcp"
+
+    def test_empty_registry_returns_empty(self):
+        """Empty skills dict → empty sources dict."""
+        registry = SkillRegistry.__new__(SkillRegistry)
+        registry.skills = {}
+        registry._builtin_functions = frozenset()
+        assert registry.get_tool_sources() == {}
