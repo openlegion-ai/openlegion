@@ -152,19 +152,17 @@ def build_launch_options(agent_id: str, profile_dir: str) -> dict:
 
     locale = os.environ.get("BROWSER_LOCALE", "en-US")
 
-    # Deterministic fingerprint screen size for this agent — same agent_id
-    # always maps to the same screen dimensions across browser restarts.
-    # Only drives the BrowserForge Screen constraint; do NOT set window= here.
-    # Per Camoufox docs: "Do not set the window size to a fixed value unless
-    # for debugging purposes" — Camoufox auto-generates a realistic window size
-    # from the screen fingerprint, and Openbox maximises it to fill the VNC.
-    fp_width, fp_height = _pick_resolution(os_hint, seed=agent_id)
+    # VNC display is always 1920×1080.  We set window= and Screen to match so
+    # that window.innerWidth and window.screen.width are consistent — a mismatch
+    # (innerWidth > screen.width) is itself a detectable bot signal.  Per-agent
+    # resolution variation is not worth breaking the KasmVNC UX.
 
     options: dict = {
         "headless": False,
         "humanize": True,        # Camoufox mouse-curves + micro-delays
         "os": os_hint,
         "locale": locale,        # navigator.language / Accept-Language header
+        "window": (1920, 1080),  # fill the KasmVNC display
         # block_webrtc: Camoufox native toggle — prevents Docker container IP
         # from leaking via ICE candidates.  More reliable than manual prefs.
         "block_webrtc": True,
@@ -174,12 +172,11 @@ def build_launch_options(agent_id: str, profile_dir: str) -> dict:
     # timezone_id, not timezone).  Passing it causes a TypeError on browser
     # startup.  Locale implicitly determines timezone via GeoIP or BrowserForge.
 
-    # BrowserForge screen constraints — drive the fingerprint screen dimensions.
-    # This is the only place the per-agent resolution is applied; the actual
-    # X11 window size is left to Camoufox to generate automatically.
+    # Lock the BrowserForge screen fingerprint to 1920×1080 so it stays
+    # consistent with the actual window size.
     try:
         from browserforge.fingerprints import Screen
-        options["screen"] = Screen(max_width=fp_width, max_height=fp_height)
+        options["screen"] = Screen(max_width=1920, max_height=1080)
     except ImportError:
         pass  # browserforge only available in browser container
 

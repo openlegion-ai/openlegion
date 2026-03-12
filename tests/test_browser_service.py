@@ -411,17 +411,17 @@ class TestStealthConfig:
         # 20 agents from a 9-resolution table should produce multiple distinct sizes
         assert len(resolutions) > 1
 
-    def test_window_not_in_launch_options(self):
-        """window= must NOT be set in launch options — Camoufox auto-generates it.
+    def test_window_fills_vnc_display(self):
+        """window= must be (1920, 1080) to fill the KasmVNC display.
 
-        Per Camoufox docs: "Do not set the window size to a fixed value unless
-        for debugging purposes."  Setting a fixed window size is a fingerprinting
-        signal.  Openbox's maximise rule fills the VNC display regardless.
+        The VNC container runs at 1920×1080.  window= must match screen= so that
+        window.innerWidth and window.screen.width are consistent — a mismatch
+        is itself a bot detection signal.
         """
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
-        assert "window" not in opts
+        assert opts["window"] == (1920, 1080)
 
     def test_macos_resolution_uses_css_logical_pixels(self):
         """macOS resolutions must be CSS logical pixels, not physical retina pixels."""
