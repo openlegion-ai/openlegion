@@ -402,61 +402,102 @@ async def save_artifact(
 @skill(
     name="set_cron",
     description=(
-        "Schedule a recurring job for yourself. The mesh will send you the "
-        "specified message on the given schedule. Use cron syntax "
-        "(e.g. '0 9 * * 1-5' for weekdays at 9 AM) or natural intervals "
-        "(e.g. 'every 30m'). Set heartbeat=true to update your autonomous "
-        "wakeup schedule instead."
+        "Schedule a recurring job on a cron schedule or interval. Three modes:\n\n"
+        "1. TOOL MODE (tool_name set) — invoke one of your tools directly on each "
+        "tick. No LLM is involved: zero token cost, instant execution. Use this "
+        "whenever the action is deterministic and needs no reasoning — e.g. sending "
+        "a status notification, polling an API, writing to the blackboard. The tool "
+        "must accept mesh_client as a keyword arg if it needs to communicate with "
+        "the mesh (e.g. call notify_user). Set tool_params to a JSON string if the "
+        "tool needs arguments.\n\n"
+        "2. MESSAGE MODE (message set) — the mesh wakes you up with that message on "
+        "each tick and you handle it with the LLM. Use this when the action requires "
+        "judgment, reasoning, or reading dynamic context. Each trigger costs API "
+        "credits.\n\n"
+        "3. HEARTBEAT MODE (heartbeat=true) — updates your autonomous wakeup "
+        "schedule. Only change this if the USER explicitly asks.\n\n"
+        "Schedules: standard 5-field cron ('0 9 * * 1-5') or natural intervals "
+        "('every 30m', 'every 5s'). tool_name and message are mutually exclusive."
     ),
     parameters={
         "schedule": {
             "type": "string",
-            "description": "Cron expression or interval (e.g. '*/5 * * * *', 'every 30m')",
+            "description": "Cron expression or interval (e.g. '0 9 * * 1-5', 'every 30m', 'every 5s')",
+        },
+        "tool_name": {
+            "type": "string",
+            "description": (
+                "Name of a tool to invoke directly on each tick (no LLM). "
+                "Mutually exclusive with message. Use for deterministic, "
+                "low-cost recurring actions."
+            ),
+            "default": "",
+        },
+        "tool_params": {
+            "type": "string",
+            "description": (
+                "JSON string of params to pass to the tool (e.g. '{\"key\": \"value\"}'). "
+                "Only used when tool_name is set. Omit or pass '{}' for no params."
+            ),
+            "default": "{}",
         },
         "message": {
             "type": "string",
-            "description": "Message the mesh will send you on each trigger",
+            "description": (
+                "Message the mesh will send you on each trigger (LLM processes it). "
+                "Mutually exclusive with tool_name. Use when the action requires "
+                "reasoning or dynamic context."
+            ),
             "default": "",
         },
         "heartbeat": {
             "type": "boolean",
             "description": (
-                "If true, sets your autonomous heartbeat schedule (finds and "
-                "updates existing heartbeat, or creates one). Only change if "
-                "the USER explicitly asks — each heartbeat costs API credits."
+                "If true, updates your autonomous heartbeat wakeup schedule. "
+                "Only change if the USER explicitly asks — each heartbeat costs API credits."
             ),
             "default": False,
         },
     },
 )
 async def set_cron(
-    schedule: str, message: str = "", heartbeat: bool = False,
+    schedule: str,
+    tool_name: str = "",
+    tool_params: str = "{}",
+    message: str = "",
+    heartbeat: bool = False,
     *, mesh_client=None,
 ) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
+    if tool_name and message:
+        return {"error": "tool_name and message are mutually exclusive — use one or the other"}
     try:
         if heartbeat:
-            # Check for existing heartbeat job and update it
             jobs = await mesh_client.list_cron()
             existing = next((j for j in jobs if j.get("heartbeat")), None)
             if existing:
-                result = await mesh_client.update_cron(
-                    existing["id"], schedule=schedule,
-                )
+                result = await mesh_client.update_cron(existing["id"], schedule=schedule)
                 return {"updated": True, "type": "heartbeat", **result}
-            # No existing heartbeat — create one
             result = await mesh_client.create_cron(
-                schedule=schedule,
-                message=message or "heartbeat",
-                heartbeat=True,
+                schedule=schedule, message="heartbeat", heartbeat=True,
             )
             return {"created": True, "type": "heartbeat", **result}
-        # Regular cron job
+
+        if tool_name:
+            # Normalise: treat "{}" as no params (cleaner stored state)
+            params_str = tool_params.strip() if tool_params and tool_params.strip() not in ("", "{}") else None
+            result = await mesh_client.create_cron(
+                schedule=schedule,
+                tool_name=tool_name,
+                tool_params=params_str,
+            )
+            return {"created": True, "type": "tool", **result}
+
         if not message:
-            return {"error": "message is required for non-heartbeat cron jobs"}
+            return {"error": "message is required when tool_name is not set (and heartbeat is false)"}
         result = await mesh_client.create_cron(schedule=schedule, message=message)
-        return {"created": True, **result}
+        return {"created": True, "type": "message", **result}
     except Exception as e:
         return {"error": f"Failed to create cron job: {e}"}
 

@@ -55,6 +55,8 @@ class CronJob:
     heartbeat: bool = False
     workflow: Optional[str] = None
     workflow_payload: Optional[str] = None
+    tool_name: Optional[str] = None    # invoke this tool directly — no LLM involved
+    tool_params: Optional[str] = None  # JSON-encoded params dict for the tool
     last_run: Optional[str] = None
     next_run: Optional[str] = None
     run_count: int = 0
@@ -77,6 +79,7 @@ class CronScheduler:
         config_path: str = "config/cron.json",
         dispatch_fn: Optional[Callable] = None,
         workflow_trigger_fn: Optional[Callable] = None,
+        invoke_fn: Optional[Callable] = None,
         blackboard: Any = None,
         trace_store: Any = None,
         context_fn: Optional[Callable] = None,
@@ -85,6 +88,7 @@ class CronScheduler:
         self.jobs: dict[str, CronJob] = {}
         self.dispatch_fn = dispatch_fn
         self.workflow_trigger_fn = workflow_trigger_fn
+        self.invoke_fn = invoke_fn
         self.blackboard = blackboard
         self._trace_store = trace_store
         self.context_fn = context_fn
@@ -170,8 +174,11 @@ class CronScheduler:
         job.next_run = None
 
     def add_job(
-        self, agent: str, schedule: str, message: str,
-        heartbeat: bool = False, **kwargs: Any,
+        self, agent: str, schedule: str, message: str = "",
+        heartbeat: bool = False,
+        tool_name: Optional[str] = None,
+        tool_params: Optional[str] = None,
+        **kwargs: Any,
     ) -> CronJob:
         error = self._validate_schedule(schedule)
         if error:
@@ -182,6 +189,8 @@ class CronScheduler:
             schedule=schedule,
             message=message,
             heartbeat=heartbeat,
+            tool_name=tool_name,
+            tool_params=tool_params,
             **kwargs,
         )
         self._compute_next_run(job)
@@ -211,7 +220,7 @@ class CronScheduler:
             message=f"Heartbeat check for {agent}", heartbeat=True,
         )
 
-    _UPDATABLE_FIELDS = frozenset({"schedule", "message", "enabled", "suppress_empty"})
+    _UPDATABLE_FIELDS = frozenset({"schedule", "message", "enabled", "suppress_empty", "tool_name", "tool_params"})
 
     async def update_job(self, job_id: str, **kwargs) -> CronJob | None:
         """Update fields on an existing cron job. Returns updated job or None."""
@@ -304,7 +313,22 @@ class CronScheduler:
                     )
 
                 response = None
-                if job.workflow and self.workflow_trigger_fn:
+                if job.tool_name and self.invoke_fn:
+                    params: dict = {}
+                    if job.tool_params:
+                        try:
+                            params = json.loads(job.tool_params)
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "Cron %s: invalid tool_params JSON, invoking with no params", job.id,
+                            )
+                    result = await self.invoke_fn(job.agent, job.tool_name, params)
+                    response = json.dumps(result) if isinstance(result, dict) else str(result)
+                    logger.info(
+                        "Cron %s invoked tool '%s' on agent '%s'",
+                        job.id, job.tool_name, job.agent,
+                    )
+                elif job.workflow and self.workflow_trigger_fn:
                     payload = json.loads(job.workflow_payload) if job.workflow_payload else {}
                     payload.setdefault("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
                     response = await self.workflow_trigger_fn(job.workflow, payload)

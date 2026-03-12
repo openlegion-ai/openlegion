@@ -123,6 +123,41 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             "tool_sources": loop.skills.get_tool_sources(exclude=exc),
         }
 
+    @app.post("/invoke")
+    async def invoke_tool(request: Request) -> dict:
+        """Execute a named tool directly without LLM involvement.
+
+        Called by the cron scheduler for tool-type jobs. The tool runs with
+        the same dependency injection (mesh_client, workspace, memory) as it
+        would during a normal agent turn.
+
+        Body: {"tool": str, "params": {}}
+        """
+        body = await request.json()
+        name = body.get("tool", "")
+        params = body.get("params") or {}
+
+        if not name:
+            raise HTTPException(400, "tool name is required")
+        excluded = loop._excluded_tools or frozenset()
+        if name in excluded:
+            raise HTTPException(403, f"Tool '{name}' is not available to this agent")
+        if name not in loop.skills.skills:
+            if not (getattr(loop.skills, "_mcp_client", None) and loop.skills._mcp_client.has_tool(name)):
+                raise HTTPException(404, f"Unknown tool: '{name}'")
+
+        try:
+            result = await loop.skills.execute(
+                name, params,
+                mesh_client=loop.mesh_client,
+                workspace_manager=loop.workspace,
+                memory_store=loop.memory,
+            )
+            return {"result": result}
+        except Exception as e:
+            logger.warning("invoke_tool '%s' failed: %s", name, e)
+            return {"error": str(e)}
+
     @app.post("/chat", response_model=ChatResponse)
     async def chat(msg: ChatMessage, request: Request) -> ChatResponse:
         """Interactive chat with the agent. Supports tool use."""

@@ -598,9 +598,21 @@ class RuntimeContext:
                 logger.debug("Failed to fetch heartbeat context for '%s': %s", agent_name, e)
                 return {}
 
+        async def invoke_tool(agent_name: str, tool_name: str, params: dict) -> dict:
+            try:
+                return await self.transport.request(
+                    agent_name, "POST", "/invoke",
+                    json={"tool": tool_name, "params": params},
+                    timeout=30,
+                )
+            except Exception as e:
+                logger.warning("Failed to invoke tool '%s' on '%s': %s", tool_name, agent_name, e)
+                return {"error": str(e)}
+
         self.cron_scheduler = CronScheduler(
             dispatch_fn=cron_dispatch,
             workflow_trigger_fn=trigger_workflow,
+            invoke_fn=invoke_tool,
             blackboard=self.blackboard,
             trace_store=self.trace_store,
             context_fn=fetch_heartbeat_context,

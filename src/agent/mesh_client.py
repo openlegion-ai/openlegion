@@ -238,18 +238,24 @@ class MeshClient:
         return response.json()
 
     async def create_cron(
-        self, schedule: str, message: str, heartbeat: bool = False,
+        self, schedule: str, message: str = "", heartbeat: bool = False,
+        tool_name: str | None = None, tool_params: str | None = None,
     ) -> dict:
         """Create a cron job for this agent via the mesh."""
         client = await self._get_client()
+        body: dict = {
+            "agent_id": self.agent_id,
+            "schedule": schedule,
+            "message": message,
+            "heartbeat": heartbeat,
+        }
+        if tool_name is not None:
+            body["tool_name"] = tool_name
+        if tool_params is not None:
+            body["tool_params"] = tool_params
         response = await client.post(
             f"{self.mesh_url}/mesh/cron",
-            json={
-                "agent_id": self.agent_id,
-                "schedule": schedule,
-                "message": message,
-                "heartbeat": heartbeat,
-            },
+            json=body,
             headers=self._trace_headers(),
         )
         response.raise_for_status()

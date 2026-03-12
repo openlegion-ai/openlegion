@@ -823,15 +823,20 @@ def create_mesh_app(
         schedule = data.get("schedule")
         message = data.get("message", "")
         heartbeat = data.get("heartbeat", False)
+        tool_name = data.get("tool_name") or None
+        tool_params = data.get("tool_params") or None
         if not agent_id or not schedule:
             raise HTTPException(400, "agent_id and schedule are required")
+        if tool_name and message:
+            raise HTTPException(400, "tool_name and message are mutually exclusive — use one or the other")
         try:
             job = cron_scheduler.add_job(
                 agent=agent_id, schedule=schedule, message=message, heartbeat=heartbeat,
+                tool_name=tool_name, tool_params=tool_params,
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
-        return {"id": job.id, "agent": job.agent, "schedule": job.schedule, "heartbeat": job.heartbeat}
+        return {"id": job.id, "agent": job.agent, "schedule": job.schedule, "heartbeat": job.heartbeat, "tool_name": job.tool_name}
 
     @app.get("/mesh/cron")
     async def list_cron_jobs(request: Request, agent_id: str | None = None) -> list[dict]:
