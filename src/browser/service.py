@@ -352,6 +352,9 @@ class BrowserManager:
                 lines = []
                 refs: dict[str, dict] = {}
                 ref_counter = [0]
+                # Counts occurrences of each (role, name) pair so we can
+                # disambiguate duplicate elements (e.g. X's two composer nodes).
+                occurrence_counts: dict[tuple, int] = {}
 
                 _MAX_WALK_DEPTH = 50
 
@@ -364,6 +367,13 @@ class BrowserManager:
                         if ref_counter[0] < _MAX_SNAPSHOT_ELEMENTS:
                             ref_id = f"e{ref_counter[0]}"
                             ref_counter[0] += 1
+
+                            # Track how many times this (role, name) combo has
+                            # appeared so we can use .nth(index) at click time.
+                            key = (role, name)
+                            occ = occurrence_counts.get(key, 0)
+                            occurrence_counts[key] = occ + 1
+
                             attrs = []
                             if node.get("checked") is not None:
                                 attrs.append(f"checked={node['checked']}")
@@ -376,10 +386,15 @@ class BrowserManager:
                                 if ref_id in inst.credential_filled_refs:
                                     val = "****"
                                 attrs.append(f"value={val}")
+                            # Flag duplicates so the agent knows which element
+                            # is which when a SPA renders multiple instances
+                            # with the same role/name (e.g. X's composer).
+                            if occ > 0:
+                                attrs.append(f"dup:{occ + 1}")
                             attr_str = f" [{', '.join(attrs)}]" if attrs else ""
                             line = f"{'  ' * depth}- [{ref_id}] {role} \"{name}\"{attr_str}"
                             lines.append(line)
-                            refs[ref_id] = {"role": role, "name": name}
+                            refs[ref_id] = {"role": role, "name": name, "index": occ}
                     for child in node.get("children", []):
                         _walk(child, depth + 1)
 
@@ -392,15 +407,20 @@ class BrowserManager:
                 return {"success": False, "error": str(e)}
 
     def _locator_from_ref(self, inst: CamoufoxInstance, ref: str):
-        """Build a Playwright locator from a stored ref's role+name."""
+        """Build a Playwright locator from a stored ref's role, name, and index.
+
+        Uses .nth(index) to target the exact occurrence found during snapshot.
+        This disambiguates duplicate elements with the same role+name — e.g.
+        X's SPA may render two composer nodes; without nth() we'd hit the wrong one.
+        """
         info = inst.refs.get(ref)
         if not info:
             return None
         role = info["role"]
         name = info.get("name", "")
-        if name:
-            return inst.page.get_by_role(role, name=name)
-        return inst.page.get_by_role(role)
+        idx = info.get("index", 0)
+        locator = inst.page.get_by_role(role, name=name) if name else inst.page.get_by_role(role)
+        return locator.nth(idx)
 
     async def click(
         self, agent_id: str, ref: str | None = None,

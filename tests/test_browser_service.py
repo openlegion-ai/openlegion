@@ -182,12 +182,15 @@ class TestBrowserManagerRefResolution:
         mock_page = MagicMock()
         mock_locator = MagicMock()
         mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "button", "name": "Submit"}}
+        inst.refs = {"e0": {"role": "button", "name": "Submit", "index": 0}}
 
         locator = mgr._locator_from_ref(inst, "e0")
         mock_page.get_by_role.assert_called_once_with("button", name="Submit")
-        assert locator is mock_locator
+        # .nth(0) is called to target the specific occurrence
+        mock_page.get_by_role.return_value.nth.assert_called_once_with(0)
+        assert locator is mock_locator.nth.return_value
 
     @pytest.mark.asyncio
     async def test_locator_from_ref_no_name(self):
@@ -197,11 +200,33 @@ class TestBrowserManagerRefResolution:
         mock_page = MagicMock()
         mock_locator = MagicMock()
         mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "textbox", "name": ""}}
+        inst.refs = {"e0": {"role": "textbox", "name": "", "index": 0}}
 
         mgr._locator_from_ref(inst, "e0")
         mock_page.get_by_role.assert_called_once_with("textbox")
+        mock_locator.nth.assert_called_once_with(0)
+
+    @pytest.mark.asyncio
+    async def test_locator_from_ref_uses_nth_for_duplicate(self):
+        """Second occurrence of same role+name must use .nth(1) to skip the first."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        mock_locator = MagicMock()
+        mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        # e1 is the second occurrence (index=1) of the same textbox
+        inst.refs = {
+            "e0": {"role": "textbox", "name": "Post text", "index": 0},
+            "e1": {"role": "textbox", "name": "Post text", "index": 1},
+        }
+
+        mgr._locator_from_ref(inst, "e1")
+        mock_locator.nth.assert_called_once_with(1)
 
     @pytest.mark.asyncio
     async def test_locator_from_ref_missing_returns_none(self):
@@ -572,6 +597,7 @@ class TestClick:
         mock_locator = AsyncMock()
         mock_locator.click = AsyncMock()
         mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.refs = {"e0": {"role": "button", "name": "Submit"}}
         mgr._instances["a1"] = inst
@@ -908,6 +934,51 @@ class TestSnapshot:
         assert result["data"]["snapshot"] == "(no interactive elements)"
 
     @pytest.mark.asyncio
+    async def test_snapshot_duplicate_elements_disambiguated(self):
+        """Duplicate role+name elements (e.g. X's two composer nodes) must get
+        distinct index values so _locator_from_ref can use .nth() to hit the right one.
+        The snapshot text must flag the second occurrence with [dup:2] so the agent
+        can tell which ref is the active element.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        tree = {
+            "role": "WebArea",
+            "name": "",
+            "children": [
+                {"role": "textbox", "name": "Post text"},   # active composer
+                {"role": "textbox", "name": "Post text"},   # stale/hidden composer
+                {"role": "button", "name": "Post"},         # active Post button
+                {"role": "button", "name": "Post"},         # stale Post button
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        refs = result["data"]["refs"]
+
+        # First occurrences get index=0
+        assert refs["e0"]["index"] == 0
+        assert refs["e2"]["index"] == 0
+        # Second occurrences get index=1
+        assert refs["e1"]["index"] == 1
+        assert refs["e3"]["index"] == 1
+
+        # Snapshot text should flag duplicates
+        snap = result["data"]["snapshot"]
+        assert "dup:2" in snap
+        # First occurrences should NOT be flagged
+        lines = snap.splitlines()
+        assert not any("dup" in ln for ln in lines if "e0" in ln)
+        assert not any("dup" in ln for ln in lines if "e2" in ln)
+
+    @pytest.mark.asyncio
     async def test_snapshot_element_limit(self):
         """Snapshot should stop adding refs after _MAX_SNAPSHOT_ELEMENTS."""
         from src.browser.service import _MAX_SNAPSHOT_ELEMENTS, BrowserManager, CamoufoxInstance
@@ -939,6 +1010,7 @@ class TestTypeTextWithRef:
         mock_locator = AsyncMock()
         mock_locator.click = AsyncMock()
         mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=True)
@@ -966,6 +1038,7 @@ class TestTypeTextWithRef:
         mock_locator = AsyncMock()
         mock_locator.click = AsyncMock()
         mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=True)
@@ -991,6 +1064,7 @@ class TestTypeTextWithRef:
         mock_locator = AsyncMock()
         mock_locator.click = AsyncMock()
         mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=True)
@@ -1193,6 +1267,7 @@ class TestScroll:
         mock_locator = AsyncMock()
         mock_locator.scroll_into_view_if_needed = AsyncMock()
         mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.refs = {"e3": {"role": "button", "name": "Submit"}}
         mgr._instances["a1"] = inst
@@ -1478,6 +1553,7 @@ class TestForceClick:
         mock_locator = AsyncMock()
         mock_locator.click = AsyncMock()
         mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.refs = {"e0": {"role": "button", "name": "Post"}}
         mgr._instances["a1"] = inst
@@ -1573,6 +1649,7 @@ class TestHover:
         mock_locator = AsyncMock()
         mock_locator.hover = AsyncMock()
         mock_page.get_by_role.return_value = mock_locator
+        mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.refs = {"e3": {"role": "link", "name": "Products"}}
         mgr._instances["a1"] = inst
