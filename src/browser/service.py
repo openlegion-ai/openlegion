@@ -235,12 +235,17 @@ class BrowserManager:
             try:
                 await inst.page.bring_to_front()
                 inst.touch()
-                # Raise at the X11 window-manager level. bring_to_front()
-                # only works at the browser-protocol layer; on X11 with
-                # Openbox the OS window can still be below the root window
-                # (e.g. after a popup closes without returning focus).
-                # windowmap handles the minimised/iconic case; windowraise
-                # moves it to the top of the stacking order.
+            except Exception as e:
+                logger.debug("Focus failed for '%s': %s", agent_id, e)
+                return False
+            # Best-effort X11 raise so VNC sees the window. bring_to_front()
+            # only works at the browser-protocol layer; on X11 with Openbox
+            # the OS window can still be below the root window (e.g. after a
+            # popup closes without returning focus). windowmap handles the
+            # minimised/iconic case; windowraise moves it to the top of the
+            # stacking order. Failures here are non-fatal — the tab is already
+            # focused at the protocol level.
+            try:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
                     None,
@@ -250,10 +255,9 @@ class BrowserManager:
                         capture_output=True, timeout=3,
                     ),
                 )
-                return True
             except Exception as e:
-                logger.debug("Focus failed for '%s': %s", agent_id, e)
-                return False
+                logger.debug("xdotool raise skipped for '%s': %s", agent_id, e)
+            return True
 
     # ── Browser operations ──────────────────────────────────
 
