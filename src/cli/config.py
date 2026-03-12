@@ -448,6 +448,10 @@ def _ensure_all_agent_permissions() -> None:
         if name not in existing:
             _add_agent_permissions(name)
 
+    # Reload after potentially writing new agents so the migration sees all
+    # agents, including ones just added above.
+    perms = _load_permissions()
+
     # Forward-migrate: add any capability flags that were introduced after an
     # agent's initial permissions entry was created.
     _CAPABILITY_DEFAULTS: dict = {"can_manage_cron": True}
