@@ -93,15 +93,23 @@
   pointer-events: none;
 }
 
-/* Deterministic agent colors */
-.agent-color-0 { background: linear-gradient(135deg, #4f46e5, #6366f1); color: #e0e7ff; }
-.agent-color-1 { background: linear-gradient(135deg, #7c3aed, #8b5cf6); color: #ede9fe; }
-.agent-color-2 { background: linear-gradient(135deg, #0891b2, #06b6d4); color: #cffafe; }
-.agent-color-3 { background: linear-gradient(135deg, #059669, #10b981); color: #d1fae5; }
-.agent-color-4 { background: linear-gradient(135deg, #d97706, #f59e0b); color: #fef3c7; }
-.agent-color-5 { background: linear-gradient(135deg, #dc2626, #ef4444); color: #fee2e2; }
-.agent-color-6 { background: linear-gradient(135deg, #db2777, #ec4899); color: #fce7f3; }
-.agent-color-7 { background: linear-gradient(135deg, #2563eb, #3b82f6); color: #dbeafe; }
+/* Deterministic agent colors — 16 slots to minimise collision probability */
+.agent-color-0  { background: linear-gradient(135deg, #4f46e5, #6366f1); color: #e0e7ff; }
+.agent-color-1  { background: linear-gradient(135deg, #0891b2, #06b6d4); color: #cffafe; }
+.agent-color-2  { background: linear-gradient(135deg, #059669, #10b981); color: #d1fae5; }
+.agent-color-3  { background: linear-gradient(135deg, #d97706, #f59e0b); color: #fef3c7; }
+.agent-color-4  { background: linear-gradient(135deg, #dc2626, #ef4444); color: #fee2e2; }
+.agent-color-5  { background: linear-gradient(135deg, #db2777, #ec4899); color: #fce7f3; }
+.agent-color-6  { background: linear-gradient(135deg, #7c3aed, #8b5cf6); color: #ede9fe; }
+.agent-color-7  { background: linear-gradient(135deg, #0f766e, #14b8a6); color: #ccfbf1; }
+.agent-color-8  { background: linear-gradient(135deg, #65a30d, #84cc16); color: #ecfccb; }
+.agent-color-9  { background: linear-gradient(135deg, #ea580c, #f97316); color: #ffedd5; }
+.agent-color-10 { background: linear-gradient(135deg, #2563eb, #0ea5e9); color: #e0f2fe; }
+.agent-color-11 { background: linear-gradient(135deg, #be123c, #f43f5e); color: #ffe4e6; }
+.agent-color-12 { background: linear-gradient(135deg, #a21caf, #d946ef); color: #fae8ff; }
+.agent-color-13 { background: linear-gradient(135deg, #a16207, #eab308); color: #fefce8; }
+.agent-color-14 { background: linear-gradient(135deg, #15803d, #22c55e); color: #dcfce7; }
+.agent-color-15 { background: linear-gradient(135deg, #334155, #64748b); color: #f1f5f9; }
 
 /* Activity dot on avatar */
 .agent-avatar .activity-dot {

@@ -69,7 +69,7 @@ function dashboard() {
 
     // Add agent
     addAgentMode: false,
-    addAgentForm: { name: '', role: '', model: '', avatar: 1, template: '', _showPicker: false },
+    addAgentForm: { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false },
     addAgentLoading: false,
     agentTemplates: [],
 
@@ -1762,6 +1762,8 @@ function dashboard() {
         role: cfg.role || '',
         avatar: cfg.avatar || 1,
         _showAvatarPicker: false,
+        color: cfg.color ?? null,
+        _showColorPicker: false,
         budget_daily: cfg.budget?.daily_usd || '',
         budget_monthly: cfg.budget?.monthly_usd || '',
         thinking: cfg.thinking || 'off',
@@ -1817,13 +1819,15 @@ function dashboard() {
       if (this.editForm.model && this.editForm.model !== cfg.model) body.model = this.editForm.model;
       if (this.editForm.role !== undefined && this.editForm.role !== cfg.role) body.role = this.editForm.role;
       if (this.editForm.avatar && this.editForm.avatar !== (cfg.avatar || 1)) body.avatar = this.editForm.avatar;
-      if ((this.editForm.budget_daily && parseFloat(this.editForm.budget_daily) > 0) ||
-          (this.editForm.budget_monthly && parseFloat(this.editForm.budget_monthly) > 0)) {
+      if (this.editForm.color !== (cfg.color ?? null)) body.color = this.editForm.color;
+      const newDaily = this.editForm.budget_daily ? parseFloat(this.editForm.budget_daily) : null;
+      const newMonthly = this.editForm.budget_monthly ? parseFloat(this.editForm.budget_monthly) : null;
+      const oldDaily = cfg.budget?.daily_usd ?? null;
+      const oldMonthly = cfg.budget?.monthly_usd ?? null;
+      if (newDaily !== oldDaily || newMonthly !== oldMonthly) {
         const budget = {};
-        if (this.editForm.budget_daily && parseFloat(this.editForm.budget_daily) > 0)
-          budget.daily_usd = parseFloat(this.editForm.budget_daily);
-        if (this.editForm.budget_monthly && parseFloat(this.editForm.budget_monthly) > 0)
-          budget.monthly_usd = parseFloat(this.editForm.budget_monthly);
+        if (newDaily !== null && newDaily > 0) budget.daily_usd = newDaily;
+        if (newMonthly !== null && newMonthly > 0) budget.monthly_usd = newMonthly;
         body.budget = budget;
       }
       if (this.editForm.thinking !== undefined && this.editForm.thinking !== (cfg.thinking || 'off')) {
@@ -1957,6 +1961,8 @@ function dashboard() {
           model: f.model,
           avatar: f.avatar || 1,
         };
+        if (f.color !== null) payload.color = f.color;
+        if (f.project) payload.project = f.project;
         if (f.template) payload.template = f.template;
         const resp = await fetch(`${window.__config.apiBase}/agents`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1964,10 +1970,12 @@ function dashboard() {
         });
         if (resp.ok) {
           const data = await resp.json();
-          this.showToast(data.ready ? `${data.agent} added and ready` : `${data.agent} added (starting)`);
+          const projectNote = data.project ? ` in ${data.project}` : '';
+          this.showToast(data.ready ? `${data.agent} added and ready${projectNote}` : `${data.agent} added (starting)${projectNote}`);
           this.addAgentMode = false;
-          this.addAgentForm = { name: '', role: '', model: '', avatar: 1, template: '', _showPicker: false };
+          this.addAgentForm = { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false };
           this.fetchAgents();
+          if (data.project) this.fetchProjects();
         } else {
           const err = await resp.json();
           if (resp.status === 403) {
@@ -1985,8 +1993,11 @@ function dashboard() {
       if (this.atAgentLimit) return;
       this.addAgentMode = true;
       if (defaultName) this.addAgentForm.name = defaultName;
+      // Pre-select the active project if one is open
+      if (this.activeProject) this.addAgentForm.project = this.activeProject;
       this.fetchSettings();
       this.fetchAgentTemplates();
+      this.fetchProjects();
       this.$nextTick(() => {
         const el = document.getElementById('add-agent-name-input');
         if (el) el.focus();
@@ -1996,7 +2007,7 @@ function dashboard() {
     closeAddAgentModal() {
       if (this.addAgentLoading) return;
       this.addAgentMode = false;
-      this.addAgentForm = { name: '', role: '', model: '', avatar: 1, template: '', _showPicker: false };
+      this.addAgentForm = { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false };
     },
 
     async fetchAgentTemplates() {
@@ -3375,8 +3386,10 @@ function dashboard() {
     // ── Chart.js rendering ────────────────────────────────
 
     _AGENT_CHART_COLORS: [
-      '#6366f1', '#8b5cf6', '#06b6d4', '#10b981',
-      '#f59e0b', '#ef4444', '#ec4899', '#3b82f6',
+      '#6366f1', '#06b6d4', '#10b981', '#f59e0b',
+      '#ef4444', '#ec4899', '#8b5cf6', '#14b8a6',
+      '#84cc16', '#f97316', '#0ea5e9', '#f43f5e',
+      '#d946ef', '#eab308', '#22c55e', '#64748b',
     ],
 
     renderCostChart() {
@@ -3706,12 +3719,26 @@ function dashboard() {
 
     agentColorIndex(agentId) {
       if (!agentId) return 0;
+      const palette = this._AGENT_CHART_COLORS.length; // 16
+      // Explicitly configured color takes highest priority.
+      const cfg = this.agentConfigs[agentId];
+      if (cfg && cfg.color != null) return cfg.color % palette;
+      const agent = this.agents.find(a => a.id === agentId);
+      if (agent && agent.color != null) return agent.color % palette;
+      // Position-based assignment over the active fleet so no two
+      // running agents share a color (sorted for determinism).
+      if (this.agents && this.agents.length > 0) {
+        const sorted = [...new Set(this.agents.map(a => a.id))].sort();
+        const idx = sorted.indexOf(agentId);
+        if (idx !== -1) return idx % palette;
+      }
+      // Fallback for agent IDs referenced only in logs / events.
       let hash = 0;
       for (let i = 0; i < agentId.length; i++) {
         hash = ((hash << 5) - hash) + agentId.charCodeAt(i);
         hash |= 0;
       }
-      return Math.abs(hash) % 8;
+      return Math.abs(hash) % palette;
     },
 
     agentInitials(agentId) {
