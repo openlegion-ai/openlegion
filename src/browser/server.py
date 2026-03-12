@@ -63,7 +63,8 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         if not url:
             raise HTTPException(400, "url required")
         wait_ms = body.get("wait_ms", 1000)
-        return await manager.navigate(agent_id, url, wait_ms)
+        wait_until = body.get("wait_until", "domcontentloaded")
+        return await manager.navigate(agent_id, url, wait_ms, wait_until)
 
     @app.post("/browser/{agent_id}/snapshot")
     async def snapshot(agent_id: str, request: Request):
@@ -78,6 +79,21 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             agent_id,
             ref=body.get("ref"),
             selector=body.get("selector"),
+            force=body.get("force", False),
+        )
+
+    @app.post("/browser/{agent_id}/wait_for")
+    async def wait_for(agent_id: str, request: Request):
+        _verify_auth(request)
+        body = await request.json()
+        selector = body.get("selector", "")
+        if not selector:
+            raise HTTPException(400, "selector required")
+        return await manager.wait_for_element(
+            agent_id,
+            selector=selector,
+            state=body.get("state", "visible"),
+            timeout_ms=body.get("timeout_ms", 10000),
         )
 
     @app.post("/browser/{agent_id}/type")

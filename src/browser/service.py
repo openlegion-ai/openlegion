@@ -49,7 +49,10 @@ _BLOCKED_URL_SCHEMES = frozenset({
 })
 _MAX_WAIT_MS = 10000  # 10 seconds max wait after navigation
 _MAX_SCROLL_PX = 10000  # 10000 pixels max per scroll call
+_CLICK_TIMEOUT_MS = 10000  # 10 seconds — SPAs like X need time for animations/overlays
+_WAIT_FOR_TIMEOUT_MS = 30000  # 30 seconds max for wait_for_element
 _AGENT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
+_VALID_WAIT_UNTIL = frozenset({"domcontentloaded", "load", "networkidle", "commit"})
 
 
 class CamoufoxInstance:
@@ -279,8 +282,18 @@ class BrowserManager:
 
     # ── Browser operations ──────────────────────────────────
 
-    async def navigate(self, agent_id: str, url: str, wait_ms: int = 1000) -> dict:
-        """Navigate to URL and return page text."""
+    async def navigate(
+        self, agent_id: str, url: str, wait_ms: int = 1000,
+        wait_until: str = "domcontentloaded",
+    ) -> dict:
+        """Navigate to URL and return page text.
+
+        wait_until controls when Playwright considers navigation complete:
+          - "domcontentloaded" (default): HTML parsed; fast but JS may not have run
+          - "load": all resources loaded; good for most sites
+          - "networkidle": no network requests for 500ms; best for heavy SPAs (X, etc.)
+          - "commit": first byte received; fastest, rarely useful
+        """
         # Validate URL scheme
         try:
             parsed = urlparse(url)
@@ -288,6 +301,9 @@ class BrowserManager:
             return {"success": False, "error": "Invalid URL"}
         if parsed.scheme.lower() in _BLOCKED_URL_SCHEMES:
             return {"success": False, "error": f"URL scheme '{parsed.scheme}' is not allowed"}
+        if wait_until not in _VALID_WAIT_UNTIL:
+            valid = sorted(_VALID_WAIT_UNTIL)
+            return {"success": False, "error": f"Invalid wait_until: {wait_until!r}. Use one of: {valid}"}
         # Cap wait_ms
         wait_ms = max(0, min(wait_ms, _MAX_WAIT_MS))
 
@@ -295,7 +311,7 @@ class BrowserManager:
         inst.touch()
         async with inst.lock:
             try:
-                await inst.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await inst.page.goto(url, wait_until=wait_until, timeout=30000)
                 if wait_ms > 0:
                     await asyncio.sleep(wait_ms / 1000 + navigation_jitter())
                 title = await inst.page.title()
@@ -376,8 +392,16 @@ class BrowserManager:
             return inst.page.get_by_role(role, name=name)
         return inst.page.get_by_role(role)
 
-    async def click(self, agent_id: str, ref: str | None = None, selector: str | None = None) -> dict:
-        """Click element by ref or CSS selector."""
+    async def click(
+        self, agent_id: str, ref: str | None = None,
+        selector: str | None = None, force: bool = False,
+    ) -> dict:
+        """Click element by ref or CSS selector.
+
+        force=True bypasses Playwright's actionability checks (visibility,
+        stability, not-covered). Use when the element is visually present in
+        VNC but Playwright reports it as covered by an overlay.
+        """
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
@@ -385,11 +409,11 @@ class BrowserManager:
                 if ref and ref in inst.refs:
                     locator = self._locator_from_ref(inst, ref)
                     if locator:
-                        await locator.click(timeout=5000)
+                        await locator.click(timeout=_CLICK_TIMEOUT_MS, force=force)
                     else:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
                 elif selector:
-                    await inst.page.click(selector, timeout=5000)
+                    await inst.page.click(selector, timeout=_CLICK_TIMEOUT_MS, force=force)
                 else:
                     return {"success": False, "error": "Must provide ref or selector"}
                 await asyncio.sleep(action_delay())
@@ -413,9 +437,9 @@ class BrowserManager:
                     locator = self._locator_from_ref(inst, ref)
                     if not locator:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
-                    await locator.click(timeout=5000)
+                    await locator.click(timeout=_CLICK_TIMEOUT_MS)
                 elif selector:
-                    await inst.page.click(selector, timeout=5000)
+                    await inst.page.click(selector, timeout=_CLICK_TIMEOUT_MS)
                 else:
                     return {"success": False, "error": "Must provide ref or selector"}
 
@@ -528,6 +552,29 @@ class BrowserManager:
                     "success": True,
                     "data": {"direction": direction, "pixels": scrolled},
                 }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+    async def wait_for_element(
+        self, agent_id: str, selector: str, state: str = "visible",
+        timeout_ms: int = 10000,
+    ) -> dict:
+        """Wait for a CSS selector to reach the given state.
+
+        state: "visible" (default), "attached", "hidden", or "detached".
+        Useful before clicking elements on SPAs that animate in after load.
+        """
+        _valid_states = frozenset({"visible", "attached", "hidden", "detached"})
+        if state not in _valid_states:
+            return {"success": False, "error": f"Invalid state: {state!r}. Use one of: {sorted(_valid_states)}"}
+        timeout_ms = max(0, min(timeout_ms, _WAIT_FOR_TIMEOUT_MS))
+
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                await inst.page.wait_for_selector(selector, state=state, timeout=timeout_ms)
+                return {"success": True, "data": {"selector": selector, "state": state}}
             except Exception as e:
                 return {"success": False, "error": str(e)}
 

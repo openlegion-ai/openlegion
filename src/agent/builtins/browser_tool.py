@@ -80,20 +80,39 @@ async def _browser_command(mesh_client, action: str, params: dict | None = None)
         "Navigate your browser to a URL and return the page text. "
         "Use this to visit any website: sign-up pages, dashboards, search engines, "
         "web apps. You can then use browser_get_elements to get element refs, "
-        "then browser_click and browser_type with refs to interact."
+        "then browser_click and browser_type with refs to interact. "
+        "For heavy SPAs (X/Twitter, Gmail, etc.) use wait_until='networkidle' or "
+        "wait_until='load' so the page fully renders before you read elements."
     ),
     parameters={
         "url": {"type": "string", "description": "URL to navigate to"},
         "wait_ms": {
             "type": "integer",
-            "description": "Milliseconds to wait after load (default 1000)",
+            "description": "Extra milliseconds to wait after load signal (default 1000)",
             "default": 1000,
+        },
+        "wait_until": {
+            "type": "string",
+            "description": (
+                "When to consider navigation complete. "
+                "'domcontentloaded' (default, fast) — HTML parsed but JS may not have run. "
+                "'load' — all resources loaded, good for most sites. "
+                "'networkidle' — no network activity for 500ms, best for SPAs like X/Twitter. "
+                "'commit' — first byte received, fastest."
+            ),
+            "default": "domcontentloaded",
         },
     },
 )
-async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -> dict:
+async def browser_navigate(
+    url: str, wait_ms: int = 1000, wait_until: str = "domcontentloaded",
+    *, mesh_client=None,
+) -> dict:
     """Navigate to a URL via the browser service."""
-    return await _browser_command(mesh_client, "navigate", {"url": url, "wait_ms": wait_ms})
+    return await _browser_command(
+        mesh_client, "navigate",
+        {"url": url, "wait_ms": wait_ms, "wait_until": wait_until},
+    )
 
 
 @skill(
@@ -112,6 +131,51 @@ async def browser_navigate(url: str, wait_ms: int = 1000, *, mesh_client=None) -
 async def browser_get_elements(*, mesh_client=None) -> dict:
     """Return an accessibility tree snapshot with element refs."""
     return await _browser_command(mesh_client, "snapshot")
+
+
+@skill(
+    name="browser_wait_for",
+    description=(
+        "Wait for a CSS selector to appear (or disappear) on the current page. "
+        "Use this before browser_click or browser_type on elements that animate "
+        "in after page load — e.g. on X/Twitter, wait for the tweet composer "
+        "to finish rendering before trying to type into it. "
+        "Returns success once the element reaches the desired state, or error on timeout."
+    ),
+    parameters={
+        "selector": {
+            "type": "string",
+            "description": "CSS selector to wait for (e.g. '[data-testid=\"tweetTextarea_0\"]')",
+        },
+        "state": {
+            "type": "string",
+            "description": (
+                "Element state to wait for: "
+                "'visible' (default) — present in DOM and visible. "
+                "'attached' — present in DOM (may be hidden). "
+                "'hidden' — not visible or not in DOM. "
+                "'detached' — removed from DOM."
+            ),
+            "default": "visible",
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "description": "Max milliseconds to wait (default 10000, max 30000)",
+            "default": 10000,
+        },
+    },
+)
+async def browser_wait_for(
+    selector: str, state: str = "visible", timeout_ms: int = 10000,
+    *, mesh_client=None,
+) -> dict:
+    """Wait for a CSS selector to reach the given state."""
+    if not selector:
+        return {"error": "The 'selector' parameter is required"}
+    return await _browser_command(
+        mesh_client, "wait_for",
+        {"selector": selector, "state": state, "timeout_ms": timeout_ms},
+    )
 
 
 @skill(
@@ -137,7 +201,9 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
     name="browser_click",
     description=(
         "Click an element on the current page. Preferred: use ref from "
-        "browser_get_elements (e.g. ref='e3'). Fallback: use a CSS selector."
+        "browser_get_elements (e.g. ref='e3'). Fallback: use a CSS selector. "
+        "If the click times out because of an overlay or animation, try "
+        "browser_wait_for first, or set force=true to bypass actionability checks."
     ),
     parameters={
         "selector": {
@@ -153,13 +219,27 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
             ),
             "default": "",
         },
+        "force": {
+            "type": "boolean",
+            "description": (
+                "Bypass Playwright actionability checks (visibility, stability, "
+                "not-covered-by-overlay). Use when the element is visually present "
+                "in the browser but click keeps timing out due to an overlay. Default false."
+            ),
+            "default": False,
+        },
     },
 )
-async def browser_click(selector: str = "", ref: str = "", *, mesh_client=None) -> dict:
+async def browser_click(
+    selector: str = "", ref: str = "", force: bool = False, *, mesh_client=None,
+) -> dict:
     """Click an element by ref or CSS selector."""
     if not selector and not ref:
         return {"error": "Provide either 'ref' (from browser_get_elements) or 'selector' (CSS)"}
-    return await _browser_command(mesh_client, "click", {"ref": ref, "selector": selector})
+    return await _browser_command(
+        mesh_client, "click",
+        {"ref": ref, "selector": selector, "force": force},
+    )
 
 
 @skill(
