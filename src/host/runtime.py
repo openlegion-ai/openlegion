@@ -348,7 +348,7 @@ class DockerBackend(RuntimeBackend):
             "BROWSER_AUTH_TOKEN": self.browser_auth_token,
             "MESH_URL": f"http://{mesh_host}:{self.mesh_host_port}",
             "MAX_BROWSERS": str(max_browsers),
-            "IDLE_TIMEOUT_MINUTES": "10",
+            "IDLE_TIMEOUT_MINUTES": "30",
         }
 
         for var in ("BROWSER_PROXY_URL", "BROWSER_PROXY_USER", "BROWSER_PROXY_PASS"):

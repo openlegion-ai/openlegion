@@ -39,6 +39,17 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         _verify_auth(request)
         return await manager.get_service_status()
 
+    @app.post("/browser/keepalive")
+    async def keepalive(request: Request):
+        """Touch all running browser instances to reset their idle timers.
+
+        Called by the VNC WebSocket proxy while a viewer is connected, so
+        a browser stays alive as long as someone is watching the display.
+        """
+        _verify_auth(request)
+        touched = await manager.touch_all()
+        return {"touched": touched}
+
     @app.get("/browser/{agent_id}/status")
     async def agent_status(agent_id: str, request: Request):
         _verify_auth(request)
