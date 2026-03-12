@@ -96,6 +96,16 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             timeout_ms=body.get("timeout_ms", 10000),
         )
 
+    @app.post("/browser/{agent_id}/hover")
+    async def hover(agent_id: str, request: Request):
+        _verify_auth(request)
+        body = await request.json()
+        return await manager.hover(
+            agent_id,
+            ref=body.get("ref"),
+            selector=body.get("selector"),
+        )
+
     @app.post("/browser/{agent_id}/type")
     async def type_text(agent_id: str, request: Request):
         _verify_auth(request)

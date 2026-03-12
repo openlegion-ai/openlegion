@@ -55,6 +55,10 @@ _CLICK_TIMEOUT_MS = 10000  # 10 seconds — SPAs like X need time for animations
 _WAIT_FOR_TIMEOUT_MS = 30000  # 30 seconds max for wait_for_element
 _AGENT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 _VALID_WAIT_UNTIL = frozenset({"domcontentloaded", "load", "networkidle", "commit"})
+# Characters that mark a natural word/clause boundary in typed text.
+# After one of these, the next character gets a higher think-pause probability
+# to model the hesitation a human feels when starting the next word or sentence.
+_WORD_BOUNDARY_CHARS = frozenset(" ,.:;!?\n\t")
 
 
 class CamoufoxInstance:
@@ -253,7 +257,11 @@ class BrowserManager:
         2. xdotool windowmap + windowraise — X11 level (unmaps if iconic,
            then raises in the stacking order so VNC actually sees it)
         """
-        inst = await self.get_or_start(agent_id)
+        try:
+            inst = await self.get_or_start(agent_id)
+        except Exception as e:
+            logger.debug("Focus get_or_start failed for '%s': %s", agent_id, e)
+            return False
         async with inst.lock:
             try:
                 await inst.page.bring_to_front()
@@ -423,6 +431,34 @@ class BrowserManager:
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
+    async def hover(
+        self, agent_id: str, ref: str | None = None,
+        selector: str | None = None,
+    ) -> dict:
+        """Move the mouse over an element without clicking.
+
+        Useful for hover-triggered dropdowns, tooltip visibility, and navigation
+        menus that only reveal sub-items on mouseover.  After hovering, call
+        snapshot() to see the newly visible elements.
+        """
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                if ref and ref in inst.refs:
+                    locator = self._locator_from_ref(inst, ref)
+                    if not locator:
+                        return {"success": False, "error": f"Ref '{ref}' not found"}
+                    await locator.hover(timeout=_CLICK_TIMEOUT_MS)
+                elif selector:
+                    await inst.page.hover(selector, timeout=_CLICK_TIMEOUT_MS)
+                else:
+                    return {"success": False, "error": "Must provide ref or selector"}
+                await asyncio.sleep(action_delay())
+                return {"success": True, "data": {"hovered": ref or selector}}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
     async def type_text(self, agent_id: str, ref: str | None = None, selector: str | None = None,
                         text: str = "", clear: bool = True, is_credential: bool = False) -> dict:
         """Type text into element. Credential values should be pre-resolved by agent."""
@@ -502,13 +538,17 @@ class BrowserManager:
         <input>/<textarea>), in which case we fall back to keyboard.type().
         keyboard.press() handles newlines and tabs as named keys.
 
-        ~5 % of characters are preceded by a think_pause (0.3–1.5 s) to
-        simulate natural composing hesitations between clauses.
+        Think-pauses are weighted to word/clause boundaries: 12 % probability
+        before the first character of each new word (after a space or punctuation)
+        vs 2.5 % mid-word.  This models the natural hesitation a human feels
+        when about to start a new word or clause, not a uniform random rhythm.
         """
+        prev_char = ""
         for char in text:
-            # Occasional mid-typing pause — models human composing hesitations.
-            # Roughly once every 20 characters on average.
-            if random.random() < 0.05:
+            # Word-boundary characters signal a clause break — higher pause
+            # probability for the character starting the next word/clause.
+            pause_prob = 0.12 if prev_char in _WORD_BOUNDARY_CHARS else 0.025
+            if random.random() < pause_prob:
                 await asyncio.sleep(think_pause())
 
             if char == "\n":
@@ -523,6 +563,7 @@ class BrowserManager:
                     # execCommand not supported (plain <input>/<textarea>)
                     await page.keyboard.type(char)
             await asyncio.sleep(keystroke_delay(char))
+            prev_char = char
 
     async def scroll(self, agent_id: str, direction: str = "down",
                      amount: int = 0, ref: str | None = None) -> dict:
@@ -562,7 +603,7 @@ class BrowserManager:
                     step = min(scroll_increment(), amount - scrolled)
                     delta = step * sign
                     await inst.page.evaluate(
-                        f"window.scrollBy({{top: {delta}, behavior: 'smooth'}})"
+                        "(d) => window.scrollBy({top: d, behavior: 'smooth'})", delta
                     )
                     scrolled += step
                     if scrolled < amount:

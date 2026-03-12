@@ -1019,8 +1019,9 @@ def create_mesh_app(
             raise HTTPException(400, "action is required")
 
         _ALLOWED_ACTIONS = frozenset({
-            "navigate", "snapshot", "click", "type",
+            "navigate", "snapshot", "click", "type", "hover",
             "screenshot", "reset", "focus", "status", "solve_captcha", "scroll",
+            "wait_for",
         })
         if action not in _ALLOWED_ACTIONS:
             raise HTTPException(400, f"Unknown browser action: {action}")
