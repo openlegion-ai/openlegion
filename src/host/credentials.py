@@ -924,6 +924,12 @@ class CredentialVault:
         """
         import litellm
 
+        # Silently drop params unsupported by the target model (e.g. gpt-5
+        # doesn't accept temperature; o-series models drop top_p etc.).
+        # This is model-aware: litellm only drops params the specific model
+        # doesn't support, not params it does.
+        litellm.drop_params = True
+
         requested_model = request.params.get("model", "")
 
         if request.action == "chat":
