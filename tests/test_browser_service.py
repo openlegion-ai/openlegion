@@ -341,14 +341,21 @@ class TestStealthConfig:
             opts = build_launch_options("agent1", "/tmp/profile")
         assert opts["os"] == "windows"
 
-    def test_webrtc_disabled_in_prefs(self):
-        """WebRTC must be disabled to prevent container IP leak."""
+    def test_webrtc_blocked_via_camoufox_toggle(self):
+        """WebRTC must be blocked via Camoufox's block_webrtc toggle, not manual prefs.
+
+        block_webrtc=True is Camoufox's canonical way to block WebRTC — it covers
+        all relevant prefs and is more reliable than setting them manually.
+        Manual WebRTC prefs must NOT be in firefox_user_prefs (they're redundant
+        and could drift out of sync with the Camoufox implementation).
+        """
         from src.browser.stealth import build_launch_options
         with patch.dict("os.environ", {}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["block_webrtc"] is True
+        # Manual WebRTC prefs are redundant — Camoufox's toggle handles them
         prefs = opts["firefox_user_prefs"]
-        assert prefs["media.peerconnection.enabled"] is False
-        assert prefs["media.peerconnection.turn.disable"] is True
+        assert "media.peerconnection.enabled" not in prefs
 
     def test_rfp_is_off(self):
         """privacy.resistFingerprinting must be False — RFP values are detectable."""
@@ -380,33 +387,41 @@ class TestStealthConfig:
         assert opts.get("geoip") is True
 
     def test_resolution_within_valid_range(self):
-        """Window resolution should be a realistic desktop size."""
-        from src.browser.stealth import build_launch_options
-        with patch.dict("os.environ", {}, clear=True):
-            opts = build_launch_options("agent1", "/tmp/profile")
-        w, h = opts["window"]
+        """Fingerprint screen resolution should be a realistic desktop size."""
+        from src.browser.stealth import _pick_resolution
+        w, h = _pick_resolution("windows", seed="agent1")
         assert 1280 <= w <= 3840
         assert 720 <= h <= 2160
 
     def test_resolution_is_deterministic_per_agent(self):
         """Same agent_id must always produce the same resolution (fingerprint stability)."""
-        from src.browser.stealth import build_launch_options
-        with patch.dict("os.environ", {}, clear=True):
-            opts1 = build_launch_options("agent_alice", "/tmp/profile")
-            opts2 = build_launch_options("agent_alice", "/tmp/profile")
-            opts3 = build_launch_options("agent_alice", "/tmp/profile")
-        assert opts1["window"] == opts2["window"] == opts3["window"]
+        from src.browser.stealth import _pick_resolution
+        r1 = _pick_resolution("windows", seed="agent_alice")
+        r2 = _pick_resolution("windows", seed="agent_alice")
+        r3 = _pick_resolution("windows", seed="agent_alice")
+        assert r1 == r2 == r3
 
     def test_different_agents_can_have_different_resolutions(self):
         """Different agent_ids should produce varied resolutions (natural distribution)."""
-        from src.browser.stealth import build_launch_options
-        with patch.dict("os.environ", {}, clear=True):
-            resolutions = {
-                build_launch_options(f"agent_{i:03d}", "/tmp/profile")["window"]
-                for i in range(20)
-            }
+        from src.browser.stealth import _pick_resolution
+        resolutions = {
+            _pick_resolution("windows", seed=f"agent_{i:03d}")
+            for i in range(20)
+        }
         # 20 agents from a 9-resolution table should produce multiple distinct sizes
         assert len(resolutions) > 1
+
+    def test_window_not_in_launch_options(self):
+        """window= must NOT be set in launch options — Camoufox auto-generates it.
+
+        Per Camoufox docs: "Do not set the window size to a fixed value unless
+        for debugging purposes."  Setting a fixed window size is a fingerprinting
+        signal.  Openbox's maximise rule fills the VNC display regardless.
+        """
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert "window" not in opts
 
     def test_macos_resolution_uses_css_logical_pixels(self):
         """macOS resolutions must be CSS logical pixels, not physical retina pixels."""
@@ -419,13 +434,19 @@ class TestStealthConfig:
                 "Use CSS logical pixels (half the physical) instead."
             )
 
-    def test_locale_and_timezone_set(self):
+    def test_locale_set_and_timezone_absent(self):
+        """locale= is a valid Camoufox param; timezone= is NOT (would cause TypeError).
+
+        Playwright's launch_persistent_context uses timezone_id, not timezone.
+        Camoufox does not expose timezone as a top-level parameter — BrowserForge
+        infers it from locale/geoip.  We must never pass timezone= directly.
+        """
         from src.browser.stealth import build_launch_options
-        env = {"BROWSER_LOCALE": "de-DE", "BROWSER_TIMEZONE": "Europe/Berlin"}
+        env = {"BROWSER_LOCALE": "de-DE"}
         with patch.dict("os.environ", env):
             opts = build_launch_options("agent1", "/tmp/profile")
         assert opts["locale"] == "de-DE"
-        assert opts["timezone"] == "Europe/Berlin"
+        assert "timezone" not in opts
 
     def test_build_launch_options_with_proxy(self):
         env = {
