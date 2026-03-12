@@ -2994,8 +2994,8 @@
       :class="chatFullScreen ? 'messenger-full' : 'messenger-half'"
       style="box-shadow: -8px 0 32px -4px rgba(0,0,0,0.5);">
 
-      <!-- Left sidebar: agent list -->
-      <div class="messenger-sidebar shrink-0 border-r border-gray-800/80 flex flex-col">
+      <!-- Left sidebar: agent list — hidden on mobile (horizontal tabs replace it) -->
+      <div class="messenger-sidebar shrink-0 border-r border-gray-800/80 hidden sm:flex flex-col">
         <!-- Sidebar header -->
         <div class="flex items-center justify-between px-3 py-2.5 border-b border-gray-800 shrink-0">
           <span class="text-xs font-semibold text-gray-300 uppercase tracking-wider">Chats</span>
@@ -3060,6 +3060,34 @@
               :class="chatStreamingAgents[activeChatId] ? 'text-green-400' : (chatLoadingAgents[activeChatId] ? 'text-purple-400' : 'text-gray-600')"
               x-text="chatStreamingAgents[activeChatId] ? 'Responding...' : (chatLoadingAgents[activeChatId] ? 'Thinking...' : 'Online')"></span>
           </div>
+          <!-- Reset conversation (inline, discrete) -->
+          <button @click="resetAgent(activeChatId)"
+            title="Reset conversation — memories preserved"
+            class="text-gray-600 hover:text-red-400 transition-colors p-1.5 rounded shrink-0"
+            aria-label="Reset conversation">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+              <path d="M3 3v5h5"/>
+            </svg>
+          </button>
+        </div>
+        <!-- Mobile: horizontal agent tab strip (shown only when multiple chats) -->
+        <div x-show="openChats.length > 1" x-cloak class="sm:hidden flex overflow-x-auto border-b border-gray-800/60 shrink-0 bg-gray-950/60">
+          <template x-for="chatId in openChats" :key="chatId">
+            <button @click="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId))"
+              class="flex items-center gap-1.5 px-3 py-2 text-xs whitespace-nowrap transition-all border-b-2 shrink-0"
+              :class="activeChatId === chatId ? 'border-b-indigo-500 text-white bg-gray-800/60' : 'border-b-transparent text-gray-500 hover:text-gray-300'">
+              <div class="relative shrink-0">
+                <img :src="agentAvatarUrl(chatId)" :alt="chatId" class="w-4 h-4 rounded-full">
+                <span class="absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 rounded-full border border-gray-900"
+                  :class="chatStreamingAgents[chatId] ? 'bg-green-400' : (chatLoadingAgents[chatId] ? 'bg-purple-400' : 'bg-gray-600')"></span>
+              </div>
+              <span x-text="chatId"></span>
+              <span x-show="chatUnread[chatId] > 0"
+                class="flex items-center justify-center min-w-[14px] h-3.5 px-0.5 rounded-full bg-amber-500 text-[8px] font-bold text-black"
+                x-text="chatUnread[chatId]"></span>
+            </button>
+          </template>
         </div>
         <!-- Messages area -->
         <div role="log" aria-live="polite" class="flex-1 overflow-y-auto px-4 py-3 space-y-2" :id="'chat-messages-' + activeChatId">
@@ -3139,18 +3167,117 @@
           </div>
         </div>
         <!-- Input area -->
-        <div class="px-4 py-3 border-t border-gray-800/80 shrink-0" x-data="{ chatInput: '' }">
+        <div class="px-4 py-3 border-t border-gray-800/80 shrink-0" x-data="{
+          chatInput: '',
+          pendingFile: null,
+          pendingFileUploading: false,
+          speechActive: false,
+          _recognition: null,
+          sendMsg() {
+            const base = this.chatInput.trim();
+            const msg = this.pendingFile
+              ? (base ? base + '\n\n' : '') + '📎 File attached: ' + this.pendingFile + ' (available at /data/uploads/' + this.pendingFile + ')'
+              : base;
+            if (!msg) return;
+            if (this.speechActive) { this._recognition && this._recognition.stop(); this.speechActive = false; }
+            if (this.isAgentBusy(this.activeChatId)) this.steerAgent(this.activeChatId, msg);
+            else this.sendChatTo(this.activeChatId, msg);
+            this.chatInput = '';
+            this.pendingFile = null;
+            const ta = document.getElementById('chat-slide-input');
+            if (ta) ta.style.height = 'auto';
+          },
+          async attachFile(file) {
+            if (!file) return;
+            const name = file.name.split('/').pop().split('\\').pop();
+            const targetChat = this.activeChatId;
+            this.pendingFileUploading = true;
+            try {
+              const resp = await fetch(window.__config.apiBase + '/uploads/' + encodeURIComponent(name), {
+                method: 'POST', body: file,
+                headers: { 'Content-Type': file.type || 'application/octet-stream' }
+              });
+              if (resp.ok) {
+                if (this.activeChatId === targetChat) this.pendingFile = name;
+              } else {
+                const e = await resp.json().catch(() => ({}));
+                this.showToast('Upload failed: ' + (e.detail || resp.status));
+              }
+            } catch(e) { this.showToast('Upload failed: ' + e.message); }
+            this.pendingFileUploading = false;
+          },
+          toggleSpeech() {
+            const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SR) return;
+            if (this.speechActive) { this._recognition && this._recognition.stop(); return; }
+            const r = new SR();
+            r.continuous = false;
+            r.interimResults = false;
+            r.lang = navigator.language || 'en-US';
+            r.onresult = (e) => { this.chatInput += (this.chatInput ? ' ' : '') + e.results[0][0].transcript; };
+            r.onerror = (e) => {
+              this.speechActive = false;
+              if (e.error === 'not-allowed') this.showToast('Microphone access denied');
+            };
+            r.onend = () => { this.speechActive = false; };
+            this._recognition = r;
+            r.start();
+            this.speechActive = true;
+          }
+        }" x-init="$watch('activeChatId', () => { chatInput=''; pendingFile=null; pendingFileUploading=false; if(speechActive){ _recognition && _recognition.stop(); speechActive=false; } })">
+          <!-- Pending file chip -->
+          <template x-if="pendingFile || pendingFileUploading">
+            <div class="flex items-center gap-2 mb-2">
+              <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-900/40 border border-indigo-700/40 text-xs text-indigo-300 max-w-full overflow-hidden">
+                <template x-if="pendingFileUploading">
+                  <svg class="animate-spin w-3 h-3 shrink-0 text-indigo-400" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                </template>
+                <template x-if="!pendingFileUploading">
+                  <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/></svg>
+                </template>
+                <span class="truncate" x-text="pendingFileUploading ? 'Uploading…' : pendingFile"></span>
+                <button x-show="!pendingFileUploading" @click="pendingFile = null" class="ml-1 shrink-0 text-indigo-500 hover:text-indigo-300 transition-colors" aria-label="Remove attachment">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+              </div>
+            </div>
+          </template>
+          <!-- Input row -->
           <div class="chat-input-wrap">
+            <!-- Hidden file input -->
+            <input type="file" x-ref="fileInput" class="hidden" @change="attachFile($event.target.files[0]); $event.target.value=''">
+            <!-- Attach file button -->
+            <button @click="$refs.fileInput.click()" :disabled="pendingFileUploading"
+              title="Attach file"
+              class="shrink-0 p-1.5 rounded-lg text-gray-600 hover:text-gray-400 hover:bg-gray-800 transition-colors disabled:opacity-40"
+              style="margin-left:4px">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <!-- Speech-to-text button (hidden if API unavailable) -->
+            <button x-show="'SpeechRecognition' in window || 'webkitSpeechRecognition' in window"
+              @click="toggleSpeech()"
+              :title="speechActive ? 'Stop recording' : 'Voice input'"
+              :class="speechActive ? 'text-red-400 bg-red-900/20' : 'text-gray-600 hover:text-gray-400 hover:bg-gray-800'"
+              class="shrink-0 p-1.5 rounded-lg transition-colors"
+              style="margin-left:2px">
+              <!-- Static mic icon; recording state conveyed by button color class above -->
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 1a3 3 0 0 1 3 3v8a3 3 0 0 1-6 0V4a3 3 0 0 1 3-3z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="23"/>
+                <line x1="8" y1="23" x2="16" y2="23"/>
+              </svg>
+            </button>
             <textarea x-model="chatInput" id="chat-slide-input" rows="1"
               :disabled="chatLoadingAgents[activeChatId] === true"
-              @keydown.enter="if (!$event.shiftKey && chatInput.trim()) { $event.preventDefault(); if (isAgentBusy(activeChatId)) { steerAgent(activeChatId, chatInput); } else { sendChatTo(activeChatId, chatInput); } chatInput = ''; $el.style.height = 'auto'; }"
+              @keydown.enter="if (!$event.shiftKey && (chatInput.trim() || pendingFile)) { $event.preventDefault(); sendMsg(); }"
               @input="$el.style.height = 'auto'; $el.style.height = Math.min($el.scrollHeight, 120) + 'px'"
               class="chat-slide-textarea"
-              :placeholder="isAgentBusy(activeChatId) ? 'Steer agent...' : 'Message...'"></textarea>
-            <button @click="if (chatInput.trim()) { if (isAgentBusy(activeChatId)) { steerAgent(activeChatId, chatInput); } else { sendChatTo(activeChatId, chatInput); } chatInput = ''; const ta = document.getElementById('chat-slide-input'); if (ta) ta.style.height = 'auto'; }"
-              :disabled="!chatInput.trim()"
+              :placeholder="speechActive ? 'Listening…' : (isAgentBusy(activeChatId) ? 'Steer agent…' : 'Message…')"></textarea>
+            <button @click="sendMsg()"
+              :disabled="!(chatInput.trim() || pendingFile)"
               style="width:34px;height:34px;min-width:34px;min-height:34px;border-radius:9999px;border:none;padding:0;margin:3px 4px 3px 0;display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0;cursor:pointer;transition:background-color 0.15s,opacity 0.15s"
-              :class="chatInput.trim() ? (isAgentBusy(activeChatId) ? 'bg-amber-600 hover:bg-amber-500' : 'bg-indigo-600 hover:bg-indigo-500') : 'bg-gray-700 opacity-40 cursor-default'">
+              :class="(chatInput.trim() || pendingFile) ? (isAgentBusy(activeChatId) ? 'bg-amber-600 hover:bg-amber-500' : 'bg-indigo-600 hover:bg-indigo-500') : 'bg-gray-700 opacity-40 cursor-default'">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" style="width:16px;height:16px"><path fill-rule="evenodd" d="M3 10a.75.75 0 0 1 .75-.75h10.638L10.23 5.29a.75.75 0 1 1 1.04-1.08l5.5 5.25a.75.75 0 0 1 0 1.08l-5.5 5.25a.75.75 0 1 1-1.04-1.08l4.158-3.96H3.75A.75.75 0 0 1 3 10Z" clip-rule="evenodd"/></svg>
             </button>
           </div>

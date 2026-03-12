@@ -679,6 +679,9 @@ select:focus-visible,
   }
 }
 
+/* ── Messenger sidebar responsive ────────────────── */
+/* On mobile the sidebar is hidden; horizontal tabs handle agent switching. */
+
 /* ── Chat slide-over panel ────────────────────────── */
 
 .chat-phase-pill {
