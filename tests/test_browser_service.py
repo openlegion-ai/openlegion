@@ -271,7 +271,7 @@ class TestTypeTextClearBehavior:
         mgr._instances["a1"] = inst
 
         await mgr.type_text("a1", selector="input", text="hello", clear=True)
-        mock_page.click.assert_called_once_with("input", timeout=5000)
+        mock_page.click.assert_called_once_with("input", timeout=10000)
         mock_page.keyboard.press.assert_any_call("Control+a")
         assert mock_page.keyboard.type.await_count == len("hello")
 
@@ -289,7 +289,7 @@ class TestTypeTextClearBehavior:
         mgr._instances["a1"] = inst
 
         await mgr.type_text("a1", selector="input", text="ab", clear=False)
-        mock_page.click.assert_called_once_with("input", timeout=5000)
+        mock_page.click.assert_called_once_with("input", timeout=10000)
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert "Control+a" not in press_calls
         assert mock_page.keyboard.type.await_count == 2
@@ -814,7 +814,7 @@ class TestTypeTextWithRef:
 
         result = await mgr.type_text("a1", ref="e0", text="test@example.com", clear=True)
         assert result["success"] is True
-        mock_locator.click.assert_called_once_with(timeout=5000)
+        mock_locator.click.assert_called_once_with(timeout=10000)
         mock_page.keyboard.press.assert_any_call("Control+a")
         assert mock_page.keyboard.type.await_count == len("test@example.com")
 
@@ -836,7 +836,7 @@ class TestTypeTextWithRef:
 
         result = await mgr.type_text("a1", ref="e0", text="ab", clear=False)
         assert result["success"] is True
-        mock_locator.click.assert_called_once_with(timeout=5000)
+        mock_locator.click.assert_called_once_with(timeout=10000)
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert "Control+a" not in press_calls
         assert mock_page.keyboard.type.await_count == 2
@@ -1188,3 +1188,159 @@ class TestTypeWithVariance:
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert "Enter" in press_calls
         assert "Tab" in press_calls
+
+
+class TestNavigateWaitUntil:
+    """Tests for wait_until parameter on navigate()."""
+
+    @pytest.mark.asyncio
+    async def test_navigate_default_wait_until_is_domcontentloaded(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.title = AsyncMock(return_value="X")
+        mock_page.url = "https://x.com"
+        mock_page.evaluate = AsyncMock(return_value="")
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        await mgr.navigate("a1", "https://x.com", wait_ms=0)
+        mock_page.goto.assert_awaited_once_with(
+            "https://x.com", wait_until="domcontentloaded", timeout=30000
+        )
+
+    @pytest.mark.asyncio
+    async def test_navigate_networkidle_passed_through(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.title = AsyncMock(return_value="X")
+        mock_page.url = "https://x.com"
+        mock_page.evaluate = AsyncMock(return_value="timeline content")
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.navigate("a1", "https://x.com", wait_ms=0, wait_until="networkidle")
+        assert result["success"] is True
+        mock_page.goto.assert_awaited_once_with(
+            "https://x.com", wait_until="networkidle", timeout=30000
+        )
+
+    @pytest.mark.asyncio
+    async def test_navigate_invalid_wait_until_rejected(self):
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        result = await mgr.navigate("a1", "https://example.com", wait_until="invalid")
+        assert result["success"] is False
+        assert "Invalid wait_until" in result["error"]
+
+
+class TestForceClick:
+    """Tests for force parameter on click()."""
+
+    @pytest.mark.asyncio
+    async def test_click_force_false_by_default(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.click = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        await mgr.click("a1", selector="#btn")
+        mock_page.click.assert_awaited_once_with("#btn", timeout=10000, force=False)
+
+    @pytest.mark.asyncio
+    async def test_click_force_true_passed_through(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.click = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.click("a1", selector="#btn", force=True)
+        assert result["success"] is True
+        mock_page.click.assert_awaited_once_with("#btn", timeout=10000, force=True)
+
+    @pytest.mark.asyncio
+    async def test_click_force_with_ref(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        mock_locator = AsyncMock()
+        mock_locator.click = AsyncMock()
+        mock_page.get_by_role.return_value = mock_locator
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.refs = {"e0": {"role": "button", "name": "Post"}}
+        mgr._instances["a1"] = inst
+
+        result = await mgr.click("a1", ref="e0", force=True)
+        assert result["success"] is True
+        mock_locator.click.assert_awaited_once_with(timeout=10000, force=True)
+
+
+class TestWaitForElement:
+    """Tests for BrowserManager.wait_for_element()."""
+
+    @pytest.mark.asyncio
+    async def test_wait_for_visible_success(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.wait_for_selector = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.wait_for_element("a1", selector='[data-testid="tweetTextarea_0"]')
+        assert result["success"] is True
+        assert result["data"]["state"] == "visible"
+        mock_page.wait_for_selector.assert_awaited_once_with(
+            '[data-testid="tweetTextarea_0"]', state="visible", timeout=10000
+        )
+
+    @pytest.mark.asyncio
+    async def test_wait_for_timeout_returns_error(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.wait_for_selector = AsyncMock(side_effect=Exception("Timeout 10000ms exceeded"))
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.wait_for_element("a1", selector="#missing")
+        assert result["success"] is False
+        assert "Timeout" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_wait_for_invalid_state_rejected(self):
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        result = await mgr.wait_for_element("a1", selector="#btn", state="hovering")
+        assert result["success"] is False
+        assert "Invalid state" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_wait_for_timeout_capped(self):
+        from src.browser.service import _WAIT_FOR_TIMEOUT_MS, BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.wait_for_selector = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        await mgr.wait_for_element("a1", selector="#btn", timeout_ms=999999)
+        _, kwargs = mock_page.wait_for_selector.call_args
+        assert kwargs["timeout"] <= _WAIT_FOR_TIMEOUT_MS
