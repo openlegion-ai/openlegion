@@ -490,10 +490,15 @@ class BrowserManager:
     async def _type_with_variance(self, page, text: str) -> None:
         """Type text character-by-character with human-like inter-key delays.
 
-        Uses keyboard.type() for printable characters so that the full
-        keydown/keypress/input/keyup event sequence is dispatched with correct
-        char codes — required for React/Vue controlled components to update.
-        keyboard.press() is reserved for named control keys (Enter, Tab).
+        Uses execCommand('insertText') for printable characters so that the
+        browser fires the full beforeinput → DOM-update → input event chain in
+        W3C order. React/Vue controlled components (including X's contenteditable
+        tweet composer) listen to beforeinput to update state; keyboard.type()
+        skips beforeinput, leaving React's state stale and submit buttons disabled.
+
+        execCommand returns False on elements that don't support it (regular
+        <input>/<textarea>), in which case we fall back to keyboard.type().
+        keyboard.press() handles newlines and tabs as named keys.
         """
         for char in text:
             if char == "\n":
@@ -501,7 +506,12 @@ class BrowserManager:
             elif char == "\t":
                 await page.keyboard.press("Tab")
             else:
-                await page.keyboard.type(char)
+                inserted = await page.evaluate(
+                    "c => document.execCommand('insertText', false, c)", char
+                )
+                if not inserted:
+                    # execCommand not supported (plain <input>/<textarea>)
+                    await page.keyboard.type(char)
             await asyncio.sleep(keystroke_delay(char))
 
     async def scroll(self, agent_id: str, direction: str = "down",
