@@ -480,7 +480,7 @@ async def set_cron(
                 result = await mesh_client.update_cron(existing["id"], schedule=schedule)
                 return {"updated": True, "type": "heartbeat", **result}
             result = await mesh_client.create_cron(
-                schedule=schedule, message="heartbeat", heartbeat=True,
+                schedule=schedule, message=message or "heartbeat", heartbeat=True,
             )
             return {"created": True, "type": "heartbeat", **result}
 
