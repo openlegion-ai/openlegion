@@ -824,7 +824,10 @@ class TestBrowserNavigateHttpClient:
 
         result = await browser_navigate(url="https://example.com", mesh_client=mc)
 
-        mc.browser_command.assert_awaited_once_with("navigate", {"url": "https://example.com", "wait_ms": 1000})
+        mc.browser_command.assert_awaited_once_with(
+            "navigate",
+            {"url": "https://example.com", "wait_ms": 1000, "wait_until": "domcontentloaded"},
+        )
         assert result["url"] == "https://example.com"
         assert result["content"] == "Hello world"
 
@@ -837,7 +840,10 @@ class TestBrowserNavigateHttpClient:
 
         await browser_navigate(url="https://example.com", wait_ms=5000, mesh_client=mc)
 
-        mc.browser_command.assert_awaited_once_with("navigate", {"url": "https://example.com", "wait_ms": 5000})
+        mc.browser_command.assert_awaited_once_with(
+            "navigate",
+            {"url": "https://example.com", "wait_ms": 5000, "wait_until": "domcontentloaded"},
+        )
 
     @pytest.mark.asyncio
     async def test_navigate_no_mesh_client(self):
@@ -883,7 +889,7 @@ class TestBrowserClickHttpClient:
 
         result = await browser_click(ref="e1", mesh_client=mc)
 
-        mc.browser_command.assert_awaited_once_with("click", {"ref": "e1", "selector": ""})
+        mc.browser_command.assert_awaited_once_with("click", {"ref": "e1", "selector": "", "force": False})
         assert result["clicked"] == "e1"
 
     @pytest.mark.asyncio
@@ -895,7 +901,7 @@ class TestBrowserClickHttpClient:
 
         result = await browser_click(selector="#btn", mesh_client=mc)
 
-        mc.browser_command.assert_awaited_once_with("click", {"ref": "", "selector": "#btn"})
+        mc.browser_command.assert_awaited_once_with("click", {"ref": "", "selector": "#btn", "force": False})
         assert result["clicked"] == "#btn"
 
     @pytest.mark.asyncio

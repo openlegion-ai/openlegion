@@ -302,7 +302,8 @@ class BrowserManager:
         if parsed.scheme.lower() in _BLOCKED_URL_SCHEMES:
             return {"success": False, "error": f"URL scheme '{parsed.scheme}' is not allowed"}
         if wait_until not in _VALID_WAIT_UNTIL:
-            return {"success": False, "error": f"Invalid wait_until: {wait_until!r}. Use one of: {sorted(_VALID_WAIT_UNTIL)}"}
+            valid = sorted(_VALID_WAIT_UNTIL)
+            return {"success": False, "error": f"Invalid wait_until: {wait_until!r}. Use one of: {valid}"}
         # Cap wait_ms
         wait_ms = max(0, min(wait_ms, _MAX_WAIT_MS))
 
