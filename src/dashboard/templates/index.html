@@ -3064,18 +3064,22 @@
         <!-- Messages area -->
         <div role="log" aria-live="polite" class="flex-1 overflow-y-auto px-4 py-3 space-y-2" :id="'chat-messages-' + activeChatId">
           <template x-for="(msg, i) in (chatHistories[activeChatId] || [])" :key="i">
-            <!-- System event: compaction / session divider — rendered as a separator, not a bubble -->
-            <template x-if="msg.role === 'system'">
-              <div class="flex items-center gap-2 py-1 select-none">
-                <div class="flex-1 border-t border-dashed border-gray-800"></div>
-                <span class="text-[9px] text-gray-600 uppercase tracking-wider whitespace-nowrap flex items-center gap-1">
-                  <svg class="w-2.5 h-2.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-                  <span x-text="msg.content"></span>
-                </span>
-                <div class="flex-1 border-t border-dashed border-gray-800"></div>
-              </div>
-            </template>
-            <div x-show="msg.role !== 'system'" :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
+            <!-- Single root wrapper required by Alpine x-for. -->
+            <div>
+              <!-- System event: compaction / session divider — rendered as a separator, not a bubble -->
+              <template x-if="msg.role === 'system'">
+                <div class="flex items-center gap-2 py-1 select-none">
+                  <div class="flex-1 border-t border-dashed border-gray-800"></div>
+                  <span class="text-[9px] text-gray-600 uppercase tracking-wider whitespace-nowrap flex items-center gap-1">
+                    <svg class="w-2.5 h-2.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                    <span x-text="msg.content"></span>
+                  </span>
+                  <div class="flex-1 border-t border-dashed border-gray-800"></div>
+                </div>
+              </template>
+              <!-- Chat bubble -->
+              <template x-if="msg.role !== 'system'">
+              <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
               <div class="max-w-[80%] px-3 py-2 rounded-2xl text-xs"
                 :class="{
                   'bg-indigo-600 text-white rounded-br-md': msg.role === 'user',
@@ -3120,6 +3124,8 @@
                 </template>
               </div>
             </div>
+              </template><!-- /chat bubble -->
+            </div><!-- /single root wrapper -->
           </template>
           <div x-show="chatLoadingAgents[activeChatId]" class="flex justify-start">
             <div class="bg-gray-800 rounded-2xl rounded-bl-md px-3 py-2 text-gray-500 text-[10px] flex items-center gap-1.5">
