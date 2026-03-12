@@ -312,6 +312,41 @@ async def browser_type(
 
 
 @skill(
+    name="browser_hover",
+    description=(
+        "Move the mouse over an element without clicking it. "
+        "Use this to trigger hover-activated dropdowns, navigation sub-menus, "
+        "or tooltips that only appear on mouseover. "
+        "After hovering, call browser_get_elements to see the newly visible items. "
+        "Preferred: use ref from browser_get_elements (e.g. ref='e3'). "
+        "Fallback: use a CSS selector."
+    ),
+    parameters={
+        "selector": {
+            "type": "string",
+            "description": "CSS selector of the element to hover. Not needed if ref is provided.",
+            "default": "",
+        },
+        "ref": {
+            "type": "string",
+            "description": "Element ref from browser_get_elements (e.g. 'e3'). Preferred over selector.",
+            "default": "",
+        },
+    },
+)
+async def browser_hover(
+    selector: str = "", ref: str = "", *, mesh_client=None,
+) -> dict:
+    """Hover over an element by ref or CSS selector."""
+    if not selector and not ref:
+        return {"error": "Provide either 'ref' (from browser_get_elements) or 'selector' (CSS)"}
+    return await _browser_command(
+        mesh_client, "hover",
+        {"ref": ref, "selector": selector},
+    )
+
+
+@skill(
     name="browser_scroll",
     description=(
         "Scroll the browser page. Supports scrolling by direction (up/down) "

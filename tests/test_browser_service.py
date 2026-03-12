@@ -341,13 +341,6 @@ class TestStealthConfig:
             opts = build_launch_options("agent1", "/tmp/profile")
         assert opts["os"] == "windows"
 
-    def test_locale_and_timezone_set(self):
-        from src.browser.stealth import build_launch_options
-        env = {"BROWSER_LOCALE": "de-DE", "BROWSER_TIMEZONE": "Europe/Berlin"}
-        with patch.dict("os.environ", env):
-            opts = build_launch_options("agent1", "/tmp/profile")
-        assert opts["locale"] == "de-DE"
-
     def test_webrtc_disabled_in_prefs(self):
         """WebRTC must be disabled to prevent container IP leak."""
         from src.browser.stealth import build_launch_options
@@ -394,6 +387,45 @@ class TestStealthConfig:
         w, h = opts["window"]
         assert 1280 <= w <= 3840
         assert 720 <= h <= 2160
+
+    def test_resolution_is_deterministic_per_agent(self):
+        """Same agent_id must always produce the same resolution (fingerprint stability)."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts1 = build_launch_options("agent_alice", "/tmp/profile")
+            opts2 = build_launch_options("agent_alice", "/tmp/profile")
+            opts3 = build_launch_options("agent_alice", "/tmp/profile")
+        assert opts1["window"] == opts2["window"] == opts3["window"]
+
+    def test_different_agents_can_have_different_resolutions(self):
+        """Different agent_ids should produce varied resolutions (natural distribution)."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            resolutions = {
+                build_launch_options(f"agent_{i:03d}", "/tmp/profile")["window"]
+                for i in range(20)
+            }
+        # 20 agents from a 9-resolution table should produce multiple distinct sizes
+        assert len(resolutions) > 1
+
+    def test_macos_resolution_uses_css_logical_pixels(self):
+        """macOS resolutions must be CSS logical pixels, not physical retina pixels."""
+        from src.browser.stealth import _MACOS_RESOLUTIONS
+        # Physical retina values (2560x1600, 2880x1800) should NOT be in the table
+        physical_retina = {(2560, 1600), (2880, 1800)}
+        for res in _MACOS_RESOLUTIONS:
+            assert res not in physical_retina, (
+                f"Physical retina resolution {res} found in macOS table. "
+                "Use CSS logical pixels (half the physical) instead."
+            )
+
+    def test_locale_and_timezone_set(self):
+        from src.browser.stealth import build_launch_options
+        env = {"BROWSER_LOCALE": "de-DE", "BROWSER_TIMEZONE": "Europe/Berlin"}
+        with patch.dict("os.environ", env):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["locale"] == "de-DE"
+        assert opts["timezone"] == "Europe/Berlin"
 
     def test_build_launch_options_with_proxy(self):
         env = {
@@ -1059,6 +1091,14 @@ class TestHumanTiming:
         mean = sum(samples) / len(samples)
         assert 0.50 <= mean <= 0.80
 
+    def test_word_boundary_chars_constant(self):
+        """_WORD_BOUNDARY_CHARS must contain expected characters."""
+        from src.browser.service import _WORD_BOUNDARY_CHARS
+        for ch in (" ", ".", ",", "!", "?", ";", ":", "\n", "\t"):
+            assert ch in _WORD_BOUNDARY_CHARS, f"'{ch}' missing from _WORD_BOUNDARY_CHARS"
+        for ch in ("a", "b", "z", "0"):
+            assert ch not in _WORD_BOUNDARY_CHARS
+
     def test_scroll_pause_range(self):
         from src.browser.timing import scroll_pause
         samples = [scroll_pause() for _ in range(1000)]
@@ -1106,11 +1146,12 @@ class TestScroll:
         result = await mgr.scroll("a1", direction="up", amount=200)
         assert result["success"] is True
         assert result["data"]["direction"] == "up"
-        # Verify negative scroll values were used
+        # With parameterized evaluate, the second positional arg is the delta.
+        # All scroll deltas must be negative for "up" direction.
         calls = mock_page.evaluate.call_args_list
         for call in calls:
-            js = call[0][0]
-            assert "top: -" in js
+            delta = call[0][1]  # second positional arg is the numeric delta
+            assert delta < 0, f"Expected negative delta for 'up', got {delta}"
 
     @pytest.mark.asyncio
     async def test_scroll_to_ref(self):
@@ -1468,3 +1509,226 @@ class TestWaitForElement:
         await mgr.wait_for_element("a1", selector="#btn", timeout_ms=999999)
         _, kwargs = mock_page.wait_for_selector.call_args
         assert kwargs["timeout"] <= _WAIT_FOR_TIMEOUT_MS
+
+
+class TestHover:
+    """Tests for BrowserManager.hover()."""
+
+    @pytest.mark.asyncio
+    async def test_hover_by_selector(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.hover = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.hover("a1", selector="nav.menu > li")
+        assert result["success"] is True
+        assert result["data"]["hovered"] == "nav.menu > li"
+        mock_page.hover.assert_awaited_once_with("nav.menu > li", timeout=10000)
+
+    @pytest.mark.asyncio
+    async def test_hover_by_ref(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        mock_locator = AsyncMock()
+        mock_locator.hover = AsyncMock()
+        mock_page.get_by_role.return_value = mock_locator
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.refs = {"e3": {"role": "link", "name": "Products"}}
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.hover("a1", ref="e3")
+        assert result["success"] is True
+        mock_locator.hover.assert_awaited_once_with(timeout=10000)
+
+    @pytest.mark.asyncio
+    async def test_hover_no_ref_or_selector(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), AsyncMock())
+        mgr._instances["a1"] = inst
+
+        result = await mgr.hover("a1")
+        assert result["success"] is False
+        assert "Must provide" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_hover_error_propagated(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.hover = AsyncMock(side_effect=Exception("element not found"))
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.hover("a1", selector="#missing")
+        assert result["success"] is False
+        assert "element not found" in result["error"]
+
+
+class TestAllowedBrowserActions:
+    """Regression tests for the mesh-proxy allowed-action allowlist.
+
+    Any browser action added to browser_tool.py must also be in the
+    _ALLOWED_ACTIONS set in host/server.py, otherwise the skill silently
+    fails with a 400 from the proxy.
+    """
+
+    def _get_allowed_actions(self) -> frozenset[str]:
+        """Extract _ALLOWED_ACTIONS from host/server.py without running the server."""
+        import ast
+        from pathlib import Path
+        source = (Path(__file__).parent.parent / "src/host/server.py").read_text()
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Assign)
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "_ALLOWED_ACTIONS"
+                and isinstance(node.value, ast.Call)
+            ):
+                # frozenset({...}) call — extract string elements
+                set_literal = node.value.args[0]
+                if isinstance(set_literal, ast.Set):
+                    return frozenset(
+                        elt.value for elt in set_literal.elts
+                        if isinstance(elt, ast.Constant)
+                    )
+        return frozenset()
+
+    def test_wait_for_in_allowed_actions(self):
+        """wait_for must be allowed — browser_wait_for skill depends on it."""
+        actions = self._get_allowed_actions()
+        assert "wait_for" in actions, (
+            "wait_for missing from _ALLOWED_ACTIONS in host/server.py — "
+            "browser_wait_for skill will silently fail"
+        )
+
+    def test_hover_in_allowed_actions(self):
+        """hover must be allowed — browser_hover skill depends on it."""
+        actions = self._get_allowed_actions()
+        assert "hover" in actions, (
+            "hover missing from _ALLOWED_ACTIONS in host/server.py — "
+            "browser_hover skill will silently fail"
+        )
+
+    def test_core_actions_present(self):
+        """Core browser actions must remain in the allowlist."""
+        actions = self._get_allowed_actions()
+        required = {"navigate", "snapshot", "click", "type", "screenshot",
+                    "reset", "focus", "scroll", "solve_captcha", "wait_for", "hover"}
+        missing = required - actions
+        assert not missing, f"Missing browser actions: {missing}"
+
+
+class TestScrollParameterized:
+    """Verify scroll uses parameterized evaluate (not f-string injection)."""
+
+    @pytest.mark.asyncio
+    async def test_scroll_uses_parameterized_evaluate(self):
+        """evaluate must be called with a function string + separate delta arg."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.evaluate = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            await mgr.scroll("a1", direction="down", amount=200)
+
+        for call in mock_page.evaluate.call_args_list:
+            fn_str, delta = call[0][0], call[0][1]
+            # Function string must not bake in the delta value
+            assert str(delta) not in fn_str, (
+                "Delta must be a separate argument, not interpolated into the JS string"
+            )
+            # Delta must be a plain number, not a string
+            assert isinstance(delta, (int, float))
+            assert delta > 0  # down = positive
+
+    @pytest.mark.asyncio
+    async def test_scroll_up_delta_is_negative(self):
+        """Scroll up must pass a negative delta as second evaluate argument."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.evaluate = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            await mgr.scroll("a1", direction="up", amount=200)
+
+        for call in mock_page.evaluate.call_args_list:
+            delta = call[0][1]
+            assert delta < 0
+
+
+class TestWordBoundaryPause:
+    """Verify think_pause fires at word boundaries with higher probability."""
+
+    @pytest.mark.asyncio
+    async def test_think_pause_fires_at_word_boundary_not_midword(self):
+        """With random.random()=0.05, pause fires after space (12%) but not mid-word (2.5%)."""
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value=True)
+
+        sleep_calls: list[float] = []
+
+        async def capture_sleep(t: float):
+            sleep_calls.append(t)
+
+        # 0.05 is between 0.025 (non-boundary threshold) and 0.12 (boundary threshold)
+        # So: fires only when prev_char was a boundary char
+        with patch("src.browser.service.random.random", return_value=0.05):
+            with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
+                # "h w": h=no-pause, ' '=no-pause, w=PAUSE (prev ' ')
+                await mgr._type_with_variance(mock_page, "h w")
+
+        # think_pause values are in [0.30, 1.50]; keystroke_delay values are in [0.03, 0.20]
+        think_pauses = [t for t in sleep_calls if t >= 0.30]
+        assert len(think_pauses) == 1, (
+            f"Expected exactly 1 think_pause for 'h w' with random=0.05, got {think_pauses}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_think_pause_when_random_above_boundary_threshold(self):
+        """With random.random()=0.15, no pauses fire (0.15 > 0.12)."""
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value=True)
+
+        sleep_calls: list[float] = []
+
+        async def capture_sleep(t: float):
+            sleep_calls.append(t)
+
+        with patch("src.browser.service.random.random", return_value=0.15):
+            with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
+                await mgr._type_with_variance(mock_page, "hello world")
+
+        think_pauses = [t for t in sleep_calls if t >= 0.30]
+        assert len(think_pauses) == 0

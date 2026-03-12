@@ -18,7 +18,8 @@ Camoufox (patched Firefox + BrowserForge) handles layers 2, 4, 5.
 This module ensures the fingerprint we feed Camoufox is internally
 consistent and realistic:
   - OS defaults to Windows (≈70 % market share); Linux is a datacenter signal
-  - Resolution sampled from the empirical distribution for that OS
+  - Resolution is deterministic per agent_id so it stays stable across
+    browser restarts (a real user always has the same screen)
   - Locale and timezone are explicit so they match the fingerprint OS
   - WebRTC fully disabled — Docker internal IPs leak via ICE otherwise
   - privacy.resistFingerprinting OFF — RFP produces detectable sentinel values
@@ -27,6 +28,7 @@ consistent and realistic:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import random
 from urllib.parse import urlparse
@@ -37,7 +39,9 @@ logger = setup_logging("browser.stealth")
 
 # ── Screen resolution tables ──────────────────────────────────────────────────
 # Sampled from StatCounter GlobalStats (desktop, 2024).
-# Each tuple is (width, height).  Weights ≈ market-share percentage.
+# Values are CSS logical pixels — what window.screen.width/height report in JS.
+# Weights ≈ market-share percentage.
+
 _WINDOWS_RESOLUTIONS = [
     (1920, 1080),  # 22 %
     (1366, 768),   # 11 %
@@ -51,22 +55,42 @@ _WINDOWS_RESOLUTIONS = [
 ]
 _WINDOWS_WEIGHTS = [22, 11, 8, 7, 5, 5, 4, 3, 3]
 
+# macOS CSS logical-pixel resolutions (what navigator.screen.width reports).
+# Physical/retina pixels are NOT included — they are 2x the logical values and
+# are never directly visible to JS.  Correct logical values:
+#   MacBook 13" retina    → 1280 × 800   (2x: 2560×1600 physical)
+#   MacBook Pro 15"       → 1440 × 900   (2x: 2880×1800 physical)
+#   MacBook 14"/16" M-series → 1512 × 982 (native scaled at 2x)
+#   iMac 24"              → 1920 × 1080  (or external 1080p)
+#   iMac 27" / external 1440p → 2560 × 1440
 _MACOS_RESOLUTIONS = [
-    (1920, 1080),  # 28 %
-    (2560, 1600),  # 18 %  MacBook retina (logical)
-    (1440, 900),   # 14 %
-    (2880, 1800),  # 10 %  MacBook Pro 15" retina
-    (1280, 800),   #  8 %
-    (2560, 1440),  #  7 %  iMac / Pro Display XDR scaled
+    (1920, 1080),  # 26 % — external monitor / iMac 24"
+    (1440, 900),   # 20 % — MacBook Pro 15" / MacBook Air 13" logical
+    (1280, 800),   # 16 % — MacBook 13" retina logical
+    (2560, 1440),  # 14 % — iMac 27" / external 1440p
+    (1512, 982),   #  8 % — MacBook 14" / 16" M-series native scaled
+    (1680, 1050),  #  6 % — older MacBook Pro / external 1050p
 ]
-_MACOS_WEIGHTS = [28, 18, 14, 10, 8, 7]
+_MACOS_WEIGHTS = [26, 20, 16, 14, 8, 6]
 
 
-def _pick_resolution(os_hint: str) -> tuple[int, int]:
-    """Pick a resolution weighted by empirical market share for the OS."""
+def _pick_resolution(os_hint: str, seed: str = "") -> tuple[int, int]:
+    """Pick a screen resolution weighted by market share for the given OS.
+
+    When ``seed`` is provided the selection is deterministic — the same seed
+    always returns the same resolution.  Pass ``agent_id`` as seed so each
+    agent has a stable fingerprint across browser restarts (a real user always
+    has the same screen; changing it on every restart is a bot signal).
+    """
+    if seed:
+        rng: random.Random = random.Random(
+            int(hashlib.sha256(seed.encode()).hexdigest(), 16)
+        )
+    else:
+        rng = random.Random()
     if os_hint == "macos":
-        return random.choices(_MACOS_RESOLUTIONS, weights=_MACOS_WEIGHTS, k=1)[0]
-    return random.choices(_WINDOWS_RESOLUTIONS, weights=_WINDOWS_WEIGHTS, k=1)[0]
+        return rng.choices(_MACOS_RESOLUTIONS, weights=_MACOS_WEIGHTS, k=1)[0]
+    return rng.choices(_WINDOWS_RESOLUTIONS, weights=_WINDOWS_WEIGHTS, k=1)[0]
 
 
 # ── Proxy ──────────────────────────────────────────────────────────────────────
@@ -81,6 +105,9 @@ def get_proxy_config() -> dict | None:
     NOTE: Residential proxies are the single most impactful defence
     against IP-reputation-based blocking.  Datacenter IPs are trivially
     flagged by Cloudflare, Akamai, and X regardless of fingerprint quality.
+    This deployment uses a static USA ISP IP which is far less suspicious
+    than a datacenter range, but a residential proxy remains the gold
+    standard for high-sensitivity targets.
     """
     proxy_url = os.environ.get("BROWSER_PROXY_URL", "")
     if not proxy_url:
@@ -127,8 +154,9 @@ def build_launch_options(agent_id: str, profile_dir: str) -> dict:
     locale = os.environ.get("BROWSER_LOCALE", "en-US")
     timezone = os.environ.get("BROWSER_TIMEZONE", "America/New_York")
 
-    # Pick a resolution representative of the OS's user population.
-    resolution = _pick_resolution(os_hint)
+    # Deterministic resolution for this agent — same agent_id always gets the
+    # same screen size across browser restarts for fingerprint consistency.
+    resolution = _pick_resolution(os_hint, seed=agent_id)
     width, height = resolution
 
     options: dict = {
@@ -147,9 +175,9 @@ def build_launch_options(agent_id: str, profile_dir: str) -> dict:
     except ImportError:
         pass  # browserforge only available in browser container
 
-    # GeoIP: map the egress IP → timezone/locale for the fingerprint.
-    # Only enable when a proxy is configured; without a proxy the egress IP is
-    # a datacenter address and GeoIP would produce a mismatched locale.
+    # GeoIP: maps egress IP → timezone/locale for the fingerprint.
+    # Only enable when a proxy is configured so the resolved location matches
+    # the proxy's egress IP, not the Docker container's internal NAT address.
     if proxy:
         options["proxy"] = proxy
         options["geoip"] = True
