@@ -279,7 +279,7 @@ class TestAutoContinueSession:
         cm.force_compact = AsyncMock(return_value=[
             {"role": "user", "content": "## Conversation Summary\n\nSummary here"},
         ])
-        cm.maybe_compact = AsyncMock(side_effect=lambda s, m: m)
+        cm.maybe_compact = AsyncMock(side_effect=lambda s, m: (m, False))
         cm.context_warning = MagicMock(return_value=None)
         loop.context_manager = cm
 
@@ -367,7 +367,7 @@ class TestAutoContinueSession:
         loop = _make_loop()
         cm = MagicMock(spec=ContextManager)
         cm.force_compact = AsyncMock(side_effect=RuntimeError("LLM down"))
-        cm.maybe_compact = AsyncMock(side_effect=lambda s, m: m)
+        cm.maybe_compact = AsyncMock(side_effect=lambda s, m: (m, False))
         cm.context_warning = MagicMock(return_value=None)
         loop.context_manager = cm
 
@@ -424,3 +424,169 @@ class TestAutoContinueSession:
 
         text_events = [e for e in events if e.get("type") == "text_delta"]
         assert any("absolute limit" in e["content"] for e in text_events)
+
+    @pytest.mark.asyncio
+    async def test_auto_continue_writes_system_separator(self):
+        """_auto_continue_session writes a system message to the transcript."""
+        import shutil
+        import tempfile
+
+        from src.agent.workspace import WorkspaceManager
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            loop = _make_loop()
+            loop.workspace = WorkspaceManager(workspace_dir=tmpdir)
+            loop._chat_total_rounds = loop.CHAT_MAX_TOTAL_ROUNDS
+            loop._chat_messages = [
+                {"role": "user", "content": "msg"},
+                {"role": "assistant", "content": "reply"},
+            ]
+
+            await loop.chat("Continue")
+
+            transcript = loop.workspace.load_chat_transcript()
+            system_msgs = [m for m in transcript if m.get("role") == "system"]
+            assert len(system_msgs) == 1
+            assert "Session continued" in system_msgs[0]["content"]
+            assert str(loop.CHAT_MAX_TOTAL_ROUNDS) in system_msgs[0]["content"]
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestToolLimitReached:
+    @pytest.mark.asyncio
+    async def test_tool_limit_sets_flag_in_response(self):
+        """When CHAT_MAX_TOOL_ROUNDS is exhausted, response has tool_limit_reached=True."""
+        # Each call uses a unique arg so the loop detector doesn't fire first.
+        responses = [
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallInfo(name="exec", arguments={"command": f"step_{i}"})],
+                tokens_used=10,
+            )
+            for i in range(AgentLoop.CHAT_MAX_TOOL_ROUNDS)
+        ] + [LLMResponse(content="I've done what I can.", tokens_used=10)]
+
+        loop = _make_loop(responses)
+        loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"type": "function", "function": {"name": "exec"}}]
+        )
+
+        result = await loop.chat("Do a long task")
+        assert result.get("tool_limit_reached") is True
+        assert result["response"] == "I've done what I can."
+
+    @pytest.mark.asyncio
+    async def test_normal_response_has_no_tool_limit_flag(self):
+        """Normal responses do not set tool_limit_reached."""
+        loop = _make_loop()
+        result = await loop.chat("Hello")
+        assert result.get("tool_limit_reached") is not True
+
+    @pytest.mark.asyncio
+    async def test_tool_limit_streaming_sets_flag(self):
+        """Streaming path also emits tool_limit_reached=True on the done event."""
+        responses = [
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallInfo(name="exec", arguments={"command": f"step_{i}"})],
+                tokens_used=10,
+            )
+            for i in range(AgentLoop.CHAT_MAX_TOOL_ROUNDS)
+        ] + [LLMResponse(content="Done.", tokens_used=10)]
+
+        loop = _make_loop(responses)
+
+        async def _no_stream(**kwargs):
+            raise RuntimeError("no streaming")
+            yield  # noqa: makes it an async generator
+
+        loop.llm.chat_stream = _no_stream
+        loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+        loop.skills.get_tool_definitions = MagicMock(
+            return_value=[{"type": "function", "function": {"name": "exec"}}]
+        )
+
+        events = []
+        async for event in loop.chat_stream("Do a long task"):
+            events.append(event)
+
+        done_events = [e for e in events if e.get("type") == "done"]
+        assert len(done_events) == 1
+        assert done_events[0].get("tool_limit_reached") is True
+
+
+class TestCompactionSystemMessage:
+    @pytest.mark.asyncio
+    async def test_compaction_writes_system_message(self):
+        """_compact_chat_context writes a system message when compaction fires."""
+        import shutil
+        import tempfile
+
+        from src.agent.context import ContextManager
+        from src.agent.workspace import WorkspaceManager
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            tool_response = LLMResponse(
+                content="",
+                tool_calls=[ToolCallInfo(name="exec", arguments={"command": "ls"})],
+                tokens_used=10,
+            )
+            final_response = LLMResponse(content="Done.", tokens_used=10)
+
+            loop = _make_loop([tool_response, final_response])
+            loop.workspace = workspace
+            loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+            loop.skills.get_tool_definitions = MagicMock(
+                return_value=[{"type": "function", "function": {"name": "exec"}}]
+            )
+
+            # Patch maybe_compact to signal compaction fired
+            cm = MagicMock(spec=ContextManager)
+            compacted_msgs = [{"role": "user", "content": "## Conversation Summary\n\nSummary"}]
+            cm.maybe_compact = AsyncMock(return_value=(compacted_msgs, True))
+            cm.context_warning = MagicMock(return_value=None)
+            loop.context_manager = cm
+
+            await loop.chat("Trigger compaction")
+
+            transcript = workspace.load_chat_transcript()
+            system_msgs = [m for m in transcript if m.get("role") == "system"]
+            assert len(system_msgs) == 1
+            assert "Context compacted" in system_msgs[0]["content"]
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_no_system_message_when_no_compaction(self):
+        """No system message is written when compaction does not fire."""
+        import shutil
+        import tempfile
+
+        from src.agent.context import ContextManager
+        from src.agent.workspace import WorkspaceManager
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            loop = _make_loop()
+            loop.workspace = workspace
+
+            cm = MagicMock(spec=ContextManager)
+            cm.maybe_compact = AsyncMock(
+                side_effect=lambda s, m: (m, False)
+            )
+            cm.context_warning = MagicMock(return_value=None)
+            loop.context_manager = cm
+
+            await loop.chat("Short message, no compaction")
+
+            transcript = workspace.load_chat_transcript()
+            system_msgs = [m for m in transcript if m.get("role") == "system"]
+            assert len(system_msgs) == 0
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
