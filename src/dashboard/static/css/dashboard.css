@@ -1127,6 +1127,11 @@ body {
   background-color: rgba(127, 29, 29, 0.25);
 }
 
+.chat-input-btn.active:hover:not(:disabled) {
+  color: #fca5a5; /* slightly lighter red for hover feedback */
+  background-color: rgba(127, 29, 29, 0.4);
+}
+
 /* ── Send button ──────────────────────────────────── */
 
 .chat-input-send {

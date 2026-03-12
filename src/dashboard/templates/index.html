@@ -3015,8 +3015,12 @@
         <!-- Agent list -->
         <div class="flex-1 overflow-y-auto">
           <template x-for="chatId in openChats" :key="chatId">
-            <button @click="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId))"
-              class="messenger-contact w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition-all border-l-2"
+            <!-- div+role=button avoids the HTML spec violation of <button> inside <button> -->
+            <div @click="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId))"
+              @keydown.enter.prevent="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId))"
+              @keydown.space.prevent="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId))"
+              role="button" tabindex="0"
+              class="messenger-contact w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition-all border-l-2 cursor-pointer"
               :class="activeChatId === chatId
                 ? 'bg-gray-800/80 border-l-indigo-500 text-white'
                 : 'border-l-transparent text-gray-400 hover:bg-gray-800/40 hover:text-gray-200'">
@@ -3038,7 +3042,7 @@
               <button @click.stop="closeChat(chatId)" class="text-gray-700 hover:text-gray-400 transition-colors shrink-0 p-0.5 rounded" style="opacity:0" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity=0" aria-label="Close chat">
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
               </button>
-            </button>
+            </div>
           </template>
         </div>
       </div>

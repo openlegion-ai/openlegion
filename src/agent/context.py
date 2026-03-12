@@ -446,6 +446,13 @@ class ContextManager:
         for msg in messages:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
+            # Multimodal messages have list content — extract text blocks only;
+            # binary image data is not useful for summarization.
+            if isinstance(content, list):
+                content = " ".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
             if role == "tool":
                 content = content[:200]
             if content:

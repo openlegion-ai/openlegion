@@ -20,6 +20,7 @@ from collections.abc import Callable
 
 import httpx
 
+from src.agent.attachments import convert_openai_image_blocks
 from src.host.transcript import sanitize_for_provider
 from src.shared.types import APIProxyRequest, APIProxyResponse
 from src.shared.utils import friendly_streaming_error, setup_logging
@@ -669,6 +670,11 @@ class CredentialVault:
                     converted.append({"role": "user", "content": [tool_result]})
 
             else:
+                # Convert OpenAI image_url blocks to Anthropic image format.
+                # LiteLLM does this automatically on its code path; the OAuth
+                # fast-path bypasses LiteLLM so we must convert manually.
+                if isinstance(m.get("content"), list):
+                    m = {**m, "content": convert_openai_image_blocks(m["content"])}
                 converted.append(m)
 
         body: dict = {
