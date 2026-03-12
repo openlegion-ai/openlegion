@@ -60,15 +60,17 @@ class TestCompaction:
     async def test_no_compact_below_threshold(self):
         cm = ContextManager(max_tokens=100_000)
         msgs = _make_messages(3, chars_each=50)
-        result = await cm.maybe_compact("system", msgs)
+        result, did_compact = await cm.maybe_compact("system", msgs)
         assert result == msgs  # unchanged
+        assert did_compact is False
 
     @pytest.mark.asyncio
     async def test_hard_prune_without_llm(self):
         cm = ContextManager(max_tokens=100, llm=None, workspace=None)
         msgs = _make_messages(10, chars_each=200)
-        result = await cm.maybe_compact("system", msgs)
+        result, did_compact = await cm.maybe_compact("system", msgs)
         assert len(result) < len(msgs)
+        assert did_compact is True
 
     @pytest.mark.asyncio
     async def test_compact_flushes_to_memory(self):
@@ -90,11 +92,12 @@ class TestCompaction:
 
             cm = ContextManager(max_tokens=100, llm=llm, workspace=workspace)
             msgs = _make_messages(10, chars_each=200)
-            result = await cm.maybe_compact("system", msgs)
+            result, did_compact = await cm.maybe_compact("system", msgs)
 
             memory_content = workspace.load_memory()
             assert "dark mode" in memory_content
             assert len(result) < len(msgs)
+            assert did_compact is True
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -116,8 +119,9 @@ class TestCompaction:
 
             cm = ContextManager(max_tokens=100, llm=llm, workspace=workspace)
             msgs = _make_messages(10, chars_each=200)
-            result = await cm.maybe_compact("system", msgs)
+            result, did_compact = await cm.maybe_compact("system", msgs)
 
+            assert did_compact is True
             assert len(result) <= 5
             assert any("Summary" in m.get("content", "") for m in result)
         finally:
@@ -130,8 +134,9 @@ class TestCompaction:
 
         cm = ContextManager(max_tokens=100, llm=llm, workspace=None)
         msgs = _make_messages(10, chars_each=200)
-        result = await cm.maybe_compact("system", msgs)
+        result, did_compact = await cm.maybe_compact("system", msgs)
         assert len(result) < len(msgs)
+        assert did_compact is True
 
     @pytest.mark.asyncio
     async def test_compact_skips_memory_when_content_short(self):
@@ -173,10 +178,11 @@ class TestProactiveFlush:
             # max_tokens=470 with 5 messages => ~65% usage (in the 60-70% window)
             cm = ContextManager(max_tokens=470, llm=llm, workspace=workspace)
             msgs = _make_messages(5, chars_each=200)
-            result = await cm.maybe_compact("system", msgs)
+            result, did_compact = await cm.maybe_compact("system", msgs)
 
             # Messages returned unchanged (no compaction yet)
             assert result == msgs
+            assert did_compact is False
             # LLM was called for extraction
             assert llm.chat.call_count == 1
             # Facts written to MEMORY.md
@@ -222,10 +228,11 @@ class TestProactiveFlush:
 
             cm = ContextManager(max_tokens=470, llm=llm, workspace=workspace)
             msgs = _make_messages(5, chars_each=200)
-            result = await cm.maybe_compact("system", msgs)
+            result, did_compact = await cm.maybe_compact("system", msgs)
 
             # Should return messages unchanged (no crash)
             assert result == msgs
+            assert did_compact is False
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -290,9 +297,10 @@ class TestProactiveFlush:
 
             # Phase 2: force compaction at 70%+
             msgs_70 = _make_messages(10, chars_each=200)
-            result = await cm.maybe_compact("system", msgs_70)
+            result, did_compact = await cm.maybe_compact("system", msgs_70)
             assert cm._flush_triggered is False  # reset after compaction
             assert len(result) < len(msgs_70)
+            assert did_compact is True
 
             # Phase 3: proactive flush fires again
             msgs_60b = _make_messages(5, chars_each=200)
