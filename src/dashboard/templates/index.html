@@ -3255,7 +3255,7 @@
             r.start();
             this.speechActive = true;
           }
-        }" x-init="$watch('activeChatId', () => { chatInput=''; pendingFile=null; pendingFileUploading=false; if(speechActive){ _recognition && _recognition.stop(); speechActive=false; } })">
+        }" x-init="$watch('activeChatId', () => { chatInput=''; pendingFile=null; pendingFileUploading=false; dragOver=false; if(speechActive){ _recognition && _recognition.stop(); speechActive=false; } })">
           <!-- Pending file chip -->
           <template x-if="pendingFile || pendingFileUploading">
             <div class="flex items-center gap-2 mb-2">
