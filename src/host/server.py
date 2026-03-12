@@ -1206,6 +1206,8 @@ def create_mesh_app(
                 subprotocols=["binary"],
                 additional_headers=extra_headers,
                 compression=None,
+                ping_interval=None,  # noVNC handles keepalive; websockets' auto-ping
+                                     # drops the connection when KasmVNC doesn't pong
             ) as upstream:
 
                 async def client_to_upstream():
