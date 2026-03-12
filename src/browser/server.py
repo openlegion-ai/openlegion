@@ -131,4 +131,39 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         _verify_auth(request)
         return await manager.solve_captcha(agent_id)
 
+    # ── User uploads file serving ─────────────────────────────────────────
+    # Serves files from /app/uploads (user-managed, read-only mount).
+    # No auth required: this port is not internet-exposed and all content
+    # was placed here by the authenticated dashboard user.
+    # Agents navigate the browser to http://localhost:8500/uploads/<filename>.
+
+    _UPLOADS_ROOT = "/app/uploads"
+
+    @app.get("/uploads/{path:path}")
+    async def serve_upload(path: str):
+        """Serve a user-uploaded file so the VNC browser can navigate to it."""
+        import mimetypes
+        from pathlib import Path
+        from fastapi.responses import Response
+
+        root = Path(_UPLOADS_ROOT)
+        if not root.is_dir():
+            raise HTTPException(503, "Uploads directory not available")
+        root = root.resolve()
+        try:
+            p = Path(path)
+        except ValueError:
+            raise HTTPException(400, "Invalid path")
+        if p.is_absolute() or ".." in p.parts:
+            raise HTTPException(400, "Invalid path")
+        candidate = (root / path).resolve()
+        if not candidate.is_relative_to(root):
+            raise HTTPException(400, "Path traversal not allowed")
+        if not candidate.exists() or not candidate.is_file():
+            raise HTTPException(404, f"Upload not found: {path}")
+        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        with candidate.open("rb") as fh:
+            content = fh.read()
+        return Response(content=content, media_type=mime)
+
     return app

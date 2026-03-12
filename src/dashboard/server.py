@@ -1090,6 +1090,42 @@ def create_dashboard_router(
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
+    @api_router.get("/api/agents/{agent_id}/files")
+    async def api_list_files(
+        agent_id: str,
+        path: str = ".",
+        recursive: bool = False,
+        pattern: str = "*",
+    ) -> dict:
+        """List files under the agent's /data volume."""
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            qs = f"path={path}&recursive={'true' if recursive else 'false'}&pattern={pattern}"
+            return await transport.request(agent_id, "GET", f"/files?{qs}", timeout=10)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @api_router.get("/api/agents/{agent_id}/files/{path:path}")
+    async def api_read_file(agent_id: str, path: str) -> dict:
+        """Read a file from the agent's /data volume."""
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        try:
+            result = await transport.request(agent_id, "GET", f"/files/{path}", timeout=30)
+            if "error" in result:
+                status = result.get("status_code", 404)
+                raise HTTPException(status_code=status, detail=result["error"])
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
     @api_router.post("/api/credentials/validate")
     async def api_validate_credential(request: Request) -> dict:
         """Validate an API key by making a minimal LLM call."""
@@ -2090,6 +2126,111 @@ def create_dashboard_router(
         ".svg": "image/svg+xml",
         ".ico": "image/x-icon",
     }
+
+    # ── User Uploads ─────────────────────────────────────────────────────
+    # User-managed files that agents can read (read-only) and the VNC browser
+    # can navigate to at http://localhost:8500/uploads/<filename>.
+    # All endpoints read/write the host uploads dir directly — no transport.
+
+    def _uploads_dir() -> Path:
+        root = (
+            runtime.project_root if runtime and hasattr(runtime, "project_root")
+            else Path(__file__).resolve().parent.parent.parent
+        )
+        d = root / ".openlegion" / "uploads"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    _MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+
+    def _safe_upload_path(name: str) -> Path:
+        """Resolve upload path, blocking traversal, absolute paths, and null bytes.
+
+        Two-stage check:
+          1. Structural: reject absolute paths and any '..' component
+             using Path.parts (platform-aware, handles both / and \).
+          2. Symlink-safe: resolve and verify the final path is inside root.
+        """
+        try:
+            p = Path(name)
+        except (ValueError, TypeError):
+            # ValueError is raised for embedded null bytes on all platforms.
+            raise HTTPException(400, "Invalid path")
+        if p.is_absolute() or ".." in p.parts:
+            raise HTTPException(400, "Invalid path")
+        root = _uploads_dir().resolve()
+        candidate = (root / name).resolve()
+        if not candidate.is_relative_to(root):
+            raise HTTPException(400, "Path traversal not allowed")
+        return candidate
+
+    @api_router.get("/api/uploads")
+    async def api_list_uploads() -> dict:
+        """List all files in the uploads directory."""
+        import mimetypes
+        root = _uploads_dir()
+        entries = []
+        for f in sorted(root.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = str(f.relative_to(root))
+            stat = f.stat()
+            mime = mimetypes.guess_type(rel)[0] or "application/octet-stream"
+            entries.append({
+                "name": rel,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+                "mime_type": mime,
+            })
+        return {"uploads": entries}
+
+    @api_router.post("/api/uploads/{name:path}")
+    async def api_upload_file(name: str, request: Request) -> dict:
+        """Upload a file to the uploads directory.
+
+        Accepts raw bytes in the request body.  The caller sets Content-Type
+        so the browser download later uses the right MIME type.
+        Maximum upload size: 50 MB.
+        """
+        dest = _safe_upload_path(name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        body = await request.body()
+        if not body:
+            raise HTTPException(400, "Empty body")
+        if len(body) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"File too large (max {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB)")
+        dest.write_bytes(body)
+        return {"uploaded": True, "name": name, "size": len(body)}
+
+    @api_router.get("/api/uploads/{name:path}/download")
+    async def api_download_upload(name: str):
+        """Download a file from the uploads directory with correct Content-Type."""
+        import mimetypes
+        from fastapi.responses import Response
+        path = _safe_upload_path(name)
+        if not path.exists() or not path.is_file():
+            raise HTTPException(404, f"Upload not found: {name}")
+        mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        return Response(
+            content=path.read_bytes(),
+            media_type=mime,
+            headers={"Content-Disposition": f'attachment; filename="{path.name}"'},
+        )
+
+    @api_router.delete("/api/uploads/{name:path}")
+    async def api_delete_upload(name: str) -> dict:
+        """Delete an uploaded file."""
+        path = _safe_upload_path(name)
+        if not path.exists() or not path.is_file():
+            raise HTTPException(404, f"Upload not found: {name}")
+        path.unlink()
+        # Clean up empty parent dirs up to (but not including) root
+        root = _uploads_dir().resolve()
+        parent = path.parent
+        while parent != root and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
+        return {"deleted": True, "name": name}
 
     @api_router.get("/static/{file_path:path}")
     async def static_file(file_path: str, v: str | None = None) -> FileResponse:

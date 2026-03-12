@@ -40,7 +40,13 @@ _CONTEXT_ROLES = frozenset({
 
 _MAX_SNAPSHOT_ELEMENTS = 200
 
-_BLOCKED_URL_SCHEMES = frozenset({"file", "javascript", "data", "blob"})
+# Block schemes that could expose local files or browser internals.
+# about: covers about:logins (saved passwords), about:config, etc.
+# moz-extension: / chrome-extension: cover installed extensions.
+_BLOCKED_URL_SCHEMES = frozenset({
+    "file", "javascript", "data", "blob",
+    "about", "moz-extension", "chrome-extension", "chrome",
+})
 _MAX_WAIT_MS = 10000  # 10 seconds max wait after navigation
 _MAX_SCROLL_PX = 10000  # 10000 pixels max per scroll call
 _AGENT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")

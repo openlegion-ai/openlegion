@@ -17,6 +17,8 @@ Exposes endpoints for the mesh/orchestrator to interact with:
   GET  /artifacts - list artifact files
   GET  /artifacts/{name} - read artifact content
   DELETE /artifacts/{name} - delete artifact file
+  GET  /files?path=.&recursive=false - list all /data files
+  GET  /files/{path} - read any /data file (text or base64)
 """
 
 from __future__ import annotations
@@ -459,6 +461,48 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             raw = filepath.read_bytes()
             return {"name": name, "content": base64.b64encode(raw).decode("ascii"),
                     "size": size, "mime_type": mime, "encoding": "base64"}
+
+    @app.get("/files")
+    async def list_data_files(
+        path: str = ".",
+        recursive: bool = False,
+        pattern: str = "*",
+    ) -> dict:
+        """List files under /data (the agent's full data volume)."""
+        from src.agent.builtins.file_tool import list_files
+        try:
+            return list_files(path=path, pattern=pattern, recursive=recursive)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/files/{path:path}")
+    async def read_data_file(path: str) -> dict:
+        """Read any file from /data. Text returned as-is; binary base64-encoded."""
+        import base64
+        import mimetypes
+        from src.agent.builtins.file_tool import _MAX_READ, _safe_path
+        try:
+            safe = _safe_path(path)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if not safe.exists():
+            raise HTTPException(404, f"File not found: {path}")
+        if not safe.is_file():
+            raise HTTPException(400, f"Not a file: {path}")
+        size = safe.stat().st_size
+        mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        # Read at most _MAX_READ bytes without loading the full file first.
+        with safe.open("rb") as fh:
+            raw = fh.read(_MAX_READ)
+        try:
+            content = raw.decode("utf-8")
+            return {"path": path, "content": content, "size": size,
+                    "mime_type": mime, "encoding": "utf-8",
+                    "truncated": size > _MAX_READ}
+        except UnicodeDecodeError:
+            return {"path": path, "content": base64.b64encode(raw).decode("ascii"),
+                    "size": size, "mime_type": mime, "encoding": "base64",
+                    "truncated": size > _MAX_READ}
 
     @app.delete("/artifacts/{name:path}")
     async def delete_artifact(name: str) -> dict:
