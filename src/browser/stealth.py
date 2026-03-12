@@ -136,9 +136,8 @@ def build_launch_options(agent_id: str, profile_dir: str) -> dict:
     """Build Camoufox AsyncNewBrowser kwargs for an agent.
 
     Environment variables (all optional):
-      BROWSER_OS       — "windows" (default) | "macos" | "linux"
-      BROWSER_LOCALE   — BCP-47 locale tag, e.g. "en-US" (default)
-      BROWSER_TIMEZONE — IANA timezone, e.g. "America/New_York" (default)
+      BROWSER_OS     — "windows" (default) | "macos" | "linux"
+      BROWSER_LOCALE — BCP-47 locale tag, e.g. "en-US" (default)
     """
     proxy = get_proxy_config()
 
@@ -152,26 +151,35 @@ def build_launch_options(agent_id: str, profile_dir: str) -> dict:
         os_hint = "windows"
 
     locale = os.environ.get("BROWSER_LOCALE", "en-US")
-    timezone = os.environ.get("BROWSER_TIMEZONE", "America/New_York")
 
-    # Deterministic resolution for this agent — same agent_id always gets the
-    # same screen size across browser restarts for fingerprint consistency.
-    resolution = _pick_resolution(os_hint, seed=agent_id)
-    width, height = resolution
+    # Deterministic fingerprint screen size for this agent — same agent_id
+    # always maps to the same screen dimensions across browser restarts.
+    # Only drives the BrowserForge Screen constraint; do NOT set window= here.
+    # Per Camoufox docs: "Do not set the window size to a fixed value unless
+    # for debugging purposes" — Camoufox auto-generates a realistic window size
+    # from the screen fingerprint, and Openbox maximises it to fill the VNC.
+    fp_width, fp_height = _pick_resolution(os_hint, seed=agent_id)
 
     options: dict = {
         "headless": False,
         "humanize": True,        # Camoufox mouse-curves + micro-delays
         "os": os_hint,
         "locale": locale,        # navigator.language / Accept-Language header
-        "timezone": timezone,    # Intl.DateTimeFormat default timezone
-        "window": resolution,
+        # block_webrtc: Camoufox native toggle — prevents Docker container IP
+        # from leaking via ICE candidates.  More reliable than manual prefs.
+        "block_webrtc": True,
     }
 
-    # BrowserForge screen constraints — keep consistent with our resolution.
+    # NOTE: "timezone" is NOT a valid Camoufox parameter (Playwright uses
+    # timezone_id, not timezone).  Passing it causes a TypeError on browser
+    # startup.  Locale implicitly determines timezone via GeoIP or BrowserForge.
+
+    # BrowserForge screen constraints — drive the fingerprint screen dimensions.
+    # This is the only place the per-agent resolution is applied; the actual
+    # X11 window size is left to Camoufox to generate automatically.
     try:
         from browserforge.fingerprints import Screen
-        options["screen"] = Screen(max_width=width, max_height=height)
+        options["screen"] = Screen(max_width=fp_width, max_height=fp_height)
     except ImportError:
         pass  # browserforge only available in browser container
 
@@ -203,14 +211,10 @@ def _stealth_prefs() -> dict:
         "browser.uidensity": 1,
         "browser.tabs.inTitlebar": 1,
 
-        # ── WebRTC: fully disabled ────────────────────────────────────────────
-        # RTCPeerConnection leaks the Docker container's internal IP (172.x.x.x
-        # or 10.x.x.x) via ICE candidates even when behind a proxy.  This is
-        # one of the most reliable automated-browser signals in use today.
-        "media.peerconnection.enabled": False,
-        "media.peerconnection.turn.disable": True,
-        "media.peerconnection.use_document_iceservers": False,
-        "media.peerconnection.video.enabled": False,
+        # ── WebRTC: handled by Camoufox block_webrtc=True ────────────────────
+        # RTCPeerConnection leaks the Docker container's internal IP via ICE
+        # candidates even when behind a proxy.  Camoufox's block_webrtc option
+        # is the canonical way to disable WebRTC — it covers all relevant prefs.
 
         # ── Geolocation ───────────────────────────────────────────────────────
         # The geo API would expose incorrect coordinates for a server IP, and
