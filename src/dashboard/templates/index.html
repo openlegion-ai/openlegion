@@ -3015,8 +3015,12 @@
         <!-- Agent list -->
         <div class="flex-1 overflow-y-auto">
           <template x-for="chatId in openChats" :key="chatId">
-            <button @click="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId))"
-              class="messenger-contact w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition-all border-l-2"
+            <!-- div+role=button avoids the HTML spec violation of <button> inside <button> -->
+            <div @click="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId))"
+              @keydown.enter.prevent="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId))"
+              @keydown.space.prevent="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId))"
+              role="button" tabindex="0"
+              class="messenger-contact w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition-all border-l-2 cursor-pointer"
               :class="activeChatId === chatId
                 ? 'bg-gray-800/80 border-l-indigo-500 text-white'
                 : 'border-l-transparent text-gray-400 hover:bg-gray-800/40 hover:text-gray-200'">
@@ -3038,7 +3042,7 @@
               <button @click.stop="closeChat(chatId)" class="text-gray-700 hover:text-gray-400 transition-colors shrink-0 p-0.5 rounded" style="opacity:0" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity=0" aria-label="Close chat">
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
               </button>
-            </button>
+            </div>
           </template>
         </div>
       </div>
@@ -3070,6 +3074,19 @@
               <path d="M3 3v5h5"/>
             </svg>
           </button>
+          <!-- Mobile-only: minimize and close (desktop has these in the sidebar header) -->
+          <div class="flex items-center gap-0.5 sm:hidden ml-1 shrink-0">
+            <button @click="chatPanelMinimized = true"
+              title="Minimize" aria-label="Minimize chat"
+              class="text-gray-500 hover:text-white transition-colors p-1.5 rounded">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 9l-7 7-7-7"/></svg>
+            </button>
+            <button @click="closeChat(activeChatId)"
+              title="Close chat" aria-label="Close chat"
+              class="text-gray-500 hover:text-white transition-colors p-1.5 rounded">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+          </div>
         </div>
         <!-- Mobile: horizontal agent tab strip (shown only when multiple chats) -->
         <div x-show="openChats.length > 1" x-cloak class="sm:hidden flex overflow-x-auto border-b border-gray-800/60 shrink-0 bg-gray-950/60">
@@ -3211,10 +3228,19 @@
             if (!SR) return;
             if (this.speechActive) { this._recognition && this._recognition.stop(); return; }
             const r = new SR();
-            r.continuous = false;
-            r.interimResults = false;
+            r.continuous = true;      /* keep mic open between utterances */
+            r.interimResults = true;  /* fire onresult so we can track finals */
             r.lang = navigator.language || 'en-US';
-            r.onresult = (e) => { this.chatInput += (this.chatInput ? ' ' : '') + e.results[0][0].transcript; };
+            r.onresult = (e) => {
+              let finals = '';
+              for (let i = e.resultIndex; i < e.results.length; i++) {
+                if (e.results[i].isFinal) finals += e.results[i][0].transcript;
+              }
+              if (finals) {
+                const sep = (this.chatInput && !this.chatInput.endsWith(' ')) ? ' ' : '';
+                this.chatInput += sep + finals.trim();
+              }
+            };
             r.onerror = (e) => {
               this.speechActive = false;
               if (e.error === 'not-allowed') this.showToast('Microphone access denied');
@@ -3248,20 +3274,17 @@
             <input type="file" x-ref="fileInput" class="hidden" @change="attachFile($event.target.files[0]); $event.target.value=''">
             <!-- Attach file button -->
             <button @click="$refs.fileInput.click()" :disabled="pendingFileUploading"
-              title="Attach file"
-              class="shrink-0 p-1.5 rounded-lg text-gray-600 hover:text-gray-400 hover:bg-gray-800 transition-colors disabled:opacity-40"
-              style="margin-left:4px">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+              title="Attach file" aria-label="Attach file"
+              class="chat-input-btn">
+              <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
             </button>
             <!-- Speech-to-text button (hidden if API unavailable) -->
             <button x-show="'SpeechRecognition' in window || 'webkitSpeechRecognition' in window"
               @click="toggleSpeech()"
               :title="speechActive ? 'Stop recording' : 'Voice input'"
-              :class="speechActive ? 'text-red-400 bg-red-900/20' : 'text-gray-600 hover:text-gray-400 hover:bg-gray-800'"
-              class="shrink-0 p-1.5 rounded-lg transition-colors"
-              style="margin-left:2px">
-              <!-- Static mic icon; recording state conveyed by button color class above -->
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              :class="speechActive ? 'chat-input-btn active' : 'chat-input-btn'"
+              aria-label="Voice input">
+              <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M12 1a3 3 0 0 1 3 3v8a3 3 0 0 1-6 0V4a3 3 0 0 1 3-3z"/>
                 <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
                 <line x1="12" y1="19" x2="12" y2="23"/>
@@ -3276,9 +3299,10 @@
               :placeholder="speechActive ? 'Listening…' : (isAgentBusy(activeChatId) ? 'Steer agent…' : 'Message…')"></textarea>
             <button @click="sendMsg()"
               :disabled="!(chatInput.trim() || pendingFile)"
-              style="width:34px;height:34px;min-width:34px;min-height:34px;border-radius:9999px;border:none;padding:0;margin:3px 4px 3px 0;display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0;cursor:pointer;transition:background-color 0.15s,opacity 0.15s"
-              :class="(chatInput.trim() || pendingFile) ? (isAgentBusy(activeChatId) ? 'bg-amber-600 hover:bg-amber-500' : 'bg-indigo-600 hover:bg-indigo-500') : 'bg-gray-700 opacity-40 cursor-default'">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" style="width:16px;height:16px"><path fill-rule="evenodd" d="M3 10a.75.75 0 0 1 .75-.75h10.638L10.23 5.29a.75.75 0 1 1 1.04-1.08l5.5 5.25a.75.75 0 0 1 0 1.08l-5.5 5.25a.75.75 0 1 1-1.04-1.08l4.158-3.96H3.75A.75.75 0 0 1 3 10Z" clip-rule="evenodd"/></svg>
+              class="chat-input-send"
+              :class="(chatInput.trim() || pendingFile) ? (isAgentBusy(activeChatId) ? 'bg-amber-600 hover:bg-amber-500' : 'bg-indigo-600 hover:bg-indigo-500') : 'bg-gray-700 opacity-40'"
+              aria-label="Send">
+              <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 10a.75.75 0 0 1 .75-.75h10.638L10.23 5.29a.75.75 0 1 1 1.04-1.08l5.5 5.25a.75.75 0 0 1 0 1.08l-5.5 5.25a.75.75 0 1 1-1.04-1.08l4.158-3.96H3.75A.75.75 0 0 1 3 10Z" clip-rule="evenodd"/></svg>
             </button>
           </div>
         </div>

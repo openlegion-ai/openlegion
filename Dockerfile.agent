@@ -17,7 +17,7 @@ WORKDIR /app
 # No browser deps — browsing is handled by the shared browser service
 COPY pyproject.toml .
 RUN pip install --no-cache-dir \
-    fastapi uvicorn httpx pydantic mcp \
+    fastapi uvicorn httpx pydantic mcp pypdf \
     && pip install --no-cache-dir --pre sqlite-vec
 
 # Application code

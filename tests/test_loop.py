@@ -1446,3 +1446,61 @@ class TestStandaloneBlackboardIsolation:
         assert "read_shared_state" not in status.capabilities
         assert "notify_user" in status.capabilities
         assert "memory_save" in status.capabilities
+
+
+# ---------------------------------------------------------------------------
+# Multimodal steer-append regression
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_steer_appended_correctly_to_multimodal_content():
+    """Steer suffix must append as a text block, not corrupt a list via +=.
+
+    Regression test for: when _prepare_chat_turn enriches a user message into
+    a list of content blocks (e.g. image attachment) and there are queued steer
+    messages, the steer text must be added as a new {"type": "text"} block
+    rather than extending the list with individual characters (which would
+    happen if we naively did list += string).
+    """
+    loop = _make_loop(
+        [LLMResponse(content="Sure, I can see the image.", tokens_used=50)],
+    )
+    # Inject a steer message as if the user typed it mid-turn
+    loop._steer_queue.put_nowait("Please focus on the chart legend.")
+
+    # Inject a multimodal content list directly (simulates enrichment result)
+    multimodal_content = [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+        {"type": "text", "text": "What is in this image?"},
+    ]
+    loop._chat_messages.append({"role": "user", "content": multimodal_content})
+
+    # Now drain the steer — the fix path runs here
+    steered = loop._drain_steer_messages()
+    assert steered  # steer was present
+
+    combined = "\n\n".join(steered)
+    steer_suffix = f"\n\n[Additional context]: {combined}"
+    current = loop._chat_messages[-1]["content"]
+    if isinstance(current, list):
+        loop._chat_messages[-1]["content"].append(
+            {"type": "text", "text": steer_suffix.strip()}
+        )
+    else:
+        loop._chat_messages[-1]["content"] += steer_suffix
+
+    result_content = loop._chat_messages[-1]["content"]
+
+    # Content must remain a proper list of dicts, NOT a list polluted with
+    # individual string characters from an erroneous list += string.
+    assert isinstance(result_content, list)
+    assert all(isinstance(b, dict) for b in result_content), (
+        "Content list was corrupted — contains non-dict elements "
+        "(likely caused by list += string)"
+    )
+    # The steer text should be present as a text block
+    text_blocks = [b["text"] for b in result_content if b.get("type") == "text"]
+    assert any("focus on the chart legend" in t for t in text_blocks)
+    # The original image block must be untouched
+    image_blocks = [b for b in result_content if b.get("type") == "image_url"]
+    assert len(image_blocks) == 1

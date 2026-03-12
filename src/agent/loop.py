@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 
+from src.agent.attachments import enrich_message_with_attachments
 from src.agent.loop_detector import ToolLoopDetector
 from src.agent.workspace import INTROSPECT_PERM_KEYS
 from src.shared.types import SILENT_REPLY_TOKEN, AgentStatus, TaskAssignment, TaskResult
@@ -841,11 +842,23 @@ class AgentLoop:
                     f"[Relevant memory auto-loaded]\n{memory_context}"
                 )
 
-        self._chat_messages.append({"role": "user", "content": user_message})
+        # Enrich with multimodal blocks for images/PDFs attached via the UI.
+        # The plain-text message was already persisted to the transcript above;
+        # the enriched form is only used for the LLM call.
+        llm_content = enrich_message_with_attachments(user_message)
+        self._chat_messages.append({"role": "user", "content": llm_content})
         steered = self._drain_steer_messages()
         if steered:
             combined = "\n\n".join(steered)
-            self._chat_messages[-1]["content"] += f"\n\n[Additional context]: {combined}"
+            steer_suffix = f"\n\n[Additional context]: {combined}"
+            current = self._chat_messages[-1]["content"]
+            if isinstance(current, list):
+                # Multimodal content — append steer as a new text block
+                self._chat_messages[-1]["content"].append(
+                    {"type": "text", "text": steer_suffix.strip()}
+                )
+            else:
+                self._chat_messages[-1]["content"] += steer_suffix
             # Persist steers as separate transcript entries
             if self.workspace:
                 for s in steered:
