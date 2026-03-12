@@ -1382,9 +1382,9 @@
                   Restart
                 </button>
                 <button @click="resetAgent(selectedAgent)" class="action-btn action-btn-danger px-3 py-1.5"
-                  title="Clear conversation history — does not restart the agent">
+                  title="Start a fresh conversation. Key memories are preserved.">
                   <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/></svg>
-                  Clear Chat
+                  Reset Conversation
                 </button>
               </div>
             </div>
@@ -3060,13 +3060,22 @@
               :class="chatStreamingAgents[activeChatId] ? 'text-green-400' : (chatLoadingAgents[activeChatId] ? 'text-purple-400' : 'text-gray-600')"
               x-text="chatStreamingAgents[activeChatId] ? 'Responding...' : (chatLoadingAgents[activeChatId] ? 'Thinking...' : 'Online')"></span>
           </div>
-          <button x-show="(chatHistories[activeChatId] || []).length > 0" @click.stop="clearChat(activeChatId)"
-            class="text-[10px] text-gray-600 hover:text-gray-400 transition-colors px-2 py-1 rounded hover:bg-gray-800" title="Clear chat">Clear</button>
         </div>
         <!-- Messages area -->
         <div role="log" aria-live="polite" class="flex-1 overflow-y-auto px-4 py-3 space-y-2" :id="'chat-messages-' + activeChatId">
           <template x-for="(msg, i) in (chatHistories[activeChatId] || [])" :key="i">
-            <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
+            <!-- System event: compaction / session divider — rendered as a separator, not a bubble -->
+            <template x-if="msg.role === 'system'">
+              <div class="flex items-center gap-2 py-1 select-none">
+                <div class="flex-1 border-t border-dashed border-gray-800"></div>
+                <span class="text-[9px] text-gray-600 uppercase tracking-wider whitespace-nowrap flex items-center gap-1">
+                  <svg class="w-2.5 h-2.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                  <span x-text="msg.content"></span>
+                </span>
+                <div class="flex-1 border-t border-dashed border-gray-800"></div>
+              </div>
+            </template>
+            <div x-show="msg.role !== 'system'" :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
               <div class="max-w-[80%] px-3 py-2 rounded-2xl text-xs"
                 :class="{
                   'bg-indigo-600 text-white rounded-br-md': msg.role === 'user',
@@ -3099,6 +3108,16 @@
                   class="text-[9px] mt-0.5 opacity-40"
                   :class="msg.role === 'user' ? 'text-indigo-200' : 'text-gray-500'"
                   x-text="formatRelativeTime(msg.ts)"></div>
+                <template x-if="msg.tool_limit_reached">
+                  <div class="mt-2 flex items-center gap-1.5 border-t border-gray-700/50 pt-1.5">
+                    <svg class="w-2.5 h-2.5 text-yellow-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M12 3a9 9 0 100 18A9 9 0 0012 3z"/></svg>
+                    <span class="text-[9px] text-gray-600">Tool limit reached mid-task.</span>
+                    <button @click="sendChatTo(activeChatId, 'Continue')"
+                      class="text-[9px] text-indigo-400 hover:text-indigo-300 transition-colors font-medium">
+                      Continue →
+                    </button>
+                  </div>
+                </template>
               </div>
             </div>
           </template>

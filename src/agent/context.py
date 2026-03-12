@@ -133,8 +133,11 @@ class ContextManager:
 
     async def maybe_compact(
         self, system_prompt: str, messages: list[dict],
-    ) -> list[dict]:
+    ) -> tuple[list[dict], bool]:
         """Check context usage and compact if needed.
+
+        Returns ``(messages, did_compact)`` where ``did_compact`` is True only
+        when the conversation was actually summarised and replaced.
 
         1. If between 60-70%, proactively flush structured facts (once).
         2. If above 70%, flush to MEMORY.md, then summarize.
@@ -152,13 +155,13 @@ class ContextManager:
         ):
             async with self._flush_lock:
                 if self._flush_triggered:
-                    return messages  # another coroutine already flushed
+                    return messages, False  # another coroutine already flushed
                 self._flush_triggered = True
             await self._proactive_flush(system_prompt, messages)
-            return messages  # don't compact yet
+            return messages, False  # don't compact yet
 
         if not self.should_compact(messages):
-            return messages
+            return messages, False
 
         usage_pct = int(usage * 100)
         tokens_before = self.token_count(messages)
@@ -189,7 +192,7 @@ class ContextManager:
             f"{tokens_before:,}", f"{tokens_after:,}",
             (1 - ratio) * 100, elapsed_ms,
         )
-        return result
+        return result, True
 
     async def force_compact(
         self, system_prompt: str, messages: list[dict],

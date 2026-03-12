@@ -2981,6 +2981,7 @@ function dashboard() {
               entry.content = finalResponse || entry.content;
               entry.streaming = false;
               entry.phase = 'done';
+              entry.tool_limit_reached = data.tool_limit_reached || false;
             } else if (data.type === 'error') {
               entry.content = data.message || 'Stream error';
               entry.role = 'error';
@@ -3225,7 +3226,7 @@ function dashboard() {
     // ── Reset ────────────────────────────────────────────
 
     async resetAgent(agentId) {
-      this.showConfirm('Reset Conversation', `Reset conversation for "${agentId}"? This clears their chat history.`, async () => {
+      this.showConfirm('Reset Conversation', `Start a fresh conversation with "${agentId}"? The conversation thread is wiped, but memories and skills are preserved.`, async () => {
         try {
           const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/reset`, { method: 'POST' });
           if (resp.ok) this.showToast(`${agentId} conversation reset`);
