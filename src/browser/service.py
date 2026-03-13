@@ -75,6 +75,124 @@ _MODAL_SELECTOR = (
     'dialog[open]'
 )
 
+# ── JS-based accessibility tree builder ──────────────────────────────────
+# Fallback when page.accessibility.snapshot() is unavailable (Camoufox
+# bundles a Playwright version that removed or never exposed the API).
+# Walks the DOM using standard APIs (getAttribute, getComputedStyle) and
+# returns the same {role, name, children, disabled, ...} tree structure
+# that the Python _walk() function expects.
+#
+# Called as:
+#   page.evaluate(_JS_A11Y_TREE)          — full page tree
+#   element_handle.evaluate(_JS_A11Y_TREE) — scoped to element
+_JS_A11Y_TREE = r"""(rootEl) => {
+    const ROLES = new Set([
+        'button','link','textbox','checkbox','radio','combobox','searchbox',
+        'slider','spinbutton','switch','tab','menuitem','menuitemcheckbox',
+        'menuitemradio','option','treeitem',
+        'heading','img','dialog','alertdialog','alert'
+    ]);
+    const IMPLICIT = {
+        BUTTON:'button',TEXTAREA:'textbox',SELECT:'combobox',OPTION:'option',
+        IMG:'img',H1:'heading',H2:'heading',H3:'heading',
+        H4:'heading',H5:'heading',H6:'heading',DIALOG:'dialog'
+    };
+    const INPUT_ROLES = {
+        text:'textbox',email:'textbox',url:'textbox',tel:'textbox',
+        password:'textbox',search:'searchbox',
+        checkbox:'checkbox',radio:'radio',
+        range:'slider',number:'spinbutton',
+        submit:'button',reset:'button',button:'button'
+    };
+    function getRole(el) {
+        const r = el.getAttribute('role');
+        if (r) return r.split(/\s+/)[0].toLowerCase();
+        if (el.tagName === 'A') return el.hasAttribute('href') ? 'link' : null;
+        if (el.tagName === 'INPUT') return INPUT_ROLES[(el.type||'text').toLowerCase()] || null;
+        return IMPLICIT[el.tagName] || null;
+    }
+    function getName(el, role) {
+        let n = el.getAttribute('aria-label');
+        if (n) return n.trim();
+        const by = el.getAttribute('aria-labelledby');
+        if (by) {
+            const t = by.split(/\s+/).map(id => {
+                const ref = document.getElementById(id);
+                return ref ? ref.textContent.trim() : '';
+            }).filter(Boolean).join(' ');
+            if (t) return t;
+        }
+        if (el.tagName === 'IMG') return (el.alt || '').trim();
+        if (['INPUT','TEXTAREA','SELECT'].includes(el.tagName)) {
+            if (el.id) {
+                const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+                if (lbl) return lbl.textContent.trim().slice(0, 200);
+            }
+            const wrap = el.closest('label');
+            if (wrap) {
+                const c = wrap.cloneNode(true);
+                c.querySelectorAll('input,textarea,select').forEach(i => i.remove());
+                const t = c.textContent.trim();
+                if (t) return t.slice(0, 200);
+            }
+            return (el.placeholder || el.title || '').trim();
+        }
+        if (['button','link','tab','menuitem','menuitemcheckbox','menuitemradio',
+            'switch','option','treeitem','heading','alert','alertdialog','dialog'
+        ].includes(role)) {
+            const t = el.textContent;
+            if (t) { const s = t.trim(); if (s) return s.slice(0, 200); }
+        }
+        return (el.title || '').trim();
+    }
+    function isVisible(el) {
+        if (el.getAttribute('aria-hidden') === 'true') return false;
+        if (!el.offsetParent && el !== document.body && el !== document.documentElement) {
+            const s = getComputedStyle(el);
+            if (s.display === 'none') return false;
+            if (s.position !== 'fixed' && s.position !== 'sticky') return false;
+        }
+        return true;
+    }
+    function walk(el, d) {
+        if (d > 50 || !el || el.nodeType !== 1) return null;
+        const tag = el.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE')
+            return null;
+        if (!isVisible(el)) return null;
+        const role = getRole(el);
+        const children = [];
+        for (const child of el.children) {
+            const r = walk(child, d + 1);
+            if (r) children.push(r);
+        }
+        if (!role || !ROLES.has(role)) {
+            if (!children.length) return null;
+            if (children.length === 1) return children[0];
+            return { role: 'none', name: '', children };
+        }
+        const nd = { role, name: getName(el, role) };
+        if (el.disabled || el.getAttribute('aria-disabled') === 'true') nd.disabled = true;
+        const chkRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio'];
+        if (chkRoles.includes(role)) {
+            nd.checked = !!(el.checked) || el.getAttribute('aria-checked') === 'true';
+        }
+        if (el.getAttribute('aria-selected') === 'true') nd.selected = true;
+        if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.value !== '') {
+            nd.value = String(el.value).slice(0, 500);
+        }
+        if (children.length) nd.children = children;
+        return nd;
+    }
+    const start = rootEl || document.body || document.documentElement;
+    const tree = walk(start, 0);
+    if (rootEl) return tree || { role: 'none', name: '', children: [] };
+    if (!tree) return { role: 'WebArea', name: document.title || '', children: [] };
+    if (tree.role === 'none')
+        return { role: 'WebArea', name: document.title || '', children: tree.children || [] };
+    return { role: 'WebArea', name: document.title || '', children: [tree] };
+}"""
+
 
 class CamoufoxInstance:
     """Wrapper around a single Camoufox browser for one agent."""
@@ -115,6 +233,7 @@ class BrowserManager:
         self._lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task | None = None
         self._playwright = None
+        self._js_snapshot_mode: bool = False  # True after page.accessibility fails
         self.redactor = CredentialRedactor()
 
     async def start_cleanup_loop(self):
@@ -356,13 +475,46 @@ class BrowserManager:
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
+    async def _build_a11y_tree(self, inst: CamoufoxInstance, root=None):
+        """Get accessibility tree, falling back to JS-based DOM walk.
+
+        Playwright's ``page.accessibility.snapshot()`` may not exist in
+        Camoufox (modified Firefox bundles its own Playwright build).
+        On first ``AttributeError``, switches permanently to a JS-based
+        tree builder that uses standard DOM APIs (``getAttribute``,
+        ``getComputedStyle``) to produce the same ``{role, name, children}``
+        tree structure the rest of the snapshot pipeline expects.
+        """
+        if not getattr(self, "_js_snapshot_mode", False):
+            try:
+                if root:
+                    return await inst.page.accessibility.snapshot(root=root)
+                return await inst.page.accessibility.snapshot()
+            except AttributeError:
+                logger.warning(
+                    "page.accessibility not available — "
+                    "switching to JS-based accessibility tree"
+                )
+                self._js_snapshot_mode = True
+            except Exception:
+                pass  # Other snapshot failures — fall through to JS
+
+        # JS fallback: walk DOM to build equivalent tree
+        try:
+            if root:
+                return await root.evaluate(_JS_A11Y_TREE)
+            return await inst.page.evaluate(_JS_A11Y_TREE)
+        except Exception as e:
+            logger.debug("JS a11y tree fallback failed: %s", e)
+            return None
+
     async def snapshot(self, agent_id: str) -> dict:
         """Get accessibility tree with element refs."""
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
             try:
-                tree = await inst.page.accessibility.snapshot()
+                tree = await self._build_a11y_tree(inst)
                 if not tree:
                     return {"success": True, "data": {"snapshot": "(empty page)", "refs": {}}}
 
@@ -462,15 +614,9 @@ class BrowserManager:
                     inst.dialog_active = True
                     lines.append("** Modal dialog is open — only dialog elements are shown **")
                     for el in visible_modals:
-                        try:
-                            subtree = await inst.page.accessibility.snapshot(root=el)
-                        except Exception:
-                            logger.debug("snapshot(root=) failed for modal element")
-                            subtree = None
+                        subtree = await self._build_a11y_tree(inst, root=el)
                         if subtree:
                             _walk(subtree)
-                        else:
-                            logger.debug("snapshot(root=) returned empty for a visible modal")
                     # Safety fallback: if scoping produced no refs, snapshot(root=)
                     # likely failed (e.g. Camoufox quirk). Fall back to full tree
                     # so the agent isn't blind.
