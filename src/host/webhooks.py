@@ -99,7 +99,7 @@ class WebhookManager:
 
             try:
                 body = json.loads(raw_body)
-            except Exception as e:
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
                 logger.debug("Webhook body is not valid JSON, using raw: %s", e)
                 body = {"raw": raw_body.decode(errors="replace")[:5000]}
 
@@ -109,7 +109,7 @@ class WebhookManager:
             message = (
                 f"Webhook '{hook['name']}' received:\n"
                 f"```json\n{json.dumps(body, indent=2, default=str)[:3000]}\n```\n"
-                f"Process this webhook payload."
+                "Process this webhook payload."
             )
             message = sanitize_for_prompt(message)
 
@@ -130,7 +130,7 @@ class WebhookManager:
         message = (
             f"Webhook '{hook['name']}' (test):\n"
             f"```json\n{json.dumps(payload, indent=2, default=str)[:3000]}\n```\n"
-            f"Process this webhook payload."
+            "Process this webhook payload."
         )
 
         if self.dispatch_fn:

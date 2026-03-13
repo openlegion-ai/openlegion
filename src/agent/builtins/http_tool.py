@@ -12,18 +12,16 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-import re
 import socket
 from urllib.parse import urlparse, urlunparse
 
 import httpx
 
+from src.agent.builtins import CRED_HANDLE_RE
 from src.agent.skills import skill
 
 _MAX_BODY = 50_000
 _MAX_REDIRECTS = 5
-
-_CRED_HANDLE_RE = re.compile(r"\$CRED\{([^}]+)\}")
 
 # Shared client for connection pooling across tool invocations.
 # Redirects are followed manually (follow_redirects=False) so we can
@@ -247,7 +245,7 @@ async def _resolve_creds(text: str, mesh_client) -> tuple[str, list[str]]:
     Returns ``(resolved_text, list_of_resolved_secret_values)`` so callers
     can redact those values from output.
     """
-    matches = _CRED_HANDLE_RE.findall(text)
+    matches = CRED_HANDLE_RE.findall(text)
     if not matches:
         return text, []
     if not mesh_client:
@@ -262,7 +260,7 @@ async def _resolve_creds(text: str, mesh_client) -> tuple[str, list[str]]:
         secrets.append(value)
     # Single-pass replacement prevents double-resolution attacks where a
     # resolved value itself contains $CRED{...} patterns.
-    text = _CRED_HANDLE_RE.sub(
+    text = CRED_HANDLE_RE.sub(
         lambda m: resolved.get(m.group(1), m.group(0)), text,
     )
     return text, secrets

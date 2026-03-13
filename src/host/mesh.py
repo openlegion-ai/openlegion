@@ -8,8 +8,10 @@ and enforces permissions.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 import sqlite3
+import threading
 import time
 from collections import deque
 from typing import TYPE_CHECKING, Any, Optional
@@ -23,6 +25,8 @@ if TYPE_CHECKING:
     from src.host.permissions import PermissionMatrix
 
 logger = setup_logging("host.mesh")
+
+_PREVIEW_MAX_LEN = 200
 
 
 class Blackboard:
@@ -38,9 +42,6 @@ class Blackboard:
     """
 
     def __init__(self, db_path: str = "blackboard.db", event_bus=None):
-        import fnmatch as _fnmatch
-        import threading
-        self._fnmatch = _fnmatch
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=30000")
@@ -123,7 +124,7 @@ class Blackboard:
 
         if self._event_bus:
             # Truncate value preview for dashboard display
-            preview = value_json[:200] if len(value_json) > 200 else value_json
+            preview = value_json[:_PREVIEW_MAX_LEN] if len(value_json) > _PREVIEW_MAX_LEN else value_json
             self._event_bus.emit("blackboard_write", agent=written_by,
                 data={"key": key, "version": new_version, "value_preview": preview,
                       "written_by": written_by})
@@ -173,7 +174,7 @@ class Blackboard:
         self._maybe_gc_ttl()
 
         if self._event_bus:
-            preview = value_json[:200] if len(value_json) > 200 else value_json
+            preview = value_json[:_PREVIEW_MAX_LEN] if len(value_json) > _PREVIEW_MAX_LEN else value_json
             self._event_bus.emit("blackboard_write", agent=written_by,
                 data={"key": key, "version": new_version, "value_preview": preview,
                       "written_by": written_by})
@@ -351,7 +352,7 @@ class Blackboard:
             if agent_id == exclude:
                 continue
             for pattern in patterns:
-                if self._fnmatch.fnmatch(key, pattern):
+                if fnmatch.fnmatch(key, pattern):
                     matched.append(agent_id)
                     break
         return matched
@@ -372,7 +373,6 @@ class PubSub:
     _EVENT_GC_KEEP = 5_000
 
     def __init__(self, db_path: str | None = None) -> None:
-        import threading
         self.subscriptions: dict[str, list[str]] = {}
         self.event_log: deque[dict] = deque(maxlen=self._EVENT_GC_KEEP)
         self._db: sqlite3.Connection | None = None
@@ -506,7 +506,6 @@ class MessageRouter:
         trace_store: Any = None,
         agent_projects: dict[str, str] | None = None,
     ):
-        import threading
         self.permissions = permissions
         self.agent_registry: dict[str, str] = agent_registry
         self.agent_roles: dict[str, str] = {}

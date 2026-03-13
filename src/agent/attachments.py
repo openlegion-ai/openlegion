@@ -178,7 +178,7 @@ def convert_openai_image_blocks(content: str | list) -> str | list:
     Anthropic: {"type": "image", "source": {"type": "base64",
                 "media_type": "image/jpeg", "data": "…"}}
     """
-    if isinstance(content, str) or not isinstance(content, list):
+    if not isinstance(content, list):
         return content
 
     result: list[dict] = []

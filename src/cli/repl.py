@@ -1091,7 +1091,7 @@ class REPLSession:
 
     def _cmd_history(self, arg: str) -> None:
         """Show recent messages for an agent."""
-        agent = arg.strip() if arg.strip() else self.current
+        agent = arg.strip() or self.current
         if not agent:
             click.echo("No active agent. Use /add to create one first.")
             return
@@ -1179,7 +1179,8 @@ class REPLSession:
         /agent edit        — interactive config editor
         /agent view <file> — display workspace file
         """
-        parts = arg.strip().split(None, 1) if arg.strip() else []
+        stripped = arg.strip()
+        parts = stripped.split(None, 1) if stripped else []
         subcmd = parts[0].lower() if parts else ""
         subarg = parts[1] if len(parts) > 1 else ""
 
@@ -1381,7 +1382,7 @@ class REPLSession:
 
     def _cmd_edit(self, arg: str) -> None:
         """Interactive property editor for an agent. Auto-applies changes."""
-        name = arg.strip() if arg.strip() else self.current
+        name = arg.strip() or self.current
         if name is None:
             click.echo("No active agent. Use /add to create one first.")
             return
@@ -1396,7 +1397,7 @@ class REPLSession:
 
     def _cmd_restart(self, arg: str) -> None:
         """Restart an agent container."""
-        name = arg.strip() if arg.strip() else self.current
+        name = arg.strip() or self.current
         if name is None:
             click.echo("No active agent. Use /add to create one first.")
             return
@@ -1456,7 +1457,7 @@ class REPLSession:
             click.echo("No agents to remove.")
             return
 
-        name = arg.strip() if arg.strip() else None
+        name = arg.strip() or None
         if name is None:
             # Interactive picker
             names = sorted(self.ctx.agents.keys())

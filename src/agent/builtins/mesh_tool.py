@@ -7,6 +7,7 @@ the shared blackboard (not through direct conversations with each other).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from src.agent.skills import skill
 from src.shared.utils import sanitize_for_prompt, setup_logging
@@ -372,7 +373,6 @@ async def save_artifact(
     if workspace_manager is None:
         return {"error": "No workspace_manager available"}
     try:
-        from pathlib import Path
         artifacts_dir = Path(workspace_manager.root) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         filepath = (artifacts_dir / name).resolve()
@@ -654,7 +654,6 @@ async def update_workspace(
 ) -> dict:
     if workspace_manager is None:
         return {"error": "No workspace_manager available"}
-    from src.shared.utils import sanitize_for_prompt
     content = sanitize_for_prompt(content)
 
     # Capture old content for diff summary (single read)
@@ -668,15 +667,16 @@ async def update_workspace(
     if mesh_client:
         try:
             agent_id = getattr(mesh_client, "agent_id", "agent")
-            if old_content.strip() == content.strip():
+            old_stripped = old_content.strip()
+            if old_stripped == content.strip():
                 summary = f"[{agent_id}] Re-saved {filename} (no changes)."
-            elif not old_content.strip() or old_content.strip() in (
+            elif not old_stripped or old_stripped in (
                 "# Heartbeat Rules",
                 "# User Context",
                 "# Identity",
                 "# Instructions",
                 "# Long-Term Memory",
-            ) or old_content.strip().startswith((
+            ) or old_stripped.startswith((
                 "# Heartbeat Rules\n\nYou are woken",
                 "# User Context\n\nYour user",
                 "# Identity\n\nPersonality, tone",

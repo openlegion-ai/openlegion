@@ -7,6 +7,7 @@ no credentials. Commands run as the container user.
 from __future__ import annotations
 
 import asyncio
+import os
 
 from src.agent.skills import skill
 
@@ -42,7 +43,6 @@ _MAX_TIMEOUT = 300
 async def exec_command(command: str, timeout: int = 30, workdir: str = "/data") -> dict:
     """Run a shell command and return exit code + output."""
     timeout = min(timeout, _MAX_TIMEOUT)
-    import os
     # Inside the container, confine workdir to /data to prevent directory escape.
     # Outside containers (dev/test), /data won't exist — skip the check.
     if os.path.isdir("/data"):

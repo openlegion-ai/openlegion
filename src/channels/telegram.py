@@ -19,14 +19,13 @@ import asyncio
 import re
 import time
 
+from src.channels import AT_MENTION_RE as _AT_MENTION_RE
 from src.channels.base import Channel, PairingManager, chunk_text
 from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("channels.telegram")
 
 MAX_TG_LEN = 4000
-
-_AT_MENTION_RE = re.compile(r"^@(\w+)\s+(.+)$", re.DOTALL)
 
 
 def _md_to_html(text: str) -> str:

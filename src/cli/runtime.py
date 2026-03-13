@@ -23,6 +23,7 @@ from src.cli.config import (
     _load_config,
 )
 from src.cli.formatting import echo_fail, echo_header, echo_ok
+from src.shared.types import RESERVED_AGENT_IDS
 
 logger = logging.getLogger("cli")
 
@@ -315,9 +316,8 @@ class RuntimeContext:
 
         self.runtime.extra_env["EMBEDDING_MODEL"] = embedding_model
 
-        _reserved_ids = frozenset({"mesh", "orchestrator"})
         for agent_id, agent_cfg in agents_cfg.items():
-            if agent_id in _reserved_ids:
+            if agent_id in RESERVED_AGENT_IDS:
                 raise click.ClickException(
                     f"Agent ID '{agent_id}' is reserved for internal use"
                 )
