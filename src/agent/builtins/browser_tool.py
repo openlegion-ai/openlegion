@@ -207,10 +207,13 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
     except Exception as e:
         return {"error": _deep_redact(str(e))}
 
-    # Pull out image data before redaction can corrupt it
+    # Pull out image data before redaction can corrupt it.
+    # Browser service returns {"success": ..., "data": {"image_base64": ..., ...}}
     image_data = None
-    if isinstance(raw, dict) and raw.get("image_base64"):
-        image_data = raw.pop("image_base64")
+    if isinstance(raw, dict):
+        data = raw.get("data")
+        if isinstance(data, dict) and data.get("image_base64"):
+            image_data = data.pop("image_base64")
 
     result = _deep_redact(raw)
 

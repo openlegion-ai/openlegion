@@ -1561,31 +1561,36 @@ class TestBrowserScreenshotHttpClient:
 
     @pytest.mark.asyncio
     async def test_screenshot_default_params(self):
+        """Screenshot extracts image from nested data dict (real service format)."""
         from src.agent.builtins.browser_tool import browser_screenshot
 
         mc = AsyncMock()
         mc.browser_command = AsyncMock(return_value={
-            "image_base64": "iVBORw0KGgo=",
-            "width": 1280,
-            "height": 720,
+            "success": True,
+            "data": {
+                "image_base64": "iVBORw0KGgo=",
+                "format": "png",
+            },
         })
 
         result = await browser_screenshot(mesh_client=mc)
 
         mc.browser_command.assert_awaited_once_with("screenshot", {"full_page": False})
-        # image_base64 is extracted into _image, not left in the result
-        assert "image_base64" not in result
+        # image_base64 is extracted into _image, not left in data
+        assert "image_base64" not in result.get("data", {})
         assert result["_image"]["data"] == "iVBORw0KGgo="
         assert result["_image"]["media_type"] == "image/png"
         assert result["status"] == "screenshot captured"
-        assert result["width"] == 1280
 
     @pytest.mark.asyncio
     async def test_screenshot_full_page(self):
         from src.agent.builtins.browser_tool import browser_screenshot
 
         mc = AsyncMock()
-        mc.browser_command = AsyncMock(return_value={"image_base64": "data"})
+        mc.browser_command = AsyncMock(return_value={
+            "success": True,
+            "data": {"image_base64": "data", "format": "png"},
+        })
 
         result = await browser_screenshot(full_page=True, mesh_client=mc)
 
@@ -1594,11 +1599,14 @@ class TestBrowserScreenshotHttpClient:
 
     @pytest.mark.asyncio
     async def test_screenshot_no_image_in_response(self):
-        """When service returns no image_base64, no _image key is set."""
+        """When service returns an error, no _image key is set."""
         from src.agent.builtins.browser_tool import browser_screenshot
 
         mc = AsyncMock()
-        mc.browser_command = AsyncMock(return_value={"error": "no page loaded"})
+        mc.browser_command = AsyncMock(return_value={
+            "success": False,
+            "error": "no page loaded",
+        })
 
         result = await browser_screenshot(mesh_client=mc)
 
@@ -1614,7 +1622,8 @@ class TestBrowserScreenshotHttpClient:
         fake_b64 = "A" * 60
         mc = AsyncMock()
         mc.browser_command = AsyncMock(return_value={
-            "image_base64": fake_b64,
+            "success": True,
+            "data": {"image_base64": fake_b64, "format": "png"},
             "debug_info": "sk-ant-api" + "X" * 30,  # should be redacted
         })
 
@@ -1624,6 +1633,19 @@ class TestBrowserScreenshotHttpClient:
         assert result["_image"]["data"] == fake_b64
         # But other fields are still redacted
         assert "[REDACTED]" in result["debug_info"]
+
+    @pytest.mark.asyncio
+    async def test_screenshot_exception_from_browser_service(self):
+        """Exception from mesh_client.browser_command is caught and redacted."""
+        from src.agent.builtins.browser_tool import browser_screenshot
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(side_effect=Exception("connection refused"))
+
+        result = await browser_screenshot(mesh_client=mc)
+
+        assert "error" in result
+        assert "_image" not in result
 
 
 # ── notify_user ──────────────────────────────────────────────
