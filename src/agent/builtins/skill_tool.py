@@ -41,7 +41,7 @@ def _validate_skill_code(code: str) -> str | None:
 
     has_skill_decorator = False
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for dec in node.decorator_list:
                 if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Name) and dec.func.id == "skill":
                     has_skill_decorator = True
