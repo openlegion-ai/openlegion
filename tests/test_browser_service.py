@@ -416,30 +416,8 @@ class TestStealthConfig:
             opts = build_launch_options("agent1", "/tmp/profile")
         assert opts.get("geoip") is True
 
-    def test_resolution_within_valid_range(self):
-        """Fingerprint screen resolution should be a realistic desktop size."""
-        from src.browser.stealth import _pick_resolution
-        w, h = _pick_resolution("windows", seed="agent1")
-        assert 1280 <= w <= 3840
-        assert 720 <= h <= 2160
-
-    def test_resolution_is_deterministic_per_agent(self):
-        """Same agent_id must always produce the same resolution (fingerprint stability)."""
-        from src.browser.stealth import _pick_resolution
-        r1 = _pick_resolution("windows", seed="agent_alice")
-        r2 = _pick_resolution("windows", seed="agent_alice")
-        r3 = _pick_resolution("windows", seed="agent_alice")
-        assert r1 == r2 == r3
-
-    def test_different_agents_can_have_different_resolutions(self):
-        """Different agent_ids should produce varied resolutions (natural distribution)."""
-        from src.browser.stealth import _pick_resolution
-        resolutions = {
-            _pick_resolution("windows", seed=f"agent_{i:03d}")
-            for i in range(20)
-        }
-        # 20 agents from a 9-resolution table should produce multiple distinct sizes
-        assert len(resolutions) > 1
+    # Resolution tests removed — _pick_resolution was dead code (VNC is always
+    # 1920×1080, so per-agent resolution variation was unused).
 
     def test_window_fills_vnc_display(self):
         """window= must be (1920, 1080) to fill the KasmVNC display.
@@ -452,17 +430,6 @@ class TestStealthConfig:
         with patch.dict("os.environ", {}, clear=True):
             opts = build_launch_options("agent1", "/tmp/profile")
         assert opts["window"] == (1920, 1080)
-
-    def test_macos_resolution_uses_css_logical_pixels(self):
-        """macOS resolutions must be CSS logical pixels, not physical retina pixels."""
-        from src.browser.stealth import _MACOS_RESOLUTIONS
-        # Physical retina values (2560x1600, 2880x1800) should NOT be in the table
-        physical_retina = {(2560, 1600), (2880, 1800)}
-        for res in _MACOS_RESOLUTIONS:
-            assert res not in physical_retina, (
-                f"Physical retina resolution {res} found in macOS table. "
-                "Use CSS logical pixels (half the physical) instead."
-            )
 
     def test_locale_set_and_timezone_absent(self):
         """locale= is a valid Camoufox param; timezone= is NOT (would cause TypeError).
@@ -2163,3 +2130,310 @@ class TestTypeTextSettleDelays:
         # The clear operation adds a small delay
         clear_delays = [t for t in sleep_calls if t < 0.10]
         assert len(clear_delays) >= 1
+
+
+# ── Press key tests ────────────────────────────────────────────────────────
+
+
+class TestPressKey:
+    """Tests for the press_key browser method."""
+
+    @pytest.mark.asyncio
+    async def test_press_escape(self):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.page.keyboard = AsyncMock()
+        inst.page.keyboard.press = AsyncMock()
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch("src.browser.service.action_delay", return_value=0.01):
+                with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                    result = await mgr.press_key("agent1", "Escape")
+
+        assert result["success"] is True
+        assert result["data"]["pressed"] == "Escape"
+        inst.page.keyboard.press.assert_called_once_with("Escape")
+
+    @pytest.mark.asyncio
+    async def test_press_modifier_combo(self):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.page.keyboard = AsyncMock()
+        inst.page.keyboard.press = AsyncMock()
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch("src.browser.service.action_delay", return_value=0.01):
+                with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                    result = await mgr.press_key("agent1", "Control+a")
+
+        assert result["success"] is True
+        inst.page.keyboard.press.assert_called_once_with("Control+a")
+
+    @pytest.mark.asyncio
+    async def test_press_empty_key_rejected(self):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        result = await mgr.press_key("agent1", "")
+        assert result["success"] is False
+        assert "Invalid key" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_press_oversized_key_rejected(self):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        result = await mgr.press_key("agent1", "x" * 51)
+        assert result["success"] is False
+        assert "Invalid key" in result["error"]
+
+
+# ── Go back / forward tests ───────────────────────────────────────────────
+
+
+class TestGoBackForward:
+    """Tests for browser history navigation."""
+
+    @pytest.mark.asyncio
+    async def test_go_back(self):
+        from src.browser.redaction import CredentialRedactor
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr.redactor = CredentialRedactor()
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.page.go_back = AsyncMock(return_value=None)
+        inst.page.title = AsyncMock(return_value="Previous Page")
+        inst.page.url = "https://example.com/prev"
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch("src.browser.service.action_delay", return_value=0.01):
+                with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                    result = await mgr.go_back("agent1")
+
+        assert result["success"] is True
+        assert result["data"]["title"] == "Previous Page"
+        inst.page.go_back.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_go_forward(self):
+        from src.browser.redaction import CredentialRedactor
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr.redactor = CredentialRedactor()
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.page.go_forward = AsyncMock(return_value=None)
+        inst.page.title = AsyncMock(return_value="Next Page")
+        inst.page.url = "https://example.com/next"
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch("src.browser.service.action_delay", return_value=0.01):
+                with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                    result = await mgr.go_forward("agent1")
+
+        assert result["success"] is True
+        assert result["data"]["title"] == "Next Page"
+        inst.page.go_forward.assert_called_once()
+
+
+# ── Switch tab tests ───────────────────────────────────────────────────────
+
+
+class TestSwitchTab:
+    """Tests for tab listing and switching."""
+
+    @pytest.mark.asyncio
+    async def test_list_tabs(self):
+        from src.browser.redaction import CredentialRedactor
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr.redactor = CredentialRedactor()
+
+        page1 = AsyncMock()
+        page1.url = "https://example.com"
+        page1.title = AsyncMock(return_value="Example")
+        page2 = AsyncMock()
+        page2.url = "https://accounts.google.com"
+        page2.title = AsyncMock(return_value="Sign in")
+
+        inst = MagicMock()
+        inst.page = page1
+        inst.context = MagicMock()
+        inst.context.pages = [page1, page2]
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.switch_tab("agent1")
+
+        assert result["success"] is True
+        tabs = result["data"]["tabs"]
+        assert len(tabs) == 2
+        assert tabs[0]["active"] is True
+        assert tabs[1]["active"] is False
+        assert result["data"]["active_tab"] == 0
+
+    @pytest.mark.asyncio
+    async def test_switch_to_tab(self):
+        from src.browser.redaction import CredentialRedactor
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr.redactor = CredentialRedactor()
+
+        page1 = AsyncMock()
+        page1.url = "https://example.com"
+        page1.title = AsyncMock(return_value="Example")
+        page2 = AsyncMock()
+        page2.url = "https://accounts.google.com"
+        page2.title = AsyncMock(return_value="Sign in")
+        page2.bring_to_front = AsyncMock()
+
+        inst = MagicMock()
+        inst.page = page1
+        inst.context = MagicMock()
+        inst.context.pages = [page1, page2]
+        inst.refs = {"e0": {"role": "button", "name": "Old", "index": 0, "disabled": False}}
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.switch_tab("agent1", tab_index=1)
+
+        assert result["success"] is True
+        assert result["data"]["active_tab"] == 1
+        assert result["data"]["tabs"][1]["active"] is True
+        assert result["data"]["tabs"][0]["active"] is False
+        assert inst.page == page2
+        assert inst.refs == {}  # Refs cleared on switch
+        page2.bring_to_front.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_switch_tab_out_of_range(self):
+        from src.browser.redaction import CredentialRedactor
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr.redactor = CredentialRedactor()
+
+        page1 = AsyncMock()
+        page1.url = "https://example.com"
+        page1.title = AsyncMock(return_value="Example")
+
+        inst = MagicMock()
+        inst.page = page1
+        inst.context = MagicMock()
+        inst.context.pages = [page1]
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.switch_tab("agent1", tab_index=5)
+
+        assert result["success"] is False
+        assert "out of range" in result["error"]
+
+
+# ── CAPTCHA detection tests ────────────────────────────────────────────────
+
+
+class TestCaptchaDetection:
+    """Tests for CAPTCHA detection including Cloudflare Turnstile."""
+
+    @pytest.mark.asyncio
+    async def test_turnstile_detected(self):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        # All selectors return 0 except Turnstile
+        async def mock_count(sel):
+            mock_loc = MagicMock()
+            if "challenges.cloudflare.com" in sel:
+                mock_loc.count = AsyncMock(return_value=1)
+            else:
+                mock_loc.count = AsyncMock(return_value=0)
+            return mock_loc
+
+        # Build locator mock that returns different counts per selector
+        locator_results = {}
+        for sel in [
+            'iframe[src*="recaptcha"]',
+            'iframe[src*="hcaptcha"]',
+            'iframe[src*="challenges.cloudflare.com"]',
+            'iframe[src*="captcha"]',
+            '[class*="cf-turnstile"]',
+            '[class*="captcha"]',
+            '#captcha',
+        ]:
+            loc = MagicMock()
+            if "challenges.cloudflare.com" in sel:
+                loc.count = AsyncMock(return_value=1)
+            else:
+                loc.count = AsyncMock(return_value=0)
+            locator_results[sel] = loc
+
+        inst.page.locator = MagicMock(side_effect=lambda s: locator_results.get(s, MagicMock(count=AsyncMock(return_value=0))))
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.solve_captcha("agent1")
+
+        assert result["success"] is True
+        assert result["data"]["captcha_found"] is True
+        assert "challenges.cloudflare.com" in result["data"]["captcha_type"]
+
+    @pytest.mark.asyncio
+    async def test_no_captcha(self):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        # All selectors return 0
+        mock_loc = MagicMock()
+        mock_loc.count = AsyncMock(return_value=0)
+        inst.page.locator = MagicMock(return_value=mock_loc)
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.solve_captcha("agent1")
+
+        assert result["success"] is True
+        assert result["data"]["captcha_found"] is False
+
+
+# ── Dead code removal verification ────────────────────────────────────────
+
+
+class TestStealthDeadCodeRemoved:
+    """Verify resolution dead code was removed from stealth.py."""
+
+    def test_pick_resolution_removed(self):
+        import src.browser.stealth as stealth
+        assert not hasattr(stealth, "_pick_resolution")
+        assert not hasattr(stealth, "_WINDOWS_RESOLUTIONS")
+        assert not hasattr(stealth, "_MACOS_RESOLUTIONS")

@@ -40,8 +40,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `src/agent/builtins/exec_tool.py` | Shell execution scoped to `/data` (`_MAX_TIMEOUT = 300`) |
 | `src/agent/builtins/file_tool.py` | File I/O with two-stage path traversal protection (uses `lstat()` to prevent symlink info leak) |
 | `src/agent/builtins/http_tool.py` | HTTP requests with CRED handles, DNS rebinding/SSRF protection (blocks `0.0.0.0`), cross-origin auth header stripping |
-| `src/agent/builtins/browser_tool.py` | Browser automation via shared Camoufox service container |
-| `src/agent/builtins/captcha.py` | CAPTCHA detection and solving via 2Captcha / CapSolver APIs (reCAPTCHA v2/v3/Enterprise, hCaptcha, Turnstile) |
+| `src/agent/builtins/browser_tool.py` | Browser automation via shared Camoufox service container (navigate, click, type, screenshot, press_key, scroll, hover, tabs, history, CAPTCHA detection) |
 | `src/agent/builtins/memory_tool.py` | Memory search with hierarchical fallback |
 | `src/agent/builtins/mesh_tool.py` | Blackboard (with `sanitize_for_prompt()`), pub/sub, notify_user, list_agents |
 | `src/agent/builtins/vault_tool.py` | Credential generation without returning actual values |
