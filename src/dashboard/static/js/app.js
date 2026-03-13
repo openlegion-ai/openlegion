@@ -233,9 +233,6 @@ function dashboard() {
       { id: 'settings', label: 'Settings' },
     ],
 
-    // System tab — collapsible infrastructure
-    systemInfraExpanded: false,
-
     // Unified Project Hub (replaces separate PROJECT.md + Comms + Broadcast panels)
     projectHubExpanded: false,
     projectHubTab: 'docs',  // 'docs' | 'activity' | 'state' | 'artifacts' | 'broadcast' | 'members'
