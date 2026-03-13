@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 import tempfile
 from unittest.mock import AsyncMock, MagicMock
@@ -35,6 +34,33 @@ class TestEstimateTokens:
         msgs = [{"role": "user", "content": "Hello world, this is a test message."}]
         tokens = estimate_tokens(msgs)
         assert 5 < tokens < 50
+
+    def test_image_blocks_use_fixed_estimate(self):
+        """Image blocks should NOT count base64 chars — use a fixed ~1600 token estimate."""
+        large_b64 = "A" * 500_000  # 500KB of base64 data
+        msgs = [
+            {"role": "user", "content": "take a screenshot"},
+            {
+                "role": "tool", "tool_call_id": "c1",
+                "content": [
+                    {"type": "text", "text": '{"status": "screenshot captured"}'},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{large_b64}"}},
+                ],
+            },
+        ]
+        tokens = estimate_tokens(msgs)
+        # Without the fix, this would be ~125,000+ tokens (500K/4)
+        # With the fix, the image is ~1,600 tokens + text overhead
+        assert tokens < 5_000, f"Image inflated token count to {tokens} — base64 is being counted as text"
+
+    def test_text_only_messages_unchanged(self):
+        """Text-only messages should estimate the same as before."""
+        msgs = [
+            {"role": "user", "content": "Hello world"},
+            {"role": "assistant", "content": "Hi there, how can I help?"},
+        ]
+        tokens = estimate_tokens(msgs)
+        assert 10 < tokens < 100
 
 
 class TestUsageTracking:
@@ -399,16 +425,15 @@ class TestEstimateTokensAccuracy:
         """Anthropic models should use ~3.5 chars per token."""
         msgs = [{"role": "user", "content": "x" * 350}]
         tokens = estimate_tokens(msgs, model="anthropic/claude-sonnet-4-5-20250929")
-        # 350 content chars + JSON overhead, divided by 3.5
-        chars = sum(len(json.dumps(m)) for m in msgs)
-        assert tokens == int(chars / 3.5)
+        # Should be roughly 350 content chars + metadata overhead / 3.5
+        assert 90 < tokens < 120
 
     def test_unknown_model_uses_4_ratio(self):
         """Unknown models should fall back to 4 chars/token."""
         msgs = [{"role": "user", "content": "x" * 400}]
         tokens = estimate_tokens(msgs, model="custom/my-model")
-        chars = sum(len(json.dumps(m)) for m in msgs)
-        assert tokens == chars // 4
+        # Should be roughly 400 content chars + metadata overhead / 4
+        assert 90 < tokens < 120
 
     def test_empty_model_uses_fallback(self):
         """Empty model string should use 4 chars/token fallback."""
