@@ -14,7 +14,6 @@ from pathlib import Path
 import click
 
 from src.cli.channels import ChannelManager
-from src.shared.types import RESERVED_AGENT_IDS
 from src.cli.config import (
     ENV_FILE,
     PROJECT_ROOT,
@@ -24,6 +23,7 @@ from src.cli.config import (
     _load_config,
 )
 from src.cli.formatting import echo_fail, echo_header, echo_ok
+from src.shared.types import RESERVED_AGENT_IDS
 
 logger = logging.getLogger("cli")
 

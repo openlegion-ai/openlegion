@@ -17,7 +17,6 @@ Config: DISCORD_BOT_TOKEN in .env, channels.discord in mesh.yaml
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 
 from src.channels import AT_MENTION_RE as _AT_MENTION_RE

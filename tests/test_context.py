@@ -12,8 +12,8 @@ from src.agent.context import (
     ContextManager,
     estimate_tokens,
 )
-from src.shared.models import _DEFAULT_CONTEXT_WINDOW
 from src.agent.workspace import WorkspaceManager
+from src.shared.models import _DEFAULT_CONTEXT_WINDOW
 from src.shared.types import LLMResponse
 
 

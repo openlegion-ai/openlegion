@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-import re
 import socket
 from urllib.parse import urlparse, urlunparse
 
