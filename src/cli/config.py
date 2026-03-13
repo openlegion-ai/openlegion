@@ -142,6 +142,7 @@ CHANNEL_TYPES = {
 # forward-migrated onto existing agents at startup by
 # _ensure_all_agent_permissions — add new flags here when introducing them.
 _AGENT_PERMISSION_DEFAULTS: dict[str, object] = {
+    "can_use_browser": True,
     "can_manage_cron": True,
 }
 
@@ -431,6 +432,7 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
         "blackboard_write": [],
         "allowed_apis": ["llm"],
         "allowed_credentials": ["*"],
+        "can_use_browser": True,
         "can_manage_cron": True,
     }
 
@@ -442,6 +444,10 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
                 existing = set(agent_perms.get(key, []))
                 existing.update(tpl_values)
                 agent_perms[key] = sorted(existing)
+        # Boolean flags — template can override defaults
+        for key in ("can_use_browser", "can_spawn", "can_manage_cron"):
+            if key in permissions:
+                agent_perms[key] = bool(permissions[key])
 
     perms["permissions"][name] = agent_perms
     _save_permissions(perms)
