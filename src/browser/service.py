@@ -66,6 +66,14 @@ _WORD_BOUNDARY_CHARS = frozenset(" ,.:;!?\n\t")
 # excluded because force-clicking genuinely disabled items in those roles causes
 # unwanted side-effects (selecting unavailable options, toggling locked switches).
 _ARIA_FORCE_ROLES = frozenset({"button", "link"})
+# CSS selector for modal dialog detection via DOM queries.
+# Used in both snapshot() (to scope the a11y tree) and _locator_from_ref()
+# (to scope click/type locators). Must stay in sync — hence a single constant.
+_MODAL_SELECTOR = (
+    '[role="dialog"]:not([aria-hidden="true"]), '
+    '[aria-modal="true"]:not([aria-hidden="true"]), '
+    'dialog[open]'
+)
 
 
 class CamoufoxInstance:
@@ -330,6 +338,7 @@ class BrowserManager:
         async with inst.lock:
             try:
                 await inst.page.goto(url, wait_until=wait_until, timeout=30000)
+                inst.dialog_active = False  # New page — stale modal state
                 if wait_ms > 0:
                     await asyncio.sleep(wait_ms / 1000 + navigation_jitter())
                 title = await inst.page.title()
@@ -419,11 +428,6 @@ class BrowserManager:
                 # Playwright's a11y tree may not surface the dialog role.
                 # If a visible modal is found in the DOM, we re-snapshot
                 # with root=element to get only the dialog's subtree.
-                _MODAL_SELECTOR = (
-                    '[role="dialog"]:not([aria-hidden="true"]), '
-                    '[aria-modal="true"]:not([aria-hidden="true"]), '
-                    'dialog[open]'
-                )
                 modal_els = await inst.page.query_selector_all(_MODAL_SELECTOR)
                 visible_modals = []
                 for el in modal_els:
@@ -432,6 +436,27 @@ class BrowserManager:
                             visible_modals.append(el)
                     except Exception:
                         pass  # Element may have been removed between query and check
+
+                # Deduplicate nested modals: if modal A contains modal B,
+                # snapshot(root=A) already includes B's elements. Walking
+                # both would double-count refs with wrong occurrence indices.
+                if len(visible_modals) > 1:
+                    deduped = []
+                    for i, el in enumerate(visible_modals):
+                        is_nested = False
+                        for j, other in enumerate(visible_modals):
+                            if i != j:
+                                try:
+                                    if await other.evaluate(
+                                        "(parent, child) => parent.contains(child)", el
+                                    ):
+                                        is_nested = True
+                                        break
+                                except Exception:
+                                    pass
+                        if not is_nested:
+                            deduped.append(el)
+                    visible_modals = deduped if deduped else visible_modals
 
                 if visible_modals:
                     inst.dialog_active = True
@@ -486,11 +511,7 @@ class BrowserManager:
         # within the dialog subtree, so the locator must search the same scope.
         # Matches the same selector used for DOM-based modal detection in snapshot().
         if inst.dialog_active:
-            base = inst.page.locator(
-                '[role="dialog"]:not([aria-hidden="true"]), '
-                '[aria-modal="true"]:not([aria-hidden="true"]), '
-                'dialog[open]'
-            )
+            base = inst.page.locator(_MODAL_SELECTOR)
         else:
             base = inst.page
         locator = base.get_by_role(role, name=name) if name else base.get_by_role(role)
