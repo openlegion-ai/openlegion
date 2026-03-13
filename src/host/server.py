@@ -246,6 +246,8 @@ def create_mesh_app(
         instead of being routed to an agent container.
         """
         msg.from_agent = _resolve_agent_id(msg.from_agent, request)
+        if not permissions.can_message(msg.from_agent, msg.to):
+            raise HTTPException(403, f"Agent {msg.from_agent} cannot message {msg.to}")
         if msg.to == "orchestrator" and msg.type == "task_result" and orchestrator is not None:
             from src.shared.types import TaskResult
             try:
@@ -578,6 +580,8 @@ def create_mesh_app(
             raise HTTPException(400, "Credential value exceeds 10KB limit")
         if is_system_credential(name):
             raise HTTPException(403, f"Cannot store system credential: {name}")
+        if not permissions.can_access_credential(agent_id, name):
+            raise HTTPException(403, f"Agent {agent_id} cannot access credential: {name}")
         handle = credential_vault.add_credential(name, value)
         return {"stored": True, "handle": handle}
 
@@ -859,10 +863,16 @@ def create_mesh_app(
     @app.put("/mesh/cron/{job_id}")
     async def update_cron_job(job_id: str, request: Request) -> dict:
         """Update a cron job by ID. Body: fields to update (schedule, enabled, etc)."""
-        if _auth_tokens:
-            _extract_verified_agent_id(request)
+        agent_id = _resolve_agent_id("", request)
+        if not permissions.can_manage_cron(agent_id):
+            raise HTTPException(403, f"Agent {agent_id} cannot manage cron jobs")
         if cron_scheduler is None:
             raise HTTPException(503, "Cron scheduler not available")
+        job = cron_scheduler.jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, f"Job not found: {job_id}")
+        if job.agent != agent_id and not permissions._is_trusted(agent_id):
+            raise HTTPException(403, f"Agent {agent_id} does not own job {job_id}")
         body = await request.json()
         if "schedule" in body:
             error = cron_scheduler._validate_schedule(body["schedule"])
@@ -877,10 +887,16 @@ def create_mesh_app(
     @app.delete("/mesh/cron/{job_id}")
     async def delete_cron_job(job_id: str, request: Request) -> dict:
         """Remove a cron job by ID."""
-        if _auth_tokens:
-            _extract_verified_agent_id(request)
+        agent_id = _resolve_agent_id("", request)
+        if not permissions.can_manage_cron(agent_id):
+            raise HTTPException(403, f"Agent {agent_id} cannot manage cron jobs")
         if cron_scheduler is None:
             raise HTTPException(503, "Cron scheduler not available")
+        job = cron_scheduler.jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, f"Job not found: {job_id}")
+        if job.agent != agent_id and not permissions._is_trusted(agent_id):
+            raise HTTPException(403, f"Agent {agent_id} does not own job {job_id}")
         if cron_scheduler.remove_job(job_id):
             return {"removed": True, "id": job_id}
         raise HTTPException(404, f"Job not found: {job_id}")
