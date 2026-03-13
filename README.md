@@ -26,7 +26,7 @@
 
 ## Demo
 
-https://github.com/user-attachments/assets/643f7e71-b8e7-4960-bc01-afa31b45b107
+https://github.com/user-attachments/assets/8bd3fe95-5734-474d-92f0-40616daf91ad
 
 > `openlegion start` → inline setup → multiple agents running.
 > Live cost tracking. No configuration files edited by hand.
