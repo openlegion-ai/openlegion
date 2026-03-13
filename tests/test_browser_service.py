@@ -2777,6 +2777,87 @@ class TestDialogScoping:
         assert len(refs) == 2  # Both elements visible
         assert inst.dialog_active is False
 
+    @pytest.mark.asyncio
+    async def test_snapshot_fallback_when_scoped_snapshot_empty(self):
+        """If snapshot(root=modal) returns None for all modals, fall back to full tree.
+
+        Camoufox (modified Firefox) may not support scoped accessibility
+        snapshots. Without fallback the agent would get zero refs — blind.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        full_tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Post", "disabled": True},
+                {"role": "link", "name": "Home"},
+                {"role": "dialog", "name": "Compose", "children": [
+                    {"role": "textbox", "name": "Tweet text"},
+                    {"role": "button", "name": "Post"},
+                ]},
+            ],
+        }
+        # snapshot(root=modal_el) returns None — simulating Camoufox quirk
+        mock_page = AsyncMock()
+        mock_modal_el = AsyncMock()
+        mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
+
+        async def _snapshot(root=None):
+            if root is not None:
+                return None  # Scoped snapshot fails
+            return full_tree
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(side_effect=_snapshot)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        refs = result["data"]["refs"]
+        snap = result["data"]["snapshot"]
+        # Should have fallen back to full tree
+        assert len(refs) > 0
+        assert "Home" in snap  # Full tree elements visible
+        assert inst.dialog_active is False  # Fallback clears dialog flag
+        assert "Modal dialog" not in snap  # Fallback clears modal banner
+
+    @pytest.mark.asyncio
+    async def test_snapshot_fallback_when_scoped_snapshot_raises(self):
+        """If snapshot(root=modal) throws, fall back to full tree."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        full_tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Submit"},
+            ],
+        }
+        mock_page = AsyncMock()
+        mock_modal_el = AsyncMock()
+        mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
+
+        async def _snapshot(root=None):
+            if root is not None:
+                raise RuntimeError("Not supported in Camoufox")
+            return full_tree
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(side_effect=_snapshot)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        refs = result["data"]["refs"]
+        assert len(refs) == 1
+        assert refs["e0"]["name"] == "Submit"
+        assert inst.dialog_active is False
+
 
 # ── Speed factor tests ────────────────────────────────────────────────────
 
