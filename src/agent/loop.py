@@ -532,7 +532,10 @@ class AgentLoop:
         if goals:
             parts.append(f"## Your Current Goals\n{sanitize_for_prompt(format_dict(goals))}")
 
-        parts.append(f"## Task: {assignment.task_type}\n\n## Input\n{sanitize_for_prompt(format_dict(assignment.input_data))}")
+        sanitized_input = sanitize_for_prompt(format_dict(assignment.input_data))
+        parts.append(
+            f"## Task: {assignment.task_type}\n\n## Input\n{sanitized_input}"
+        )
 
         high_salience = await self.memory.get_high_salience_facts(top_k=10)
         if high_salience:
