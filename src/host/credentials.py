@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections.abc import Callable
 
 import httpx
@@ -84,7 +85,6 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     special characters (``$``, ``#``).  Production loads with
     ``interpolate=False`` as a second layer of defense.
     """
-    import re
     from pathlib import Path
 
     # Reject newlines/carriage returns to prevent env injection

@@ -27,7 +27,7 @@ logger = setup_logging("channels.discord")
 
 MAX_DC_LEN = 1900
 
-_AT_MENTION_RE = re.compile(r"^@(\w+)\s+(.+)$", re.DOTALL)
+from src.channels import AT_MENTION_RE as _AT_MENTION_RE
 
 
 class DiscordChannel(Channel):

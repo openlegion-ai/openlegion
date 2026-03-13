@@ -27,7 +27,7 @@ logger = setup_logging("channels.slack")
 
 MAX_SLACK_LEN = 3000
 
-_AT_MENTION_RE = re.compile(r"^@(\w+)\s+(.+)$", re.DOTALL)
+from src.channels import AT_MENTION_RE as _AT_MENTION_RE
 _SLACK_USER_MENTION_PREFIX_RE = re.compile(r"^(?:<@[A-Z0-9]+>\s*)+")
 
 

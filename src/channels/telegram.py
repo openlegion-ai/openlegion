@@ -26,7 +26,7 @@ logger = setup_logging("channels.telegram")
 
 MAX_TG_LEN = 4000
 
-_AT_MENTION_RE = re.compile(r"^@(\w+)\s+(.+)$", re.DOTALL)
+from src.channels import AT_MENTION_RE as _AT_MENTION_RE
 
 
 def _md_to_html(text: str) -> str:

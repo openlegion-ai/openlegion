@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import json as json_module
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
@@ -405,14 +407,13 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     # ── Artifact API ─────────────────────────────────────────
 
     _MAX_ARTIFACT_BYTES = 2 * 1024 * 1024  # 2 MB cap for content transfer
-    _ARTIFACT_NAME_RE = __import__("re").compile(r"^[\w][\w.\-/ ]{0,198}[\w.]$")
+    _ARTIFACT_NAME_RE = re.compile(r"^[\w][\w.\-/ ]{0,198}[\w.]$")
 
     @app.get("/artifacts")
     async def list_artifacts() -> dict:
         """List artifact files in the workspace."""
         if not loop.workspace:
             return {"artifacts": []}
-        from pathlib import Path
         artifacts_dir = Path(loop.workspace.root) / "artifacts"
         if not artifacts_dir.is_dir():
             return {"artifacts": []}
@@ -439,7 +440,6 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             raise HTTPException(503, "Workspace not available")
         if not _ARTIFACT_NAME_RE.match(name):
             raise HTTPException(400, f"Invalid artifact name: {name}")
-        from pathlib import Path
         artifacts_dir = Path(loop.workspace.root) / "artifacts"
         filepath = (artifacts_dir / name).resolve()
         if not filepath.is_relative_to(artifacts_dir.resolve()):
@@ -512,7 +512,6 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             raise HTTPException(503, "Workspace not available")
         if not _ARTIFACT_NAME_RE.match(name):
             raise HTTPException(400, f"Invalid artifact name: {name}")
-        from pathlib import Path
         artifacts_dir = Path(loop.workspace.root) / "artifacts"
         filepath = (artifacts_dir / name).resolve()
         if not filepath.is_relative_to(artifacts_dir.resolve()):
@@ -533,8 +532,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
 def _summarize_payload(payload: dict, max_len: int = 500) -> str:
     """Compact a message payload for memory storage."""
-    import json
-    text = json.dumps(payload, default=str)
+    text = json_module.dumps(payload, default=str)
     return text[:max_len] + "..." if len(text) > max_len else text
 
 

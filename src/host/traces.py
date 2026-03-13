@@ -9,6 +9,7 @@ Follows the same SQLite-WAL pattern as ``CostTracker`` and ``Blackboard``.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -71,8 +72,7 @@ class TraceStore:
         meta: dict | None = None,
     ) -> None:
         """Insert a trace event and evict overflow."""
-        import json as _json
-        meta_json = _json.dumps(meta, default=str) if meta else ""
+        meta_json = json.dumps(meta, default=str) if meta else ""
         self._conn.execute(
             "INSERT INTO traces "
             "(trace_id, timestamp, source, agent, event_type, detail, duration_ms, status, error, meta_json) "
@@ -90,9 +90,8 @@ class TraceStore:
 
     def _row_to_dict(self, row: tuple) -> dict:
         """Convert a query row to a trace event dict."""
-        import json as _json
         meta_json = row[9] if len(row) > 9 else ""
-        meta = _json.loads(meta_json) if meta_json else {}
+        meta = json.loads(meta_json) if meta_json else {}
         return {
             "trace_id": row[0],
             "timestamp": row[1],
@@ -129,7 +128,6 @@ class TraceStore:
 
     def list_trace_summaries(self, limit: int = 50) -> list[dict]:
         """Return one summary row per trace_id, newest first."""
-        import json as _json
         cur = self._conn.execute(
             """
             SELECT s.trace_id,
@@ -171,7 +169,7 @@ class TraceStore:
             trigger_preview = ""
             if first_meta_json:
                 try:
-                    meta = _json.loads(first_meta_json)
+                    meta = json.loads(first_meta_json)
                     trigger_preview = meta.get("prompt_preview", "")
                 except (ValueError, TypeError):
                     pass

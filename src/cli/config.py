@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import secrets
 import subprocess
 import sys
@@ -498,8 +499,6 @@ def _validate_agent_name(name: str) -> str:
     Rejects path traversal, slashes, non-alphanumeric chars
     (aside from hyphens and underscores), and reserved internal names.
     """
-    import re
-
     if not name or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", name):
         raise ValueError(
             f"Invalid agent name '{name}': must be 1–64 alphanumeric chars, "

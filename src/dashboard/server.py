@@ -8,6 +8,7 @@ objects — no HTTP round-trips through mesh endpoints.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -868,7 +869,7 @@ def create_dashboard_router(
         from src.shared.utils import sanitize_for_prompt
         message = sanitize_for_prompt(message)
 
-        import json as _json
+
 
         async def event_generator():
             try:
@@ -877,13 +878,13 @@ def create_dashboard_router(
                     json={"message": message}, timeout=120,
                 ):
                     if isinstance(event, dict):
-                        yield f"data: {_json.dumps(event, default=str)}\n\n"
+                        yield f"data: {json.dumps(event, default=str)}\n\n"
                         etype = event.get("type", "")
                         if event_bus and etype in ("tool_start", "tool_result"):
                             event_bus.emit(etype, agent=agent_id,
                                 data={k: v for k, v in event.items() if k != "type"})
             except Exception as e:
-                yield f"data: {_json.dumps({'type': 'error', 'message': friendly_streaming_error(e)})}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'message': friendly_streaming_error(e)})}\n\n"
 
         from starlette.responses import StreamingResponse
         return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -943,7 +944,7 @@ def create_dashboard_router(
         message = sanitize_for_prompt(message)
 
         import asyncio
-        import json as _json
+
 
         agents = list(agent_registry.keys())
         project = body.get("project") or ""
@@ -991,12 +992,12 @@ def create_dashboard_router(
                     event = await queue.get()
                     if event.get("type") == "agent_done":
                         done_count += 1
-                    yield f"data: {_json.dumps(event, default=str)}\n\n"
+                    yield f"data: {json.dumps(event, default=str)}\n\n"
             except asyncio.CancelledError:
                 for t in tasks:
                     t.cancel()
                 raise
-            yield f"data: {_json.dumps({'type': 'all_done'})}\n\n"
+            yield f"data: {json.dumps({'type': 'all_done'})}\n\n"
 
         from starlette.responses import StreamingResponse
         return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -1455,7 +1456,7 @@ def create_dashboard_router(
     @api_router.get("/api/comms/activity")
     async def api_comms_activity(limit: int = 100, project: str = "") -> dict:
         """Recent inter-agent communication: blackboard writes/deletes + pubsub events."""
-        import json as _json
+
         limit = max(1, min(limit, 500))
         project_prefix = f"projects/{project}/" if project else ""
         activity: list[dict] = []
@@ -1485,7 +1486,7 @@ def create_dashboard_router(
                 }
                 if data:
                     try:
-                        parsed = _json.loads(data)
+                        parsed = json.loads(data)
                         # Extract a human-readable preview from the value
                         if isinstance(parsed, dict):
                             for f in ("text", "summary", "status", "message",
@@ -1494,7 +1495,7 @@ def create_dashboard_router(
                                     entry["preview"] = parsed[f][:200]
                                     break
                             if "preview" not in entry:
-                                entry["preview"] = _json.dumps(parsed, default=str)[:200]
+                                entry["preview"] = json.dumps(parsed, default=str)[:200]
                         else:
                             entry["preview"] = str(parsed)[:200]
                     except (ValueError, TypeError):
@@ -1528,7 +1529,7 @@ def create_dashboard_router(
                     }
                     if data:
                         try:
-                            parsed = _json.loads(data)
+                            parsed = json.loads(data)
                             if isinstance(parsed, dict):
                                 entry["agent"] = parsed.get("source", parsed.get("agent", ""))
                                 for f in ("message", "summary", "result", "text"):
@@ -1563,14 +1564,14 @@ def create_dashboard_router(
 
     @api_router.put("/api/blackboard/{key:path}")
     async def api_blackboard_write(key: str, request: Request) -> dict:
-        import json as _json
+
         if len(key) > _MAX_BB_KEY_LEN:
             raise HTTPException(status_code=400, detail=f"Key too long ({len(key)} chars, max {_MAX_BB_KEY_LEN})")
         body = await request.json()
         value = body.get("value", {})
         if not isinstance(value, dict):
             raise HTTPException(status_code=400, detail="value must be a JSON object")
-        value_size = len(_json.dumps(value, default=str))
+        value_size = len(json.dumps(value, default=str))
         if value_size > _MAX_BB_VALUE_BYTES:
             raise HTTPException(
                 status_code=413,

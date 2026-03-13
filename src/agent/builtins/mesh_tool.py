@@ -7,6 +7,7 @@ the shared blackboard (not through direct conversations with each other).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from src.agent.skills import skill
 from src.shared.utils import sanitize_for_prompt, setup_logging
@@ -372,7 +373,6 @@ async def save_artifact(
     if workspace_manager is None:
         return {"error": "No workspace_manager available"}
     try:
-        from pathlib import Path
         artifacts_dir = Path(workspace_manager.root) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         filepath = (artifacts_dir / name).resolve()
@@ -654,7 +654,6 @@ async def update_workspace(
 ) -> dict:
     if workspace_manager is None:
         return {"error": "No workspace_manager available"}
-    from src.shared.utils import sanitize_for_prompt
     content = sanitize_for_prompt(content)
 
     # Capture old content for diff summary (single read)

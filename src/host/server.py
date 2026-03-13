@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import re
 import time
 from collections import defaultdict
 from collections.abc import Callable, Coroutine
@@ -96,9 +97,7 @@ def create_mesh_app(
     _agent_projects = agent_projects if agent_projects is not None else {}
 
     # -- Input validation helpers ------------------------------------------------
-    import re as _re
-
-    _AGENT_ID_RE = _re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+    _AGENT_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
     _RESERVED_AGENT_IDS = frozenset({"mesh", "orchestrator"})
     _MAX_SYSTEM_PROMPT = 10_000
     _MAX_BB_KEY_LEN = 512
@@ -1096,7 +1095,6 @@ def create_mesh_app(
         # Subscribe first, then replay events that existed before subscribe.
         # This eliminates the race where events emitted between replay and
         # subscribe appear twice (once in replay, once in live feed).
-        import json
         snapshot_seq = event_bus.current_seq
         event_bus.subscribe(websocket, agents_filter, types_filter)
         for evt in event_bus.recent_events(agents_filter, types_filter, before_seq=snapshot_seq):

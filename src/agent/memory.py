@@ -17,6 +17,7 @@ import functools
 import hashlib
 import json
 import math
+import re
 import sqlite3
 import struct
 import threading
@@ -24,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Optional, TypeVar
 
 import sqlite_vec
+from sqlite_vec import serialize_float32
 
 from src.shared.types import MemoryFact, MemoryLog
 from src.shared.utils import generate_id, setup_logging
@@ -234,7 +236,7 @@ class MemoryStore:
         self.db.commit()
 
     def _store_embedding(self, fact_id: str, embedding: list[float]) -> None:
-        from sqlite_vec import serialize_float32
+
 
         blob = serialize_float32(embedding)
         self.db.execute("DELETE FROM facts_vec WHERE id = ?", (fact_id,))
@@ -285,7 +287,7 @@ class MemoryStore:
         return await self._run_db(self._search_sync, query, query_embedding, top_k)
 
     def _vector_search(self, embedding: list[float], top_k: int) -> list[tuple]:
-        from sqlite_vec import serialize_float32
+
 
         blob = serialize_float32(embedding)
         return self.db.execute(
@@ -297,7 +299,6 @@ class MemoryStore:
     def _sanitize_fts_query(query: str) -> str:
         """Sanitize a query for FTS5 MATCH: strip all special chars."""
         # FTS5 special characters: *, ^, :, (, ), +, -, ", NEAR, AND, OR, NOT
-        import re
         # Strip everything except alphanumeric and spaces
         safe = re.sub(r"[^\w\s]", " ", query)
         words = safe.split()
@@ -607,7 +608,7 @@ class MemoryStore:
             return cat_id
 
         # Create new category with the fact's embedding as initial embedding
-        from sqlite_vec import serialize_float32
+
 
         blob = serialize_float32(fact_embedding)
         cursor = self.db.execute(
@@ -636,7 +637,7 @@ class MemoryStore:
 
     def _recompute_category_embedding(self, cat_id: int) -> None:
         """Recompute category embedding as average of its facts' embeddings."""
-        from sqlite_vec import serialize_float32
+
 
         rows = self.db.execute(
             "SELECT fv.embedding FROM facts_vec fv "
@@ -663,7 +664,7 @@ class MemoryStore:
 
     def _search_categories(self, query_embedding: list[float], top_k: int = 3) -> list[tuple[int, float]]:
         """Vector search on category embeddings. Returns [(cat_id, similarity)]."""
-        from sqlite_vec import serialize_float32
+
 
         # Check if any categories exist
         count = self.db.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
@@ -741,7 +742,7 @@ class MemoryStore:
         results: dict[str, dict[str, float]] = {}
 
         # Vector search scoped to category
-        from sqlite_vec import serialize_float32
+
 
         blob = serialize_float32(query_embedding)
         # Get candidate fact IDs from these categories
