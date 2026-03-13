@@ -79,6 +79,7 @@ class CamoufoxInstance:
         self.last_activity = time.time()
         self.refs: dict[str, dict] = {}  # ref_id -> {"role", "name", "index", "disabled"}
         self.credential_filled_refs: set[str] = set()
+        self.dialog_active: bool = False  # True when snapshot found a modal dialog
         self.lock = asyncio.Lock()  # serialize page operations per instance
 
     def touch(self):
@@ -408,7 +409,29 @@ class BrowserManager:
                     for child in node.get("children", []):
                         _walk(child, depth + 1)
 
-                _walk(tree)
+                # When a modal dialog is open, scope to only dialog elements
+                # so agents don't see/click elements behind the overlay
+                # (e.g. X's sidebar "Post" button behind the compose modal).
+                dialog_nodes = []
+
+                def _find_dialogs(node):
+                    if node.get("role") in ("dialog", "alertdialog"):
+                        dialog_nodes.append(node)
+                    else:
+                        for child in node.get("children", []):
+                            _find_dialogs(child)
+
+                _find_dialogs(tree)
+
+                if dialog_nodes:
+                    inst.dialog_active = True
+                    lines.append("** Modal dialog is open — only dialog elements are shown **")
+                    for dialog_node in dialog_nodes:
+                        _walk(dialog_node)
+                else:
+                    inst.dialog_active = False
+                    _walk(tree)
+
                 inst.refs = refs  # Store refs for click/type by ref ID
                 snapshot_text = "\n".join(lines) if lines else "(no interactive elements)"
                 snapshot_text = self.redactor.redact(agent_id, snapshot_text)
@@ -422,6 +445,10 @@ class BrowserManager:
         Uses .nth(index) to target the exact occurrence found during snapshot.
         This disambiguates duplicate elements with the same role+name — e.g.
         X's SPA may render two composer nodes; without nth() we'd hit the wrong one.
+
+        When a modal dialog was detected in the last snapshot, scopes the search
+        to the dialog element so .nth(index) matches dialog-only occurrence
+        counts and doesn't accidentally target elements behind the overlay.
         """
         info = inst.refs.get(ref)
         if not info:
@@ -429,7 +456,16 @@ class BrowserManager:
         role = info["role"]
         name = info.get("name", "")
         idx = info.get("index", 0)
-        locator = inst.page.get_by_role(role, name=name) if name else inst.page.get_by_role(role)
+        # Scope to dialog when one is active — occurrence indices were counted
+        # within the dialog subtree, so the locator must search the same scope.
+        # Match both explicit role attributes and native <dialog> elements.
+        if inst.dialog_active:
+            base = inst.page.locator(
+                '[role="dialog"], [role="alertdialog"], dialog[open]'
+            )
+        else:
+            base = inst.page
+        locator = base.get_by_role(role, name=name) if name else base.get_by_role(role)
         return locator.nth(idx)
 
     async def click(
@@ -844,6 +880,7 @@ class BrowserManager:
                     inst.page = pages[tab_index]
                     await inst.page.bring_to_front()
                     inst.refs = {}  # Stale refs from previous tab's snapshot
+                    inst.dialog_active = False  # New tab may not have a dialog
                     active_index = tab_index
                     for t in tabs:
                         t["active"] = t["index"] == tab_index
