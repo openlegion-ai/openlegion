@@ -1008,6 +1008,7 @@ class BrowserManager:
         async with inst.lock:
             try:
                 response = await inst.page.go_back(timeout=10000)
+                inst.dialog_active = False  # New page — stale modal state
                 await asyncio.sleep(action_delay())
                 title = await inst.page.title()
                 url = self.redactor.redact(agent_id, inst.page.url)
@@ -1024,6 +1025,7 @@ class BrowserManager:
         async with inst.lock:
             try:
                 response = await inst.page.go_forward(timeout=10000)
+                inst.dialog_active = False  # New page — stale modal state
                 await asyncio.sleep(action_delay())
                 title = await inst.page.title()
                 url = self.redactor.redact(agent_id, inst.page.url)
