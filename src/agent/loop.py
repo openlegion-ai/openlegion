@@ -591,7 +591,14 @@ class AgentLoop:
         for group in middle_groups:
             for msg in group:
                 if msg.get("role") == "tool":
-                    summary_parts.append(f"Tool result: {truncate(msg.get('content', ''), 100)}")
+                    content = msg.get("content", "")
+                    # Multimodal content — extract text blocks only
+                    if isinstance(content, list):
+                        content = " ".join(
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    summary_parts.append(f"Tool result: {truncate(content, 100)}")
                 elif msg.get("role") == "assistant" and msg.get("tool_calls"):
                     names = [tc["function"]["name"] for tc in msg["tool_calls"]]
                     summary_parts.append(f"Called: {', '.join(names)}")
@@ -891,11 +898,13 @@ class AgentLoop:
         })
         return entries
 
-    async def _run_tool(self, tool_call) -> tuple[str, dict]:
+    async def _run_tool(self, tool_call) -> tuple[str | list, dict]:
         """Execute a single tool call with loop detection, learning, and error handling.
 
-        Returns (result_str, result_dict) for the caller to append to messages.
-        Shared by both task mode and chat mode to avoid duplicated logic.
+        Returns (content, result_dict) for the caller to append to messages.
+        ``content`` is a plain string for text-only results, or a list of
+        content blocks (text + image_url) when the tool returns an ``_image``
+        key.  Shared by both task mode and chat mode.
         """
         loop_verdict = self._loop_detector.check_before(tool_call.name, tool_call.arguments)
 
@@ -921,6 +930,14 @@ class AgentLoop:
                 ),
                 timeout=_TOOL_TIMEOUT,
             )
+
+            # Pop _image before JSON serialization — keeps base64 out of
+            # result_str so loop detection, learning, and event streaming
+            # never see the massive blob.
+            image_block = None
+            if isinstance(result, dict):
+                image_block = result.pop("_image", None)
+
             result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
             result_str = sanitize_for_prompt(result_str)
             self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
@@ -935,6 +952,17 @@ class AgentLoop:
                 self._maybe_reload_skills(result)
             except Exception as learn_err:
                 logger.warning("Post-tool learning failed for %s: %s", tool_call.name, learn_err)
+
+            # Build multimodal content when an image is present
+            if image_block and isinstance(image_block, dict) and image_block.get("data"):
+                media_type = image_block.get("media_type", "image/png")
+                data_uri = f"data:{media_type};base64,{image_block['data']}"
+                content: str | list = [
+                    {"type": "text", "text": result_str},
+                    {"type": "image_url", "image_url": {"url": data_uri}},
+                ]
+                return content, result
+
             return result_str, result
         except asyncio.TimeoutError:
             result_str = json.dumps({"error": f"Tool {tool_call.name} timed out after {_TOOL_TIMEOUT}s"})

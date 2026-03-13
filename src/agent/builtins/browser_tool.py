@@ -182,7 +182,7 @@ async def browser_wait_for(
     name="browser_screenshot",
     description=(
         "Take a screenshot of the current page. "
-        "Returns base64-encoded PNG image data."
+        "Returns a visual PNG image you can see directly."
     ),
     parameters={
         "full_page": {
@@ -193,8 +193,33 @@ async def browser_wait_for(
     },
 )
 async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> dict:
-    """Take a screenshot via the browser service."""
-    return await _browser_command(mesh_client, "screenshot", {"full_page": full_page})
+    """Take a screenshot via the browser service.
+
+    Extracts image_base64 from the raw result *before* ``_deep_redact`` runs,
+    because the broad credential-redaction patterns (40+ hex/base64 chars)
+    would corrupt any PNG payload.  The base64 data is returned under the
+    ``_image`` key so ``_run_tool`` can build a multimodal content block.
+    """
+    if not mesh_client:
+        return {"error": "Browser requires mesh connectivity"}
+    try:
+        raw = await mesh_client.browser_command("screenshot", {"full_page": full_page})
+    except Exception as e:
+        return {"error": _deep_redact(str(e))}
+
+    # Pull out image data before redaction can corrupt it
+    image_data = None
+    if isinstance(raw, dict) and raw.get("image_base64"):
+        image_data = raw.pop("image_base64")
+
+    result = _deep_redact(raw)
+
+    if image_data:
+        result["_image"] = {"data": image_data, "media_type": "image/png"}
+        # Give the LLM a short text summary instead of the raw base64 blob
+        result.setdefault("status", "screenshot captured")
+
+    return result
 
 
 @skill(

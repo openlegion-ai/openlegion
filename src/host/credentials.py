@@ -656,10 +656,15 @@ class CredentialVault:
 
             elif role == "tool":
                 # Tool result → user message with tool_result block
+                raw_content = m.get("content", "")
+                # Convert OpenAI image_url blocks to Anthropic format
+                # (tool results can contain multimodal content from screenshots)
+                if isinstance(raw_content, list):
+                    raw_content = convert_openai_image_blocks(raw_content)
                 tool_result = {
                     "type": "tool_result",
                     "tool_use_id": m.get("tool_call_id", ""),
-                    "content": m.get("content", ""),
+                    "content": raw_content,
                 }
                 # Merge consecutive tool results into one user message
                 if (converted

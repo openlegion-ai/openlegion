@@ -1573,7 +1573,12 @@ class TestBrowserScreenshotHttpClient:
         result = await browser_screenshot(mesh_client=mc)
 
         mc.browser_command.assert_awaited_once_with("screenshot", {"full_page": False})
-        assert result["image_base64"] == "iVBORw0KGgo="
+        # image_base64 is extracted into _image, not left in the result
+        assert "image_base64" not in result
+        assert result["_image"]["data"] == "iVBORw0KGgo="
+        assert result["_image"]["media_type"] == "image/png"
+        assert result["status"] == "screenshot captured"
+        assert result["width"] == 1280
 
     @pytest.mark.asyncio
     async def test_screenshot_full_page(self):
@@ -1582,9 +1587,43 @@ class TestBrowserScreenshotHttpClient:
         mc = AsyncMock()
         mc.browser_command = AsyncMock(return_value={"image_base64": "data"})
 
-        await browser_screenshot(full_page=True, mesh_client=mc)
+        result = await browser_screenshot(full_page=True, mesh_client=mc)
 
         mc.browser_command.assert_awaited_once_with("screenshot", {"full_page": True})
+        assert result["_image"]["data"] == "data"
+
+    @pytest.mark.asyncio
+    async def test_screenshot_no_image_in_response(self):
+        """When service returns no image_base64, no _image key is set."""
+        from src.agent.builtins.browser_tool import browser_screenshot
+
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={"error": "no page loaded"})
+
+        result = await browser_screenshot(mesh_client=mc)
+
+        assert "_image" not in result
+        assert result["error"] == "no page loaded"
+
+    @pytest.mark.asyncio
+    async def test_screenshot_redaction_does_not_corrupt_image(self):
+        """The base64 image data must bypass _deep_redact (broad patterns corrupt images)."""
+        from src.agent.builtins.browser_tool import browser_screenshot
+
+        # A string that would match the 40+ base64 char redaction pattern
+        fake_b64 = "A" * 60
+        mc = AsyncMock()
+        mc.browser_command = AsyncMock(return_value={
+            "image_base64": fake_b64,
+            "debug_info": "sk-ant-api" + "X" * 30,  # should be redacted
+        })
+
+        result = await browser_screenshot(mesh_client=mc)
+
+        # Image data preserved intact
+        assert result["_image"]["data"] == fake_b64
+        # But other fields are still redacted
+        assert "[REDACTED]" in result["debug_info"]
 
 
 # ── notify_user ──────────────────────────────────────────────

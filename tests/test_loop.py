@@ -1504,3 +1504,152 @@ async def test_steer_appended_correctly_to_multimodal_content():
     # The original image block must be untouched
     image_blocks = [b for b in result_content if b.get("type") == "image_url"]
     assert len(image_blocks) == 1
+
+
+# ── _run_tool multimodal image support ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_tool_pops_image_and_returns_multimodal_content():
+    """When a tool result contains _image, _run_tool returns multimodal content."""
+    loop = _make_loop()
+    loop.skills.execute = AsyncMock(return_value={
+        "status": "screenshot captured",
+        "_image": {"data": "iVBORw0KGgo=", "media_type": "image/png"},
+    })
+
+    content, result_dict = await loop._run_tool(
+        ToolCallInfo(name="browser_screenshot", arguments={})
+    )
+
+    # _image must be popped from the result dict
+    assert "_image" not in result_dict
+    assert result_dict == {"status": "screenshot captured"}
+
+    # content must be a list with text + image_url blocks
+    assert isinstance(content, list)
+    assert len(content) == 2
+    assert content[0]["type"] == "text"
+    assert "screenshot captured" in content[0]["text"]
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert content[1]["image_url"]["url"].endswith("iVBORw0KGgo=")
+
+
+@pytest.mark.asyncio
+async def test_run_tool_no_image_returns_plain_string():
+    """Normal tool results (no _image) return a plain string."""
+    loop = _make_loop()
+    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+
+    content, result_dict = await loop._run_tool(
+        ToolCallInfo(name="web_search", arguments={"q": "test"})
+    )
+
+    assert isinstance(content, str)
+    assert "ok" in content
+
+
+@pytest.mark.asyncio
+async def test_run_tool_image_not_in_serialized_result():
+    """The serialized result_str must not contain the base64 image data."""
+    loop = _make_loop()
+    image_b64 = "A" * 1000  # large payload
+    loop.skills.execute = AsyncMock(return_value={
+        "status": "screenshot captured",
+        "_image": {"data": image_b64, "media_type": "image/png"},
+    })
+
+    content, result_dict = await loop._run_tool(
+        ToolCallInfo(name="browser_screenshot", arguments={})
+    )
+
+    # The text portion of the content must not contain the image data
+    text_part = content[0]["text"] if isinstance(content, list) else content
+    assert image_b64 not in text_part
+    # _image was popped
+    assert "_image" not in result_dict
+
+
+@pytest.mark.asyncio
+async def test_task_mode_appends_multimodal_content():
+    """Task mode correctly passes multimodal content into message history."""
+    captured_messages = []
+
+    tool_call_response = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="browser_screenshot", arguments={})],
+        tokens_used=50,
+    )
+    final_response = LLMResponse(content='{"result": {"seen": true}}', tokens_used=30)
+
+    loop = _make_loop([tool_call_response, final_response])
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "browser_screenshot"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={
+        "status": "screenshot captured",
+        "_image": {"data": "iVBORw0KGgo=", "media_type": "image/png"},
+    })
+
+    original_chat = loop.llm.chat
+
+    async def capturing_chat(system, messages, tools=None, **kwargs):
+        captured_messages.append([dict(m) for m in messages])
+        return await original_chat(system=system, messages=messages, tools=tools, **kwargs)
+
+    loop.llm.chat = capturing_chat
+
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research", input_data={"q": "test"}
+    )
+    result = await loop.execute_task(assignment)
+
+    assert result.status == "complete"
+    # The tool result message in the second LLM call should have multimodal content
+    tool_msg = captured_messages[1][2]  # user, assistant, tool
+    assert tool_msg["role"] == "tool"
+    assert isinstance(tool_msg["content"], list)
+    assert tool_msg["content"][0]["type"] == "text"
+    assert tool_msg["content"][1]["type"] == "image_url"
+
+
+@pytest.mark.asyncio
+async def test_trim_context_handles_multimodal_tool_content():
+    """_trim_context extracts text from multimodal content for summaries."""
+    loop = _make_loop()
+
+    multimodal_content = [
+        {"type": "text", "text": '{"status": "screenshot captured"}'},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+    ]
+
+    messages = [
+        {"role": "user", "content": "take a screenshot"},
+        {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c1", "type": "function",
+                           "function": {"name": "browser_screenshot", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": multimodal_content},
+        {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c2", "type": "function",
+                           "function": {"name": "web_search", "arguments": '{"q":"x"}'}}],
+        },
+        {"role": "tool", "tool_call_id": "c2", "content": "search results here"},
+        {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c3", "type": "function",
+                           "function": {"name": "web_search", "arguments": '{"q":"y"}'}}],
+        },
+        {"role": "tool", "tool_call_id": "c3", "content": "more results"},
+    ]
+
+    # Force trimming with a very low max_tokens
+    trimmed = loop._trim_context(messages, max_tokens=1)
+
+    # Should not crash and should contain a summary
+    summary_msg = trimmed[1]
+    assert summary_msg["role"] == "user"
+    assert "screenshot captured" in summary_msg["content"]
