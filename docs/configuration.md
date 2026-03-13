@@ -181,6 +181,9 @@ Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
 | `blackboard_write` | list[string] | Glob patterns for writable blackboard keys |
 | `allowed_apis` | list[string] | External APIs accessible through the vault proxy |
 | `allowed_credentials` | list[string] | Glob patterns for accessible credential names. `["*"]` grants access to all agent-tier credentials; `[]` denies all. System credentials (LLM provider keys) are always blocked regardless of patterns. |
+| `can_use_browser` | boolean | Whether this agent can use the shared browser service. Default: `false`. |
+| `can_spawn` | boolean | Whether this agent can spawn ephemeral fleet agents via `spawn_fleet_agent`. Default: `false`. |
+| `can_manage_cron` | boolean | Whether this agent can create, update, and delete cron jobs. Default: `false`. |
 
 ### Glob Patterns
 
@@ -218,6 +221,8 @@ OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
 ```
 
 All credentials are loaded by the credential vault (`src/host/credentials.py`). Agents never see values directly -- they make API calls through the mesh proxy, which injects credentials server-side.
+
+**Channel credential fallback:** Channel bot tokens (Telegram, Discord, Slack, WhatsApp) are resolved with a three-tier fallback chain: `OPENLEGION_SYSTEM_<NAME>` → `OPENLEGION_CRED_<NAME>` → legacy unprefixed `<NAME>` (e.g., `TELEGRAM_BOT_TOKEN`). The `OPENLEGION_CRED_` prefix is recommended for channel tokens.
 
 **Important:** LLM provider keys **must** use the `OPENLEGION_SYSTEM_` prefix. The mesh proxy only looks for provider keys in the system tier. A provider key stored with `OPENLEGION_CRED_` will be treated as an agent-tier credential and will not be used for LLM calls.
 
@@ -262,5 +267,8 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `THINKING` | `off` | Extended thinking/reasoning mode (set automatically from `thinking` in agents.yaml) |
 | `PROJECT_NAME` | -- | Project this agent belongs to (set automatically for project members) |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for memory vector search (set automatically from `llm.embedding_model` in mesh.yaml). Set to `"none"` to disable vector search |
+| `OPENLEGION_MAX_AGENTS` | `0` | Plan limit: maximum agents to start. `0` means unlimited. If set to N > 0, only the first N agents are started. |
+| `OPENLEGION_MAX_PROJECTS` | `0` | Plan limit: maximum projects allowed. `0` means unlimited. |
+| `OPENLEGION_HOST_NETWORK` | `0` | Use Docker host networking for agent containers instead of bridge network. Set to `1` to enable. Not recommended — disables network isolation. |
 
 The mesh port is configured in `config/mesh.yaml` (`mesh.port`), not via environment variable.

@@ -67,7 +67,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `skills.py` | Skill discovery and registry; `@skill` decorator system |
 | `mcp_client.py` | MCP server lifecycle management and tool routing |
 | `memory.py` | SQLite + sqlite-vec + FTS5 hierarchical memory store |
-| `workspace.py` | Persistent markdown workspace (MEMORY.md, SYSTEM.md, daily logs, learnings) |
+| `workspace.py` | Persistent markdown workspace (INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md, SYSTEM.md, HEARTBEAT.md, daily logs, learnings) |
 | `context.py` | Context window management with write-then-compact pattern |
 | `llm.py` | LLM client with streaming (`chat_stream()`) and non-streaming (`chat()`) — routes through mesh proxy |
 | `mesh_client.py` | HTTP client for agent-to-mesh communication |

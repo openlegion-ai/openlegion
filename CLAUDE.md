@@ -12,7 +12,7 @@ OpenLegion Engine is a container-isolated multi-agent runtime. LLM-powered agent
 User (CLI REPL / Telegram / Discord / Slack / WhatsApp / Webhook)
   → Mesh Host (FastAPI :8420) — routes messages, enforces permissions, proxies APIs, VNC proxy
     → Agent Containers (FastAPI :8400 each) — isolated execution with private memory
-    → Browser Service Container (FastAPI :8421 + KasmVNC :6080) — shared Camoufox browser
+    → Browser Service Container (FastAPI :8500 + KasmVNC :6080) — shared Camoufox browser
 ```
 
 Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agents** (untrusted, sandboxed). All cross-zone communication is HTTP + JSON with Pydantic contracts from `src/shared/types.py`.
@@ -23,7 +23,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 |---|---|---|
 | `openlegion` CLI | `src/cli/__main__.py` → `src/cli/main.py` | CLI commands: start, stop, status, chat, version |
 | Agent container | `src/agent/__main__.py` → `src/agent/server.py` | Agent FastAPI server on :8400 |
-| Browser service | `src/browser/__main__.py` → `src/browser/server.py` | KasmVNC + Openbox + FastAPI on :8421 |
+| Browser service | `src/browser/__main__.py` → `src/browser/server.py` | KasmVNC + Openbox + FastAPI on :8500 |
 | Mesh host | `src/host/server.py` | FastAPI app on :8420 (started by CLI) |
 | Dashboard | `src/dashboard/server.py` | Mounted as router on mesh host |
 
@@ -38,7 +38,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `models.py` | Model cost/context window registry backed by LiteLLM |
 | **`src/agent/`** | |
 | `loop.py` | Agent execution loop (task mode + chat mode). `MAX_ITERATIONS=20`, `CHAT_MAX_TOOL_ROUNDS=30`. |
-| `server.py` | Agent FastAPI server (`/task`, `/chat`, `/status`, `/cancel`, `/history`) |
+| `server.py` | Agent FastAPI server (25 endpoints: `/task`, `/cancel`, `/status`, `/result`, `/capabilities`, `/invoke`, `/chat`, `/chat/steer`, `/chat/stream`, `/chat/reset`, `/chat/history`, `/history`, `/message`, `/workspace`, `/workspace/{filename}`, `/project`, `/workspace-logs`, `/workspace-learnings`, `/heartbeat-context`, `/artifacts`, `/files`, etc.) |
 | `llm.py` | LLM client — routes through mesh proxy, never holds keys |
 | `context.py` | Context window management (write-then-compact, `_SUMMARIZATION_INPUT_LIMIT=20_000`) |
 | `skills.py` | Skill registry and tool discovery |
@@ -61,7 +61,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `subagent_tool.py` | In-process subagents (MAX_DEPTH=2, MAX_CONCURRENT=3, MAX_TTL=600s) |
 | `introspect_tool.py` | Runtime state query (permissions, budget, fleet, cron, health) |
 | **`src/host/`** | |
-| `server.py` | Mesh FastAPI app factory — 26+ endpoints, all permission-checked. VNC reverse proxy with agent token rejection. Localhost validation for `x-mesh-internal`. |
+| `server.py` | Mesh FastAPI app factory — 31 endpoints, all permission-checked. VNC reverse proxy with agent token rejection. Localhost validation for `x-mesh-internal`. |
 | `mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter |
 | `orchestrator.py` | DAG workflow executor with safe condition eval (regex, no eval()) |
 | `runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. Agent network, browser container, VNC URL tracking. `_quote_env_value()` for .env escaping. |
@@ -150,7 +150,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 ### Error Handling
 - Domain-specific exceptions propagated with context
 - Overly broad catches avoided — transient vs permanent distinguished
-- `sanitize_for_prompt()` strips invisible Unicode at 35+ injection choke points
+- `sanitize_for_prompt()` strips invisible Unicode at 56 injection choke points
 - Security errors return generic messages (no leaking internals)
 
 ### Async Patterns
@@ -168,14 +168,14 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - JSON format in production, human-readable in dev
 
 ### State
-- All SQLite with WAL mode and `busy_timeout=5000` — blackboard, memory, costs, cron, traces
+- All SQLite with WAL mode — blackboard, memory, costs, cron, traces. `busy_timeout=30000` for mesh/costs/memory; `busy_timeout=5000` for traces.
 - No Redis, no external databases
 
 ## Security Boundaries
 
 - **Agents never hold API keys.** All LLM/API calls go through mesh credential vault.
 - **No `eval()`/`exec()` on untrusted input.** Workflow conditions use regex-based safe parser.
-- **Permission checks on all 26+ mesh endpoints.** Default deny.
+- **Permission checks on all 31 mesh endpoints.** Default deny.
 - **File path traversal protection.** Two-stage validation (reject `..` before resolution, then walk with symlink resolution via `lstat()`).
 - **Container hardening.** Non-root (UID 1000), `no-new-privileges`, 384MB memory, 0.15 CPU.
 - **All untrusted text sanitized** via `sanitize_for_prompt()` before reaching LLM context.
@@ -241,7 +241,7 @@ pytest tests/test_loop.py -x -v
 - Mock LLM responses, not the loop. See `tests/test_loop.py:_make_loop()`.
 - `AsyncMock` for async methods, SQLite in-memory or `tmp_path` for DB paths.
 - E2E tests skip gracefully without Docker + API key.
-- 58 test files covering all modules.
+- 56 test files covering all modules.
 
 ### Test File Mapping
 
@@ -325,6 +325,28 @@ pytest tests/test_loop.py -x -v
 3. Optionally include `heartbeat_rules`, `permissions`, `budget`, `workflows`
 4. Templates auto-discovered by `_load_templates()` in `src/cli/config.py`
 
+## Target State
+
+### Architecture Decisions
+- Orchestrator polling (`_wait_for_task_result`) should migrate to push-based notification (PubSub or asyncio.Event)
+- VNC proxy httpx client-per-request is acceptable short-term but should pool at scale
+- Browser module-level state prevents concurrent subagent browser use — needs per-context isolation if concurrency is required
+
+### Pattern Standards
+- **busy_timeout**: Standardize on 30000 across all SQLite connections (traces.py still uses 5000)
+- **Sanitization**: 56 call sites verified — maintain coverage as new endpoints are added
+- **Logging**: All modules should use `setup_logging("component.module")` consistently
+
+### Security Requirements
+- All current security boundaries verified and holding (2026-03-13)
+- Maintain: no eval/exec on untrusted input, permission checks on all mesh endpoints, SSRF protection, file traversal protection, AST validation for skills
+- Audit: container hardening settings should be periodically reviewed against Docker security benchmarks
+
+### Current → Target Gaps
+- No gaps blocking production — security posture is sound
+- Tech debt items (orchestrator polling, VNC proxy pooling) are non-critical
+- Test coverage is comprehensive (56 test files) but should be verified for regressions after any batch fixes
+
 ## Review State
 
-(Empty — ready for the next review cycle)
+Documentation audit completed 2026-03-13. All docs verified against code truth. Zero 🔴 lies. Fixes applied: README.md (test counts 1826→2070, line counts ~26K→~29K, 5 missing templates added, browser RAM/capacity scaling, test coverage table expanded to 47 rows), docs/configuration.md (3 permission fields, 3 env vars, credential fallback chain), docs/security.md (pids_limit), docs/architecture.md (workspace files list), docs/development.md (busy_timeout, 8 test mapping entries), CLAUDE.md (test file count). Sanitization call sites verified at 56.
