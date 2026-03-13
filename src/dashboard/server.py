@@ -579,6 +579,8 @@ def create_dashboard_router(
             if any(fnmatch(c, p) for p in allowed_creds)
         ) if allowed_creds else []
 
+        # Capability flags from permissions
+        agent_perms = permissions.get_permissions(agent_id) if permissions else None
         cfg_result = {
             "id": agent_id,
             "model": agent_cfg.get("model", default_model),
@@ -592,6 +594,9 @@ def create_dashboard_router(
             "available_credentials": sorted(agent_cred_names),
             "system_credentials": system_cred_names,
             "resolved_credentials": resolved,
+            "can_use_browser": agent_perms.can_use_browser if agent_perms else False,
+            "can_spawn": agent_perms.can_spawn if agent_perms else False,
+            "can_manage_cron": agent_perms.can_manage_cron if agent_perms else False,
         }
         vnc_url = _browser_vnc_url_for_request(request)
         if vnc_url:
@@ -760,6 +765,9 @@ def create_dashboard_router(
             "allowed_credentials": perms.allowed_credentials,
             "allowed_apis": perms.allowed_apis,
             "available_credentials": available_creds,
+            "can_use_browser": perms.can_use_browser,
+            "can_spawn": perms.can_spawn,
+            "can_manage_cron": perms.can_manage_cron,
         }
 
     @api_router.put("/api/agents/{agent_id}/permissions")
@@ -787,6 +795,10 @@ def create_dashboard_router(
                 raise HTTPException(status_code=400, detail="allowed_apis must be a list of strings")
             agent_perms["allowed_apis"] = val
             updated.append("allowed_apis")
+        for flag in ("can_use_browser", "can_spawn", "can_manage_cron"):
+            if flag in body:
+                agent_perms[flag] = bool(body[flag])
+                updated.append(flag)
 
         perms_data.setdefault("permissions", {})[agent_id] = agent_perms
         _save_permissions(perms_data)

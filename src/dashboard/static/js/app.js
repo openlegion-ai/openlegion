@@ -1950,6 +1950,9 @@ function dashboard() {
         budget_daily: cfg.budget?.daily_usd || '',
         budget_monthly: cfg.budget?.monthly_usd || '',
         thinking: cfg.thinking || 'off',
+        can_use_browser: cfg.can_use_browser ?? false,
+        can_spawn: cfg.can_spawn ?? false,
+        can_manage_cron: cfg.can_manage_cron ?? false,
         allowed_credentials: credsStr,
         _credMode: credMode,
       };
@@ -2016,11 +2019,17 @@ function dashboard() {
       if (this.editForm.thinking !== undefined && this.editForm.thinking !== (cfg.thinking || 'off')) {
         body.thinking = this.editForm.thinking;
       }
-      // Handle allowed_credentials via the permissions endpoint
+      // Handle allowed_credentials + capability flags via the permissions endpoint
       const newCreds = (this.editForm.allowed_credentials || '').split(',').map(s => s.trim()).filter(Boolean);
       const oldCreds = cfg.allowed_credentials || [];
       const credsChanged = JSON.stringify(newCreds) !== JSON.stringify(oldCreds);
-      if (Object.keys(body).length === 0 && !credsChanged) {
+      const permBody = {};
+      if (credsChanged) permBody.allowed_credentials = newCreds;
+      for (const flag of ['can_use_browser', 'can_spawn', 'can_manage_cron']) {
+        if (this.editForm[flag] !== (cfg[flag] ?? false)) permBody[flag] = this.editForm[flag];
+      }
+      const permsChanged = Object.keys(permBody).length > 0;
+      if (Object.keys(body).length === 0 && !permsChanged) {
         this.cancelConfigEdit();
         return;
       }
@@ -2041,20 +2050,18 @@ function dashboard() {
             return;
           }
         }
-        if (credsChanged) {
+        if (permsChanged) {
           const permResp = await fetch(`${window.__config.apiBase}/agents/${agentId}/permissions`, {
             method: 'PUT', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ allowed_credentials: newCreds }),
+            body: JSON.stringify(permBody),
           });
           if (permResp.ok) {
-            allUpdated.push('allowed_credentials');
+            const permResult = await permResp.json();
+            allUpdated.push(...permResult.updated);
           } else {
             const err = await permResp.json();
             this.showToast(`Error updating permissions: ${err.detail || 'Update failed'}`);
           }
-        }
-        if (credsChanged && !configResult?.restart_required) {
-          this.showToast(`Credentials updated for ${agentId} — restart may be needed`);
         }
         if (configResult && configResult.restart_required) {
           this.showToast(`Updated: ${allUpdated.join(', ')} — restarting ${agentId}...`);

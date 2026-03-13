@@ -1473,6 +1473,26 @@
                           <div class="text-sm font-mono" :class="(agentConfigs[selectedAgent]?.thinking || 'off') !== 'off' ? 'text-indigo-400' : 'text-gray-500'" x-text="(agentConfigs[selectedAgent]?.thinking || 'off').charAt(0).toUpperCase() + (agentConfigs[selectedAgent]?.thinking || 'off').slice(1)"></div>
                         </div>
                         <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
+                          <div class="text-xs text-gray-500 mb-1">Capabilities</div>
+                          <div class="flex flex-wrap gap-2">
+                            <span class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded"
+                              :class="agentConfigs[selectedAgent]?.can_use_browser ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'">
+                              <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_use_browser ? 'bg-indigo-400' : 'bg-gray-600'"></span>
+                              Browser
+                            </span>
+                            <span class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded"
+                              :class="agentConfigs[selectedAgent]?.can_spawn ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'">
+                              <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_spawn ? 'bg-indigo-400' : 'bg-gray-600'"></span>
+                              Spawn Agents
+                            </span>
+                            <span class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded"
+                              :class="agentConfigs[selectedAgent]?.can_manage_cron ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'">
+                              <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_manage_cron ? 'bg-indigo-400' : 'bg-gray-600'"></span>
+                              Cron Jobs
+                            </span>
+                          </div>
+                        </div>
+                        <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
                           <div class="text-xs text-gray-500 mb-1">Credential Access</div>
                           <div class="text-sm text-gray-200 font-mono mb-2">
                             Pattern: <span x-text="(agentConfigs[selectedAgent]?.allowed_credentials || []).join(', ') || 'none'" :class="(agentConfigs[selectedAgent]?.allowed_credentials || []).length ? 'text-indigo-400' : 'text-gray-500'"></span>
@@ -1605,6 +1625,38 @@
                             <template x-if="thinkingOptionsForModel(editForm.model).length === 0">
                               <div class="dash-input w-full text-gray-500 cursor-not-allowed">Not supported for this model</div>
                             </template>
+                          </div>
+                          <div class="md:col-span-2">
+                            <label class="text-xs text-gray-500 mb-1.5 block">Capabilities</label>
+                            <div class="flex flex-wrap gap-4">
+                              <label class="flex items-center gap-2 cursor-pointer">
+                                <button type="button" @click="editForm.can_use_browser = !editForm.can_use_browser"
+                                  class="relative inline-flex w-7 h-4 rounded-full transition-colors flex-shrink-0"
+                                  :class="editForm.can_use_browser ? 'bg-indigo-600' : 'bg-gray-700'">
+                                  <span class="absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform"
+                                    :class="editForm.can_use_browser ? 'translate-x-3' : ''"></span>
+                                </button>
+                                <span class="text-xs" :class="editForm.can_use_browser ? 'text-gray-200' : 'text-gray-500'">Browser</span>
+                              </label>
+                              <label class="flex items-center gap-2 cursor-pointer">
+                                <button type="button" @click="editForm.can_spawn = !editForm.can_spawn"
+                                  class="relative inline-flex w-7 h-4 rounded-full transition-colors flex-shrink-0"
+                                  :class="editForm.can_spawn ? 'bg-indigo-600' : 'bg-gray-700'">
+                                  <span class="absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform"
+                                    :class="editForm.can_spawn ? 'translate-x-3' : ''"></span>
+                                </button>
+                                <span class="text-xs" :class="editForm.can_spawn ? 'text-gray-200' : 'text-gray-500'">Spawn Agents</span>
+                              </label>
+                              <label class="flex items-center gap-2 cursor-pointer">
+                                <button type="button" @click="editForm.can_manage_cron = !editForm.can_manage_cron"
+                                  class="relative inline-flex w-7 h-4 rounded-full transition-colors flex-shrink-0"
+                                  :class="editForm.can_manage_cron ? 'bg-indigo-600' : 'bg-gray-700'">
+                                  <span class="absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform"
+                                    :class="editForm.can_manage_cron ? 'translate-x-3' : ''"></span>
+                                </button>
+                                <span class="text-xs" :class="editForm.can_manage_cron ? 'text-gray-200' : 'text-gray-500'">Cron Jobs</span>
+                              </label>
+                            </div>
                           </div>
                           <div class="md:col-span-2">
                             <label class="text-xs text-gray-500 mb-1.5 block">Credential Access</label>
