@@ -2009,6 +2009,7 @@ class TestSnapshotDisabledField:
                 {"role": "button", "name": "Post", "disabled": True},
             ],
         })
+        inst.page.query_selector_all = AsyncMock(return_value=[])
         inst.page.url = "https://x.com"
         inst.page.title = AsyncMock(return_value="X")
         inst.refs = {}
@@ -2039,6 +2040,7 @@ class TestSnapshotDisabledField:
                 {"role": "button", "name": "Submit"},
             ],
         })
+        inst.page.query_selector_all = AsyncMock(return_value=[])
         inst.page.url = "https://example.com"
         inst.page.title = AsyncMock(return_value="Example")
         inst.refs = {}
@@ -2798,10 +2800,11 @@ class TestDialogScoping:
                 ]},
             ],
         }
-        # snapshot(root=modal_el) returns None — simulating Camoufox quirk
+        # Both Playwright and JS scoped snapshots return None
         mock_page = AsyncMock()
         mock_modal_el = AsyncMock()
         mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_modal_el.evaluate = AsyncMock(return_value=None)
         mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
 
         async def _snapshot(root=None):
@@ -2826,7 +2829,7 @@ class TestDialogScoping:
 
     @pytest.mark.asyncio
     async def test_snapshot_fallback_when_scoped_snapshot_raises(self):
-        """If snapshot(root=modal) throws, fall back to full tree."""
+        """If both Playwright and JS scoped snapshots fail, fall back to full tree."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
@@ -2839,6 +2842,10 @@ class TestDialogScoping:
         mock_page = AsyncMock()
         mock_modal_el = AsyncMock()
         mock_modal_el.is_visible = AsyncMock(return_value=True)
+        # JS fallback for scoped snapshot also fails
+        mock_modal_el.evaluate = AsyncMock(
+            side_effect=RuntimeError("evaluate failed")
+        )
         mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
 
         async def _snapshot(root=None):
@@ -2943,6 +2950,169 @@ class TestDialogScoping:
         yes_refs = [r for r in refs.values() if r["name"] == "Yes"]
         assert len(yes_refs) == 1
         assert yes_refs[0]["index"] == 0
+
+
+# ── JS a11y tree fallback tests ──────────────────────────────────────────
+
+
+class TestJsA11yTreeFallback:
+    """When page.accessibility is unavailable, snapshot uses JS-based DOM walk."""
+
+    @pytest.mark.asyncio
+    async def test_fallback_on_attribute_error(self):
+        """AttributeError on page.accessibility.snapshot triggers JS fallback."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        # Simulate Camoufox where accessibility.snapshot() raises AttributeError
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(
+            side_effect=AttributeError("'Page' object has no attribute 'accessibility'")
+        )
+        # JS fallback returns a tree via page.evaluate()
+        js_tree = {
+            "role": "WebArea", "name": "Test Page",
+            "children": [
+                {"role": "button", "name": "Submit"},
+                {"role": "link", "name": "Home"},
+            ],
+        }
+        mock_page.evaluate = AsyncMock(return_value=js_tree)
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+        assert mgr._js_snapshot_mode is False
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        refs = result["data"]["refs"]
+        assert len(refs) == 2
+        assert refs["e0"]["name"] == "Submit"
+        assert refs["e1"]["name"] == "Home"
+        assert mgr._js_snapshot_mode is True
+
+    @pytest.mark.asyncio
+    async def test_js_mode_persists(self):
+        """Once JS mode is enabled, subsequent snapshots skip Playwright API."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr._js_snapshot_mode = True  # Already switched
+
+        mock_page = AsyncMock()
+        js_tree = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "textbox", "name": "Search"}],
+        }
+        mock_page.evaluate = AsyncMock(return_value=js_tree)
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        assert len(result["data"]["refs"]) == 1
+        # Should NOT have tried page.accessibility at all
+        assert not hasattr(mock_page, 'accessibility') or \
+            not mock_page.accessibility.snapshot.called
+
+    @pytest.mark.asyncio
+    async def test_js_fallback_scoped_to_dialog(self):
+        """In JS mode, scoped snapshots use element.evaluate()."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr._js_snapshot_mode = True
+
+        full_tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Post", "disabled": True},
+                {"role": "link", "name": "Home"},
+            ],
+        }
+        dialog_tree = {
+            "role": "dialog", "name": "Compose",
+            "children": [
+                {"role": "textbox", "name": "What is happening?!"},
+                {"role": "button", "name": "Post"},
+            ],
+        }
+
+        mock_page = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value=full_tree)
+
+        mock_modal_el = AsyncMock()
+        mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_modal_el.evaluate = AsyncMock(return_value=dialog_tree)
+        mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        snap = result["data"]["snapshot"]
+        refs = result["data"]["refs"]
+
+        assert "Modal dialog is open" in snap
+        assert inst.dialog_active is True
+        # Only dialog elements — sidebar "Post" and "Home" excluded
+        post_refs = [r for r in refs.values() if r["name"] == "Post"]
+        assert len(post_refs) == 1
+        assert post_refs[0].get("disabled") is not True
+        assert "Home" not in snap
+
+    @pytest.mark.asyncio
+    async def test_js_fallback_empty_returns_empty_page(self):
+        """When JS fallback returns None, snapshot returns empty page."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr._js_snapshot_mode = True
+
+        mock_page = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value=None)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        assert result["data"]["snapshot"] == "(empty page)"
+        assert result["data"]["refs"] == {}
+
+    @pytest.mark.asyncio
+    async def test_js_tree_none_role_flattened(self):
+        """Nodes with role='none' (non-role containers) are walked for children."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr._js_snapshot_mode = True
+
+        # JS tree has 'none' role wrapper (non-role div containing buttons)
+        js_tree = {
+            "role": "WebArea", "name": "",
+            "children": [{
+                "role": "none", "name": "",
+                "children": [
+                    {"role": "button", "name": "Save"},
+                    {"role": "button", "name": "Cancel"},
+                ],
+            }],
+        }
+        mock_page = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value=js_tree)
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        refs = result["data"]["refs"]
+        # Both buttons should be found despite 'none' wrapper
+        assert len(refs) == 2
+        names = {r["name"] for r in refs.values()}
+        assert names == {"Save", "Cancel"}
 
 
 # ── Speed factor tests ────────────────────────────────────────────────────
