@@ -218,13 +218,13 @@ function dashboard() {
     cmdPaletteIdx: 0,
 
     // System tab — sub-navigation
-    systemTab: 'activity',
+    systemTab: 'costs',
     systemTabs: [
-      { id: 'activity', label: 'Activity' },
-      { id: 'automation', label: 'Automation' },
       { id: 'costs', label: 'Costs' },
-      { id: 'integrations', label: 'Integrations' },
-      { id: 'uploads', label: 'Uploads' },
+      { id: 'activity', label: 'Activity' },
+      { id: 'schedules', label: 'Schedules' },
+      { id: 'connections', label: 'Connections' },
+      { id: 'storage', label: 'Storage' },
     ],
 
     // System tab — collapsible infrastructure
@@ -345,7 +345,7 @@ function dashboard() {
           if (this.activityView === 'logs') return '/system/activity/logs';
           return '/system/activity';
         }
-        return '/system/' + (this.systemTab || 'activity');
+        return '/system/' + (this.systemTab || 'costs');
       }
       return '/';
     },
@@ -369,7 +369,7 @@ function dashboard() {
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
+      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'costs', agentId: null, identityTab: 'config' };
       if (!clean) return route;
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
@@ -386,9 +386,12 @@ function dashboard() {
       else if (clean.startsWith('system')) {
         route.tab = 'system';
         const sub = clean.split('/')[1];
-        if (sub && ['activity', 'costs', 'automation', 'integrations', 'uploads'].includes(sub)) {
-          route.systemTab = sub;
-          if (sub === 'activity') {
+        // Backward compat for old URLs
+        const _tabAliases = { automation: 'schedules', integrations: 'connections', uploads: 'storage' };
+        const resolved = _tabAliases[sub] || sub;
+        if (resolved && ['activity', 'costs', 'schedules', 'connections', 'storage'].includes(resolved)) {
+          route.systemTab = resolved;
+          if (resolved === 'activity') {
             const view = clean.split('/')[2];
             if (view === 'events') route.activityView = 'events';
             else if (view === 'logs') route.activityView = 'logs';
@@ -438,7 +441,7 @@ function dashboard() {
             if (this.systemTab !== route.systemTab) {
               if (this.systemTab === 'activity') this._stopActivityRefresh();
               this.systemTab = route.systemTab;
-              if (route.systemTab === 'integrations') {
+              if (route.systemTab === 'connections') {
                 this.fetchChannels(); this.fetchWebhooks(); this.fetchSettings();
               }
               if (route.systemTab === 'activity') {
@@ -766,7 +769,7 @@ function dashboard() {
 
       // Deep link restoration: parse initial URL and apply route
       const initRoute = this._parsePath(window.location.pathname);
-      const isDeepLink = initRoute.agentId || initRoute.tab !== 'fleet' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'activity';
+      const isDeepLink = initRoute.agentId || initRoute.tab !== 'fleet' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
       if (isDeepLink) {
         this.$nextTick(() => {
           this._applyRoute(initRoute);
@@ -885,7 +888,7 @@ function dashboard() {
         this.fetchStorage();
         this.fetchCronJobs();
         this.fetchWorkflows();
-        if (this.systemTab === 'integrations') {
+        if (this.systemTab === 'connections') {
           this.fetchWebhooks();
           this.fetchChannels();
         }
@@ -3102,7 +3105,7 @@ function dashboard() {
       this.detailAgent = null;
       this.cronFormAgent = agent;
       this.showCronForm = true;
-      this.systemTab = 'automation';
+      this.systemTab = 'schedules';
       this.switchTab('system');
     },
 
@@ -3174,7 +3177,7 @@ function dashboard() {
       // Match tabs with keywords
       const tabKeywords = {
         fleet: ['agents', 'fleet', 'cards', 'project'],
-        system: ['system', 'costs', 'cron', 'automation', 'credentials', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows'],
+        system: ['system', 'costs', 'cron', 'schedules', 'automation', 'credentials', 'connections', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows', 'storage', 'uploads', 'disk'],
       };
       for (const [tabId, keywords] of Object.entries(tabKeywords)) {
         const tab = this.tabs.find(t => t.id === tabId);
@@ -3213,28 +3216,29 @@ function dashboard() {
         const agent = (job.agent || '').toLowerCase();
         const message = (job.message || '').toLowerCase();
         if (id.includes(q) || agent.includes(q) || message.includes(q)) {
-          results.push({ type: 'cron', label: job.id, desc: `${job.agent} · ${job.schedule}`, action: () => { this.systemTab = 'automation'; this.switchTab('system'); } });
+          results.push({ type: 'cron', label: job.id, desc: `${job.agent} · ${job.schedule}`, action: () => { this.systemTab = 'schedules'; this.switchTab('system'); } });
         }
       }
       // Match workflows
       for (const wf of this.workflows || []) {
         if ((wf.name || '').toLowerCase().includes(q)) {
-          results.push({ type: 'action', label: `Run ${wf.name}`, desc: `Workflow · ${wf.steps} steps`, action: () => { this.systemTab = 'automation'; this.switchTab('system'); this.runWorkflow(wf.name); } });
+          results.push({ type: 'action', label: `Run ${wf.name}`, desc: `Workflow · ${wf.steps} steps`, action: () => { this.systemTab = 'schedules'; this.switchTab('system'); this.runWorkflow(wf.name); } });
         }
       }
       // Match credentials
       for (const name of this.settingsData?.credentials?.names || []) {
         if (name.toLowerCase().includes(q)) {
-          results.push({ type: 'action', label: name, desc: 'Credential', action: () => { this.systemTab = 'integrations'; this.switchTab('system'); } });
+          results.push({ type: 'action', label: name, desc: 'Credential', action: () => { this.systemTab = 'connections'; this.switchTab('system'); } });
         }
       }
       // System quick actions
       const sysActions = [
         { label: 'Activity', desc: 'Traces, events, and logs', keywords: ['activity', 'traces', 'events'], action: () => { this.systemTab = 'activity'; this.switchTab('system'); } },
         { label: 'View Logs', desc: 'Open runtime logs', keywords: ['logs', 'runtime', 'debug'], action: () => { this.systemTab = 'activity'; this.switchTab('system'); this.setActivityView('logs'); } },
-        { label: 'Add Credential', desc: 'Add new API key', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.showCredForm = true; } },
-        { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchWebhooks(); } },
-        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchChannels(); } },
+        { label: 'Add Credential', desc: 'Add new API key', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.systemTab = 'connections'; this.switchTab('system'); this.showCredForm = true; } },
+        { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.systemTab = 'connections'; this.switchTab('system'); this.fetchWebhooks(); } },
+        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'connections'; this.switchTab('system'); this.fetchChannels(); } },
+        { label: 'Model Pricing', desc: 'Token costs by model', keywords: ['model', 'pricing', 'tokens'], action: () => { this.systemTab = 'costs'; this.switchTab('system'); } },
       ];
       for (const act of sysActions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
