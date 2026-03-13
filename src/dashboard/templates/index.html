@@ -2013,7 +2013,7 @@
         <!-- System sub-tab bar -->
         <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
           <template x-for="st in systemTabs" :key="st.id">
-            <button @click="if (systemTab === 'activity' && st.id !== 'activity') _stopActivityRefresh(); systemTab = st.id; _pushUrl(false); if (st.id === 'connections') { fetchChannels(); fetchWebhooks(); fetchSettings(); } if (st.id === 'storage') { fetchUploads(); fetchStorage(); } if (st.id === 'activity') { unreadEvents = 0; _lastSeenEventCount = events.length; if (activityView === 'traces') { fetchTraces(); _startActivityRefresh(); } else if (activityView === 'logs') { fetchSystemLogs(); } }"
+            <button @click="if (systemTab === 'activity' && st.id !== 'activity') _stopActivityRefresh(); systemTab = st.id; _pushUrl(false); if (st.id === 'connections') { fetchChannels(); fetchWebhooks(); fetchSettings(); } if (st.id === 'storage') { fetchUploads(); fetchStorage(); } if (st.id === 'settings') { fetchBrowserSettings(); } if (st.id === 'activity') { unreadEvents = 0; _lastSeenEventCount = events.length; if (activityView === 'traces') { fetchTraces(); _startActivityRefresh(); } else if (activityView === 'logs') { fetchSystemLogs(); } }"
               class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative"
               :class="systemTab === st.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
               <span x-text="st.label"></span>
@@ -2888,6 +2888,76 @@
           </div>
         </div>
         </div><!-- /activity sub-tab -->
+
+        <!-- ═══ SETTINGS SUB-TAB ═══ -->
+        <div x-show="systemTab === 'settings'" x-init="if (systemTab === 'settings') { fetchBrowserSettings(); }">
+
+          <!-- Browser section -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex items-center gap-2 mb-4">
+              <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/></svg>
+              <h3 class="text-sm font-medium text-gray-200">Browser</h3>
+            </div>
+
+            <!-- Speed control -->
+            <div class="space-y-3">
+              <div class="flex items-center justify-between">
+                <div>
+                  <div class="text-xs text-gray-400">Interaction Speed</div>
+                  <div class="text-[10px] text-gray-600 mt-0.5">Controls typing, clicking, and scrolling delays</div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-xs font-medium px-2 py-0.5 rounded-full"
+                    :class="{
+                      'bg-yellow-500/10 text-yellow-400': browserSpeedFactor <= 0.6,
+                      'bg-gray-700 text-gray-300': browserSpeedFactor > 0.6 && browserSpeedFactor <= 1.2,
+                      'bg-indigo-500/10 text-indigo-400': browserSpeedFactor > 1.2
+                    }"
+                    x-text="browserSpeedLabel"></span>
+                  <span class="text-xs text-gray-500 font-mono w-10 text-right" x-text="browserSpeedFactor.toFixed(2) + 'x'"></span>
+                </div>
+              </div>
+
+              <div class="flex items-center gap-3">
+                <span class="text-[10px] text-gray-600 w-6">Fast</span>
+                <input type="range" min="0.25" max="3.0" step="0.05"
+                  :value="browserSpeedFactor"
+                  @input="saveBrowserSpeed($event.target.value)"
+                  class="flex-1 h-1.5 bg-gray-700 rounded-full appearance-none cursor-pointer
+                    [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5
+                    [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-indigo-500 [&::-webkit-slider-thumb]:cursor-pointer
+                    [&::-webkit-slider-thumb]:hover:bg-indigo-400 [&::-webkit-slider-thumb]:transition-colors
+                    [&::-moz-range-thumb]:w-3.5 [&::-moz-range-thumb]:h-3.5 [&::-moz-range-thumb]:rounded-full
+                    [&::-moz-range-thumb]:bg-indigo-500 [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:cursor-pointer">
+                <span class="text-[10px] text-gray-600 w-10 text-right">Careful</span>
+              </div>
+
+              <!-- Preset buttons -->
+              <div class="flex gap-2 pt-1">
+                <template x-for="preset in [
+                  { value: 0.25, label: 'Lightning' },
+                  { value: 0.5, label: 'Fast' },
+                  { value: 1.0, label: 'Normal' },
+                  { value: 2.0, label: 'Careful' },
+                  { value: 3.0, label: 'Stealth' }
+                ]" :key="preset.value">
+                  <button @click="saveBrowserSpeed(preset.value)"
+                    class="px-2 py-1 text-[10px] rounded transition-all"
+                    :class="Math.abs(browserSpeedFactor - preset.value) < 0.05
+                      ? 'bg-indigo-500/20 text-indigo-300 ring-1 ring-indigo-500/30'
+                      : 'bg-gray-800 text-gray-500 hover:text-gray-300 hover:bg-gray-700'"
+                    x-text="preset.label"></button>
+                </template>
+              </div>
+
+              <p class="text-[10px] text-gray-600 leading-relaxed pt-1">
+                Lower values make the browser faster but less human-like. Higher values add more natural variance
+                to typing rhythm, click delays, and scroll pauses for better stealth on sites with bot detection.
+              </p>
+            </div>
+          </div>
+
+        </div><!-- /settings sub-tab -->
 
       </div>
 

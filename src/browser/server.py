@@ -184,6 +184,27 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             agent_id, tab_index=body.get("tab_index", -1),
         )
 
+    # ── Settings ───────────────────────────────────────────────────────────
+
+    @app.get("/browser/settings")
+    async def get_settings(request: Request):
+        """Return current browser speed settings."""
+        _verify_auth(request)
+        from src.browser.timing import get_speed_factor
+        return {"speed_factor": get_speed_factor()}
+
+    @app.post("/browser/settings")
+    async def update_settings(request: Request):
+        """Update browser speed settings at runtime."""
+        _verify_auth(request)
+        body = await request.json()
+        speed = body.get("speed_factor")
+        if speed is not None:
+            from src.browser.timing import set_speed_factor
+            set_speed_factor(float(speed))
+        from src.browser.timing import get_speed_factor
+        return {"speed_factor": get_speed_factor()}
+
     # ── User uploads file serving ─────────────────────────────────────────
     # Serves files from /app/uploads (user-managed, read-only mount).
     # No auth required: this port is not internet-exposed and all content

@@ -150,6 +150,11 @@ function dashboard() {
     // Settings
     settingsData: null,
 
+    // Browser settings
+    browserSpeedFactor: 1.0,
+    browserSettingsLoading: false,
+    _browserSettingsDebounce: null,
+
     // Storage
     storageData: null,
 
@@ -225,6 +230,7 @@ function dashboard() {
       { id: 'schedules', label: 'Schedules' },
       { id: 'connections', label: 'Connections' },
       { id: 'storage', label: 'Storage' },
+      { id: 'settings', label: 'Settings' },
     ],
 
     // System tab — collapsible infrastructure
@@ -389,7 +395,7 @@ function dashboard() {
         // Backward compat for old URLs
         const _tabAliases = { automation: 'schedules', integrations: 'connections', uploads: 'storage' };
         const resolved = _tabAliases[sub] || sub;
-        if (resolved && ['activity', 'costs', 'schedules', 'connections', 'storage'].includes(resolved)) {
+        if (resolved && ['activity', 'costs', 'schedules', 'connections', 'storage', 'settings'].includes(resolved)) {
           route.systemTab = resolved;
           if (resolved === 'activity') {
             const view = clean.split('/')[2];
@@ -2645,6 +2651,46 @@ function dashboard() {
       } catch (e) { console.warn('fetchSettings failed:', e); }
     },
 
+    // ── Browser settings ─────────────────────────────────
+
+    async fetchBrowserSettings() {
+      this.browserSettingsLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/browser-settings`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.browserSpeedFactor = data.speed_factor ?? 1.0;
+        }
+      } catch (e) { console.warn('fetchBrowserSettings failed:', e); }
+      this.browserSettingsLoading = false;
+    },
+
+    saveBrowserSpeed(value) {
+      this.browserSpeedFactor = parseFloat(value);
+      // Debounce save — user may be dragging the slider
+      if (this._browserSettingsDebounce) clearTimeout(this._browserSettingsDebounce);
+      this._browserSettingsDebounce = setTimeout(async () => {
+        try {
+          await fetch(`${window.__config.apiBase}/browser-settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ speed_factor: this.browserSpeedFactor }),
+          });
+        } catch (e) { console.warn('saveBrowserSpeed failed:', e); }
+      }, 300);
+    },
+
+    get browserSpeedLabel() {
+      const f = this.browserSpeedFactor;
+      if (f <= 0.35) return 'Lightning';
+      if (f <= 0.6) return 'Fast';
+      if (f <= 0.8) return 'Quick';
+      if (f <= 1.2) return 'Normal';
+      if (f <= 1.8) return 'Careful';
+      if (f <= 2.5) return 'Cautious';
+      return 'Stealth';
+    },
+
     async fetchStorage() {
       try {
         const resp = await fetch(`${window.__config.apiBase}/storage`);
@@ -3239,6 +3285,7 @@ function dashboard() {
         { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.systemTab = 'connections'; this.switchTab('system'); this.fetchWebhooks(); } },
         { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'connections'; this.switchTab('system'); this.fetchChannels(); } },
         { label: 'Model Pricing', desc: 'Token costs by model', keywords: ['model', 'pricing', 'tokens'], action: () => { this.systemTab = 'costs'; this.switchTab('system'); } },
+        { label: 'Browser Settings', desc: 'Browser speed and timing', keywords: ['browser', 'speed', 'settings', 'timing', 'stealth'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchBrowserSettings(); } },
       ];
       for (const act of sysActions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {

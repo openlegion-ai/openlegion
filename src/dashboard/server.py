@@ -1772,6 +1772,85 @@ def create_dashboard_router(
             },
         }
 
+    # ── Browser settings ─────────────────────────────────────────
+
+    _SETTINGS_PATH = Path("config/settings.json")
+
+    def _load_settings() -> dict:
+        """Load persisted settings from config/settings.json."""
+        if _SETTINGS_PATH.exists():
+            try:
+                return json.loads(_SETTINGS_PATH.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {}
+
+    def _save_settings(settings: dict) -> None:
+        """Persist settings to config/settings.json (atomic write)."""
+        import tempfile
+        _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        content = json.dumps(settings, indent=2) + "\n"
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(_SETTINGS_PATH.parent), suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
+        try:
+            Path(tmp_path).replace(_SETTINGS_PATH)
+        except Exception:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
+
+    @api_router.get("/api/browser-settings")
+    async def api_get_browser_settings() -> dict:
+        """Return saved browser speed settings."""
+        settings = _load_settings()
+        return {"speed_factor": settings.get("browser_speed_factor", 1.0)}
+
+    @api_router.post("/api/browser-settings")
+    async def api_set_browser_settings(request: Request) -> dict:
+        """Save browser speed settings and push to browser service."""
+        body = await request.json()
+        speed = body.get("speed_factor")
+        if speed is None:
+            raise HTTPException(400, "speed_factor is required")
+        try:
+            speed = float(speed)
+        except (ValueError, TypeError):
+            raise HTTPException(400, "speed_factor must be a number")
+        if speed < 0.25 or speed > 3.0:
+            raise HTTPException(400, "speed_factor must be between 0.25 and 3.0")
+
+        # Persist to config file
+        settings = _load_settings()
+        settings["browser_speed_factor"] = speed
+        _save_settings(settings)
+
+        # Push to browser service immediately
+        if runtime and hasattr(runtime, 'browser_service_url') and runtime.browser_service_url:
+            try:
+                browser_auth = getattr(runtime, 'browser_auth_token', '')
+                headers = {}
+                if browser_auth:
+                    headers["Authorization"] = f"Bearer {browser_auth}"
+                await _dashboard_browser_client.post(
+                    f"{runtime.browser_service_url}/browser/settings",
+                    json={"speed_factor": speed},
+                    headers=headers,
+                )
+            except Exception as e:
+                logger.debug("Failed to push browser settings: %s", e)
+
+        return {"speed_factor": speed}
+
     # ── Storage ────────────────────────────────────────────────
 
     _STORAGE_SKIP_DIRS = {"src", ".git", ".venv", "venv", "node_modules", ".claude"}

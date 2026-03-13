@@ -2373,6 +2373,7 @@ class TestSwitchTab:
         assert result["data"]["tabs"][0]["active"] is False
         assert inst.page == page2
         assert inst.refs == {}  # Refs cleared on switch
+        assert inst.dialog_active is False  # Dialog state cleared on switch
         page2.bring_to_front.assert_called_once()
 
     @pytest.mark.asyncio
@@ -2476,6 +2477,433 @@ class TestCaptchaDetection:
 
         assert result["success"] is True
         assert result["data"]["captcha_found"] is False
+
+
+# ── Dialog scoping tests ──────────────────────────────────────────────────
+
+
+class TestDialogScoping:
+    """When a modal dialog is open, snapshot and locators scope to dialog only.
+
+    This prevents agents from seeing/clicking elements behind the modal overlay
+    (e.g. X's sidebar "Post" button behind the compose modal).
+    """
+
+    @pytest.mark.asyncio
+    async def test_snapshot_scopes_to_dialog(self):
+        """Elements outside the dialog should not appear in snapshot."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        tree = {
+            "role": "WebArea",
+            "name": "",
+            "children": [
+                {"role": "button", "name": "Post", "disabled": True},  # sidebar
+                {"role": "link", "name": "Home"},
+                {
+                    "role": "dialog",
+                    "name": "Create post",
+                    "children": [
+                        {"role": "textbox", "name": "What is happening?!"},
+                        {"role": "button", "name": "Post"},  # modal button
+                    ],
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        snap = result["data"]["snapshot"]
+        refs = result["data"]["refs"]
+
+        # Dialog header should be present
+        assert "Modal dialog is open" in snap
+        # Dialog context element should appear
+        assert "Create post" in snap
+        # Elements inside the dialog should appear
+        assert "What is happening?!" in snap
+        # The modal Post button should appear with index 0 (first in dialog scope)
+        post_refs = [r for r in refs.values() if r["name"] == "Post"]
+        assert len(post_refs) == 1
+        assert post_refs[0]["index"] == 0
+        # Elements outside the dialog should NOT appear
+        assert "Home" not in snap
+        # The sidebar Post button should NOT appear
+        sidebar_post = [r for r in refs.values()
+                        if r["name"] == "Post" and r.get("disabled")]
+        assert len(sidebar_post) == 0
+        # dialog_active flag should be set
+        assert inst.dialog_active is True
+
+    @pytest.mark.asyncio
+    async def test_snapshot_no_dialog_walks_all(self):
+        """Without a dialog, all elements should appear as before."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        tree = {
+            "role": "WebArea",
+            "name": "",
+            "children": [
+                {"role": "button", "name": "Post"},
+                {"role": "link", "name": "Home"},
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        refs = result["data"]["refs"]
+        assert len(refs) == 2
+        assert inst.dialog_active is False
+        assert "Modal dialog" not in result["data"]["snapshot"]
+
+    @pytest.mark.asyncio
+    async def test_snapshot_alertdialog_treated_as_modal(self):
+        """alertdialog role should also trigger dialog scoping."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        tree = {
+            "role": "WebArea",
+            "name": "",
+            "children": [
+                {"role": "button", "name": "Background"},
+                {
+                    "role": "alertdialog",
+                    "name": "Confirm",
+                    "children": [
+                        {"role": "button", "name": "OK"},
+                        {"role": "button", "name": "Cancel"},
+                    ],
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        refs = result["data"]["refs"]
+        assert inst.dialog_active is True
+        # Only alertdialog elements: alertdialog + OK + Cancel = 3
+        assert len(refs) == 3
+        assert "Background" not in result["data"]["snapshot"]
+
+    @pytest.mark.asyncio
+    async def test_snapshot_dialog_clears_flag_when_dismissed(self):
+        """After dialog is dismissed, next snapshot should clear dialog_active."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+
+        # First snapshot: dialog open
+        tree_with_dialog = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "dialog", "name": "Modal", "children": [
+                    {"role": "button", "name": "Close"},
+                ]},
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_with_dialog)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        await mgr.snapshot("a1")
+        assert inst.dialog_active is True
+
+        # Second snapshot: dialog dismissed
+        tree_no_dialog = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Post"},
+            ],
+        }
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_no_dialog)
+        await mgr.snapshot("a1")
+        assert inst.dialog_active is False
+        assert len(inst.refs) == 1  # Just the Post button
+
+    @pytest.mark.asyncio
+    async def test_snapshot_dialog_duplicate_indexing(self):
+        """Occurrence indices should be counted within dialog scope only.
+
+        On X/Twitter, the sidebar "Post" button (index 0 in full page scope)
+        must not affect the modal "Post" button's index within the dialog.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                # These are behind the modal — should be excluded
+                {"role": "button", "name": "Post"},
+                {"role": "textbox", "name": "Search"},
+                {
+                    "role": "dialog", "name": "Compose",
+                    "children": [
+                        {"role": "textbox", "name": "Tweet text"},
+                        {"role": "button", "name": "Post"},
+                    ],
+                },
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        refs = result["data"]["refs"]
+
+        # Only dialog elements: dialog + textbox + button = 3
+        assert len(refs) == 3
+        # The Post button inside the dialog should have index 0 (not 1)
+        post_ref = [r for r in refs.values()
+                    if r["role"] == "button" and r["name"] == "Post"]
+        assert len(post_ref) == 1
+        assert post_ref[0]["index"] == 0
+
+    @pytest.mark.asyncio
+    async def test_locator_from_ref_scopes_to_dialog(self):
+        """When dialog_active is True, locator should search within dialog elements."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        mock_dialog_locator = MagicMock()
+        mock_role_locator = MagicMock()
+        mock_page.locator.return_value = mock_dialog_locator
+        mock_dialog_locator.get_by_role.return_value = mock_role_locator
+        mock_role_locator.nth.return_value = mock_role_locator
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.dialog_active = True
+        inst.refs = {"e0": {"role": "button", "name": "Post", "index": 0}}
+
+        locator = mgr._locator_from_ref(inst, "e0")
+
+        # Should scope to dialog elements
+        mock_page.locator.assert_called_once_with(
+            '[role="dialog"], [role="alertdialog"], dialog[open]'
+        )
+        # Should search for the button within the dialog scope
+        mock_dialog_locator.get_by_role.assert_called_once_with("button", name="Post")
+        mock_role_locator.nth.assert_called_once_with(0)
+        assert locator is mock_role_locator.nth.return_value
+
+    @pytest.mark.asyncio
+    async def test_locator_from_ref_page_scope_when_no_dialog(self):
+        """When dialog_active is False, locator should search entire page."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        mock_role_locator = MagicMock()
+        mock_page.get_by_role.return_value = mock_role_locator
+        mock_role_locator.nth.return_value = mock_role_locator
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.dialog_active = False
+        inst.refs = {"e0": {"role": "button", "name": "Post", "index": 0}}
+
+        mgr._locator_from_ref(inst, "e0")
+
+        # Should NOT call page.locator() — searches page directly
+        mock_page.locator.assert_not_called()
+        mock_page.get_by_role.assert_called_once_with("button", name="Post")
+
+    @pytest.mark.asyncio
+    async def test_snapshot_nested_dialog(self):
+        """Dialog nested inside non-dialog containers should be found."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Outside"},
+                # Dialog wrapped in a generic container (React portals do this)
+                {"role": "generic", "name": "", "children": [
+                    {"role": "dialog", "name": "Nested", "children": [
+                        {"role": "button", "name": "Inside"},
+                    ]},
+                ]},
+            ],
+        }
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert inst.dialog_active is True
+        assert "Outside" not in result["data"]["snapshot"]
+        assert "Inside" in result["data"]["snapshot"]
+
+
+# ── Speed factor tests ────────────────────────────────────────────────────
+
+
+class TestSpeedFactor:
+    """Tests for the configurable browser speed factor in timing.py."""
+
+    def setup_method(self):
+        """Reset speed factor to default before each test."""
+        from src.browser.timing import set_speed_factor
+        set_speed_factor(1.0)
+
+    def teardown_method(self):
+        """Reset speed factor after each test to avoid leaking state."""
+        from src.browser.timing import set_speed_factor
+        set_speed_factor(1.0)
+
+    def test_default_speed_factor(self):
+        from src.browser.timing import get_speed_factor
+        assert get_speed_factor() == 1.0
+
+    def test_set_speed_factor(self):
+        from src.browser.timing import get_speed_factor, set_speed_factor
+        set_speed_factor(2.0)
+        assert get_speed_factor() == 2.0
+
+    def test_speed_factor_clamped_low(self):
+        from src.browser.timing import get_speed_factor, set_speed_factor
+        set_speed_factor(0.01)
+        assert get_speed_factor() == 0.25  # _SPEED_MIN
+
+    def test_speed_factor_clamped_high(self):
+        from src.browser.timing import get_speed_factor, set_speed_factor
+        set_speed_factor(99.0)
+        assert get_speed_factor() == 3.0  # _SPEED_MAX
+
+    def test_speed_factor_scales_action_delay(self):
+        """Doubling speed factor should roughly double the mean action delay."""
+        from src.browser.timing import action_delay, set_speed_factor
+        set_speed_factor(1.0)
+        baseline = [action_delay() for _ in range(2000)]
+        set_speed_factor(2.0)
+        scaled = [action_delay() for _ in range(2000)]
+        baseline_mean = sum(baseline) / len(baseline)
+        scaled_mean = sum(scaled) / len(scaled)
+        ratio = scaled_mean / baseline_mean
+        assert 1.6 <= ratio <= 2.4, f"Expected ~2.0x, got {ratio:.2f}x"
+
+    def test_speed_factor_scales_keystroke_delay(self):
+        """Keystroke delays should scale with the speed factor."""
+        from src.browser.timing import keystroke_delay, set_speed_factor
+        set_speed_factor(1.0)
+        baseline = [keystroke_delay("a") for _ in range(2000)]
+        set_speed_factor(0.5)
+        fast = [keystroke_delay("a") for _ in range(2000)]
+        baseline_mean = sum(baseline) / len(baseline)
+        fast_mean = sum(fast) / len(fast)
+        ratio = fast_mean / baseline_mean
+        assert 0.35 <= ratio <= 0.65, f"Expected ~0.5x, got {ratio:.2f}x"
+
+    def test_speed_factor_does_not_scale_scroll_increment(self):
+        """Scroll increment (pixels) should not change with speed factor."""
+        from src.browser.timing import scroll_increment, set_speed_factor
+        set_speed_factor(1.0)
+        baseline = [scroll_increment() for _ in range(2000)]
+        set_speed_factor(3.0)
+        slow = [scroll_increment() for _ in range(2000)]
+        baseline_mean = sum(baseline) / len(baseline)
+        slow_mean = sum(slow) / len(slow)
+        ratio = slow_mean / baseline_mean
+        assert 0.85 <= ratio <= 1.15, f"Expected ~1.0x, got {ratio:.2f}x"
+
+    def test_fast_speed_action_delay_range(self):
+        """At 0.25x speed, delays should be much smaller."""
+        from src.browser.timing import action_delay, set_speed_factor
+        set_speed_factor(0.25)
+        samples = [action_delay() for _ in range(500)]
+        mean = sum(samples) / len(samples)
+        assert mean < 0.15, f"Expected mean < 0.15 at 0.25x speed, got {mean:.3f}"
+
+    def test_careful_speed_action_delay_range(self):
+        """At 3.0x speed, delays should be much larger."""
+        from src.browser.timing import action_delay, set_speed_factor
+        set_speed_factor(3.0)
+        samples = [action_delay() for _ in range(500)]
+        mean = sum(samples) / len(samples)
+        assert mean > 0.6, f"Expected mean > 0.6 at 3.0x speed, got {mean:.3f}"
+
+
+# ── Browser settings endpoint tests ──────────────────────────────────────
+
+
+class TestBrowserSettingsEndpoint:
+    """Tests for GET/POST /browser/settings on the browser service."""
+
+    def setup_method(self):
+        from src.browser.timing import set_speed_factor
+        set_speed_factor(1.0)
+
+    def teardown_method(self):
+        from src.browser.timing import set_speed_factor
+        set_speed_factor(1.0)
+
+    def test_get_settings_default(self):
+        """GET /browser/settings should return default speed_factor=1.0."""
+        from src.browser.server import create_browser_app
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        app = create_browser_app(mgr)
+
+        from starlette.testclient import TestClient
+        client = TestClient(app)
+        resp = client.get("/browser/settings")
+        assert resp.status_code == 200
+        assert resp.json()["speed_factor"] == 1.0
+
+    def test_set_settings(self):
+        """POST /browser/settings should update the speed factor."""
+        from src.browser.server import create_browser_app
+        from src.browser.service import BrowserManager
+        from src.browser.timing import get_speed_factor
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        app = create_browser_app(mgr)
+
+        from starlette.testclient import TestClient
+        client = TestClient(app)
+        resp = client.post("/browser/settings", json={"speed_factor": 2.5})
+        assert resp.status_code == 200
+        assert resp.json()["speed_factor"] == 2.5
+        assert get_speed_factor() == 2.5
+
+    def test_set_settings_clamped(self):
+        """POST /browser/settings should clamp out-of-range values."""
+        from src.browser.server import create_browser_app
+        from src.browser.service import BrowserManager
+        from src.browser.timing import get_speed_factor
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        app = create_browser_app(mgr)
+
+        from starlette.testclient import TestClient
+        client = TestClient(app)
+        resp = client.post("/browser/settings", json={"speed_factor": 100.0})
+        assert resp.status_code == 200
+        assert resp.json()["speed_factor"] == 3.0  # clamped to max
+        assert get_speed_factor() == 3.0
 
 
 # ── Dead code removal verification ────────────────────────────────────────

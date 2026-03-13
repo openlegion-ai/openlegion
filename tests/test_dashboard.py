@@ -3059,3 +3059,113 @@ class TestDashboardChatHistory:
         )
         resp = self.client.get("/dashboard/api/agents/alpha/chat/history")
         assert resp.status_code == 502
+
+
+# ── Browser Settings Dashboard Endpoints ──────────────────────
+
+
+class TestDashboardBrowserSettings:
+    """Tests for GET/POST /api/browser-settings on the dashboard."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+        # Ensure no stale settings file
+        settings_path = Path("config/settings.json")
+        self._had_settings = settings_path.exists()
+        if self._had_settings:
+            self._backup = settings_path.read_text()
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+        # Restore or remove settings file
+        settings_path = Path("config/settings.json")
+        if self._had_settings:
+            settings_path.write_text(self._backup)
+        elif settings_path.exists():
+            settings_path.unlink()
+
+    def test_get_default(self):
+        """GET should return 1.0 when no settings file exists."""
+        settings_path = Path("config/settings.json")
+        if settings_path.exists():
+            settings_path.unlink()
+        resp = self.client.get("/dashboard/api/browser-settings")
+        assert resp.status_code == 200
+        assert resp.json()["speed_factor"] == 1.0
+
+    def test_post_persists_and_returns(self):
+        """POST should persist the value and return it."""
+        resp = self.client.post(
+            "/dashboard/api/browser-settings",
+            json={"speed_factor": 1.5},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["speed_factor"] == 1.5
+        # Verify persisted to file
+        import json
+        saved = json.loads(Path("config/settings.json").read_text())
+        assert saved["browser_speed_factor"] == 1.5
+
+    def test_post_validates_range_low(self):
+        """POST should reject speed_factor below 0.25."""
+        resp = self.client.post(
+            "/dashboard/api/browser-settings",
+            json={"speed_factor": 0.1},
+        )
+        assert resp.status_code == 400
+
+    def test_post_validates_range_high(self):
+        """POST should reject speed_factor above 3.0."""
+        resp = self.client.post(
+            "/dashboard/api/browser-settings",
+            json={"speed_factor": 5.0},
+        )
+        assert resp.status_code == 400
+
+    def test_post_requires_speed_factor(self):
+        """POST should reject missing speed_factor."""
+        resp = self.client.post(
+            "/dashboard/api/browser-settings",
+            json={},
+        )
+        assert resp.status_code == 400
+
+    def test_post_rejects_non_numeric(self):
+        """POST should reject non-numeric speed_factor."""
+        resp = self.client.post(
+            "/dashboard/api/browser-settings",
+            json={"speed_factor": "fast"},
+        )
+        assert resp.status_code == 400
+
+    def test_get_reads_persisted_value(self):
+        """GET should return the value saved by a previous POST."""
+        self.client.post(
+            "/dashboard/api/browser-settings",
+            json={"speed_factor": 2.0},
+        )
+        resp = self.client.get("/dashboard/api/browser-settings")
+        assert resp.status_code == 200
+        assert resp.json()["speed_factor"] == 2.0
+
+    def test_post_graceful_when_browser_unreachable(self):
+        """POST should persist and return success even when browser service is unreachable."""
+        runtime = self.components["runtime"]
+        runtime.browser_service_url = "http://127.0.0.1:19999"  # nothing listening
+        runtime.browser_auth_token = "test-token"
+        self.client = _make_client(self.components)
+
+        resp = self.client.post(
+            "/dashboard/api/browser-settings",
+            json={"speed_factor": 1.5},
+        )
+        # Should still return success — setting is persisted locally
+        assert resp.status_code == 200
+        assert resp.json()["speed_factor"] == 1.5
+        # Verify it was actually persisted despite push failure
+        import json
+        saved = json.loads(Path("config/settings.json").read_text())
+        assert saved["browser_speed_factor"] == 1.5
