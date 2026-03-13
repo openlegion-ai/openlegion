@@ -497,6 +497,7 @@ class AgentLoop:
             return result
         except Exception as e:
             self.state = "idle"
+            self.current_task = None
             self.tasks_failed += 1
             logger.error(f"Task {assignment.task_id} failed: {e}", exc_info=True)
             if self.workspace:
