@@ -14,6 +14,7 @@ from pathlib import Path
 import click
 
 from src.cli.channels import ChannelManager
+from src.shared.types import RESERVED_AGENT_IDS
 from src.cli.config import (
     ENV_FILE,
     PROJECT_ROOT,
@@ -315,9 +316,8 @@ class RuntimeContext:
 
         self.runtime.extra_env["EMBEDDING_MODEL"] = embedding_model
 
-        _reserved_ids = frozenset({"mesh", "orchestrator"})
         for agent_id, agent_cfg in agents_cfg.items():
-            if agent_id in _reserved_ids:
+            if agent_id in RESERVED_AGENT_IDS:
                 raise click.ClickException(
                     f"Agent ID '{agent_id}' is reserved for internal use"
                 )

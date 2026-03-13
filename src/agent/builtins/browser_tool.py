@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import re
 
+from src.agent.builtins import CRED_HANDLE_RE
 from src.agent.skills import skill
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.browser")
-
-_CRED_HANDLE_RE = re.compile(r"\$CRED\{([^}]+)\}")
 
 # Pattern-based credential redaction (defense in depth on agent side)
 _REDACT_PATTERNS = [
@@ -317,7 +316,7 @@ async def browser_type(
     # Resolve $CRED{name} handles agent-side (secrets never transit as names)
     is_credential = False
     actual_text = text
-    cred_matches = _CRED_HANDLE_RE.findall(text)
+    cred_matches = CRED_HANDLE_RE.findall(text)
     if cred_matches:
         if not mesh_client:
             return {"error": "$CRED{} handles require mesh connectivity for resolution"}

@@ -24,6 +24,7 @@ from fastapi.responses import StreamingResponse
 
 from src.host.credentials import is_system_credential
 from src.shared.types import (
+    RESERVED_AGENT_IDS,
     AgentMessage,
     APIProxyRequest,
     APIProxyResponse,
@@ -98,7 +99,6 @@ def create_mesh_app(
 
     # -- Input validation helpers ------------------------------------------------
     _AGENT_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
-    _RESERVED_AGENT_IDS = frozenset({"mesh", "orchestrator"})
     _MAX_SYSTEM_PROMPT = 10_000
     _MAX_BB_KEY_LEN = 512
     _MAX_BB_VALUE_BYTES = 262_144  # 256 KB
@@ -106,7 +106,7 @@ def create_mesh_app(
     def _validate_agent_id(agent_id: str) -> str:
         if not agent_id or not _AGENT_ID_RE.match(agent_id):
             raise HTTPException(400, "Invalid agent_id: must be 1-64 alphanumeric/hyphen/underscore chars")
-        if agent_id in _RESERVED_AGENT_IDS:
+        if agent_id in RESERVED_AGENT_IDS:
             raise HTTPException(400, f"Agent ID '{agent_id}' is reserved for internal use")
         return agent_id
 
@@ -572,7 +572,7 @@ def create_mesh_app(
         value = data.get("value", "")
         if not name or not value:
             raise HTTPException(400, "name and value are required")
-        if not _re.match(r"^[a-zA-Z0-9_.-]{1,128}$", name):
+        if not re.match(r"^[a-zA-Z0-9_.-]{1,128}$", name):
             raise HTTPException(400, "Credential name must be 1-128 alphanumeric/underscore/dot/dash chars")
         if len(value) > 10_000:
             raise HTTPException(400, "Credential value exceeds 10KB limit")

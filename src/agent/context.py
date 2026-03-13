@@ -31,7 +31,6 @@ _WARNING_THRESHOLD = 0.80
 
 _encoding_cache: dict[str, object | None] = {}
 
-_DEFAULT_CONTEXT_WINDOW = 128_000
 _SUMMARIZATION_INPUT_LIMIT = 20_000
 
 

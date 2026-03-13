@@ -13,6 +13,7 @@ from pathlib import Path
 import click
 import yaml
 
+from src.shared.types import RESERVED_AGENT_IDS
 from src.shared.utils import truncate
 
 logger = logging.getLogger("cli")
@@ -490,9 +491,6 @@ def _set_collaborative_permissions() -> None:
     _save_permissions(perms)
 
 
-_RESERVED_AGENT_NAMES = frozenset({"mesh", "orchestrator"})
-
-
 def _validate_agent_name(name: str) -> str:
     """Validate and return a safe agent name.
 
@@ -504,7 +502,7 @@ def _validate_agent_name(name: str) -> str:
             f"Invalid agent name '{name}': must be 1–64 alphanumeric chars, "
             "hyphens, or underscores (must start with a letter or digit)."
         )
-    if name in _RESERVED_AGENT_NAMES:
+    if name in RESERVED_AGENT_IDS:
         raise ValueError(f"Agent name '{name}' is reserved for internal use")
     return name
 
