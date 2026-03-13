@@ -1959,7 +1959,7 @@
                 <div class="flex items-center justify-between mb-3">
                   <div class="text-xs text-gray-500 uppercase tracking-wider">Automations</div>
                   <button @click="addCronForAgent()"
-                    class="text-[10px] px-2 py-1 rounded border border-gray-700 hover:border-indigo-500/50 text-gray-400 hover:text-indigo-300 transition-colors">+ New Job</button>
+                    class="text-[10px] px-2 py-1 rounded border border-gray-700 hover:border-indigo-500/50 text-gray-400 hover:text-indigo-300 transition-colors">+ Cron Job</button>
                 </div>
                 <div x-show="detailAgentCronJobs.length > 0" class="space-y-2">
                   <template x-for="job in detailAgentCronJobs" :key="job.id">
@@ -2013,7 +2013,7 @@
         <!-- System sub-tab bar -->
         <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
           <template x-for="st in systemTabs" :key="st.id">
-            <button @click="if (systemTab === 'activity' && st.id !== 'activity') _stopActivityRefresh(); systemTab = st.id; _pushUrl(false); if (st.id === 'integrations') { fetchChannels(); fetchWebhooks(); fetchSettings(); } if (st.id === 'uploads') { fetchUploads(); } if (st.id === 'activity') { unreadEvents = 0; _lastSeenEventCount = events.length; if (activityView === 'traces') { fetchTraces(); _startActivityRefresh(); } else if (activityView === 'logs') { fetchSystemLogs(); } }"
+            <button @click="if (systemTab === 'activity' && st.id !== 'activity') _stopActivityRefresh(); systemTab = st.id; _pushUrl(false); if (st.id === 'connections') { fetchChannels(); fetchWebhooks(); fetchSettings(); } if (st.id === 'storage') { fetchUploads(); fetchStorage(); } if (st.id === 'activity') { unreadEvents = 0; _lastSeenEventCount = events.length; if (activityView === 'traces') { fetchTraces(); _startActivityRefresh(); } else if (activityView === 'logs') { fetchSystemLogs(); } }"
               class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative"
               :class="systemTab === st.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
               <span x-text="st.label"></span>
@@ -2053,7 +2053,7 @@
               </div>
             </div>
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-              <div class="text-xs text-gray-500 uppercase tracking-wider mb-4">Budget Status</div>
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-4">Budgets</div>
               <div class="space-y-4">
                 <template x-for="item in costData.agents || []" :key="item.agent">
                   <div>
@@ -2082,48 +2082,30 @@
           </div>
         </div>
 
-        <!-- Storage -->
-        <div class="mt-6" x-show="storageData">
-          <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Storage</div>
-          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <!-- Disk usage -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-              <div class="flex items-center justify-between mb-3">
-                <div class="text-xs text-gray-500 uppercase tracking-wider">Disk</div>
-                <div class="text-xs text-gray-400 font-mono" x-text="formatBytes(storageData.disk?.used) + ' / ' + formatBytes(storageData.disk?.total)"></div>
-              </div>
-              <div class="w-full bg-gray-800 rounded-full h-2 mb-2">
-                <div class="h-2 rounded-full transition-all duration-500"
-                  :class="storageData.disk?.total > 0 && (storageData.disk.used / storageData.disk.total) > 0.9 ? 'bg-red-500' : (storageData.disk?.total > 0 && (storageData.disk.used / storageData.disk.total) > 0.75 ? 'bg-amber-500' : 'bg-indigo-500')"
-                  :style="'width:' + (storageData.disk?.total > 0 ? Math.min(100, (storageData.disk.used / storageData.disk.total) * 100) : 0) + '%'"></div>
-              </div>
-              <div class="text-xs text-gray-500" x-text="formatBytes(storageData.disk?.free) + ' free'"></div>
-            </div>
-            <!-- Engine breakdown -->
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-              <div class="flex items-center justify-between mb-3">
-                <div class="text-xs text-gray-500 uppercase tracking-wider">Engine Data</div>
-                <div class="text-xs text-gray-400 font-mono" x-text="formatBytes(storageData.engine?.total)"></div>
-              </div>
-              <div class="space-y-2">
-                <template x-for="[label, key] in [['Databases', 'databases'], ['Agent Data', 'agent_data'], ['Logs', 'logs'], ['Config', 'config'], ['Other', 'other']]" :key="key">
-                  <div x-show="storageData.engine?.[key] > 0" class="flex items-center justify-between text-xs">
-                    <span class="text-gray-400" x-text="label"></span>
-                    <span class="text-gray-300 font-mono" x-text="formatBytes(storageData.engine?.[key])"></span>
+        <!-- Model Pricing -->
+        <div class="mt-6" x-show="settingsData?.model_costs && Object.keys(settingsData.model_costs).length > 0">
+          <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Model Pricing</div>
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="space-y-1 max-h-60 overflow-y-auto custom-scrollbar">
+              <template x-for="[model, costs] in Object.entries(settingsData?.model_costs || {})" :key="model">
+                <div class="flex justify-between text-xs">
+                  <span class="text-gray-400 font-mono" x-text="model"></span>
+                  <div class="flex gap-3">
+                    <span class="text-gray-500">in: <span class="text-gray-300" x-text="'$' + costs.input_per_1k.toFixed(5)"></span></span>
+                    <span class="text-gray-500">out: <span class="text-gray-300" x-text="'$' + costs.output_per_1k.toFixed(5)"></span></span>
                   </div>
-                </template>
-                <div x-show="!storageData.engine?.total" class="text-gray-600 text-xs">No data yet</div>
-              </div>
+                </div>
+              </template>
             </div>
           </div>
         </div>
         </div><!-- /costs sub-tab -->
 
-        <!-- Automation sub-tab -->
-        <div x-show="systemTab === 'automation'">
+        <!-- Schedules sub-tab -->
+        <div x-show="systemTab === 'schedules'">
         <div class="flex items-center justify-between mb-3">
           <div class="text-xs text-gray-500 uppercase tracking-wider">Cron Jobs</div>
-          <button x-show="!showCronForm" @click="showCronForm = true" class="text-xs px-2.5 py-1 rounded border border-gray-700 hover:border-indigo-500/50 text-gray-400 hover:text-indigo-300 transition-colors">+ New Job</button>
+          <button x-show="!showCronForm" @click="showCronForm = true" class="text-xs px-2.5 py-1 rounded border border-gray-700 hover:border-indigo-500/50 text-gray-400 hover:text-indigo-300 transition-colors">+ Cron Job</button>
         </div>
         <!-- Cron creation form -->
         <div x-show="showCronForm" x-cloak x-transition class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
@@ -2256,7 +2238,7 @@
               <svg class="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
               </svg>
-              <div class="text-gray-500 font-medium mb-1">No automation jobs configured</div>
+              <div class="text-gray-500 font-medium mb-1">No scheduled jobs configured</div>
               <div class="text-gray-600 text-sm">Add cron jobs in your agent config</div>
             </div>
           </div>
@@ -2319,13 +2301,13 @@
             </div>
           </div>
         </div>
-        </div><!-- /automation sub-tab -->
+        </div><!-- /schedules sub-tab -->
 
-        <!-- Integrations sub-tab (Channels + Credentials + Webhooks) -->
-        <div x-show="systemTab === 'integrations'">
+        <!-- Connections sub-tab (Channels + Credentials + Webhooks) -->
+        <div x-show="systemTab === 'connections'">
 
-        <!-- Messaging Channels -->
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Messaging Channels</div>
+        <!-- Channels -->
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Channels</div>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
           <template x-for="ch in channels" :key="ch.type">
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -2574,49 +2556,10 @@
           </div>
         </div>
 
-        <!-- Infrastructure (collapsible) -->
-        <div class="mb-6" x-show="settingsData">
-          <button @click="systemInfraExpanded = !systemInfraExpanded"
-            class="flex items-center gap-2 text-xs text-gray-500 uppercase tracking-wider mb-3 hover:text-gray-300 transition-colors">
-            <svg class="w-3 h-3 transition-transform duration-200" :class="systemInfraExpanded && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-            Infrastructure
-          </button>
-          <div x-show="systemInfraExpanded" x-transition>
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">PubSub Subscriptions</div>
-                <div x-show="Object.keys(settingsData?.pubsub_subscriptions || {}).length === 0" class="text-gray-600 text-sm">No subscriptions</div>
-                <div class="space-y-2">
-                  <template x-for="[topic, agents] in Object.entries(settingsData?.pubsub_subscriptions || {})" :key="topic">
-                    <div>
-                      <span class="text-xs text-cyan-400 font-mono" x-text="topic"></span>
-                      <span class="text-gray-600 text-xs mx-1">&rarr;</span>
-                      <span class="text-xs text-gray-400" x-text="agents.join(', ')"></span>
-                    </div>
-                  </template>
-                </div>
-              </div>
-              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Model Pricing (per 1K tokens)</div>
-                <div class="space-y-1 max-h-60 overflow-y-auto custom-scrollbar">
-                  <template x-for="[model, costs] in Object.entries(settingsData?.model_costs || {})" :key="model">
-                    <div class="flex justify-between text-xs">
-                      <span class="text-gray-400 font-mono" x-text="model"></span>
-                      <div class="flex gap-3">
-                        <span class="text-gray-500">in: <span class="text-gray-300" x-text="'$' + costs.input_per_1k.toFixed(5)"></span></span>
-                        <span class="text-gray-500">out: <span class="text-gray-300" x-text="'$' + costs.output_per_1k.toFixed(5)"></span></span>
-                      </div>
-                    </div>
-                  </template>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        </div><!-- /integrations sub-tab -->
+        </div><!-- /connections sub-tab -->
 
-        <!-- ═══ UPLOADS SUB-TAB ═══ -->
-        <div x-show="systemTab === 'uploads'" x-init="if (systemTab === 'uploads') fetchUploads()">
+        <!-- ═══ STORAGE SUB-TAB ═══ -->
+        <div x-show="systemTab === 'storage'" x-init="if (systemTab === 'storage') { fetchUploads(); fetchStorage(); }">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
             <div class="flex items-center justify-between mb-1">
               <div class="text-xs text-gray-500 uppercase tracking-wider">Shared Uploads</div>
@@ -2675,7 +2618,42 @@
               </template>
             </div>
           </div>
-        </div><!-- /uploads sub-tab -->
+        <!-- Disk & Engine Data -->
+        <div class="mt-6" x-show="storageData">
+          <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Disk Usage</div>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <!-- Disk usage -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <div class="flex items-center justify-between mb-3">
+                <div class="text-xs text-gray-500 uppercase tracking-wider">Disk</div>
+                <div class="text-xs text-gray-400 font-mono" x-text="formatBytes(storageData.disk?.used) + ' / ' + formatBytes(storageData.disk?.total)"></div>
+              </div>
+              <div class="w-full bg-gray-800 rounded-full h-2 mb-2">
+                <div class="h-2 rounded-full transition-all duration-500"
+                  :class="storageData.disk?.total > 0 && (storageData.disk.used / storageData.disk.total) > 0.9 ? 'bg-red-500' : (storageData.disk?.total > 0 && (storageData.disk.used / storageData.disk.total) > 0.75 ? 'bg-amber-500' : 'bg-indigo-500')"
+                  :style="'width:' + (storageData.disk?.total > 0 ? Math.min(100, (storageData.disk.used / storageData.disk.total) * 100) : 0) + '%'"></div>
+              </div>
+              <div class="text-xs text-gray-500" x-text="formatBytes(storageData.disk?.free) + ' free'"></div>
+            </div>
+            <!-- Engine breakdown -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <div class="flex items-center justify-between mb-3">
+                <div class="text-xs text-gray-500 uppercase tracking-wider">Engine Data</div>
+                <div class="text-xs text-gray-400 font-mono" x-text="formatBytes(storageData.engine?.total)"></div>
+              </div>
+              <div class="space-y-2">
+                <template x-for="[label, key] in [['Databases', 'databases'], ['Agent Data', 'agent_data'], ['Logs', 'logs'], ['Config', 'config'], ['Other', 'other']]" :key="key">
+                  <div x-show="storageData.engine?.[key] > 0" class="flex items-center justify-between text-xs">
+                    <span class="text-gray-400" x-text="label"></span>
+                    <span class="text-gray-300 font-mono" x-text="formatBytes(storageData.engine?.[key])"></span>
+                  </div>
+                </template>
+                <div x-show="!storageData.engine?.total" class="text-gray-600 text-xs">No data yet</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </div><!-- /storage sub-tab -->
 
         <!-- ═══ ACTIVITY SUB-TAB ═══ -->
         <div x-show="systemTab === 'activity'">
@@ -2688,7 +2666,7 @@
             <button @click="setActivityView('events')"
               class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
               :class="activityView === 'events' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
-            >Live Events</button>
+            >Events</button>
             <button @click="setActivityView('logs')"
               class="px-3 py-1.5 rounded-md text-sm font-medium transition-all"
               :class="activityView === 'logs' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
@@ -2798,7 +2776,7 @@
           </div>
         </div>
 
-        <!-- Live Events view -->
+        <!-- Events view -->
         <div x-show="activityView === 'events'">
           <div class="flex items-center justify-between mb-3">
             <div class="flex gap-1.5 flex-wrap">
@@ -2885,6 +2863,27 @@
                   }"
                   x-text="line"></div>
               </template>
+            </div>
+          </div>
+        </div>
+        <!-- Topics (PubSub) — collapsible -->
+        <div class="mt-4" x-show="settingsData?.pubsub_subscriptions && Object.keys(settingsData.pubsub_subscriptions).length > 0">
+          <button @click="systemInfraExpanded = !systemInfraExpanded"
+            class="flex items-center gap-2 text-xs text-gray-500 uppercase tracking-wider mb-3 hover:text-gray-300 transition-colors">
+            <svg class="w-3 h-3 transition-transform duration-200" :class="systemInfraExpanded && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+            Topics
+          </button>
+          <div x-show="systemInfraExpanded" x-transition>
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <div class="space-y-2">
+                <template x-for="[topic, agents] in Object.entries(settingsData?.pubsub_subscriptions || {})" :key="topic">
+                  <div>
+                    <span class="text-xs text-cyan-400 font-mono" x-text="topic"></span>
+                    <span class="text-gray-600 text-xs mx-1">&rarr;</span>
+                    <span class="text-xs text-gray-400" x-text="agents.join(', ')"></span>
+                  </div>
+                </template>
+              </div>
             </div>
           </div>
         </div>
