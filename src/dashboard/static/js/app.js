@@ -31,7 +31,6 @@ function dashboard() {
     activeTab: 'fleet',
     tabs: [
       { id: 'fleet', label: 'Agents' },
-      { id: 'activity', label: 'Activity' },
       { id: 'system', label: 'System' },
     ],
     connected: false,
@@ -219,10 +218,11 @@ function dashboard() {
     cmdPaletteIdx: 0,
 
     // System tab — sub-navigation
-    systemTab: 'costs',
+    systemTab: 'activity',
     systemTabs: [
-      { id: 'costs', label: 'Costs & Budgets' },
+      { id: 'activity', label: 'Activity' },
       { id: 'automation', label: 'Automation' },
+      { id: 'costs', label: 'Costs' },
       { id: 'integrations', label: 'Integrations' },
       { id: 'uploads', label: 'Uploads' },
     ],
@@ -232,7 +232,7 @@ function dashboard() {
 
     // Unified Project Hub (replaces separate PROJECT.md + Comms + Broadcast panels)
     projectHubExpanded: false,
-    projectHubTab: 'docs',  // 'docs' | 'activity' | 'state' | 'artifacts' | 'broadcast'
+    projectHubTab: 'docs',  // 'docs' | 'activity' | 'state' | 'artifacts' | 'broadcast' | 'members'
 
     // PROJECT.md banner on Agents tab (kept for backward compat, not used by template)
     projectBannerExpanded: false,
@@ -339,12 +339,14 @@ function dashboard() {
           ? `/agents/${this.detailAgent}`
           : `/agents/${this.detailAgent}/${tab}`;
       }
-      if (this.activeTab === 'activity') {
-        if (this.activityView === 'events') return '/activity/events';
-        if (this.activityView === 'logs') return '/activity/logs';
-        return '/activity';
+      if (this.activeTab === 'system') {
+        if (this.systemTab === 'activity') {
+          if (this.activityView === 'events') return '/system/activity/events';
+          if (this.activityView === 'logs') return '/system/activity/logs';
+          return '/system/activity';
+        }
+        return '/system/' + (this.systemTab || 'activity');
       }
-      if (this.activeTab === 'system') return '/system/' + (this.systemTab || 'costs');
       return '/';
     },
 
@@ -353,12 +355,12 @@ function dashboard() {
         const tabLabel = (_IDENTITY_TABS.find(t => t.id === this.identityTab) || _IDENTITY_TABS[0]).label;
         return `${this.detailAgent} \u00b7 ${tabLabel} \u2014 OpenLegion`;
       }
-      if (this.activeTab === 'activity') {
-        if (this.activityView === 'events') return 'Events \u2014 OpenLegion';
-        if (this.activityView === 'logs') return 'Logs \u2014 OpenLegion';
-        return 'Traces \u2014 OpenLegion';
-      }
       if (this.activeTab === 'system') {
+        if (this.systemTab === 'activity') {
+          if (this.activityView === 'events') return 'Events \u2014 OpenLegion';
+          if (this.activityView === 'logs') return 'Logs \u2014 OpenLegion';
+          return 'Traces \u2014 OpenLegion';
+        }
         const st = this.systemTabs.find(t => t.id === this.systemTab);
         return (st ? st.label : 'System') + ' \u2014 OpenLegion';
       }
@@ -367,7 +369,7 @@ function dashboard() {
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'costs', agentId: null, identityTab: 'config' };
+      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
       if (!clean) return route;
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
@@ -378,13 +380,20 @@ function dashboard() {
         return route;
       }
 
-      if (clean === 'activity/events') { route.tab = 'activity'; route.activityView = 'events'; }
-      else if (clean === 'activity/logs') { route.tab = 'activity'; route.activityView = 'logs'; }
-      else if (clean === 'activity') { route.tab = 'activity'; }
+      if (clean === 'activity/events') { route.tab = 'system'; route.systemTab = 'activity'; route.activityView = 'events'; }
+      else if (clean === 'activity/logs') { route.tab = 'system'; route.systemTab = 'activity'; route.activityView = 'logs'; }
+      else if (clean === 'activity') { route.tab = 'system'; route.systemTab = 'activity'; }
       else if (clean.startsWith('system')) {
         route.tab = 'system';
         const sub = clean.split('/')[1];
-        if (sub && ['costs', 'automation', 'integrations'].includes(sub)) route.systemTab = sub;
+        if (sub && ['activity', 'costs', 'automation', 'integrations', 'uploads'].includes(sub)) {
+          route.systemTab = sub;
+          if (sub === 'activity') {
+            const view = clean.split('/')[2];
+            if (view === 'events') route.activityView = 'events';
+            else if (view === 'logs') route.activityView = 'logs';
+          }
+        }
       }
       return route;
     },
@@ -419,15 +428,28 @@ function dashboard() {
             this.selectedAgent = null;
           }
           if (this.activeTab !== route.tab) {
+            // Sync sub-state before switchTab so it uses the correct values
+            if (route.tab === 'system') {
+              this.systemTab = route.systemTab;
+              if (route.systemTab === 'activity') this.activityView = route.activityView;
+            }
             this.switchTab(route.tab);
-          }
-          if (route.tab === 'activity' && this.activityView !== route.activityView) {
-            this.setActivityView(route.activityView);
-          }
-          if (route.tab === 'system' && this.systemTab !== route.systemTab) {
-            this.systemTab = route.systemTab;
-            if (route.systemTab === 'integrations') {
-              this.fetchChannels(); this.fetchWebhooks(); this.fetchSettings();
+          } else if (route.tab === 'system') {
+            if (this.systemTab !== route.systemTab) {
+              if (this.systemTab === 'activity') this._stopActivityRefresh();
+              this.systemTab = route.systemTab;
+              if (route.systemTab === 'integrations') {
+                this.fetchChannels(); this.fetchWebhooks(); this.fetchSettings();
+              }
+              if (route.systemTab === 'activity') {
+                this.activityView = route.activityView;
+                this.unreadEvents = 0;
+                this._lastSeenEventCount = this.events.length;
+                if (route.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
+                else if (route.activityView === 'logs') { this.fetchSystemLogs(); }
+              }
+            } else if (route.systemTab === 'activity' && this.activityView !== route.activityView) {
+              this.setActivityView(route.activityView);
             }
           }
         }
@@ -744,7 +766,7 @@ function dashboard() {
 
       // Deep link restoration: parse initial URL and apply route
       const initRoute = this._parsePath(window.location.pathname);
-      const isDeepLink = initRoute.agentId || initRoute.tab !== 'fleet' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
+      const isDeepLink = initRoute.agentId || initRoute.tab !== 'fleet' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'activity';
       if (isDeepLink) {
         this.$nextTick(() => {
           this._applyRoute(initRoute);
@@ -791,17 +813,17 @@ function dashboard() {
           // Resume polling — restore intervals without navigating (switchTab clears detailAgent)
           this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
           this.fetchAgents();
-          if (this.activeTab === 'activity' && this.activityView === 'traces') {
-            this.fetchTraces();
-            this._startActivityRefresh();
-          }
-          if (this.activeTab === 'activity' && this.activityView === 'logs') {
-            this.fetchSystemLogs();
-          }
           if (this.activeTab === 'system') {
             this.fetchCronJobs();
             this.fetchStorage();
             this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
+            if (this.systemTab === 'activity' && this.activityView === 'traces') {
+              this.fetchTraces();
+              this._startActivityRefresh();
+            }
+            if (this.systemTab === 'activity' && this.activityView === 'logs') {
+              this.fetchSystemLogs();
+            }
           }
           // Resume model health + queue polling
           this.fetchModelHealth();
@@ -850,16 +872,6 @@ function dashboard() {
       // Clear tab-specific auto-refresh intervals
       if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
       this._stopActivityRefresh();
-      if (tab === 'activity') {
-        this.unreadEvents = 0;
-        this._lastSeenEventCount = this.events.length;
-        if (this.activityView === 'traces') {
-          this.fetchTraces();
-          this._startActivityRefresh();
-        } else if (this.activityView === 'logs') {
-          this.fetchSystemLogs();
-        }
-      }
       if (tab === 'fleet') {
         this.fetchAgents();
         this.fetchQueues();
@@ -876,6 +888,16 @@ function dashboard() {
         if (this.systemTab === 'integrations') {
           this.fetchWebhooks();
           this.fetchChannels();
+        }
+        if (this.systemTab === 'activity') {
+          this.unreadEvents = 0;
+          this._lastSeenEventCount = this.events.length;
+          if (this.activityView === 'traces') {
+            this.fetchTraces();
+            this._startActivityRefresh();
+          } else if (this.activityView === 'logs') {
+            this.fetchSystemLogs();
+          }
         }
         this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
       }
@@ -967,9 +989,14 @@ function dashboard() {
       this.events.unshift(evt);
       if (this.events.length > 500) this.events.splice(500);
 
-      // Track unread events when not on Activity tab
-      if (this.activeTab !== 'activity') {
-        this.unreadEvents++;
+      // Track unread events when not viewing the Activity sub-tab.
+      // Skip if the user is actively viewing this agent's chat panel.
+      const onActivity = this.activeTab === 'system' && this.systemTab === 'activity';
+      if (!onActivity) {
+        const isViewingAgent = evt.agent && evt.agent === this.activeChatId && !this.chatPanelMinimized;
+        if (!isViewingAgent) {
+          this.unreadEvents++;
+        }
       }
 
       // Favicon badge: prefix document title with unread count when tab not visible
@@ -1055,7 +1082,7 @@ function dashboard() {
       }
 
       // Debounced trace refresh when on traces view
-      if (this.activeTab === 'activity' && this.activityView === 'traces') {
+      if (this.activeTab === 'system' && this.systemTab === 'activity' && this.activityView === 'traces') {
         if (['llm_call', 'message_sent', 'tool_result'].includes(evt.type)) {
           if (this._tracesDebounce) clearTimeout(this._tracesDebounce);
           this._tracesDebounce = setTimeout(() => this.fetchTraces(), 3000);
@@ -3140,7 +3167,6 @@ function dashboard() {
       // Match tabs with keywords
       const tabKeywords = {
         fleet: ['agents', 'fleet', 'cards', 'project'],
-        activity: ['activity', 'traces', 'events', 'logs', 'runtime'],
         system: ['system', 'costs', 'cron', 'automation', 'credentials', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows'],
       };
       for (const [tabId, keywords] of Object.entries(tabKeywords)) {
@@ -3155,6 +3181,7 @@ function dashboard() {
         { label: 'Add Agent', desc: 'Open add agent form', keywords: ['add', 'agent', 'new', 'create'], action: () => { this.switchTab('fleet'); this.openAddAgentModal(); } },
         { label: 'Broadcast', desc: this.activeProject ? `Broadcast to ${this.activeProject} agents` : (this.projects.length > 0 ? 'Broadcast to standalone agents' : 'Send message to all agents'), keywords: ['broadcast', 'send', 'all', 'message'], action: () => { this.switchTab('fleet'); if (this.activeProject) { this.projectHubExpanded = true; this.projectHubTab = 'broadcast'; this.$nextTick(() => document.getElementById('broadcast-input')?.focus()); } else { this.$nextTick(() => document.getElementById('broadcast-standalone-input')?.focus()); } } },
         ...(this.activeProject ? [{ label: 'Edit PROJECT.md', desc: `Edit ${this.activeProject} project context`, keywords: ['project', 'edit', 'context'], action: () => { this.switchTab('fleet'); this.projectHubExpanded = true; this.projectHubTab = 'docs'; this.$nextTick(() => this.startProjectEdit()); } }] : []),
+        ...(this.activeProject ? [{ label: 'Project Members', desc: `Manage ${this.activeProject} members`, keywords: ['members', 'team', 'assign', 'agents'], action: () => { this.switchTab('fleet'); this.projectHubExpanded = true; this.projectHubTab = 'members'; } }] : []),
       ];
       for (const act of actions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
@@ -3196,7 +3223,8 @@ function dashboard() {
       }
       // System quick actions
       const sysActions = [
-        { label: 'View Logs', desc: 'Open runtime logs', keywords: ['logs', 'runtime', 'debug'], action: () => { this.switchTab('activity'); this.setActivityView('logs'); } },
+        { label: 'Activity', desc: 'Traces, events, and logs', keywords: ['activity', 'traces', 'events'], action: () => { this.systemTab = 'activity'; this.switchTab('system'); } },
+        { label: 'View Logs', desc: 'Open runtime logs', keywords: ['logs', 'runtime', 'debug'], action: () => { this.systemTab = 'activity'; this.switchTab('system'); this.setActivityView('logs'); } },
         { label: 'Add Credential', desc: 'Add new API key', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.showCredForm = true; } },
         { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchWebhooks(); } },
         { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchChannels(); } },
