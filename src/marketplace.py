@@ -7,6 +7,7 @@ checker, and mounted into agent containers at runtime.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -102,18 +103,30 @@ def install_skill(
     """
     marketplace_dir.mkdir(parents=True, exist_ok=True)
 
+    # Validate URL scheme — only allow https:// and git@ (SSH)
+    if not (repo_url.startswith("https://") or repo_url.startswith("git@")):
+        return {"error": "Invalid repo URL: only https:// and git@ schemes are allowed"}
+
+    # Validate ref parameter against flag injection
+    if ref and ref.startswith("-"):
+        return {"error": "Invalid ref: must not start with '-'"}
+
     # Clone to temp directory first
     tmp_dir = marketplace_dir / "_tmp_install"
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
 
-    clone_cmd = ["git", "clone", "--depth", "1"]
+    clone_cmd = ["git", "clone", "--depth", "1", "-c", "protocol.ext.allow=never"]
     if ref:
         clone_cmd += ["--branch", ref]
-    clone_cmd += [repo_url, str(tmp_dir)]
+    clone_cmd += ["--", repo_url, str(tmp_dir)]
 
     result = subprocess.run(
-        clone_cmd, capture_output=True, text=True, timeout=60,
+        clone_cmd,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"},
     )
     if result.returncode != 0:
         return {"error": f"Git clone failed: {result.stderr.strip()}"}
