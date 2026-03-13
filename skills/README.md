@@ -1,7 +1,7 @@
 # Skills
 
 Skills are Python functions that give agents custom capabilities beyond the
-built-in tools (exec, file I/O, HTTP, browser, memory, mesh communication).
+built-in tools (shell, file I/O, HTTP, browser, memory, mesh communication).
 
 ## How Skills Work
 
@@ -45,13 +45,18 @@ async def my_tool(query: str, limit: int = 5, *, mesh_client=None):
 Every agent automatically has access to built-in tools defined in
 `src/agent/builtins/`. You don't need to add these to your skills directory:
 
-- `exec` — Shell command execution
+- `run_command` — Shell command execution
 - `read_file`, `write_file`, `list_files` — File I/O
-- `http_request` — HTTP requests
-- `browser_navigate`, `browser_screenshot`, etc. — Browser automation
+- `http_request` — HTTP requests with `$CRED{name}` handles
+- `browser_navigate`, `browser_get_elements`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_hover`, `browser_scroll`, `browser_wait_for`, `browser_press_key`, `browser_go_back`, `browser_go_forward`, `browser_switch_tab`, `browser_reset`, `browser_solve_captcha` — Browser automation
 - `memory_search`, `memory_save` — Persistent memory
-- `list_agents`, `spawn_agent`, `spawn_subagent`, `notify_user`, `publish_event` — Team coordination
-- `read_shared_state`, `write_shared_state`, `list_shared_state` — Shared blackboard
+- `web_search` — Web search via DuckDuckGo
+- `list_agents`, `spawn_fleet_agent`, `notify_user`, `publish_event`, `subscribe_event` — Fleet coordination
+- `read_shared_state`, `write_shared_state`, `list_shared_state`, `watch_blackboard`, `claim_task`, `save_artifact` — Shared blackboard
+- `update_workspace` — Persist learnings to workspace files
+- `spawn_subagent`, `list_subagents`, `wait_for_subagent` — In-process subagents
+- `set_cron`, `list_cron`, `remove_cron` — Scheduled jobs
 - `vault_generate_secret`, `vault_capture_from_page`, `vault_list` — Credential vault
-- `introspect` — Runtime state queries
+- `get_system_status` — Runtime state queries (permissions, budget, fleet, cron, health)
+- `read_agent_history` — Read another agent's conversation logs
 - `create_skill`, `reload_skills` — Self-extension
