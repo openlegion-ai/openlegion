@@ -412,22 +412,34 @@ class BrowserManager:
                 # When a modal dialog is open, scope to only dialog elements
                 # so agents don't see/click elements behind the overlay
                 # (e.g. X's sidebar "Post" button behind the compose modal).
-                dialog_nodes = []
+                #
+                # Detection uses DOM queries (CSS selectors) rather than
+                # accessibility tree roles, because some SPAs (Twitter/X)
+                # set role="dialog" and aria-modal="true" in the DOM but
+                # Playwright's a11y tree may not surface the dialog role.
+                # If a visible modal is found in the DOM, we re-snapshot
+                # with root=element to get only the dialog's subtree.
+                _MODAL_SELECTOR = (
+                    '[role="dialog"]:not([aria-hidden="true"]), '
+                    '[aria-modal="true"]:not([aria-hidden="true"]), '
+                    'dialog[open]'
+                )
+                modal_els = await inst.page.query_selector_all(_MODAL_SELECTOR)
+                visible_modals = []
+                for el in modal_els:
+                    try:
+                        if await el.is_visible():
+                            visible_modals.append(el)
+                    except Exception:
+                        pass  # Element may have been removed between query and check
 
-                def _find_dialogs(node):
-                    if node.get("role") in ("dialog", "alertdialog"):
-                        dialog_nodes.append(node)
-                    else:
-                        for child in node.get("children", []):
-                            _find_dialogs(child)
-
-                _find_dialogs(tree)
-
-                if dialog_nodes:
+                if visible_modals:
                     inst.dialog_active = True
                     lines.append("** Modal dialog is open — only dialog elements are shown **")
-                    for dialog_node in dialog_nodes:
-                        _walk(dialog_node)
+                    for el in visible_modals:
+                        subtree = await inst.page.accessibility.snapshot(root=el)
+                        if subtree:
+                            _walk(subtree)
                 else:
                     inst.dialog_active = False
                     _walk(tree)
@@ -458,10 +470,12 @@ class BrowserManager:
         idx = info.get("index", 0)
         # Scope to dialog when one is active — occurrence indices were counted
         # within the dialog subtree, so the locator must search the same scope.
-        # Match both explicit role attributes and native <dialog> elements.
+        # Matches the same selector used for DOM-based modal detection in snapshot().
         if inst.dialog_active:
             base = inst.page.locator(
-                '[role="dialog"], [role="alertdialog"], dialog[open]'
+                '[role="dialog"]:not([aria-hidden="true"]), '
+                '[aria-modal="true"]:not([aria-hidden="true"]), '
+                'dialog[open]'
             )
         else:
             base = inst.page

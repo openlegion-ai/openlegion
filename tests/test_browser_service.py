@@ -2485,9 +2485,42 @@ class TestCaptchaDetection:
 class TestDialogScoping:
     """When a modal dialog is open, snapshot and locators scope to dialog only.
 
+    Detection uses DOM queries (query_selector_all) for modal elements rather
+    than accessibility tree roles, because SPAs like Twitter/X may not surface
+    the dialog role in Playwright's accessibility tree.
+
     This prevents agents from seeing/clicking elements behind the modal overlay
     (e.g. X's sidebar "Post" button behind the compose modal).
     """
+
+    @staticmethod
+    def _mock_page_with_modal(full_tree, dialog_subtree):
+        """Create a mock page where DOM has a visible modal element.
+
+        full_tree: returned by page.accessibility.snapshot() (no root)
+        dialog_subtree: returned by page.accessibility.snapshot(root=modal_el)
+        """
+        mock_page = AsyncMock()
+        mock_modal_el = AsyncMock()
+        mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
+
+        async def _snapshot(root=None):
+            if root is not None:
+                return dialog_subtree
+            return full_tree
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(side_effect=_snapshot)
+        return mock_page
+
+    @staticmethod
+    def _mock_page_no_modal(full_tree):
+        """Create a mock page where DOM has no visible modal elements."""
+        mock_page = AsyncMock()
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(return_value=full_tree)
+        return mock_page
 
     @pytest.mark.asyncio
     async def test_snapshot_scopes_to_dialog(self):
@@ -2495,25 +2528,25 @@ class TestDialogScoping:
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
-        mock_page = AsyncMock()
-        tree = {
-            "role": "WebArea",
-            "name": "",
+        full_tree = {
+            "role": "WebArea", "name": "",
             "children": [
-                {"role": "button", "name": "Post", "disabled": True},  # sidebar
+                {"role": "button", "name": "Post", "disabled": True},
                 {"role": "link", "name": "Home"},
-                {
-                    "role": "dialog",
-                    "name": "Create post",
-                    "children": [
-                        {"role": "textbox", "name": "What is happening?!"},
-                        {"role": "button", "name": "Post"},  # modal button
-                    ],
-                },
+                {"role": "dialog", "name": "Create post", "children": [
+                    {"role": "textbox", "name": "What is happening?!"},
+                    {"role": "button", "name": "Post"},
+                ]},
             ],
         }
-        mock_page.accessibility = MagicMock()
-        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        dialog_subtree = {
+            "role": "dialog", "name": "Create post",
+            "children": [
+                {"role": "textbox", "name": "What is happening?!"},
+                {"role": "button", "name": "Post"},
+            ],
+        }
+        mock_page = self._mock_page_with_modal(full_tree, dialog_subtree)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
@@ -2522,23 +2555,16 @@ class TestDialogScoping:
         snap = result["data"]["snapshot"]
         refs = result["data"]["refs"]
 
-        # Dialog header should be present
         assert "Modal dialog is open" in snap
-        # Dialog context element should appear
         assert "Create post" in snap
-        # Elements inside the dialog should appear
         assert "What is happening?!" in snap
-        # The modal Post button should appear with index 0 (first in dialog scope)
         post_refs = [r for r in refs.values() if r["name"] == "Post"]
         assert len(post_refs) == 1
         assert post_refs[0]["index"] == 0
-        # Elements outside the dialog should NOT appear
         assert "Home" not in snap
-        # The sidebar Post button should NOT appear
         sidebar_post = [r for r in refs.values()
                         if r["name"] == "Post" and r.get("disabled")]
         assert len(sidebar_post) == 0
-        # dialog_active flag should be set
         assert inst.dialog_active is True
 
     @pytest.mark.asyncio
@@ -2547,17 +2573,14 @@ class TestDialogScoping:
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
-        mock_page = AsyncMock()
         tree = {
-            "role": "WebArea",
-            "name": "",
+            "role": "WebArea", "name": "",
             "children": [
                 {"role": "button", "name": "Post"},
                 {"role": "link", "name": "Home"},
             ],
         }
-        mock_page.accessibility = MagicMock()
-        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        mock_page = self._mock_page_no_modal(tree)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
@@ -2569,38 +2592,40 @@ class TestDialogScoping:
         assert "Modal dialog" not in result["data"]["snapshot"]
 
     @pytest.mark.asyncio
-    async def test_snapshot_alertdialog_treated_as_modal(self):
-        """alertdialog role should also trigger dialog scoping."""
+    async def test_snapshot_aria_modal_detected(self):
+        """Elements with aria-modal=true (without dialog role in a11y tree) should trigger scoping."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
-        mock_page = AsyncMock()
-        tree = {
-            "role": "WebArea",
-            "name": "",
+        # Simulate Twitter: DOM has aria-modal=true but a11y tree uses 'group' role
+        full_tree = {
+            "role": "WebArea", "name": "",
             "children": [
-                {"role": "button", "name": "Background"},
-                {
-                    "role": "alertdialog",
-                    "name": "Confirm",
-                    "children": [
-                        {"role": "button", "name": "OK"},
-                        {"role": "button", "name": "Cancel"},
-                    ],
-                },
+                {"role": "button", "name": "Post", "disabled": True},
+                {"role": "group", "name": "Confirm", "children": [
+                    {"role": "button", "name": "OK"},
+                    {"role": "button", "name": "Cancel"},
+                ]},
             ],
         }
-        mock_page.accessibility = MagicMock()
-        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        dialog_subtree = {
+            "role": "group", "name": "Confirm",
+            "children": [
+                {"role": "button", "name": "OK"},
+                {"role": "button", "name": "Cancel"},
+            ],
+        }
+        mock_page = self._mock_page_with_modal(full_tree, dialog_subtree)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
         refs = result["data"]["refs"]
         assert inst.dialog_active is True
-        # Only alertdialog elements: alertdialog + OK + Cancel = 3
-        assert len(refs) == 3
-        assert "Background" not in result["data"]["snapshot"]
+        # Only interactive elements inside the modal: OK + Cancel = 2
+        # (group role is not actionable/context, so it's not ref'd)
+        assert len(refs) == 2
+        assert "Post" not in result["data"]["snapshot"]
 
     @pytest.mark.asyncio
     async def test_snapshot_dialog_clears_flag_when_dismissed(self):
@@ -2608,36 +2633,32 @@ class TestDialogScoping:
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
-        mock_page = AsyncMock()
-
-        # First snapshot: dialog open
-        tree_with_dialog = {
-            "role": "WebArea", "name": "",
-            "children": [
-                {"role": "dialog", "name": "Modal", "children": [
-                    {"role": "button", "name": "Close"},
-                ]},
-            ],
+        # First snapshot: modal open
+        dialog_subtree = {
+            "role": "dialog", "name": "Modal",
+            "children": [{"role": "button", "name": "Close"}],
         }
-        mock_page.accessibility = MagicMock()
-        mock_page.accessibility.snapshot = AsyncMock(return_value=tree_with_dialog)
+        full_tree = {
+            "role": "WebArea", "name": "",
+            "children": [dialog_subtree],
+        }
+        mock_page = self._mock_page_with_modal(full_tree, dialog_subtree)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
         await mgr.snapshot("a1")
         assert inst.dialog_active is True
 
-        # Second snapshot: dialog dismissed
+        # Second snapshot: modal dismissed — no visible modals in DOM
         tree_no_dialog = {
             "role": "WebArea", "name": "",
-            "children": [
-                {"role": "button", "name": "Post"},
-            ],
+            "children": [{"role": "button", "name": "Post"}],
         }
+        mock_page.query_selector_all = AsyncMock(return_value=[])
         mock_page.accessibility.snapshot = AsyncMock(return_value=tree_no_dialog)
         await mgr.snapshot("a1")
         assert inst.dialog_active is False
-        assert len(inst.refs) == 1  # Just the Post button
+        assert len(inst.refs) == 1
 
     @pytest.mark.asyncio
     async def test_snapshot_dialog_duplicate_indexing(self):
@@ -2649,24 +2670,25 @@ class TestDialogScoping:
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
-        mock_page = AsyncMock()
-        tree = {
+        full_tree = {
             "role": "WebArea", "name": "",
             "children": [
-                # These are behind the modal — should be excluded
                 {"role": "button", "name": "Post"},
                 {"role": "textbox", "name": "Search"},
-                {
-                    "role": "dialog", "name": "Compose",
-                    "children": [
-                        {"role": "textbox", "name": "Tweet text"},
-                        {"role": "button", "name": "Post"},
-                    ],
-                },
+                {"role": "dialog", "name": "Compose", "children": [
+                    {"role": "textbox", "name": "Tweet text"},
+                    {"role": "button", "name": "Post"},
+                ]},
             ],
         }
-        mock_page.accessibility = MagicMock()
-        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
+        dialog_subtree = {
+            "role": "dialog", "name": "Compose",
+            "children": [
+                {"role": "textbox", "name": "Tweet text"},
+                {"role": "button", "name": "Post"},
+            ],
+        }
+        mock_page = self._mock_page_with_modal(full_tree, dialog_subtree)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
@@ -2675,7 +2697,6 @@ class TestDialogScoping:
 
         # Only dialog elements: dialog + textbox + button = 3
         assert len(refs) == 3
-        # The Post button inside the dialog should have index 0 (not 1)
         post_ref = [r for r in refs.values()
                     if r["role"] == "button" and r["name"] == "Post"]
         assert len(post_ref) == 1
@@ -2700,11 +2721,10 @@ class TestDialogScoping:
 
         locator = mgr._locator_from_ref(inst, "e0")
 
-        # Should scope to dialog elements
-        mock_page.locator.assert_called_once_with(
-            '[role="dialog"], [role="alertdialog"], dialog[open]'
-        )
-        # Should search for the button within the dialog scope
+        # Should scope to dialog/modal elements
+        call_args = mock_page.locator.call_args[0][0]
+        assert '[role="dialog"]' in call_args
+        assert '[aria-modal="true"]' in call_args
         mock_dialog_locator.get_by_role.assert_called_once_with("button", name="Post")
         mock_role_locator.nth.assert_called_once_with(0)
         assert locator is mock_role_locator.nth.return_value
@@ -2726,38 +2746,36 @@ class TestDialogScoping:
 
         mgr._locator_from_ref(inst, "e0")
 
-        # Should NOT call page.locator() — searches page directly
         mock_page.locator.assert_not_called()
         mock_page.get_by_role.assert_called_once_with("button", name="Post")
 
     @pytest.mark.asyncio
-    async def test_snapshot_nested_dialog(self):
-        """Dialog nested inside non-dialog containers should be found."""
+    async def test_snapshot_hidden_dialog_ignored(self):
+        """Hidden dialog elements (aria-hidden) should not trigger scoping."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
-        mock_page = AsyncMock()
+        # DOM query returns an element but it's not visible
         tree = {
             "role": "WebArea", "name": "",
             "children": [
-                {"role": "button", "name": "Outside"},
-                # Dialog wrapped in a generic container (React portals do this)
-                {"role": "generic", "name": "", "children": [
-                    {"role": "dialog", "name": "Nested", "children": [
-                        {"role": "button", "name": "Inside"},
-                    ]},
-                ]},
+                {"role": "button", "name": "Post"},
+                {"role": "link", "name": "Home"},
             ],
         }
+        mock_page = AsyncMock()
+        mock_hidden_el = AsyncMock()
+        mock_hidden_el.is_visible = AsyncMock(return_value=False)
+        mock_page.query_selector_all = AsyncMock(return_value=[mock_hidden_el])
         mock_page.accessibility = MagicMock()
         mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
-        assert inst.dialog_active is True
-        assert "Outside" not in result["data"]["snapshot"]
-        assert "Inside" in result["data"]["snapshot"]
+        refs = result["data"]["refs"]
+        assert len(refs) == 2  # Both elements visible
+        assert inst.dialog_active is False
 
 
 # ── Speed factor tests ────────────────────────────────────────────────────
