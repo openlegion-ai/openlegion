@@ -776,12 +776,13 @@ class BrowserManager:
         inst.touch()
         async with inst.lock:
             try:
-                await inst.page.go_back(timeout=10000)
+                response = await inst.page.go_back(timeout=10000)
                 await asyncio.sleep(action_delay())
                 title = await inst.page.title()
                 url = self.redactor.redact(agent_id, inst.page.url)
                 title = self.redactor.redact(agent_id, title)
-                return {"success": True, "data": {"url": url, "title": title}}
+                navigated = response is not None
+                return {"success": True, "data": {"url": url, "title": title, "navigated": navigated}}
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
@@ -791,12 +792,13 @@ class BrowserManager:
         inst.touch()
         async with inst.lock:
             try:
-                await inst.page.go_forward(timeout=10000)
+                response = await inst.page.go_forward(timeout=10000)
                 await asyncio.sleep(action_delay())
                 title = await inst.page.title()
                 url = self.redactor.redact(agent_id, inst.page.url)
                 title = self.redactor.redact(agent_id, title)
-                return {"success": True, "data": {"url": url, "title": title}}
+                navigated = response is not None
+                return {"success": True, "data": {"url": url, "title": title, "navigated": navigated}}
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
