@@ -8,7 +8,7 @@ Agents interact with their environment through **skills** -- Python functions re
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `exec` | `command`, `workdir`, `timeout` | Execute shell commands with full Linux environment |
+| `run_command` | `command`, `workdir`, `timeout` | Execute shell commands with full Linux environment |
 
 ### File Operations
 
@@ -32,12 +32,18 @@ All agents share a single **browser service container** running Camoufox (a stea
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `browser_navigate` | `url`, `wait_ms` | Open URL, wait, extract page text (default wait: 1000ms). |
-| `browser_snapshot` | -- | Accessibility tree snapshot with element refs (e1, e2, ...) |
-| `browser_screenshot` | `full_page` | Take screenshot, return base64 PNG. |
-| `browser_click` | `ref` or `selector` | Click element by accessibility ref or CSS selector |
+| `browser_navigate` | `url`, `wait_ms`, `wait_until` | Open URL, wait, extract page text. `wait_until`: `domcontentloaded` (default), `load`, `networkidle`, `commit`. |
+| `browser_get_elements` | -- | Accessibility tree snapshot with element refs (e1, e2, ...). Returns structured text, not a visual image. |
+| `browser_screenshot` | `full_page` | Take screenshot, return visual PNG image. |
+| `browser_click` | `ref` or `selector`, `force` | Click element by accessibility ref or CSS selector. `force` bypasses actionability checks. |
 | `browser_type` | `ref` or `selector`, `text` | Type into input field (supports `$CRED{name}` handles) |
+| `browser_hover` | `ref` or `selector` | Hover over an element to trigger dropdowns/tooltips. |
 | `browser_scroll` | `direction`, `amount`, `ref` | Scroll page up/down or scroll element into view. Default direction: `down`, default amount: one viewport height. |
+| `browser_wait_for` | `selector`, `state`, `timeout_ms` | Wait for a CSS selector to appear/disappear. `state`: `visible` (default), `attached`, `hidden`, `detached`. |
+| `browser_press_key` | `key` | Press a keyboard key or shortcut (e.g. `Escape`, `Enter`, `Control+a`). |
+| `browser_go_back` | -- | Navigate back in browser history. |
+| `browser_go_forward` | -- | Navigate forward in browser history. |
+| `browser_switch_tab` | `tab_index` | List open tabs or switch to a specific tab. Omit `tab_index` to list only. |
 | `browser_reset` | -- | Reset browser session (profile preserved) |
 | `browser_solve_captcha` | -- | Manual CAPTCHA detection and solving. Usually not needed — `browser_navigate` auto-detects CAPTCHAs. |
 
@@ -92,7 +98,7 @@ All agents share a single **browser service container** running Camoufox (a stea
 |------|-----------|-------------|
 | `create_skill` | `name`, `code` | Write a new Python skill at runtime |
 | `reload_skills` | -- | Hot-reload all skills from disk |
-| `spawn_agent` | `role`, `system_prompt`, `ttl` | Spawn an ephemeral sub-agent in a new container (default TTL: 3600s) |
+| `spawn_fleet_agent` | `role`, `system_prompt`, `ttl` | Spawn an ephemeral sub-agent in a new container (default TTL: 3600s) |
 
 ### Subagents (In-Container)
 
@@ -120,13 +126,13 @@ Agents never see credential values. All operations return opaque `$CRED{name}` h
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `introspect` | `section` | Query live runtime state: permissions, budget, fleet, cron, health, or all |
+| `get_system_status` | `section` | Query live runtime state: permissions, budget, fleet, cron, health, or all |
 
 Agents receive system awareness through three layers:
 
 1. **SYSTEM.md** — Generated at startup and refreshed every 5 minutes. Contains a static architecture guide (mesh concepts, context window mechanics, tool cost model, common errors) plus a compact snapshot of permissions and fleet. Loaded into the system prompt via workspace bootstrap.
 2. **Runtime Context** — A compact block injected into the system prompt on each turn (5-minute cache). Shows live budget numbers, permission patterns, fleet roster, and cron schedule.
-3. **`introspect` tool** — On-demand access to fresh data when agents need exact numbers mid-conversation.
+3. **`get_system_status` tool** — On-demand access to fresh data when agents need exact numbers mid-conversation.
 
 The `section` parameter accepts: `permissions`, `budget`, `fleet`, `cron`, `health`, or `all` (default). Fleet data is filtered by `can_message` permissions — agents only see teammates they can interact with.
 

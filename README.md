@@ -394,17 +394,23 @@ canonicalized parameters and results over a 15-call sliding window.
 
 | Tool | Purpose |
 |------|---------|
-| `exec` | Shell command execution with timeout |
+| `run_command` | Shell command execution with timeout |
 | `read_file` | Read file contents from `/data` |
 | `write_file` | Write/append file in `/data` |
 | `list_files` | List/glob files in `/data` |
 | `http_request` | HTTP GET/POST/PUT/DELETE/PATCH |
 | `browser_navigate` | Open URL, extract page text via shared browser service |
-| `browser_snapshot` | Accessibility tree snapshot with element refs (e1, e2, ...) |
+| `browser_get_elements` | Accessibility tree snapshot with element refs (e1, e2, ...) |
 | `browser_screenshot` | Capture page screenshot |
 | `browser_click` | Click element by ref or CSS selector |
 | `browser_type` | Fill input by ref or CSS selector (supports `$CRED{}` handles) |
+| `browser_hover` | Hover over element to trigger dropdowns/tooltips |
 | `browser_scroll` | Scroll page up/down or scroll element into view |
+| `browser_wait_for` | Wait for CSS selector to appear/disappear |
+| `browser_press_key` | Press keyboard key or shortcut (Escape, Enter, Control+a) |
+| `browser_go_back` | Navigate back in browser history |
+| `browser_go_forward` | Navigate forward in browser history |
+| `browser_switch_tab` | List open tabs or switch to a specific tab |
 | `browser_reset` | Reset browser session (profile preserved) |
 | `browser_solve_captcha` | Manual CAPTCHA detection and solving |
 | `memory_search` | Hybrid search across workspace files and structured DB |
@@ -425,14 +431,14 @@ canonicalized parameters and results over a 15-call sliding window.
 | `list_cron` / `remove_cron` | Manage scheduled jobs |
 | `create_skill` | Write a new Python skill at runtime |
 | `reload_skills` | Hot-reload all skills |
-| `spawn_agent` | Spawn an ephemeral sub-agent in a new container |
+| `spawn_fleet_agent` | Spawn an ephemeral sub-agent in a new container |
 | `spawn_subagent` | Spawn a lightweight in-container subagent for parallel subtasks |
 | `list_subagents` | List active subagents and their status |
 | `wait_for_subagent` | Wait for a subagent to complete and return its result |
 | `vault_generate_secret` | Generate and store a random secret (returns opaque handle) |
 | `vault_capture_from_page` | Capture text from browser element and store as credential |
 | `vault_list` | List credential names (names only, never values) |
-| `introspect` | Query own runtime state: permissions, budget, fleet, cron, health |
+| `get_system_status` | Query own runtime state: permissions, budget, fleet, cron, health |
 | `read_agent_history` | Read another agent's conversation logs |
 
 Custom skills are Python functions decorated with `@skill`, auto-discovered
@@ -865,7 +871,7 @@ pytest tests/
 
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
-| Built-in Tools | 145 | exec, file, browser (Camoufox, screenshots, reset/recovery), memory, mesh, vault, introspect, path traversal, discovery |
+| Built-in Tools | 145 | run_command, file, browser (Camoufox, screenshots, reset/recovery), memory, mesh, vault, get_system_status, path traversal, discovery |
 | Dashboard | 104 | Fleet management, blackboard, costs, traces, queues, cron, settings, config, streaming broadcast, workspace proxy |
 | Workspace | 68 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files, SYSTEM.md |
 | Agent Loop | 67 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |

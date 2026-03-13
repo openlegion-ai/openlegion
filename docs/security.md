@@ -80,7 +80,7 @@ Even with `allowed_credentials: ["*"]`, system credentials are **always** blocke
 Resolved credentials are automatically redacted from tool outputs to prevent accidental leakage into LLM context:
 
 - **HTTP responses** — `http_request` strips resolved `$CRED{name}` values from response headers and body before returning results to the agent
-- **Browser snapshots** — `browser_snapshot` strips common secret patterns (API keys, GitHub tokens, AWS keys, etc.) from accessibility tree text
+- **Browser snapshots** — `browser_get_elements` strips common secret patterns (API keys, GitHub tokens, AWS keys, etc.) from accessibility tree text
 
 This ensures that even if an agent interacts with an API that echoes credentials back, the actual secret values are not exposed in the conversation.
 
@@ -174,7 +174,7 @@ Agents process untrusted text from user messages, web pages, HTTP responses, too
 | Choke Point | File | What It Covers |
 |-------------|------|----------------|
 | User input | `src/agent/server.py` | All user messages from all channels/CLI |
-| Tool results | `src/agent/loop.py` | All tool outputs (browser, web search, HTTP, file, exec, memory, MCP) |
+| Tool results | `src/agent/loop.py` | All tool outputs (browser, web search, HTTP, file, run_command, memory, MCP) |
 | System prompt context | `src/agent/loop.py` | Workspace bootstrap, blackboard goals, memory facts, learnings, tool history |
 
 ### What Gets Stripped
@@ -204,7 +204,7 @@ The `/mesh/introspect` endpoint lets agents query their own runtime state (permi
 The introspect data flows into agents through three layers, each with its own sanitization:
 1. `SYSTEM.md` — generated at startup, refreshed on cache miss (5-min TTL)
 2. Runtime Context block — injected into the system prompt each turn
-3. `introspect` tool — on-demand fresh data
+3. `get_system_status` tool — on-demand fresh data
 
 ## Mesh Authentication
 
