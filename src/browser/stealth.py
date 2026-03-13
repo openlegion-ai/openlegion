@@ -18,8 +18,7 @@ Camoufox (patched Firefox + BrowserForge) handles layers 2, 4, 5.
 This module ensures the fingerprint we feed Camoufox is internally
 consistent and realistic:
   - OS defaults to Windows (≈70 % market share); Linux is a datacenter signal
-  - Resolution is deterministic per agent_id so it stays stable across
-    browser restarts (a real user always has the same screen)
+  - Resolution is locked to 1920×1080 to match the KasmVNC display
   - Locale and timezone are explicit so they match the fingerprint OS
   - WebRTC fully disabled — Docker internal IPs leak via ICE otherwise
   - privacy.resistFingerprinting OFF — RFP produces detectable sentinel values

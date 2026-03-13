@@ -996,6 +996,12 @@ def create_mesh_app(
     import httpx as _httpx
     _browser_proxy_client = _httpx.AsyncClient(timeout=60)
 
+    _ALLOWED_BROWSER_ACTIONS = frozenset({
+        "navigate", "snapshot", "click", "type", "hover",
+        "screenshot", "reset", "focus", "status", "solve_captcha", "scroll",
+        "wait_for", "press_key", "go_back", "go_forward", "switch_tab",
+    })
+
     @app.post("/mesh/browser/command")
     async def browser_command(request: Request) -> dict:
         """Proxy a browser command to the shared browser service.
@@ -1018,12 +1024,7 @@ def create_mesh_app(
         if not action:
             raise HTTPException(400, "action is required")
 
-        _ALLOWED_ACTIONS = frozenset({
-            "navigate", "snapshot", "click", "type", "hover",
-            "screenshot", "reset", "focus", "status", "solve_captcha", "scroll",
-            "wait_for", "press_key", "go_back", "go_forward", "switch_tab",
-        })
-        if action not in _ALLOWED_ACTIONS:
+        if action not in _ALLOWED_BROWSER_ACTIONS:
             raise HTTPException(400, f"Unknown browser action: {action}")
 
         # SSRF protection: validate navigate URLs before forwarding to browser

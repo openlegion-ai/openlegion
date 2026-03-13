@@ -1657,12 +1657,12 @@ class TestAllowedBrowserActions:
     """Regression tests for the mesh-proxy allowed-action allowlist.
 
     Any browser action added to browser_tool.py must also be in the
-    _ALLOWED_ACTIONS set in host/server.py, otherwise the skill silently
+    _ALLOWED_BROWSER_ACTIONS set in host/server.py, otherwise the skill silently
     fails with a 400 from the proxy.
     """
 
     def _get_allowed_actions(self) -> frozenset[str]:
-        """Extract _ALLOWED_ACTIONS from host/server.py without running the server."""
+        """Extract _ALLOWED_BROWSER_ACTIONS from host/server.py without running the server."""
         import ast
         from pathlib import Path
         source = (Path(__file__).parent.parent / "src/host/server.py").read_text()
@@ -1671,7 +1671,7 @@ class TestAllowedBrowserActions:
             if (
                 isinstance(node, ast.Assign)
                 and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == "_ALLOWED_ACTIONS"
+                and node.targets[0].id == "_ALLOWED_BROWSER_ACTIONS"
                 and isinstance(node.value, ast.Call)
             ):
                 # frozenset({...}) call — extract string elements
@@ -1687,7 +1687,7 @@ class TestAllowedBrowserActions:
         """wait_for must be allowed — browser_wait_for skill depends on it."""
         actions = self._get_allowed_actions()
         assert "wait_for" in actions, (
-            "wait_for missing from _ALLOWED_ACTIONS in host/server.py — "
+            "wait_for missing from _ALLOWED_BROWSER_ACTIONS in host/server.py — "
             "browser_wait_for skill will silently fail"
         )
 
@@ -1695,7 +1695,7 @@ class TestAllowedBrowserActions:
         """hover must be allowed — browser_hover skill depends on it."""
         actions = self._get_allowed_actions()
         assert "hover" in actions, (
-            "hover missing from _ALLOWED_ACTIONS in host/server.py — "
+            "hover missing from _ALLOWED_BROWSER_ACTIONS in host/server.py — "
             "browser_hover skill will silently fail"
         )
 
@@ -2213,7 +2213,7 @@ class TestGoBackForward:
         mgr.redactor = CredentialRedactor()
         inst = MagicMock()
         inst.page = AsyncMock()
-        inst.page.go_back = AsyncMock(return_value=None)
+        inst.page.go_back = AsyncMock(return_value=MagicMock())  # non-None = navigated
         inst.page.title = AsyncMock(return_value="Previous Page")
         inst.page.url = "https://example.com/prev"
         inst.lock = asyncio.Lock()
@@ -2226,6 +2226,7 @@ class TestGoBackForward:
 
         assert result["success"] is True
         assert result["data"]["title"] == "Previous Page"
+        assert result["data"]["navigated"] is True
         inst.page.go_back.assert_called_once()
 
     @pytest.mark.asyncio
@@ -2237,7 +2238,7 @@ class TestGoBackForward:
         mgr.redactor = CredentialRedactor()
         inst = MagicMock()
         inst.page = AsyncMock()
-        inst.page.go_forward = AsyncMock(return_value=None)
+        inst.page.go_forward = AsyncMock(return_value=MagicMock())  # non-None = navigated
         inst.page.title = AsyncMock(return_value="Next Page")
         inst.page.url = "https://example.com/next"
         inst.lock = asyncio.Lock()
@@ -2250,7 +2251,55 @@ class TestGoBackForward:
 
         assert result["success"] is True
         assert result["data"]["title"] == "Next Page"
+        assert result["data"]["navigated"] is True
         inst.page.go_forward.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_go_forward_no_history(self):
+        from src.browser.redaction import CredentialRedactor
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr.redactor = CredentialRedactor()
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.page.go_forward = AsyncMock(return_value=None)
+        inst.page.title = AsyncMock(return_value="Current Page")
+        inst.page.url = "https://example.com/current"
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch("src.browser.service.action_delay", return_value=0.01):
+                with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                    result = await mgr.go_forward("agent1")
+
+        assert result["success"] is True
+        assert result["data"]["navigated"] is False
+
+    @pytest.mark.asyncio
+    async def test_go_back_no_history(self):
+        from src.browser.redaction import CredentialRedactor
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr.redactor = CredentialRedactor()
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.page.go_back = AsyncMock(return_value=None)
+        inst.page.title = AsyncMock(return_value="Current Page")
+        inst.page.url = "https://example.com/current"
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch("src.browser.service.action_delay", return_value=0.01):
+                with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                    result = await mgr.go_back("agent1")
+
+        assert result["success"] is True
+        assert result["data"]["navigated"] is False
+        assert result["data"]["url"] == "https://example.com/current"
 
 
 # ── Switch tab tests ───────────────────────────────────────────────────────
