@@ -1016,12 +1016,13 @@ class TestBrowserTypeCredentialHandles:
         bt._resolved_credential_values.clear()
 
         mc = AsyncMock()
+        mc.agent_id = "test-agent"
         mc.vault_resolve = AsyncMock(return_value="MySecretP@ss123")
         mc.browser_command = AsyncMock(return_value={"success": True, "data": {}})
 
         await browser_type(text="$CRED{password}", ref="e1", mesh_client=mc)
 
-        assert "MySecretP@ss123" in bt._resolved_credential_values
+        assert "MySecretP@ss123" in bt._resolved_credential_values.get("test-agent", set())
         bt._resolved_credential_values.clear()
 
     @pytest.mark.asyncio
@@ -1033,12 +1034,13 @@ class TestBrowserTypeCredentialHandles:
         bt._resolved_credential_values.clear()
 
         mc = AsyncMock()
+        mc.agent_id = "test-agent"
         mc.vault_resolve = AsyncMock(return_value="abc")
         mc.browser_command = AsyncMock(return_value={"success": True, "data": {}})
 
         await browser_type(text="$CRED{pin}", ref="e1", mesh_client=mc)
 
-        assert "abc" not in bt._resolved_credential_values
+        assert "abc" not in bt._resolved_credential_values.get("test-agent", set())
         bt._resolved_credential_values.clear()
 
 
@@ -1049,14 +1051,14 @@ class TestCredentialRedaction:
         import src.agent.builtins.browser_tool as bt
         from src.agent.builtins.browser_tool import _deep_redact
 
-        bt._resolved_credential_values = {"secret-val"}
+        bt._resolved_credential_values = {"test-agent": {"secret-val"}}
 
-        assert _deep_redact({"a": {"b": "secret-val"}}) == {"a": {"b": "[REDACTED]"}}
-        assert _deep_redact([{"k": "secret-val"}]) == [{"k": "[REDACTED]"}]
-        assert _deep_redact({"items": ["ok", "secret-val"]}) == {"items": ["ok", "[REDACTED]"]}
-        assert _deep_redact({"count": 42, "flag": True}) == {"count": 42, "flag": True}
-        assert _deep_redact(None) is None
-        assert _deep_redact("") == ""
+        assert _deep_redact({"a": {"b": "secret-val"}}, "test-agent") == {"a": {"b": "[REDACTED]"}}
+        assert _deep_redact([{"k": "secret-val"}], "test-agent") == [{"k": "[REDACTED]"}]
+        assert _deep_redact({"items": ["ok", "secret-val"]}, "test-agent") == {"items": ["ok", "[REDACTED]"]}
+        assert _deep_redact({"count": 42, "flag": True}, "test-agent") == {"count": 42, "flag": True}
+        assert _deep_redact(None, "test-agent") is None
+        assert _deep_redact("", "test-agent") == ""
         bt._resolved_credential_values.clear()
 
     def test_redact_credentials_api_key_patterns(self):
@@ -1077,18 +1079,18 @@ class TestCredentialRedaction:
         import src.agent.builtins.browser_tool as bt
         from src.agent.builtins.browser_tool import _redact_resolved_credentials
 
-        bt._resolved_credential_values = {"secret123", "p@ssw0rd"}
-        assert _redact_resolved_credentials("the key is secret123") == "the key is [REDACTED]"
-        assert _redact_resolved_credentials("safe text here") == "safe text here"
+        bt._resolved_credential_values = {"test-agent": {"secret123", "p@ssw0rd"}}
+        assert _redact_resolved_credentials("the key is secret123", "test-agent") == "the key is [REDACTED]"
+        assert _redact_resolved_credentials("safe text here", "test-agent") == "safe text here"
         bt._resolved_credential_values.clear()
 
     def test_redact_resolved_credentials_noop_when_empty(self):
         import src.agent.builtins.browser_tool as bt
         from src.agent.builtins.browser_tool import _redact_resolved_credentials
 
-        bt._resolved_credential_values = set()
+        bt._resolved_credential_values = {}
         text = "sk-abcdefghijklmnopqrstuvwxyz"
-        assert _redact_resolved_credentials(text) == text
+        assert _redact_resolved_credentials(text, "test-agent") == text
 
     def test_browser_command_redacts_response(self):
         """_browser_command applies _deep_redact to the response."""
@@ -1097,9 +1099,10 @@ class TestCredentialRedaction:
         import src.agent.builtins.browser_tool as bt
         from src.agent.builtins.browser_tool import _browser_command
 
-        bt._resolved_credential_values = {"leaked-secret"}
+        bt._resolved_credential_values = {"test-agent": {"leaked-secret"}}
 
         mc = AsyncMock()
+        mc.agent_id = "test-agent"
         mc.browser_command = AsyncMock(return_value={"content": "found leaked-secret here"})
 
         result = asyncio.get_event_loop().run_until_complete(
@@ -1117,9 +1120,10 @@ class TestCredentialRedaction:
         import src.agent.builtins.browser_tool as bt
         from src.agent.builtins.browser_tool import _browser_command
 
-        bt._resolved_credential_values = {"my-secret"}
+        bt._resolved_credential_values = {"test-agent": {"my-secret"}}
 
         mc = AsyncMock()
+        mc.agent_id = "test-agent"
         mc.browser_command = AsyncMock(side_effect=Exception("fail: my-secret exposed"))
 
         result = asyncio.get_event_loop().run_until_complete(
@@ -1139,29 +1143,30 @@ class TestBrowserResetHttpClient:
         import src.agent.builtins.browser_tool as bt
         from src.agent.builtins.browser_tool import browser_reset
 
-        bt._resolved_credential_values.add("some-secret")
+        bt._resolved_credential_values.setdefault("test-agent", set()).add("some-secret")
 
         mc = AsyncMock()
+        mc.agent_id = "test-agent"
         mc.browser_command = AsyncMock(return_value={"status": "reset"})
 
         result = await browser_reset(mesh_client=mc)
 
         mc.browser_command.assert_awaited_once_with("reset", {})
         assert result["status"] == "reset"
-        assert len(bt._resolved_credential_values) == 0
+        assert "test-agent" not in bt._resolved_credential_values
 
     @pytest.mark.asyncio
     async def test_reset_no_mesh_client(self):
         import src.agent.builtins.browser_tool as bt
         from src.agent.builtins.browser_tool import browser_reset
 
-        bt._resolved_credential_values.add("leftover")
+        bt._resolved_credential_values.setdefault("", set()).add("leftover")
 
         result = await browser_reset(mesh_client=None)
 
         assert "error" in result
         # Credentials should still be cleared even if mesh call fails
-        assert len(bt._resolved_credential_values) == 0
+        assert "" not in bt._resolved_credential_values
 
 
 class TestBrowserNoMeshClient:
