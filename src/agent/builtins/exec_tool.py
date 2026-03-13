@@ -69,6 +69,7 @@ async def exec_command(command: str, timeout: int = 30, workdir: str = "/data") 
         }
     except asyncio.TimeoutError:
         proc.kill()
+        await proc.wait()
         return {"exit_code": -1, "stdout": "", "stderr": f"Command timed out after {timeout}s"}
     except Exception as e:
         return {"exit_code": -1, "stdout": "", "stderr": str(e)}

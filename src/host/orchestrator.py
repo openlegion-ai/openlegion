@@ -286,7 +286,6 @@ class Orchestrator:
 
         task = asyncio.create_task(self._run_workflow(execution))
         task.add_done_callback(self._on_workflow_done)
-        execution._task = task
 
         return execution.id
 
@@ -543,47 +542,6 @@ class Orchestrator:
                 detail=f"wf={execution.workflow.name} step={step.id}",
                 duration_ms=duration_ms,
             )
-
-    async def _wait_for_task_result(self, agent_url: str, assignment: TaskAssignment, timeout: int) -> TaskResult:
-        """Poll agent status until task completes, then fetch the real result.
-
-        Uses exponential backoff: 1s, 2s, 4s, ... up to 30s between polls.
-        """
-        start = time.time()
-        poll_delay = 1.0
-        _MAX_POLL_DELAY = 30.0
-        while time.time() - start < timeout:
-            try:
-                client = await self._get_client()
-                response = await client.get(f"{agent_url}/status", timeout=10)
-                status = response.json()
-                agent_state = status.get("state")
-                if agent_state != "working":
-                    result_resp = await client.get(f"{agent_url}/result", timeout=10)
-                    if result_resp.status_code == 200:
-                        result_data = result_resp.json()
-                        logger.info(f"Got result from agent: status={result_data.get('status')}")
-                        return TaskResult(**result_data)
-                    logger.warning(
-                        f"Agent state={agent_state} but /result returned {result_resp.status_code}"
-                    )
-                    return TaskResult(
-                        task_id=assignment.task_id,
-                        status="failed",
-                        error=f"Agent state={agent_state}, no result (HTTP {result_resp.status_code})",
-                    )
-                # Agent still working — reset backoff on successful polls
-                poll_delay = 1.0
-            except Exception as e:
-                logger.warning(f"Polling agent at {agent_url}: {e}")
-                poll_delay = min(poll_delay * 2, _MAX_POLL_DELAY)
-            await asyncio.sleep(poll_delay)
-
-        return TaskResult(
-            task_id=assignment.task_id,
-            status="timeout",
-            error=f"Task timed out after {timeout}s",
-        )
 
     def _resolve_input(self, execution: WorkflowExecution, step: WorkflowStep) -> dict:
         """Resolve the input data for a step."""
