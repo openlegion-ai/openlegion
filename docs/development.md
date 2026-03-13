@@ -81,11 +81,19 @@ pytest tests/ -x
 | `src/channels/discord.py` | `tests/test_discord.py` |
 | `src/channels/slack.py` | `tests/test_slack.py` |
 | `src/channels/whatsapp.py` | `tests/test_whatsapp.py` |
+| `src/agent/attachments.py` | `tests/test_attachments.py` |
+| `src/agent/llm.py` | `tests/test_llm_param_allowlist.py` |
+| `src/agent/builtins/web_search_tool.py` | `tests/test_web_search_tool.py` |
+| `src/browser/service.py` | `tests/test_browser_service.py` |
 | `src/shared/types.py` | `tests/test_types.py` |
 | `src/shared/utils.py` (sanitization) | `tests/test_sanitize.py` |
+| `src/shared/models.py` | `tests/test_models.py` |
+| `src/templates/` | `tests/test_templates.py` |
 | `src/cli/` | `tests/test_cli_commands.py`, `tests/test_setup_wizard.py` |
 | `src/cli/config.py` (projects) | `tests/test_projects.py` |
+| `src/dashboard/auth.py` | `tests/test_dashboard_auth.py` |
 | `src/dashboard/events.py` | `tests/test_events.py` |
+| `src/agent/memory.py` (fallback) | `tests/test_embedding_fallback.py` |
 | Cross-component | `tests/test_integration.py` |
 
 ### Testing Conventions
@@ -179,7 +187,7 @@ Blackboard, agent memory, cost tracking, cron -- all SQLite with WAL mode:
 ```python
 conn = sqlite3.connect(db_path)
 conn.execute("PRAGMA journal_mode=WAL")
-conn.execute("PRAGMA busy_timeout=5000")
+conn.execute("PRAGMA busy_timeout=30000")  # 30s for mesh/costs/memory; traces uses 5000
 ```
 
 No Redis, no external databases.

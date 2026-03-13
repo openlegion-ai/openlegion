@@ -21,6 +21,7 @@ Agents run as non-root (UID 1000) with:
 - `no-new-privileges` security option
 - 384MB memory limit (agents are slim — no browser)
 - 0.15 CPU quota (agents are I/O-bound, waiting on LLM APIs)
+- PID limit: 256 processes (`pids_limit: 256`)
 - Browser operations handled by shared browser service container (2–8GB RAM scaled by fleet size, 1 CPU)
 - `cap_drop: ALL` (no capabilities re-added)
 - Read-only root filesystem (`read_only: True`)

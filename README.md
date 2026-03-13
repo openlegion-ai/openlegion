@@ -8,7 +8,7 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 1826](https://img.shields.io/badge/tests-1826%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 2070](https://img.shields.io/badge/tests-2070%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -113,8 +113,8 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 1826 tests including full Docker E2E |
-| **Codebase size** | 430,000+ lines | ~26,000 lines — auditable in a day |
+| **Test coverage** | Minimal | 2070 tests including full Docker E2E |
+| **Codebase size** | 430,000+ lines | ~29,000 lines — auditable in a day |
 
 ---
 
@@ -128,7 +128,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**1826 tests passing** across **~26,000 lines** of application code.
+**2070 tests passing** across **~29,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
@@ -321,9 +321,9 @@ Agent containers are slim — no browser. Browsing is handled by a shared browse
 
 **Browser service container** (shared across all agents):
 - **Image**: `openlegion-browser:latest` (Camoufox stealth browser + KasmVNC)
-- **Resources**: 2GB RAM, 1 CPU, 512MB shared memory
+- **Resources**: 2–8GB RAM (scaled by fleet size), 1 CPU, 512MB shared memory
 - **Ports**: 8500 (browser API), 6080 (KasmVNC web client)
-- **Capacity**: up to 5 concurrent browser sessions
+- **Capacity**: 1–10 concurrent browser sessions (scaled by fleet size)
 
 ---
 
@@ -609,7 +609,7 @@ OpenLegion supports two isolation levels:
 | **Requirements** | Any Docker install | Docker Desktop 4.58+ |
 | **Enable** | `openlegion start` | `openlegion start --sandbox` |
 
-**Docker containers** (default) run agents as non-root with `no-new-privileges`, 384MB memory limit, 0.15 CPU cap, and no host filesystem access. Browser operations are handled by a shared browser service container (2GB RAM, 1 CPU). This is secure for most use cases.
+**Docker containers** (default) run agents as non-root with `no-new-privileges`, 384MB memory limit, 0.15 CPU cap, and no host filesystem access. Browser operations are handled by a shared browser service container (2–8GB RAM scaled by fleet size, 1 CPU). This is secure for most use cases.
 
 **Docker Sandbox microVMs** give each agent its own Linux kernel via Apple Virtualization.framework (macOS) or Hyper-V (Windows). Even if an agent achieves code execution, it's trapped inside a lightweight VM with no visibility into other agents or the host. Use this when running untrusted code or when compliance requires hypervisor isolation.
 
@@ -684,6 +684,11 @@ Templates are offered during first-run setup (via `openlegion start`):
 | `content` | researcher, writer, editor | Content creation team |
 | `deep-research` | researcher, analyst | Deep research and analysis team |
 | `monitor` | monitor | Autonomous monitoring agent |
+| `competitive-intel` | researcher, analyst, reporter | Market and competitor analysis |
+| `lead-enrichment` | enricher | Lead data enrichment |
+| `price-intelligence` | monitor, analyst | Price monitoring and analysis |
+| `review-ops` | monitor, responder | Review and feedback management |
+| `social-listening` | listener | Social media monitoring |
 
 ---
 
@@ -871,52 +876,60 @@ pytest tests/
 
 | Category | Tests | What's Tested |
 |----------|-------|---------------|
-| Built-in Tools | 145 | run_command, file, browser (Camoufox, screenshots, reset/recovery), memory, mesh, vault, get_system_status, path traversal, discovery |
-| Dashboard | 104 | Fleet management, blackboard, costs, traces, queues, cron, settings, config, streaming broadcast, workspace proxy |
-| Workspace | 68 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files, SYSTEM.md |
-| Agent Loop | 67 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
-| Credentials | 67 | Vault, API proxy, provider detection, two-tier system, credential lifecycle |
-| CLI | 80 | Agent add/list/edit/remove, chat, REPL commands, cron management, version |
-| Channels (base) | 47 | Abstract channel, commands, per-user routing, chunking, steer, debug, addkey normalization, parallel broadcast |
-| Cron | 44 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM, concurrent mutations |
-| Mesh | 42 | Blackboard, PubSub, MessageRouter, permissions |
-| Integration | 42 | Multi-component mesh operations, notifications |
+| Dashboard | 215 | Fleet management, blackboard, costs, traces, queues, cron, settings, config, streaming broadcast, workspace proxy, projects |
+| Built-in Tools | 167 | run_command, file, browser tools, memory, mesh, vault, get_system_status, path traversal, discovery |
+| Browser Service | 137 | Camoufox sessions, screenshots, reset/recovery, tab switching, anti-detection |
+| Credentials | 110 | Vault, API proxy, provider detection, two-tier system, credential lifecycle |
+| CLI | 99 | Agent add/list/edit/remove, chat, REPL commands, cron management, version |
+| Workspace | 90 | File scaffold, loading, BM25 search, daily logs, learnings, heartbeat, identity files, SYSTEM.md |
+| Agent Loop | 82 | Task execution, tool calling, cancellation, tool memory, chat helpers, daily log enrichment, task logging |
+| Integration | 68 | Multi-component mesh operations, notifications |
+| Mesh | 65 | Blackboard, PubSub, MessageRouter, permissions |
+| Channels (base) | 62 | Abstract channel, commands, per-user routing, chunking, steer, debug, addkey normalization, parallel broadcast |
+| Cron | 58 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM, concurrent mutations |
+| Templates | 54 | Template loading, agent creation, model interpolation, all 11 templates |
+| Runtime Backend | 54 | DockerBackend, SandboxBackend, extra_env, name sanitization, detection, VNC allocation |
+| Projects | 42 | Multi-project CRUD, config, agent membership, blackboard key scoping, cross-project permission isolation |
+| Context Manager | 41 | Token estimation (tiktoken + model-aware), compaction, flushing, flush reset |
 | Sanitization | 38 | Invisible Unicode stripping, bidi overrides, tag chars, zero-width |
 | Discord Channel | 36 | Slash commands, message routing, pairing, chunking, embed formatting |
+| Agent Server | 35 | Workspace API, heartbeat-context endpoint, content sanitization, file allowlist |
+| Skills | 34 | Discovery, execution, injection, MCP integration |
 | Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
-| Context Manager | 34 | Token estimation (tiktoken + model-aware), compaction, flushing, flush reset |
-| Runtime Backend | 34 | DockerBackend, SandboxBackend, extra_env, name sanitization, detection, VNC allocation |
-| Projects | 47 | Multi-project CRUD, config, agent membership, blackboard key scoping, cross-project permission isolation |
+| Orchestrator | 33 | Workflows, conditions, retries, failures |
 | Events | 31 | Event streaming, filtering, WebSocket, notification events |
 | Traces | 30 | Trace recording, grouping, summaries, prompt preview extraction |
-| Orchestrator | 32 | Workflows, conditions, retries, failures |
+| Setup Wizard | 29 | Quickstart, full setup, API key validation, templates, inline setup, two-tier credentials |
+| Chat | 28 | Chat mode, streaming, workspace integration |
+| Models | 24 | Model cost registry, context windows, provider detection |
 | Transcript | 24 | Transcript formatting, safety, round-trip fidelity |
 | WhatsApp Channel | 22 | Cloud API, webhook verification, message chunking, non-text reply |
-| Agent Server | 21 | Workspace API, heartbeat-context endpoint, content sanitization, file allowlist |
-| Slack Channel | 21 | Socket Mode, thread routing, pairing, command translation |
-| Skills | 20 | Discovery, execution, injection, MCP integration |
-| Setup Wizard | 20 | Quickstart, full setup, API key validation, templates, inline setup, two-tier credentials |
+| Slack Channel | 22 | Socket Mode, thread routing, pairing, command translation |
+| Attachments | 21 | Image base64 encoding, PDF text extraction, multimodal content blocks |
 | Marketplace | 20 | Install, manifest parsing, validation, path traversal, remove |
+| Costs | 20 | Usage recording, budgets, vault integration, budget overrun warnings |
+| Dashboard Workspace | 19 | Workspace proxy endpoints, filename validation, transport forwarding, sanitization |
+| Chat Workspace | 19 | Cross-session memory, corrections, learnings |
 | Transport | 18 | HttpTransport, SandboxTransport, resolve_url |
-| Dashboard Workspace | 17 | Workspace proxy endpoints, filename validation, transport forwarding, sanitization |
-| Vault | 16 | Credential storage, budget enforcement, failover |
+| Subagent | 17 | Spawn, depth/concurrent limits, TTL timeout, skill cloning, memory isolation |
+| LLM Params | 17 | Parameter allowlisting, model-specific options |
 | Failover | 15 | Health tracking, chain cascade, cooldown |
 | Loop Detector | 14 | Agent loop detection and intervention |
-| Lanes | 13 | Per-agent FIFO task queues |
-| Costs | 13 | Usage recording, budgets, vault integration, budget overrun warnings |
-| Chat | 12 | Chat mode, streaming, workspace integration |
-| Subagent | 11 | Spawn, depth/concurrent limits, TTL timeout, skill cloning, memory isolation |
+| Lanes | 14 | Per-agent FIFO task queues |
+| Vault | 13 | Credential storage, generation, capture, budget enforcement |
+| Dashboard Auth | 10 | Session cookies, HMAC verification, SSO flow |
 | MCP Client | 10 | Tool discovery, routing, conflicts, lifecycle |
-| Chat Workspace | 10 | Cross-session memory, corrections, learnings |
-| Health Monitor | 8 | Ephemeral cleanup, TTL expiry, event emission, restart with missing config, parallel health checks |
-| Types | 8 | Pydantic validation, serialization |
+| Embedding Fallback | 10 | Graceful degradation when embeddings fail |
+| Types | 9 | Pydantic validation, serialization |
+| Health Monitor | 8 | Ephemeral cleanup, TTL expiry, event emission, restart with missing config |
 | MCP E2E | 7 | Real MCP protocol with live server subprocess |
 | Webhooks | 7 | Add/remove, persistence, dispatch |
 | File Watchers | 7 | Polling, dispatch, pattern matching |
 | Memory Tools | 6 | memory_search, memory_save |
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
-| **Total** | **1826** | |
+| Web Search | 2 | DuckDuckGo search tool |
+| **Total** | **2070** | |
 
 ---
 
@@ -1046,7 +1059,7 @@ config/
 | The mesh is the only door | No agent has network access except through the mesh. No agent holds credentials. |
 | Private by default, shared by promotion | Agents keep knowledge private. Facts are explicitly promoted to the blackboard. |
 | Explicit failure handling | Every workflow step declares what happens on failure. No silent error swallowing. |
-| Small enough to audit | ~25,000 total lines. The entire codebase is auditable in a day. |
+| Small enough to audit | ~29,000 total lines. The entire codebase is auditable in a day. |
 | Skills over features | New capabilities are agent skills, not mesh or orchestrator code. |
 | SQLite for all state | Single-file databases. No external services. WAL mode for concurrent reads. |
 | Zero vendor lock-in | LiteLLM supports 100+ providers. Markdown workspace files. No proprietary formats. |
@@ -1079,7 +1092,7 @@ Looking for alternatives? OpenLegion is often compared to:
 
 OpenLegion differs from all of these in combining **fleet orchestration,
 Docker isolation, credential vaulting, and cost enforcement** in a single
-~25,000 line auditable codebase.
+~29,000 line auditable codebase.
 
 **Keywords:** autonomous AI agents, multi-agent framework, LLM agent orchestration,
 self-hosted AI agents, Docker AI agents, OpenClaw alternative, AI agent security,
