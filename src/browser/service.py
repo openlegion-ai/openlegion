@@ -437,9 +437,23 @@ class BrowserManager:
                     inst.dialog_active = True
                     lines.append("** Modal dialog is open — only dialog elements are shown **")
                     for el in visible_modals:
-                        subtree = await inst.page.accessibility.snapshot(root=el)
+                        try:
+                            subtree = await inst.page.accessibility.snapshot(root=el)
+                        except Exception:
+                            logger.debug("snapshot(root=) failed for modal element")
+                            subtree = None
                         if subtree:
                             _walk(subtree)
+                        else:
+                            logger.debug("snapshot(root=) returned empty for a visible modal")
+                    # Safety fallback: if scoping produced no refs, snapshot(root=)
+                    # likely failed (e.g. Camoufox quirk). Fall back to full tree
+                    # so the agent isn't blind.
+                    if not refs:
+                        logger.debug("Modal scoping produced 0 refs — falling back to full tree")
+                        inst.dialog_active = False
+                        lines.clear()
+                        _walk(tree)
                 else:
                     inst.dialog_active = False
                     _walk(tree)
