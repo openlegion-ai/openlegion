@@ -2877,9 +2877,9 @@ class TestBrowserSettingsEndpoint:
 
     def test_set_settings(self):
         """POST /browser/settings should update the speed factor."""
-        from src.browser.timing import get_speed_factor
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
+        from src.browser.timing import get_speed_factor
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
         app = create_browser_app(mgr)
 
@@ -2892,9 +2892,9 @@ class TestBrowserSettingsEndpoint:
 
     def test_set_settings_clamped(self):
         """POST /browser/settings should clamp out-of-range values."""
-        from src.browser.timing import get_speed_factor
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
+        from src.browser.timing import get_speed_factor
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
         app = create_browser_app(mgr)
 
