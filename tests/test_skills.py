@@ -226,9 +226,27 @@ def test():
         from src.agent.builtins.skill_tool import _validate_skill_code
         assert _validate_skill_code("def broken(") is not None
 
+    def test_validate_valid_async_code(self):
+        from src.agent.builtins.skill_tool import _validate_skill_code
+        code = '''
+from src.agent.skills import skill
+
+@skill(name="async_test", description="async test", parameters={})
+async def async_test(*, mesh_client=None):
+    return {"ok": True}
+'''
+        assert _validate_skill_code(code) is None
+
     def test_validate_missing_decorator(self):
         from src.agent.builtins.skill_tool import _validate_skill_code
         code = "def plain():\n    return 1\n"
+        error = _validate_skill_code(code)
+        assert error is not None
+        assert "decorator" in error.lower()
+
+    def test_validate_missing_decorator_async(self):
+        from src.agent.builtins.skill_tool import _validate_skill_code
+        code = "async def plain():\n    return 1\n"
         error = _validate_skill_code(code)
         assert error is not None
         assert "decorator" in error.lower()
