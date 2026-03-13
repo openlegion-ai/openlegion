@@ -2858,6 +2858,92 @@ class TestDialogScoping:
         assert refs["e0"]["name"] == "Submit"
         assert inst.dialog_active is False
 
+    @pytest.mark.asyncio
+    async def test_navigate_resets_dialog_active(self):
+        """Navigation to a new page should clear stale dialog_active flag."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.title = AsyncMock(return_value="New Page")
+        mock_page.url = "https://example.com"
+        mock_page.evaluate = AsyncMock(return_value="")
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.dialog_active = True  # Stale state from previous page
+        mgr._instances["a1"] = inst
+
+        result = await mgr.navigate("a1", "https://example.com", wait_ms=0)
+        assert result["success"] is True
+        assert inst.dialog_active is False
+
+    @pytest.mark.asyncio
+    async def test_snapshot_nested_modals_deduped(self):
+        """When a parent modal contains a child modal, only walk the parent.
+
+        Without deduplication, elements inside the child would be counted
+        twice — once from snapshot(root=parent) and again from
+        snapshot(root=child) — producing wrong occurrence indices.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        parent_subtree = {
+            "role": "dialog", "name": "Parent",
+            "children": [
+                {"role": "button", "name": "Save"},
+                {"role": "dialog", "name": "Confirm", "children": [
+                    {"role": "button", "name": "Yes"},
+                ]},
+            ],
+        }
+        full_tree = {
+            "role": "WebArea", "name": "",
+            "children": [parent_subtree],
+        }
+
+        mock_page = AsyncMock()
+        mock_parent = AsyncMock()
+        mock_child = AsyncMock()
+        mock_parent.is_visible = AsyncMock(return_value=True)
+        mock_child.is_visible = AsyncMock(return_value=True)
+        # parent.contains(child) = True, child.contains(parent) = False
+        mock_parent.evaluate = AsyncMock(
+            side_effect=lambda js, arg: arg is mock_child
+        )
+        mock_child.evaluate = AsyncMock(return_value=False)
+        mock_page.query_selector_all = AsyncMock(
+            return_value=[mock_parent, mock_child]
+        )
+
+        child_subtree = {
+            "role": "dialog", "name": "Confirm",
+            "children": [{"role": "button", "name": "Yes"}],
+        }
+
+        async def _snapshot(root=None):
+            if root is mock_parent:
+                return parent_subtree
+            if root is mock_child:
+                return child_subtree
+            return full_tree
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(side_effect=_snapshot)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        refs = result["data"]["refs"]
+        # Parent walked: dialog "Parent", button "Save", dialog "Confirm", button "Yes" = 4
+        # Without dedup we'd get 6 (4 + dialog "Confirm" + button "Yes" again)
+        assert len(refs) == 4
+        # "Yes" button should appear exactly once with index 0
+        yes_refs = [r for r in refs.values() if r["name"] == "Yes"]
+        assert len(yes_refs) == 1
+        assert yes_refs[0]["index"] == 0
+
 
 # ── Speed factor tests ────────────────────────────────────────────────────
 

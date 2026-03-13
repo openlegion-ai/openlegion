@@ -62,8 +62,7 @@ def navigation_jitter() -> float:
 
     Base: μ=0.20, σ=0.10, range 0.0–0.50.
     """
-    f = 1.0 / _speed
-    return _clamped_gauss(0.20 * f, 0.10 * f, 0.0, 0.50 * f)
+    return _scaled(0.20, 0.10, 0.0, 0.50)
 
 
 def keystroke_delay(char: str) -> float:
