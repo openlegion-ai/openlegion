@@ -185,6 +185,9 @@ def write_file(path: str, content: str, append: bool = False) -> dict:
 )
 def list_files(path: str = ".", pattern: str = "*", recursive: bool = False) -> dict:
     """List files matching a pattern."""
+    if ".." in pattern.split("/"):
+        return {"error": "Pattern must not contain '..' components"}
+
     safe = _safe_path(path)
     if not safe.exists():
         return {"error": f"Directory not found: {path}"}

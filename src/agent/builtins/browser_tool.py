@@ -29,8 +29,9 @@ _REDACT_PATTERNS = [
     re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9/+=])"),
 ]
 
-# Per-agent resolved credential values for exact-match redaction
-_resolved_credential_values: set[str] = set()
+# Per-agent resolved credential values for exact-match redaction.
+# Keyed by agent_id so credentials never leak across trust boundaries.
+_resolved_credential_values: dict[str, set[str]] = {}
 
 
 def _redact_credentials(text: str) -> str:
@@ -42,23 +43,30 @@ def _redact_credentials(text: str) -> str:
     return text
 
 
-def _redact_resolved_credentials(text: str) -> str:
-    """Replace any resolved $CRED{} values with [REDACTED]."""
-    if not text or not _resolved_credential_values:
+def _redact_resolved_credentials(text: str, agent_id: str = "") -> str:
+    """Replace any resolved $CRED{} values with [REDACTED].
+
+    Only redacts credentials belonging to *agent_id* so that one agent's
+    secrets cannot influence another agent's output.
+    """
+    if not text or not agent_id:
         return text
-    for value in _resolved_credential_values:
+    agent_creds = _resolved_credential_values.get(agent_id)
+    if not agent_creds:
+        return text
+    for value in agent_creds:
         text = text.replace(value, "[REDACTED]")
     return text
 
 
-def _deep_redact(obj):
+def _deep_redact(obj, agent_id: str = ""):
     """Recursively redact credential values from any JSON-serializable structure."""
     if isinstance(obj, str):
-        return _redact_resolved_credentials(_redact_credentials(obj))
+        return _redact_resolved_credentials(_redact_credentials(obj), agent_id)
     if isinstance(obj, dict):
-        return {k: _deep_redact(v) for k, v in obj.items()}
+        return {k: _deep_redact(v, agent_id) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_deep_redact(item) for item in obj]
+        return [_deep_redact(item, agent_id) for item in obj]
     return obj
 
 
@@ -66,11 +74,12 @@ async def _browser_command(mesh_client, action: str, params: dict | None = None)
     """Send a browser command through mesh. Returns the result dict."""
     if not mesh_client:
         return {"error": "Browser requires mesh connectivity"}
+    agent_id = getattr(mesh_client, "agent_id", "")
     try:
         result = await mesh_client.browser_command(action, params or {})
-        return _deep_redact(result)
+        return _deep_redact(result, agent_id)
     except Exception as e:
-        return {"error": _deep_redact(str(e))}
+        return {"error": _deep_redact(str(e), agent_id)}
 
 
 @skill(
@@ -201,10 +210,11 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
     """
     if not mesh_client:
         return {"error": "Browser requires mesh connectivity"}
+    agent_id = getattr(mesh_client, "agent_id", "")
     try:
         raw = await mesh_client.browser_command("screenshot", {"full_page": full_page})
     except Exception as e:
-        return {"error": _deep_redact(str(e))}
+        return {"error": _deep_redact(str(e), agent_id)}
 
     # Pull out image data before redaction can corrupt it.
     # Browser service returns {"success": ..., "data": {"image_base64": ..., ...}}
@@ -214,7 +224,7 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
         if isinstance(data, dict) and data.get("image_base64"):
             image_data = data.pop("image_base64")
 
-    result = _deep_redact(raw)
+    result = _deep_redact(raw, agent_id)
 
     if image_data:
         result["_image"] = {"data": image_data, "media_type": "image/png"}
@@ -320,13 +330,14 @@ async def browser_type(
     if cred_matches:
         if not mesh_client:
             return {"error": "$CRED{} handles require mesh connectivity for resolution"}
+        agent_id = getattr(mesh_client, "agent_id", "")
         for cred_name in cred_matches:
             resolved = await mesh_client.vault_resolve(cred_name)
             if resolved is None:
                 return {"error": f"Credential not found: {cred_name}"}
             actual_text = actual_text.replace(f"$CRED{{{cred_name}}}", resolved)
             if len(resolved) >= 4:
-                _resolved_credential_values.add(resolved)
+                _resolved_credential_values.setdefault(agent_id, set()).add(resolved)
         is_credential = True
 
     result = await _browser_command(
@@ -412,7 +423,6 @@ async def browser_scroll(
     return await _browser_command(mesh_client, "scroll", params)
 
 
-
 @skill(
     name="browser_reset",
     description=(
@@ -424,7 +434,8 @@ async def browser_scroll(
 )
 async def browser_reset(*, mesh_client=None) -> dict:
     """Force-close the browser session so the next call gets a fresh one."""
-    _resolved_credential_values.clear()
+    agent_id = getattr(mesh_client, "agent_id", "") if mesh_client else ""
+    _resolved_credential_values.pop(agent_id, None)
     return await _browser_command(mesh_client, "reset")
 
 

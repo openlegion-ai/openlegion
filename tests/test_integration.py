@@ -284,8 +284,9 @@ def test_list_agents_unknown_agent_id(mesh_components):
     assert resp.json() == {}
 
 
-def test_webhook_integration(tmp_path):
+def test_webhook_integration(tmp_path, monkeypatch):
     """Test webhook endpoint triggers orchestrator (without actual agents)."""
+    monkeypatch.setenv("WEBHOOK_SECRET", "test-secret")
     from src.channels.webhook import create_webhook_router
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
@@ -309,21 +310,23 @@ def test_webhook_integration(tmp_path):
     app = FastAPI()
     app.include_router(create_webhook_router(orch))
     client = TestClient(app)
+    auth_headers = {"Authorization": "Bearer test-secret"}
 
-    response = client.post("/webhook/trigger/test_wf", json={"company": "Acme"})
+    response = client.post("/webhook/trigger/test_wf", json={"company": "Acme"}, headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "started"
     assert "execution_id" in data
 
-    response = client.get(f"/webhook/status/{data['execution_id']}")
+    response = client.get(f"/webhook/status/{data['execution_id']}", headers=auth_headers)
     assert response.status_code == 200
     status = response.json()
     assert status["workflow"] == "test_wf"
 
 
-def test_webhook_unknown_workflow(tmp_path):
+def test_webhook_unknown_workflow(tmp_path, monkeypatch):
     """Test triggering an unknown workflow returns 404."""
+    monkeypatch.setenv("WEBHOOK_SECRET", "test-secret")
     from src.channels.webhook import create_webhook_router
 
     orch = Orchestrator(mesh_url="http://localhost:8420", workflows_dir="/nonexistent")
@@ -334,7 +337,7 @@ def test_webhook_unknown_workflow(tmp_path):
     app.include_router(create_webhook_router(orch))
     client = TestClient(app)
 
-    response = client.post("/webhook/trigger/nonexistent", json={})
+    response = client.post("/webhook/trigger/nonexistent", json={}, headers={"Authorization": "Bearer test-secret"})
     assert response.status_code == 404
 
 

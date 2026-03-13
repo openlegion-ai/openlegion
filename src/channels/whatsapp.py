@@ -24,7 +24,7 @@ import hmac
 import os
 
 import httpx
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.channels.base import Channel, PairingManager, chunk_text
 from src.shared.utils import setup_logging
@@ -118,7 +118,7 @@ class WhatsAppChannel(Channel):
             hub_challenge: str = Query(None, alias="hub.challenge"),
         ) -> int | str:
             """Verification challenge from Meta."""
-            if hub_mode == "subscribe" and hub_verify_token == channel_ref.verify_token:
+            if hub_mode == "subscribe" and hmac.compare_digest(hub_verify_token or "", channel_ref.verify_token):
                 logger.info("WhatsApp webhook verified")
                 return int(hub_challenge) if hub_challenge else ""
             logger.warning("WhatsApp webhook verification failed")
@@ -136,7 +136,7 @@ class WhatsAppChannel(Channel):
                     app_secret.encode(), raw_body, hashlib.sha256,
                 ).hexdigest()
                 if not hmac.compare_digest(signature, expected):
-                    return {"status": "invalid_signature"}
+                    raise HTTPException(status_code=401, detail="Invalid signature")
 
             try:
                 body = await request.json()

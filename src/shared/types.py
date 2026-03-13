@@ -174,7 +174,7 @@ class AgentPermissions(BaseModel):
     blackboard_write: list[str] = []
     allowed_apis: list[str] = []
     allowed_credentials: list[str] = []
-    can_use_browser: bool = True
+    can_use_browser: bool = False
     can_spawn: bool = False
     can_manage_cron: bool = False
 
