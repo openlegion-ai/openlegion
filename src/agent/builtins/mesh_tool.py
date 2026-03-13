@@ -667,15 +667,16 @@ async def update_workspace(
     if mesh_client:
         try:
             agent_id = getattr(mesh_client, "agent_id", "agent")
-            if old_content.strip() == content.strip():
+            old_stripped = old_content.strip()
+            if old_stripped == content.strip():
                 summary = f"[{agent_id}] Re-saved {filename} (no changes)."
-            elif not old_content.strip() or old_content.strip() in (
+            elif not old_stripped or old_stripped in (
                 "# Heartbeat Rules",
                 "# User Context",
                 "# Identity",
                 "# Instructions",
                 "# Long-Term Memory",
-            ) or old_content.strip().startswith((
+            ) or old_stripped.startswith((
                 "# Heartbeat Rules\n\nYou are woken",
                 "# User Context\n\nYour user",
                 "# Identity\n\nPersonality, tone",

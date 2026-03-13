@@ -1887,7 +1887,7 @@ def create_dashboard_router(
             raise HTTPException(status_code=404, detail=f"Workflow '{name}' not found")
         try:
             body = await request.json()
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             body = {}
         execution_id = await orchestrator.trigger_workflow(name, payload=body)
         return {"started": True, "execution_id": execution_id, "workflow": name}
