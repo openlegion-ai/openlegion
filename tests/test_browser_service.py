@@ -2763,89 +2763,92 @@ class TestDialogScoping:
 # ── Speed factor tests ────────────────────────────────────────────────────
 
 
-class TestSpeedFactor:
-    """Tests for the configurable browser speed factor in timing.py."""
+class TestSpeed:
+    """Tests for the configurable browser speed in timing.py.
+
+    Higher speed = faster (shorter delays). Speed 2.0 means half the delays.
+    """
 
     def setup_method(self):
-        """Reset speed factor to default before each test."""
-        from src.browser.timing import set_speed_factor
-        set_speed_factor(1.0)
+        """Reset speed to default before each test."""
+        from src.browser.timing import set_speed
+        set_speed(1.0)
 
     def teardown_method(self):
-        """Reset speed factor after each test to avoid leaking state."""
-        from src.browser.timing import set_speed_factor
-        set_speed_factor(1.0)
+        """Reset speed after each test to avoid leaking state."""
+        from src.browser.timing import set_speed
+        set_speed(1.0)
 
-    def test_default_speed_factor(self):
-        from src.browser.timing import get_speed_factor
-        assert get_speed_factor() == 1.0
+    def test_default_speed(self):
+        from src.browser.timing import get_speed
+        assert get_speed() == 1.0
 
-    def test_set_speed_factor(self):
-        from src.browser.timing import get_speed_factor, set_speed_factor
-        set_speed_factor(2.0)
-        assert get_speed_factor() == 2.0
+    def test_set_speed(self):
+        from src.browser.timing import get_speed, set_speed
+        set_speed(2.0)
+        assert get_speed() == 2.0
 
-    def test_speed_factor_clamped_low(self):
-        from src.browser.timing import get_speed_factor, set_speed_factor
-        set_speed_factor(0.01)
-        assert get_speed_factor() == 0.25  # _SPEED_MIN
+    def test_speed_clamped_low(self):
+        from src.browser.timing import get_speed, set_speed
+        set_speed(0.01)
+        assert get_speed() == 0.25  # _SPEED_MIN
 
-    def test_speed_factor_clamped_high(self):
-        from src.browser.timing import get_speed_factor, set_speed_factor
-        set_speed_factor(99.0)
-        assert get_speed_factor() == 3.0  # _SPEED_MAX
+    def test_speed_clamped_high(self):
+        from src.browser.timing import get_speed, set_speed
+        set_speed(99.0)
+        assert get_speed() == 4.0  # _SPEED_MAX
 
-    def test_speed_factor_scales_action_delay(self):
-        """Doubling speed factor should roughly double the mean action delay."""
-        from src.browser.timing import action_delay, set_speed_factor
-        set_speed_factor(1.0)
+    def test_higher_speed_reduces_action_delay(self):
+        """Doubling speed should roughly halve the mean action delay."""
+        from src.browser.timing import action_delay, set_speed
+        set_speed(1.0)
         baseline = [action_delay() for _ in range(2000)]
-        set_speed_factor(2.0)
-        scaled = [action_delay() for _ in range(2000)]
-        baseline_mean = sum(baseline) / len(baseline)
-        scaled_mean = sum(scaled) / len(scaled)
-        ratio = scaled_mean / baseline_mean
-        assert 1.6 <= ratio <= 2.4, f"Expected ~2.0x, got {ratio:.2f}x"
-
-    def test_speed_factor_scales_keystroke_delay(self):
-        """Keystroke delays should scale with the speed factor."""
-        from src.browser.timing import keystroke_delay, set_speed_factor
-        set_speed_factor(1.0)
-        baseline = [keystroke_delay("a") for _ in range(2000)]
-        set_speed_factor(0.5)
-        fast = [keystroke_delay("a") for _ in range(2000)]
+        set_speed(2.0)
+        fast = [action_delay() for _ in range(2000)]
         baseline_mean = sum(baseline) / len(baseline)
         fast_mean = sum(fast) / len(fast)
         ratio = fast_mean / baseline_mean
         assert 0.35 <= ratio <= 0.65, f"Expected ~0.5x, got {ratio:.2f}x"
 
-    def test_speed_factor_does_not_scale_scroll_increment(self):
-        """Scroll increment (pixels) should not change with speed factor."""
-        from src.browser.timing import scroll_increment, set_speed_factor
-        set_speed_factor(1.0)
+    def test_lower_speed_increases_keystroke_delay(self):
+        """Halving speed should roughly double keystroke delays."""
+        from src.browser.timing import keystroke_delay, set_speed
+        set_speed(1.0)
+        baseline = [keystroke_delay("a") for _ in range(2000)]
+        set_speed(0.5)
+        slow = [keystroke_delay("a") for _ in range(2000)]
+        baseline_mean = sum(baseline) / len(baseline)
+        slow_mean = sum(slow) / len(slow)
+        ratio = slow_mean / baseline_mean
+        assert 1.6 <= ratio <= 2.4, f"Expected ~2.0x, got {ratio:.2f}x"
+
+    def test_speed_does_not_scale_scroll_increment(self):
+        """Scroll increment (pixels) should not change with speed."""
+        from src.browser.timing import scroll_increment, set_speed
+        set_speed(1.0)
         baseline = [scroll_increment() for _ in range(2000)]
-        set_speed_factor(3.0)
+        set_speed(0.25)
         slow = [scroll_increment() for _ in range(2000)]
         baseline_mean = sum(baseline) / len(baseline)
         slow_mean = sum(slow) / len(slow)
         ratio = slow_mean / baseline_mean
         assert 0.85 <= ratio <= 1.15, f"Expected ~1.0x, got {ratio:.2f}x"
 
-    def test_fast_speed_action_delay_range(self):
-        """At 0.25x speed, delays should be much smaller."""
-        from src.browser.timing import action_delay, set_speed_factor
-        set_speed_factor(0.25)
+    def test_lightning_speed_action_delay_range(self):
+        """At 4.0x speed, delays should be much smaller."""
+        from src.browser.timing import action_delay, set_speed
+        set_speed(4.0)
         samples = [action_delay() for _ in range(500)]
         mean = sum(samples) / len(samples)
-        assert mean < 0.15, f"Expected mean < 0.15 at 0.25x speed, got {mean:.3f}"
+        assert mean < 0.15, f"Expected mean < 0.15 at 4.0x speed, got {mean:.3f}"
 
-    def test_careful_speed_action_delay_range(self):
-        """At 3.0x speed, delays should be much larger."""
-        from src.browser.timing import action_delay, set_speed_factor
-        set_speed_factor(3.0)
+    def test_stealth_speed_action_delay_range(self):
+        """At 0.25x speed, delays should be much larger."""
+        from src.browser.timing import action_delay, set_speed
+        set_speed(0.25)
         samples = [action_delay() for _ in range(500)]
         mean = sum(samples) / len(samples)
-        assert mean > 0.6, f"Expected mean > 0.6 at 3.0x speed, got {mean:.3f}"
+        assert mean > 0.6, f"Expected mean > 0.6 at 0.25x speed, got {mean:.3f}"
 
 
 # ── Browser settings endpoint tests ──────────────────────────────────────
@@ -2855,15 +2858,15 @@ class TestBrowserSettingsEndpoint:
     """Tests for GET/POST /browser/settings on the browser service."""
 
     def setup_method(self):
-        from src.browser.timing import set_speed_factor
-        set_speed_factor(1.0)
+        from src.browser.timing import set_speed
+        set_speed(1.0)
 
     def teardown_method(self):
-        from src.browser.timing import set_speed_factor
-        set_speed_factor(1.0)
+        from src.browser.timing import set_speed
+        set_speed(1.0)
 
     def test_get_settings_default(self):
-        """GET /browser/settings should return default speed_factor=1.0."""
+        """GET /browser/settings should return default speed=1.0."""
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
@@ -2873,37 +2876,37 @@ class TestBrowserSettingsEndpoint:
         client = TestClient(app)
         resp = client.get("/browser/settings")
         assert resp.status_code == 200
-        assert resp.json()["speed_factor"] == 1.0
+        assert resp.json()["speed"] == 1.0
 
     def test_set_settings(self):
-        """POST /browser/settings should update the speed factor."""
+        """POST /browser/settings should update the speed."""
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
-        from src.browser.timing import get_speed_factor
+        from src.browser.timing import get_speed
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
         app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
         client = TestClient(app)
-        resp = client.post("/browser/settings", json={"speed_factor": 2.5})
+        resp = client.post("/browser/settings", json={"speed": 2.5})
         assert resp.status_code == 200
-        assert resp.json()["speed_factor"] == 2.5
-        assert get_speed_factor() == 2.5
+        assert resp.json()["speed"] == 2.5
+        assert get_speed() == 2.5
 
     def test_set_settings_clamped(self):
         """POST /browser/settings should clamp out-of-range values."""
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
-        from src.browser.timing import get_speed_factor
+        from src.browser.timing import get_speed
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
         app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
         client = TestClient(app)
-        resp = client.post("/browser/settings", json={"speed_factor": 100.0})
+        resp = client.post("/browser/settings", json={"speed": 100.0})
         assert resp.status_code == 200
-        assert resp.json()["speed_factor"] == 3.0  # clamped to max
-        assert get_speed_factor() == 3.0
+        assert resp.json()["speed"] == 4.0  # clamped to max
+        assert get_speed() == 4.0
 
 
 # ── Dead code removal verification ────────────────────────────────────────

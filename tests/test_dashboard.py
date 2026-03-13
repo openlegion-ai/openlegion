@@ -3094,39 +3094,39 @@ class TestDashboardBrowserSettings:
             settings_path.unlink()
         resp = self.client.get("/dashboard/api/browser-settings")
         assert resp.status_code == 200
-        assert resp.json()["speed_factor"] == 1.0
+        assert resp.json()["speed"] == 1.0
 
     def test_post_persists_and_returns(self):
         """POST should persist the value and return it."""
         resp = self.client.post(
             "/dashboard/api/browser-settings",
-            json={"speed_factor": 1.5},
+            json={"speed": 1.5},
         )
         assert resp.status_code == 200
-        assert resp.json()["speed_factor"] == 1.5
+        assert resp.json()["speed"] == 1.5
         # Verify persisted to file
         import json
         saved = json.loads(Path("config/settings.json").read_text())
-        assert saved["browser_speed_factor"] == 1.5
+        assert saved["browser_speed"] == 1.5
 
     def test_post_validates_range_low(self):
-        """POST should reject speed_factor below 0.25."""
+        """POST should reject speed below 0.25."""
         resp = self.client.post(
             "/dashboard/api/browser-settings",
-            json={"speed_factor": 0.1},
+            json={"speed": 0.1},
         )
         assert resp.status_code == 400
 
     def test_post_validates_range_high(self):
-        """POST should reject speed_factor above 3.0."""
+        """POST should reject speed above 4.0."""
         resp = self.client.post(
             "/dashboard/api/browser-settings",
-            json={"speed_factor": 5.0},
+            json={"speed": 5.0},
         )
         assert resp.status_code == 400
 
-    def test_post_requires_speed_factor(self):
-        """POST should reject missing speed_factor."""
+    def test_post_requires_speed(self):
+        """POST should reject missing speed."""
         resp = self.client.post(
             "/dashboard/api/browser-settings",
             json={},
@@ -3134,10 +3134,10 @@ class TestDashboardBrowserSettings:
         assert resp.status_code == 400
 
     def test_post_rejects_non_numeric(self):
-        """POST should reject non-numeric speed_factor."""
+        """POST should reject non-numeric speed."""
         resp = self.client.post(
             "/dashboard/api/browser-settings",
-            json={"speed_factor": "fast"},
+            json={"speed": "fast"},
         )
         assert resp.status_code == 400
 
@@ -3145,11 +3145,11 @@ class TestDashboardBrowserSettings:
         """GET should return the value saved by a previous POST."""
         self.client.post(
             "/dashboard/api/browser-settings",
-            json={"speed_factor": 2.0},
+            json={"speed": 2.0},
         )
         resp = self.client.get("/dashboard/api/browser-settings")
         assert resp.status_code == 200
-        assert resp.json()["speed_factor"] == 2.0
+        assert resp.json()["speed"] == 2.0
 
     def test_post_graceful_when_browser_unreachable(self):
         """POST should persist and return success even when browser service is unreachable."""
@@ -3160,12 +3160,12 @@ class TestDashboardBrowserSettings:
 
         resp = self.client.post(
             "/dashboard/api/browser-settings",
-            json={"speed_factor": 1.5},
+            json={"speed": 1.5},
         )
         # Should still return success — setting is persisted locally
         assert resp.status_code == 200
-        assert resp.json()["speed_factor"] == 1.5
+        assert resp.json()["speed"] == 1.5
         # Verify it was actually persisted despite push failure
         import json
         saved = json.loads(Path("config/settings.json").read_text())
-        assert saved["browser_speed_factor"] == 1.5
+        assert saved["browser_speed"] == 1.5

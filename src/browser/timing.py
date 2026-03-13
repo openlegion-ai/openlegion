@@ -4,10 +4,10 @@ Uses clamped Gaussian distributions to produce natural variance in
 action delays, keystroke timing, and scroll behavior. No third-party
 dependencies — built on stdlib ``random``.
 
-A global *speed factor* scales all time-based values:
-  - 0.25 = fast (minimal delays, for testing / impatient tasks)
+A global *speed* value scales all time-based values (higher = faster):
+  - 4.0  = lightning (minimal delays, for testing / impatient tasks)
   - 1.0  = normal (default human-like timing)
-  - 3.0  = careful (maximum human emulation, slower and more cautious)
+  - 0.25 = stealth (maximum human emulation, slower and more cautious)
 
 Pixel-based values (scroll_increment) are unaffected — scroll speed is
 already governed by scroll_pause timing.
@@ -17,22 +17,22 @@ from __future__ import annotations
 
 import random
 
-# ── Speed factor ──────────────────────────────────────────────
+# ── Speed ─────────────────────────────────────────────────────
 
-_speed_factor: float = 1.0
+_speed: float = 1.0
 _SPEED_MIN: float = 0.25
-_SPEED_MAX: float = 3.0
+_SPEED_MAX: float = 4.0
 
 
-def get_speed_factor() -> float:
-    """Return the current speed factor (0.25–3.0, default 1.0)."""
-    return _speed_factor
+def get_speed() -> float:
+    """Return the current speed (0.25–4.0, default 1.0). Higher = faster."""
+    return _speed
 
 
-def set_speed_factor(factor: float) -> None:
-    """Set the global speed factor, clamped to [0.25, 3.0]."""
-    global _speed_factor
-    _speed_factor = max(_SPEED_MIN, min(_SPEED_MAX, float(factor)))
+def set_speed(speed: float) -> None:
+    """Set the global speed, clamped to [0.25, 4.0]. Higher = faster."""
+    global _speed
+    _speed = max(_SPEED_MIN, min(_SPEED_MAX, float(speed)))
 
 
 # ── Internal ──────────────────────────────────────────────────
@@ -44,8 +44,8 @@ def _clamped_gauss(mean: float, stddev: float, low: float, high: float) -> float
 
 
 def _scaled(mean: float, stddev: float, low: float, high: float) -> float:
-    """Sample a time value scaled by the current speed factor."""
-    f = _speed_factor
+    """Sample a time value inversely scaled by speed (higher speed → shorter delays)."""
+    f = 1.0 / _speed  # Convert speed to delay factor
     return _clamped_gauss(mean * f, stddev * f, low * f, high * f)
 
 
@@ -62,7 +62,7 @@ def navigation_jitter() -> float:
 
     Base: μ=0.20, σ=0.10, range 0.0–0.50.
     """
-    f = _speed_factor
+    f = 1.0 / _speed
     return _clamped_gauss(0.20 * f, 0.10 * f, 0.0, 0.50 * f)
 
 

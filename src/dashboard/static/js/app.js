@@ -151,7 +151,7 @@ function dashboard() {
     settingsData: null,
 
     // Browser settings
-    browserSpeedFactor: 1.0,
+    browserSpeed: 1.0,
     browserSettingsLoading: false,
     _browserSettingsDebounce: null,
 
@@ -2665,14 +2665,14 @@ function dashboard() {
         const resp = await fetch(`${window.__config.apiBase}/browser-settings`);
         if (resp.ok) {
           const data = await resp.json();
-          this.browserSpeedFactor = data.speed_factor ?? 1.0;
+          this.browserSpeed = data.speed ?? 1.0;
         }
       } catch (e) { console.warn('fetchBrowserSettings failed:', e); }
       this.browserSettingsLoading = false;
     },
 
     saveBrowserSpeed(value) {
-      this.browserSpeedFactor = parseFloat(value);
+      this.browserSpeed = parseFloat(value);
       // Debounce save — user may be dragging the slider
       if (this._browserSettingsDebounce) clearTimeout(this._browserSettingsDebounce);
       this._browserSettingsDebounce = setTimeout(async () => {
@@ -2680,20 +2680,19 @@ function dashboard() {
           await fetch(`${window.__config.apiBase}/browser-settings`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ speed_factor: this.browserSpeedFactor }),
+            body: JSON.stringify({ speed: this.browserSpeed }),
           });
         } catch (e) { console.warn('saveBrowserSpeed failed:', e); }
       }, 300);
     },
 
     get browserSpeedLabel() {
-      const f = this.browserSpeedFactor;
-      if (f <= 0.35) return 'Lightning';
-      if (f <= 0.6) return 'Fast';
-      if (f <= 0.8) return 'Quick';
-      if (f <= 1.2) return 'Normal';
-      if (f <= 1.8) return 'Careful';
-      if (f <= 2.5) return 'Cautious';
+      const f = this.browserSpeed;
+      if (f >= 3.0) return 'Lightning';
+      if (f >= 1.8) return 'Fast';
+      if (f >= 1.2) return 'Quick';
+      if (f >= 0.8) return 'Normal';
+      if (f >= 0.5) return 'Careful';
       return 'Stealth';
     },
 
