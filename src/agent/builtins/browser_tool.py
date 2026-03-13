@@ -430,14 +430,94 @@ async def browser_reset(*, mesh_client=None) -> dict:
 
 
 @skill(
+    name="browser_press_key",
+    description=(
+        "Press a keyboard key or shortcut. Use this to dismiss modals (Escape), "
+        "submit forms (Enter), navigate between fields (Tab), use arrow keys "
+        "(ArrowUp, ArrowDown), or fire shortcuts (Control+a, Control+c). "
+        "Key names follow Playwright conventions: Enter, Escape, Tab, Backspace, "
+        "Delete, Space, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, "
+        "PageUp, PageDown, F1-F12. Modifiers: Control+key, Shift+key, Alt+key."
+    ),
+    parameters={
+        "key": {
+            "type": "string",
+            "description": (
+                "Key to press — e.g. 'Escape', 'Enter', 'Tab', 'ArrowDown', "
+                "'Control+a', 'Shift+Tab'"
+            ),
+        },
+    },
+)
+async def browser_press_key(key: str, *, mesh_client=None) -> dict:
+    """Press a keyboard key or combination."""
+    if not key:
+        return {"error": "The 'key' parameter is required"}
+    return await _browser_command(mesh_client, "press_key", {"key": key})
+
+
+@skill(
+    name="browser_go_back",
+    description=(
+        "Navigate back in browser history (like clicking the Back button). "
+        "Returns the URL and title of the page navigated to."
+    ),
+    parameters={},
+)
+async def browser_go_back(*, mesh_client=None) -> dict:
+    """Go back one page in browser history."""
+    return await _browser_command(mesh_client, "go_back")
+
+
+@skill(
+    name="browser_go_forward",
+    description=(
+        "Navigate forward in browser history (like clicking the Forward button). "
+        "Returns the URL and title of the page navigated to."
+    ),
+    parameters={},
+)
+async def browser_go_forward(*, mesh_client=None) -> dict:
+    """Go forward one page in browser history."""
+    return await _browser_command(mesh_client, "go_forward")
+
+
+@skill(
+    name="browser_switch_tab",
+    description=(
+        "List all open browser tabs, or switch to a specific tab. "
+        "Call without tab_index to see all open tabs — useful when a popup or "
+        "OAuth window opens. Call with tab_index to switch to that tab. "
+        "After switching, call browser_get_elements to see the new tab's content. "
+        "Refs from the previous tab are cleared on switch."
+    ),
+    parameters={
+        "tab_index": {
+            "type": "integer",
+            "description": (
+                "Tab index to switch to (from the tab list). "
+                "Omit or set to -1 to just list all open tabs without switching."
+            ),
+            "default": -1,
+        },
+    },
+)
+async def browser_switch_tab(tab_index: int = -1, *, mesh_client=None) -> dict:
+    """List open tabs and optionally switch to one."""
+    return await _browser_command(
+        mesh_client, "switch_tab", {"tab_index": tab_index},
+    )
+
+
+@skill(
     name="browser_solve_captcha",
     description=(
-        "Manually trigger CAPTCHA detection and solving on the current page. "
-        "Usually NOT needed — browser_navigate auto-detects CAPTCHAs. "
-        "Use this only when a CAPTCHA appears AFTER navigation."
+        "Detect CAPTCHAs (reCAPTCHA, hCaptcha, Cloudflare Turnstile) on the "
+        "current page. If found, the CAPTCHA must be solved manually via VNC. "
+        "Use this when you suspect a CAPTCHA is blocking progress."
     ),
     parameters={},
 )
 async def browser_solve_captcha(*, mesh_client=None) -> dict:
-    """Detect and solve a CAPTCHA on the current page."""
+    """Detect CAPTCHAs on the current page."""
     return await _browser_command(mesh_client, "solve_captcha")

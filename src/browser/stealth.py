@@ -28,70 +28,12 @@ consistent and realistic:
 
 from __future__ import annotations
 
-import hashlib
 import os
-import random
 from urllib.parse import urlparse
 
 from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.stealth")
-
-# ── Screen resolution tables ──────────────────────────────────────────────────
-# Sampled from StatCounter GlobalStats (desktop, 2024).
-# Values are CSS logical pixels — what window.screen.width/height report in JS.
-# Weights ≈ market-share percentage.
-
-_WINDOWS_RESOLUTIONS = [
-    (1920, 1080),  # 22 %
-    (1366, 768),   # 11 %
-    (1536, 864),   #  8 %
-    (1440, 900),   #  7 %
-    (1280, 720),   #  5 %
-    (2560, 1440),  #  5 %
-    (1600, 900),   #  4 %
-    (1280, 1024),  #  3 %
-    (1680, 1050),  #  3 %
-]
-_WINDOWS_WEIGHTS = [22, 11, 8, 7, 5, 5, 4, 3, 3]
-
-# macOS CSS logical-pixel resolutions (what navigator.screen.width reports).
-# Physical/retina pixels are NOT included — they are 2x the logical values and
-# are never directly visible to JS.  Correct logical values:
-#   MacBook 13" retina    → 1280 × 800   (2x: 2560×1600 physical)
-#   MacBook Pro 15"       → 1440 × 900   (2x: 2880×1800 physical)
-#   MacBook 14"/16" M-series → 1512 × 982 (native scaled at 2x)
-#   iMac 24"              → 1920 × 1080  (or external 1080p)
-#   iMac 27" / external 1440p → 2560 × 1440
-_MACOS_RESOLUTIONS = [
-    (1920, 1080),  # 26 % — external monitor / iMac 24"
-    (1440, 900),   # 20 % — MacBook Pro 15" / MacBook Air 13" logical
-    (1280, 800),   # 16 % — MacBook 13" retina logical
-    (2560, 1440),  # 14 % — iMac 27" / external 1440p
-    (1512, 982),   #  8 % — MacBook 14" / 16" M-series native scaled
-    (1680, 1050),  #  6 % — older MacBook Pro / external 1050p
-]
-_MACOS_WEIGHTS = [26, 20, 16, 14, 8, 6]
-
-
-def _pick_resolution(os_hint: str, seed: str = "") -> tuple[int, int]:
-    """Pick a screen resolution weighted by market share for the given OS.
-
-    When ``seed`` is provided the selection is deterministic — the same seed
-    always returns the same resolution.  Pass ``agent_id`` as seed so each
-    agent has a stable fingerprint across browser restarts (a real user always
-    has the same screen; changing it on every restart is a bot signal).
-    """
-    if seed:
-        rng: random.Random = random.Random(
-            int(hashlib.sha256(seed.encode()).hexdigest(), 16)
-        )
-    else:
-        rng = random.Random()
-    if os_hint == "macos":
-        return rng.choices(_MACOS_RESOLUTIONS, weights=_MACOS_WEIGHTS, k=1)[0]
-    return rng.choices(_WINDOWS_RESOLUTIONS, weights=_WINDOWS_WEIGHTS, k=1)[0]
-
 
 # ── Proxy ──────────────────────────────────────────────────────────────────────
 

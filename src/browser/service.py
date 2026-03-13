@@ -715,7 +715,7 @@ class BrowserManager:
                 return {"success": False, "error": str(e)}
 
     async def solve_captcha(self, agent_id: str) -> dict:
-        """Attempt CAPTCHA detection and solving."""
+        """Detect CAPTCHAs on the current page."""
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
@@ -723,7 +723,9 @@ class BrowserManager:
                 captcha_selectors = [
                     'iframe[src*="recaptcha"]',
                     'iframe[src*="hcaptcha"]',
+                    'iframe[src*="challenges.cloudflare.com"]',
                     'iframe[src*="captcha"]',
+                    '[class*="cf-turnstile"]',
                     '[class*="captcha"]',
                     '#captcha',
                 ]
@@ -744,6 +746,109 @@ class BrowserManager:
                         "captcha_type": found,
                         "message": "CAPTCHA detected. Manual solving may be required via VNC.",
                     },
+                }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+    async def press_key(self, agent_id: str, key: str) -> dict:
+        """Press a keyboard key or combination (e.g. 'Enter', 'Escape', 'Control+a').
+
+        Dispatches a real keyDown/keyUp event pair via Playwright, producing
+        trusted keyboard events.  Useful for dismissing modals (Escape),
+        submitting forms (Enter), tabbing between fields (Tab), or keyboard
+        navigation (ArrowUp/ArrowDown).
+        """
+        if not key or len(key) > 50:
+            return {"success": False, "error": "Invalid key"}
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                await inst.page.keyboard.press(key)
+                await asyncio.sleep(action_delay())
+                return {"success": True, "data": {"pressed": key}}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+    async def go_back(self, agent_id: str) -> dict:
+        """Navigate back in browser history."""
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                await inst.page.go_back(timeout=10000)
+                await asyncio.sleep(action_delay())
+                title = await inst.page.title()
+                url = self.redactor.redact(agent_id, inst.page.url)
+                title = self.redactor.redact(agent_id, title)
+                return {"success": True, "data": {"url": url, "title": title}}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+    async def go_forward(self, agent_id: str) -> dict:
+        """Navigate forward in browser history."""
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                await inst.page.go_forward(timeout=10000)
+                await asyncio.sleep(action_delay())
+                title = await inst.page.title()
+                url = self.redactor.redact(agent_id, inst.page.url)
+                title = self.redactor.redact(agent_id, title)
+                return {"success": True, "data": {"url": url, "title": title}}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+    async def switch_tab(self, agent_id: str, tab_index: int = -1) -> dict:
+        """List open tabs and optionally switch to one.
+
+        tab_index=-1 (default): list all tabs without switching.
+        tab_index>=0: switch to that tab index and clear stale refs.
+        """
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                pages = inst.context.pages
+                if not pages:
+                    return {"success": False, "error": "No tabs open"}
+
+                # Build tab list
+                tabs = []
+                active_index = 0
+                for i, page in enumerate(pages):
+                    is_active = page == inst.page
+                    if is_active:
+                        active_index = i
+                    try:
+                        title = await page.title()
+                    except Exception:
+                        title = "(loading)"
+                    tabs.append({
+                        "index": i,
+                        "url": self.redactor.redact(agent_id, page.url),
+                        "title": self.redactor.redact(agent_id, title),
+                        "active": is_active,
+                    })
+
+                # Switch if requested
+                if tab_index >= 0:
+                    if tab_index >= len(pages):
+                        return {
+                            "success": False,
+                            "error": f"Tab {tab_index} out of range (0-{len(pages) - 1})",
+                        }
+                    inst.page = pages[tab_index]
+                    await inst.page.bring_to_front()
+                    inst.refs = {}  # Stale refs from previous tab's snapshot
+                    active_index = tab_index
+                    for t in tabs:
+                        t["active"] = t["index"] == tab_index
+
+                return {
+                    "success": True,
+                    "data": {"tabs": tabs, "active_tab": active_index},
                 }
             except Exception as e:
                 return {"success": False, "error": str(e)}

@@ -157,6 +157,33 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         _verify_auth(request)
         return await manager.solve_captcha(agent_id)
 
+    @app.post("/browser/{agent_id}/press_key")
+    async def press_key(agent_id: str, request: Request):
+        _verify_auth(request)
+        body = await request.json()
+        key = body.get("key", "")
+        if not key:
+            raise HTTPException(400, "key required")
+        return await manager.press_key(agent_id, key)
+
+    @app.post("/browser/{agent_id}/go_back")
+    async def go_back(agent_id: str, request: Request):
+        _verify_auth(request)
+        return await manager.go_back(agent_id)
+
+    @app.post("/browser/{agent_id}/go_forward")
+    async def go_forward(agent_id: str, request: Request):
+        _verify_auth(request)
+        return await manager.go_forward(agent_id)
+
+    @app.post("/browser/{agent_id}/switch_tab")
+    async def switch_tab(agent_id: str, request: Request):
+        _verify_auth(request)
+        body = await request.json()
+        return await manager.switch_tab(
+            agent_id, tab_index=body.get("tab_index", -1),
+        )
+
     # ── User uploads file serving ─────────────────────────────────────────
     # Serves files from /app/uploads (user-managed, read-only mount).
     # No auth required: this port is not internet-exposed and all content
