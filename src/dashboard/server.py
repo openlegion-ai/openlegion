@@ -869,8 +869,6 @@ def create_dashboard_router(
         from src.shared.utils import sanitize_for_prompt
         message = sanitize_for_prompt(message)
 
-
-
         async def event_generator():
             try:
                 async for event in transport.stream_request(
@@ -944,7 +942,6 @@ def create_dashboard_router(
         message = sanitize_for_prompt(message)
 
         import asyncio
-
 
         agents = list(agent_registry.keys())
         project = body.get("project") or ""

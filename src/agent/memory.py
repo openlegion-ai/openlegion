@@ -236,8 +236,6 @@ class MemoryStore:
         self.db.commit()
 
     def _store_embedding(self, fact_id: str, embedding: list[float]) -> None:
-
-
         blob = serialize_float32(embedding)
         self.db.execute("DELETE FROM facts_vec WHERE id = ?", (fact_id,))
         self.db.execute("INSERT INTO facts_vec (id, embedding) VALUES (?, ?)", (fact_id, blob))
@@ -287,8 +285,6 @@ class MemoryStore:
         return await self._run_db(self._search_sync, query, query_embedding, top_k)
 
     def _vector_search(self, embedding: list[float], top_k: int) -> list[tuple]:
-
-
         blob = serialize_float32(embedding)
         return self.db.execute(
             "SELECT id, distance FROM facts_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
@@ -608,8 +604,6 @@ class MemoryStore:
             return cat_id
 
         # Create new category with the fact's embedding as initial embedding
-
-
         blob = serialize_float32(fact_embedding)
         cursor = self.db.execute(
             "INSERT INTO categories (name, embedding, item_count) VALUES (?, ?, 1)",
@@ -637,8 +631,6 @@ class MemoryStore:
 
     def _recompute_category_embedding(self, cat_id: int) -> None:
         """Recompute category embedding as average of its facts' embeddings."""
-
-
         rows = self.db.execute(
             "SELECT fv.embedding FROM facts_vec fv "
             "JOIN facts f ON f.id = fv.id "
@@ -664,8 +656,6 @@ class MemoryStore:
 
     def _search_categories(self, query_embedding: list[float], top_k: int = 3) -> list[tuple[int, float]]:
         """Vector search on category embeddings. Returns [(cat_id, similarity)]."""
-
-
         # Check if any categories exist
         count = self.db.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
         if count == 0:
@@ -742,8 +732,6 @@ class MemoryStore:
         results: dict[str, dict[str, float]] = {}
 
         # Vector search scoped to category
-
-
         blob = serialize_float32(query_embedding)
         # Get candidate fact IDs from these categories
         scoped_ids = self.db.execute(

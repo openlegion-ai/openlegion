@@ -18,6 +18,7 @@ import json
 import os
 import re
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 
@@ -85,8 +86,6 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     special characters (``$``, ``#``).  Production loads with
     ``interpolate=False`` as a second layer of defense.
     """
-    from pathlib import Path
-
     # Reject newlines/carriage returns to prevent env injection
     if re.search(r"[\r\n]", env_key) or re.search(r"[\r\n]", value):
         raise ValueError("env key and value must not contain newline characters")
@@ -130,8 +129,6 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
 
 def _remove_from_env(env_key: str, env_file: str = "") -> None:
     """Remove an environment variable from .env and os.environ."""
-    from pathlib import Path
-
     if not env_file:
         env_file = str(Path(__file__).resolve().parent.parent.parent / ".env")
 
