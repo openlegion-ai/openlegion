@@ -1521,6 +1521,127 @@ class TestOAuthTokenHandling:
         assert msgs[2]["content"][0]["tool_use_id"] == "c1"
         assert msgs[2]["content"][1]["tool_use_id"] == "c2"
 
+    def test_build_anthropic_body_converts_multimodal_tool_results(self):
+        """Tool results with image_url blocks are converted to Anthropic image format."""
+        params = {
+            "model": "anthropic/claude-opus-4-6",
+            "messages": [
+                {"role": "user", "content": "take a screenshot"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_ss",
+                            "type": "function",
+                            "function": {"name": "browser_screenshot", "arguments": "{}"},
+                        },
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_ss",
+                    "content": [
+                        {"type": "text", "text": '{"status": "screenshot captured"}'},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+                        },
+                    ],
+                },
+            ],
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        msgs = body["messages"]
+
+        # Tool result is in a user message with tool_result block
+        tool_user_msg = msgs[2]
+        assert tool_user_msg["role"] == "user"
+        tool_result = tool_user_msg["content"][0]
+        assert tool_result["type"] == "tool_result"
+
+        # The content inside tool_result should have Anthropic image format
+        inner = tool_result["content"]
+        assert isinstance(inner, list)
+        assert inner[0] == {"type": "text", "text": '{"status": "screenshot captured"}'}
+        assert inner[1]["type"] == "image"
+        assert inner[1]["source"]["type"] == "base64"
+        assert inner[1]["source"]["media_type"] == "image/png"
+        assert inner[1]["source"]["data"] == "iVBORw0KGgo="
+
+
+class TestVisionStripping:
+    """Non-vision models get image blocks stripped from tool messages."""
+
+    def test_prepare_llm_params_strips_images_for_non_vision_model(self, vault):
+        """Tool messages with image_url blocks are flattened to text for non-vision models."""
+        request = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "groq/llama-3.3-70b-versatile",
+                "messages": [
+                    {"role": "user", "content": "take a screenshot"},
+                    {
+                        "role": "assistant", "content": "",
+                        "tool_calls": [
+                            {"id": "c1", "type": "function",
+                             "function": {"name": "browser_screenshot", "arguments": "{}"}},
+                        ],
+                    },
+                    {
+                        "role": "tool", "tool_call_id": "c1",
+                        "content": [
+                            {"type": "text", "text": '{"status": "screenshot captured"}'},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+                        ],
+                    },
+                ],
+            },
+        )
+        with patch("src.host.credentials._model_supports_vision", return_value=False):
+            sanitized, _ = vault._prepare_llm_params(
+                request, "groq/llama-3.3-70b-versatile",
+            )
+        tool_msg = [m for m in sanitized if m.get("role") == "tool"][0]
+        # Content must be flattened to text-only string
+        assert isinstance(tool_msg["content"], str)
+        assert "screenshot captured" in tool_msg["content"]
+        assert "image_url" not in tool_msg["content"]
+
+    def test_prepare_llm_params_keeps_images_for_vision_model(self, vault):
+        """Tool messages with image_url blocks are preserved for vision models."""
+        request = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "openai/gpt-4o",
+                "messages": [
+                    {"role": "user", "content": "take a screenshot"},
+                    {
+                        "role": "assistant", "content": "",
+                        "tool_calls": [
+                            {"id": "c1", "type": "function",
+                             "function": {"name": "browser_screenshot", "arguments": "{}"}},
+                        ],
+                    },
+                    {
+                        "role": "tool", "tool_call_id": "c1",
+                        "content": [
+                            {"type": "text", "text": '{"status": "screenshot captured"}'},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+                        ],
+                    },
+                ],
+            },
+        )
+        with patch("src.host.credentials._model_supports_vision", return_value=True):
+            sanitized, _ = vault._prepare_llm_params(
+                request, "openai/gpt-4o",
+            )
+        tool_msg = [m for m in sanitized if m.get("role") == "tool"][0]
+        # Content must remain as multimodal list
+        assert isinstance(tool_msg["content"], list)
+        assert len(tool_msg["content"]) == 2
+
 
 # ── OAuth async integration tests ─────────────────────────────
 
