@@ -51,12 +51,42 @@ def _get_tiktoken_encoding(model: str):
         return None
 
 
+def _content_chars(content) -> int:
+    """Return character count for message content, handling multimodal blocks.
+
+    Image blocks (``image_url`` with data URIs) are counted as a fixed
+    estimate (~1,600 tokens ≈ 6,400 chars) rather than their raw base64
+    size, which would overestimate by ~100x and trigger premature
+    context compaction.
+    """
+    _IMAGE_TOKEN_ESTIMATE = 1_600  # conservative; covers high-detail images
+    _IMAGE_CHAR_ESTIMATE = _IMAGE_TOKEN_ESTIMATE * 4
+
+    if isinstance(content, str):
+        return len(content)
+    if not isinstance(content, list):
+        return len(str(content))
+    total = 0
+    for block in content:
+        if not isinstance(block, dict):
+            total += len(str(block))
+        elif block.get("type") == "image_url":
+            total += _IMAGE_CHAR_ESTIMATE
+        else:
+            # text blocks, tool_use blocks, etc.
+            total += len(json.dumps(block))
+    return total
+
+
 def estimate_tokens(messages: list[dict], model: str = "") -> int:
     """Estimate token count for a message list.
 
     - OpenAI models: use tiktoken for accurate counting
     - Anthropic models: ~3.5 chars per token
     - Others/fallback: ~4 chars per token
+
+    Image blocks use a fixed token estimate (~1,600 tokens) instead of
+    counting base64 characters, which would overestimate by ~100x.
     """
     if model.startswith("openai/"):
         enc = _get_tiktoken_encoding(model)
@@ -68,10 +98,13 @@ def estimate_tokens(messages: list[dict], model: str = "") -> int:
                     if isinstance(val, str):
                         total += len(enc.encode(val))
                     elif isinstance(val, list):
-                        total += len(enc.encode(json.dumps(val)))
+                        # Use image-aware char count, then estimate tokens
+                        total += _content_chars(val) // 4
             return total
 
-    chars = sum(len(json.dumps(m)) for m in messages)
+    chars = sum(_content_chars(m.get("content", "")) + len(json.dumps({
+        k: v for k, v in m.items() if k != "content"
+    })) for m in messages)
     if model.startswith("anthropic/"):
         return int(chars / 3.5)
     return chars // 4

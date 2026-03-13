@@ -558,7 +558,13 @@ class AgentLoop:
         Groups messages into tool-call groups (assistant+tool responses)
         so we never split a tool-call from its results.
         """
-        estimated_tokens = sum(len(json.dumps(m)) // 4 for m in messages)
+        from src.agent.context import _content_chars
+        estimated_tokens = sum(
+            _content_chars(m.get("content", "")) // 4 + len(json.dumps({
+                k: v for k, v in m.items() if k != "content"
+            })) // 4
+            for m in messages
+        )
         if estimated_tokens <= max_tokens:
             return messages
 
@@ -1268,6 +1274,9 @@ class AgentLoop:
                 "\n## Browser\n"
                 "browser_navigate → browser_get_elements (get refs) → "
                 "browser_click(ref=)/browser_type(ref=). Re-snapshot after changes.\n"
+                "Use browser_screenshot when you need visual context: verifying "
+                "actions succeeded, reading visual content (charts, images, complex "
+                "layouts), or diagnosing why element interaction failed.\n"
             )
 
         rules += (
