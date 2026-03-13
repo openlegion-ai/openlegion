@@ -2395,7 +2395,10 @@ class TestCaptchaDetection:
                 loc.count = AsyncMock(return_value=0)
             locator_results[sel] = loc
 
-        inst.page.locator = MagicMock(side_effect=lambda s: locator_results.get(s, MagicMock(count=AsyncMock(return_value=0))))
+        default_loc = MagicMock(count=AsyncMock(return_value=0))
+        inst.page.locator = MagicMock(
+            side_effect=lambda s: locator_results.get(s, default_loc),
+        )
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
             result = await mgr.solve_captcha("agent1")
