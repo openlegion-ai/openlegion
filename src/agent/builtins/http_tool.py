@@ -22,6 +22,7 @@ from src.agent.skills import skill
 
 _MAX_BODY = 50_000
 _MAX_REDIRECTS = 5
+_CGNAT_NETWORK = ipaddress.IPv4Network("100.64.0.0/10")
 
 # Shared client for connection pooling across tool invocations.
 # Redirects are followed manually (follow_redirects=False) so we can
@@ -54,13 +55,19 @@ async def close_client() -> None:
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if the IP is in a range that should be blocked for SSRF."""
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
+    if (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_unspecified or ip.is_multicast):
+        return True
+    # CGNAT range (RFC 6598) — only applies to IPv4
+    if isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT_NETWORK:
         return True
     # IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) — check the mapped v4 address too
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         mapped = ip.ipv4_mapped
         if (mapped.is_private or mapped.is_loopback or mapped.is_link_local
-                or mapped.is_reserved or mapped.is_unspecified):
+                or mapped.is_reserved or mapped.is_unspecified or mapped.is_multicast):
+            return True
+        if mapped in _CGNAT_NETWORK:
             return True
     return False
 

@@ -533,7 +533,10 @@ class AgentLoop:
         if goals:
             parts.append(f"## Your Current Goals\n{sanitize_for_prompt(format_dict(goals))}")
 
-        parts.append(f"## Task: {assignment.task_type}\n\n## Input\n{format_dict(assignment.input_data)}")
+        sanitized_input = sanitize_for_prompt(format_dict(assignment.input_data))
+        parts.append(
+            f"## Task: {assignment.task_type}\n\n## Input\n{sanitized_input}"
+        )
 
         high_salience = await self.memory.get_high_salience_facts(top_k=10)
         if high_salience:
@@ -1111,11 +1114,12 @@ class AgentLoop:
                 await self._compact_chat_context(system)
 
             # Max tool rounds exhausted — force final text response.
+            # Omit tools so the LLM cannot return more tool calls.
             llm_response = await _llm_call_with_retry(
                 self.llm.chat,
                 system=system,
                 messages=self._chat_messages,
-                tools=self.skills.get_tool_definitions(exclude=self._excluded_tools) or None,
+                tools=None,
             )
             total_tokens += llm_response.tokens_used
             content = self._resolve_content(llm_response)
@@ -1476,11 +1480,12 @@ class AgentLoop:
                 await self._compact_chat_context(system)
 
             # Max tool rounds exhausted — force final response (non-streaming ok).
+            # Omit tools so the LLM cannot return more tool calls.
             llm_response = await _llm_call_with_retry(
                 self.llm.chat,
                 system=system,
                 messages=self._chat_messages,
-                tools=self.skills.get_tool_definitions(exclude=self._excluded_tools) or None,
+                tools=None,
             )
             total_tokens += llm_response.tokens_used
             content = self._resolve_content(llm_response)
