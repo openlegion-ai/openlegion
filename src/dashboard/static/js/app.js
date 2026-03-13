@@ -450,6 +450,9 @@ function dashboard() {
               if (route.systemTab === 'connections') {
                 this.fetchChannels(); this.fetchWebhooks(); this.fetchSettings();
               }
+              if (route.systemTab === 'settings') {
+                this.fetchBrowserSettings();
+              }
               if (route.systemTab === 'activity') {
                 this.activityView = route.activityView;
                 this.unreadEvents = 0;
@@ -897,6 +900,9 @@ function dashboard() {
         if (this.systemTab === 'connections') {
           this.fetchWebhooks();
           this.fetchChannels();
+        }
+        if (this.systemTab === 'settings') {
+          this.fetchBrowserSettings();
         }
         if (this.systemTab === 'activity') {
           this.unreadEvents = 0;
