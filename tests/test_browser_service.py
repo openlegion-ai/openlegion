@@ -1843,3 +1843,323 @@ class TestWordBoundaryPause:
 
         think_pauses = [t for t in sleep_calls if t >= 0.30]
         assert len(think_pauses) == 0
+
+
+# ── Auto-force click tests ─────────────────────────────────────────────────
+
+
+class TestAutoForceClick:
+    """Tests for auto-force click on disabled button/link refs."""
+
+    def _make_manager(self):
+        from src.browser.service import BrowserManager
+        return BrowserManager.__new__(BrowserManager)
+
+    def _make_instance(self, refs: dict):
+        """Create a mock CamoufoxInstance with given refs and a mock page."""
+        inst = MagicMock()
+        inst.refs = refs
+        inst.page = AsyncMock()
+        inst.page.click = AsyncMock()
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+        return inst
+
+    @pytest.mark.asyncio
+    async def test_disabled_button_ref_auto_forces(self):
+        """A disabled button ref should auto-force the click."""
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        refs = {"e1": {"role": "button", "name": "Post", "index": 0, "disabled": True}}
+        inst = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.click = AsyncMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+                with patch("src.browser.service.action_delay", return_value=0.01):
+                    with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                        result = await mgr.click("agent1", ref="e1")
+
+        assert result["success"] is True
+        mock_locator.click.assert_called_once()
+        call_kwargs = mock_locator.click.call_args
+        assert call_kwargs[1].get("force") is True or call_kwargs.kwargs.get("force") is True
+
+    @pytest.mark.asyncio
+    async def test_disabled_link_ref_auto_forces(self):
+        """A disabled link ref should also auto-force."""
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        refs = {"e2": {"role": "link", "name": "Sign in", "index": 0, "disabled": True}}
+        inst = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.click = AsyncMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+                with patch("src.browser.service.action_delay", return_value=0.01):
+                    with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                        result = await mgr.click("agent1", ref="e2")
+
+        assert result["success"] is True
+        mock_locator.click.assert_called_once()
+        call_kwargs = mock_locator.click.call_args
+        assert call_kwargs[1].get("force") is True or call_kwargs.kwargs.get("force") is True
+
+    @pytest.mark.asyncio
+    async def test_disabled_textbox_no_auto_force(self):
+        """A disabled textbox should NOT auto-force (not in _ARIA_FORCE_ROLES)."""
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        refs = {"e3": {"role": "textbox", "name": "Search", "index": 0, "disabled": True}}
+        inst = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.click = AsyncMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+                with patch("src.browser.service.action_delay", return_value=0.01):
+                    with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                        result = await mgr.click("agent1", ref="e3")
+
+        assert result["success"] is True
+        call_kwargs = mock_locator.click.call_args
+        assert call_kwargs[1].get("force") is False or call_kwargs.kwargs.get("force") is False
+
+    @pytest.mark.asyncio
+    async def test_disabled_menuitem_no_auto_force(self):
+        """A disabled menuitem should NOT auto-force."""
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        refs = {"e4": {"role": "menuitem", "name": "Delete", "index": 0, "disabled": True}}
+        inst = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.click = AsyncMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+                with patch("src.browser.service.action_delay", return_value=0.01):
+                    with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                        result = await mgr.click("agent1", ref="e4")
+
+        assert result["success"] is True
+        call_kwargs = mock_locator.click.call_args
+        assert call_kwargs[1].get("force") is False or call_kwargs.kwargs.get("force") is False
+
+    @pytest.mark.asyncio
+    async def test_non_disabled_button_no_auto_force(self):
+        """A non-disabled button should not trigger auto-force."""
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        refs = {"e5": {"role": "button", "name": "Submit", "index": 0, "disabled": False}}
+        inst = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.click = AsyncMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+                with patch("src.browser.service.action_delay", return_value=0.01):
+                    with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                        result = await mgr.click("agent1", ref="e5")
+
+        assert result["success"] is True
+        call_kwargs = mock_locator.click.call_args
+        assert call_kwargs[1].get("force") is False or call_kwargs.kwargs.get("force") is False
+
+    @pytest.mark.asyncio
+    async def test_explicit_force_with_disabled_button(self):
+        """Explicit force=True should still work with disabled button."""
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        refs = {"e6": {"role": "button", "name": "Post", "index": 0, "disabled": True}}
+        inst = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.click = AsyncMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+                with patch("src.browser.service.action_delay", return_value=0.01):
+                    with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                        result = await mgr.click("agent1", ref="e6", force=True)
+
+        assert result["success"] is True
+        call_kwargs = mock_locator.click.call_args
+        assert call_kwargs[1].get("force") is True or call_kwargs.kwargs.get("force") is True
+
+    @pytest.mark.asyncio
+    async def test_old_ref_format_no_auto_force(self):
+        """Refs without 'disabled' key should not trigger auto-force (backward compat)."""
+        from src.browser.service import BrowserManager
+
+        mgr = self._make_manager()
+        refs = {"e7": {"role": "button", "name": "OK", "index": 0}}
+        inst = self._make_instance(refs)
+
+        mock_locator = AsyncMock()
+        mock_locator.click = AsyncMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+                with patch("src.browser.service.action_delay", return_value=0.01):
+                    with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                        result = await mgr.click("agent1", ref="e7")
+
+        assert result["success"] is True
+        call_kwargs = mock_locator.click.call_args
+        assert call_kwargs[1].get("force") is False or call_kwargs.kwargs.get("force") is False
+
+
+class TestSnapshotDisabledField:
+    """Tests that snapshot stores disabled state in refs."""
+
+    @pytest.mark.asyncio
+    async def test_disabled_element_has_disabled_true(self):
+        """Snapshot should store disabled=True for disabled elements."""
+        from src.browser.redaction import CredentialRedactor
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr.redactor = CredentialRedactor()
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.page.accessibility = MagicMock()
+        inst.page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea",
+            "children": [
+                {"role": "button", "name": "Post", "disabled": True},
+            ],
+        })
+        inst.page.url = "https://x.com"
+        inst.page.title = AsyncMock(return_value="X")
+        inst.refs = {}
+        inst.credential_filled_refs = set()
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.snapshot("agent1")
+
+        assert result["success"] is True
+        assert inst.refs["e0"]["disabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_non_disabled_element_has_disabled_false(self):
+        """Snapshot should store disabled=False for non-disabled elements."""
+        from src.browser.redaction import CredentialRedactor
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        mgr.redactor = CredentialRedactor()
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.page.accessibility = MagicMock()
+        inst.page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea",
+            "children": [
+                {"role": "button", "name": "Submit"},
+            ],
+        })
+        inst.page.url = "https://example.com"
+        inst.page.title = AsyncMock(return_value="Example")
+        inst.refs = {}
+        inst.credential_filled_refs = set()
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            result = await mgr.snapshot("agent1")
+
+        assert result["success"] is True
+        assert inst.refs["e0"]["disabled"] is False
+
+
+class TestTypeTextSettleDelays:
+    """Tests that type_text includes settle delays for SPA reconciliation."""
+
+    @pytest.mark.asyncio
+    async def test_settle_delays_present(self):
+        """type_text should include settle delays after focus and after typing."""
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.page.click = AsyncMock()
+        inst.page.keyboard = AsyncMock()
+        inst.page.keyboard.press = AsyncMock()
+        inst.refs = {"e1": {"role": "textbox", "name": "Tweet", "index": 0, "disabled": False}}
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        sleep_calls: list[float] = []
+
+        async def capture_sleep(t):
+            sleep_calls.append(t)
+
+        mock_locator = AsyncMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+                with patch.object(BrowserManager, "_type_with_variance", new_callable=AsyncMock):
+                    with patch("src.browser.service.action_delay", return_value=0.15):
+                        with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
+                            result = await mgr.type_text(
+                                "agent1", text="hello", ref="e1", clear=False,
+                            )
+
+        assert result["success"] is True
+        # Should have at least 2 settle delays (after focus, after typing)
+        settle_delays = [t for t in sleep_calls if 0.10 <= t <= 0.50]
+        assert len(settle_delays) >= 2
+
+    @pytest.mark.asyncio
+    async def test_settle_delays_with_clear(self):
+        """type_text with clear=True should have settle + clear + settle delays."""
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager.__new__(BrowserManager)
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.page.click = AsyncMock()
+        inst.page.keyboard = AsyncMock()
+        inst.page.keyboard.press = AsyncMock()
+        inst.refs = {"e1": {"role": "textbox", "name": "Tweet", "index": 0, "disabled": False}}
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+
+        sleep_calls: list[float] = []
+
+        async def capture_sleep(t):
+            sleep_calls.append(t)
+
+        mock_locator = AsyncMock()
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst):
+            with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
+                with patch.object(BrowserManager, "_type_with_variance", new_callable=AsyncMock):
+                    with patch("src.browser.service.action_delay", return_value=0.15):
+                        with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
+                            result = await mgr.type_text(
+                                "agent1", text="hello", ref="e1", clear=True,
+                            )
+
+        assert result["success"] is True
+        # Should have settle delays + the 0.05 clear delay
+        settle_delays = [t for t in sleep_calls if 0.10 <= t <= 0.50]
+        assert len(settle_delays) >= 2
+        # The clear operation adds a small delay
+        clear_delays = [t for t in sleep_calls if t < 0.10]
+        assert len(clear_delays) >= 1

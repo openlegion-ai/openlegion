@@ -230,6 +230,9 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
     description=(
         "Click an element on the current page. Preferred: use ref from "
         "browser_get_elements (e.g. ref='e3'). Fallback: use a CSS selector. "
+        "Buttons and links marked [disabled] in browser_get_elements should still "
+        "be clicked — SPAs like X/Twitter use aria-disabled on buttons that are "
+        "visually active, and the system handles this automatically. "
         "If the click times out because of an overlay or animation, try "
         "browser_wait_for first, or set force=true to bypass actionability checks."
     ),

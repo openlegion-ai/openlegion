@@ -59,6 +59,13 @@ _VALID_WAIT_UNTIL = frozenset({"domcontentloaded", "load", "networkidle", "commi
 # After one of these, the next character gets a higher think-pause probability
 # to model the hesitation a human feels when starting the next word or sentence.
 _WORD_BOUNDARY_CHARS = frozenset(" ,.:;!?\n\t")
+# Roles where aria-disabled="true" should NOT block click attempts.
+# SPA frameworks (X/Twitter, Gmail) keep aria-disabled on buttons/links while
+# handling clicks via JS — the visual state and handler are the source of truth,
+# not the ARIA attribute.  Intentionally narrow: menuitem, switch, option are
+# excluded because force-clicking genuinely disabled items in those roles causes
+# unwanted side-effects (selecting unavailable options, toggling locked switches).
+_ARIA_FORCE_ROLES = frozenset({"button", "link"})
 
 
 class CamoufoxInstance:
@@ -70,7 +77,7 @@ class CamoufoxInstance:
         self.context = context
         self.page = page
         self.last_activity = time.time()
-        self.refs: dict[str, dict] = {}  # ref_id -> {"role": ..., "name": ...}
+        self.refs: dict[str, dict] = {}  # ref_id -> {"role", "name", "index", "disabled"}
         self.credential_filled_refs: set[str] = set()
         self.lock = asyncio.Lock()  # serialize page operations per instance
 
@@ -394,7 +401,10 @@ class BrowserManager:
                             attr_str = f" [{', '.join(attrs)}]" if attrs else ""
                             line = f"{'  ' * depth}- [{ref_id}] {role} \"{name}\"{attr_str}"
                             lines.append(line)
-                            refs[ref_id] = {"role": role, "name": name, "index": occ}
+                            refs[ref_id] = {
+                                "role": role, "name": name, "index": occ,
+                                "disabled": bool(node.get("disabled")),
+                            }
                     for child in node.get("children", []):
                         _walk(child, depth + 1)
 
@@ -429,17 +439,35 @@ class BrowserManager:
         """Click element by ref or CSS selector.
 
         force=True bypasses Playwright's actionability checks (visibility,
-        stability, not-covered). Use when the element is visually present in
-        VNC but Playwright reports it as covered by an overlay.
+        stability, not-covered, enabled). Use when the element is visually
+        present in VNC but Playwright reports it as covered by an overlay.
+
+        For button/link roles that were disabled in the last snapshot,
+        force is applied automatically — SPA frameworks (X/Twitter, Gmail)
+        commonly set aria-disabled="true" on buttons that are still clickable
+        via JS handlers. Playwright blocks clicks on aria-disabled elements
+        unless force=True, so we bypass the check for these roles.
         """
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
             try:
+                use_force = force
                 if ref and ref in inst.refs:
+                    ref_info = inst.refs[ref]
+                    # Auto-force for disabled button/link roles — aria-disabled
+                    # on SPA buttons doesn't mean the JS click handler won't fire.
+                    if (not use_force
+                            and ref_info.get("disabled")
+                            and ref_info.get("role") in _ARIA_FORCE_ROLES):
+                        use_force = True
+                        logger.debug(
+                            "Auto-force click on disabled %s ref=%s for '%s'",
+                            ref_info["role"], ref, agent_id,
+                        )
                     locator = self._locator_from_ref(inst, ref)
                     if locator:
-                        await locator.click(timeout=_CLICK_TIMEOUT_MS, force=force)
+                        await locator.click(timeout=_CLICK_TIMEOUT_MS, force=use_force)
                     else:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
                 elif selector:
@@ -501,11 +529,25 @@ class BrowserManager:
                 else:
                     return {"success": False, "error": "Must provide ref or selector"}
 
+                # Settle after focus — SPA editors (Lexical, ProseMirror, Draft.js)
+                # may expand or initialise event listeners on focus click.  Without
+                # this pause, keystrokes can arrive before the editor is ready,
+                # producing visible DOM text that the framework's internal state
+                # doesn't track (e.g. X's composer expands on first click).
+                await asyncio.sleep(action_delay())
+
                 if clear:
                     await inst.page.keyboard.press("Control+a")
                     await asyncio.sleep(0.05)
 
                 await self._type_with_variance(inst.page, text)
+
+                # Settle after typing — framework state (React, Lexical, Vue)
+                # batches DOM reconciliation asynchronously.  Without this pause,
+                # a snapshot taken immediately after typing may see stale attributes
+                # like aria-disabled="true" on submit buttons that are actually
+                # enabled (e.g. X's Post button).
+                await asyncio.sleep(action_delay())
 
                 if is_credential:
                     self.redactor.track_resolved_value(agent_id, text)
