@@ -35,6 +35,20 @@ _CLAUDE_CLI_VERSION = "2.1.62"
 _ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 
+def _model_supports_vision(model: str) -> bool:
+    """Check if a model supports image content blocks.
+
+    Uses litellm's model registry.  Returns True when unsure (safe default
+    for custom/unknown models — the API will reject if wrong, and the
+    error is clear and recoverable).
+    """
+    try:
+        from litellm import supports_vision
+        return supports_vision(model=model)
+    except Exception:
+        return True
+
+
 def _extract_content(raw_content) -> tuple[str, str | None]:
     """Extract text and thinking from LLM response content.
 
@@ -572,6 +586,17 @@ class CredentialVault:
         Returns ``(sanitized_messages, extra_kwargs)``.
         """
         sanitized = sanitize_for_provider(request.params.get("messages", []), model)
+
+        # Strip image blocks from tool messages for non-vision models
+        # (e.g., Groq/Llama, DeepSeek) so they don't cause API errors.
+        if not _model_supports_vision(model):
+            for msg in sanitized:
+                if msg.get("role") == "tool" and isinstance(msg.get("content"), list):
+                    msg["content"] = " ".join(
+                        b.get("text", "") for b in msg["content"]
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )
+
         extra: dict = {}
         for k, v in request.params.items():
             if k in ("model", "messages"):

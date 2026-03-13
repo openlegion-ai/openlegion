@@ -1570,6 +1570,79 @@ class TestOAuthTokenHandling:
         assert inner[1]["source"]["data"] == "iVBORw0KGgo="
 
 
+class TestVisionStripping:
+    """Non-vision models get image blocks stripped from tool messages."""
+
+    def test_prepare_llm_params_strips_images_for_non_vision_model(self, vault):
+        """Tool messages with image_url blocks are flattened to text for non-vision models."""
+        request = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "groq/llama-3.3-70b-versatile",
+                "messages": [
+                    {"role": "user", "content": "take a screenshot"},
+                    {
+                        "role": "assistant", "content": "",
+                        "tool_calls": [
+                            {"id": "c1", "type": "function",
+                             "function": {"name": "browser_screenshot", "arguments": "{}"}},
+                        ],
+                    },
+                    {
+                        "role": "tool", "tool_call_id": "c1",
+                        "content": [
+                            {"type": "text", "text": '{"status": "screenshot captured"}'},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+                        ],
+                    },
+                ],
+            },
+        )
+        with patch("src.host.credentials._model_supports_vision", return_value=False):
+            sanitized, _ = vault._prepare_llm_params(
+                request, "groq/llama-3.3-70b-versatile",
+            )
+        tool_msg = [m for m in sanitized if m.get("role") == "tool"][0]
+        # Content must be flattened to text-only string
+        assert isinstance(tool_msg["content"], str)
+        assert "screenshot captured" in tool_msg["content"]
+        assert "image_url" not in tool_msg["content"]
+
+    def test_prepare_llm_params_keeps_images_for_vision_model(self, vault):
+        """Tool messages with image_url blocks are preserved for vision models."""
+        request = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "openai/gpt-4o",
+                "messages": [
+                    {"role": "user", "content": "take a screenshot"},
+                    {
+                        "role": "assistant", "content": "",
+                        "tool_calls": [
+                            {"id": "c1", "type": "function",
+                             "function": {"name": "browser_screenshot", "arguments": "{}"}},
+                        ],
+                    },
+                    {
+                        "role": "tool", "tool_call_id": "c1",
+                        "content": [
+                            {"type": "text", "text": '{"status": "screenshot captured"}'},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+                        ],
+                    },
+                ],
+            },
+        )
+        with patch("src.host.credentials._model_supports_vision", return_value=True):
+            sanitized, _ = vault._prepare_llm_params(
+                request, "openai/gpt-4o",
+            )
+        tool_msg = [m for m in sanitized if m.get("role") == "tool"][0]
+        # Content must remain as multimodal list
+        assert isinstance(tool_msg["content"], list)
+        assert len(tool_msg["content"]) == 2
+
+
 # ── OAuth async integration tests ─────────────────────────────
 
 
