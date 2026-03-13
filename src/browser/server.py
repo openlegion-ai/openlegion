@@ -190,20 +190,20 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     async def get_settings(request: Request):
         """Return current browser speed settings."""
         _verify_auth(request)
-        from src.browser.timing import get_speed_factor
-        return {"speed_factor": get_speed_factor()}
+        from src.browser.timing import get_speed
+        return {"speed": get_speed()}
 
     @app.post("/browser/settings")
     async def update_settings(request: Request):
         """Update browser speed settings at runtime."""
         _verify_auth(request)
         body = await request.json()
-        speed = body.get("speed_factor")
+        speed = body.get("speed")
         if speed is not None:
-            from src.browser.timing import set_speed_factor
-            set_speed_factor(float(speed))
-        from src.browser.timing import get_speed_factor
-        return {"speed_factor": get_speed_factor()}
+            from src.browser.timing import set_speed
+            set_speed(float(speed))
+        from src.browser.timing import get_speed
+        return {"speed": get_speed()}
 
     # ── User uploads file serving ─────────────────────────────────────────
     # Serves files from /app/uploads (user-managed, read-only mount).

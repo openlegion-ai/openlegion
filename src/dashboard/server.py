@@ -1813,25 +1813,25 @@ def create_dashboard_router(
     async def api_get_browser_settings() -> dict:
         """Return saved browser speed settings."""
         settings = _load_settings()
-        return {"speed_factor": settings.get("browser_speed_factor", 1.0)}
+        return {"speed": settings.get("browser_speed", 1.0)}
 
     @api_router.post("/api/browser-settings")
     async def api_set_browser_settings(request: Request) -> dict:
         """Save browser speed settings and push to browser service."""
         body = await request.json()
-        speed = body.get("speed_factor")
+        speed = body.get("speed")
         if speed is None:
-            raise HTTPException(400, "speed_factor is required")
+            raise HTTPException(400, "speed is required")
         try:
             speed = float(speed)
         except (ValueError, TypeError):
-            raise HTTPException(400, "speed_factor must be a number")
-        if speed < 0.25 or speed > 3.0:
-            raise HTTPException(400, "speed_factor must be between 0.25 and 3.0")
+            raise HTTPException(400, "speed must be a number")
+        if speed < 0.25 or speed > 4.0:
+            raise HTTPException(400, "speed must be between 0.25 and 4.0")
 
         # Persist to config file
         settings = _load_settings()
-        settings["browser_speed_factor"] = speed
+        settings["browser_speed"] = speed
         _save_settings(settings)
 
         # Push to browser service immediately
@@ -1843,13 +1843,13 @@ def create_dashboard_router(
                     headers["Authorization"] = f"Bearer {browser_auth}"
                 await _dashboard_browser_client.post(
                     f"{runtime.browser_service_url}/browser/settings",
-                    json={"speed_factor": speed},
+                    json={"speed": speed},
                     headers=headers,
                 )
             except Exception as e:
                 logger.debug("Failed to push browser settings: %s", e)
 
-        return {"speed_factor": speed}
+        return {"speed": speed}
 
     # ── Storage ────────────────────────────────────────────────
 

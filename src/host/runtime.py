@@ -446,21 +446,21 @@ class DockerBackend(RuntimeBackend):
 
         self.browser_vnc_url = f"http://127.0.0.1:{vnc_port}/index.html?autoconnect=true&path=&resize=scale"
 
-        # Push saved browser settings (speed factor) so they survive container restarts
+        # Push saved browser settings (speed) so they survive container restarts
         try:
             _settings_path = Path("config/settings.json")
             if _settings_path.exists():
                 import json as _json
                 _saved = _json.loads(_settings_path.read_text())
-                _speed = _saved.get("browser_speed_factor")
+                _speed = _saved.get("browser_speed")
                 if _speed is not None:
                     _httpx.post(
                         f"{self.browser_service_url}/browser/settings",
-                        json={"speed_factor": _speed},
+                        json={"speed": _speed},
                         headers={"Authorization": f"Bearer {self.browser_auth_token}"},
                         timeout=5,
                     )
-                    logger.info("Pushed browser speed_factor=%.2f from saved settings", _speed)
+                    logger.info("Pushed browser speed=%.2f from saved settings", _speed)
         except Exception as e:
             logger.debug("Browser settings push skipped: %s", e)
 
