@@ -854,13 +854,15 @@ function dashboard() {
           if (this.detailAgent) {
             this.fetchAgentDetail(this.detailAgent);
           }
-          // Sync open chat histories from server (cross-device consistency)
-          for (const agentId of this.openChats) {
-            delete this._chatFetchedAt[agentId];
-            this._loadChatHistory(agentId);
-          }
-          // Recover chats whose SSE streams died while the tab was hidden
-          this._recoverDeadStreams();
+          // Recover chats whose SSE streams died while tab was hidden,
+          // then sync histories for non-recovering agents.
+          this._recoverDeadStreams().then(() => {
+            for (const agentId of this.openChats) {
+              if (this._chatRecoveryPolls[agentId]) continue; // being recovered
+              delete this._chatFetchedAt[agentId];
+              this._loadChatHistory(agentId);
+            }
+          });
         }
       });
     },
@@ -2770,18 +2772,21 @@ function dashboard() {
           return;
         }
         const serverMsgs = data.messages.map(m => ({
-          role: m.role,
+          role: m.role === 'assistant' ? 'agent' : m.role,
           content: m.content,
           streaming: false,
           phase: 'done',
-          ts: m.ts || 0,
+          ts: (m.ts || 0) < 1e12 ? (m.ts || 0) * 1000 : (m.ts || 0),
           tools: Array.isArray(m.tools) ? m.tools.map(t =>
             typeof t === 'string' ? { name: t, status: 'done', inputPreview: '', outputPreview: '' } : t
           ) : [],
         }));
         // Preserve local user messages not yet on the server (e.g., sent
         // right before tab-out, before the server could persist them).
-        const lastServerTs = Math.max(...data.messages.map(m => m.ts || 0));
+        const lastServerTs = Math.max(...data.messages.map(m => {
+          const t = m.ts || 0;
+          return t < 1e12 ? t * 1000 : t;
+        }));
         const trailing = localMsgs.filter(m =>
           (m.ts || 0) > lastServerTs && m.role === 'user'
         );
@@ -2801,13 +2806,14 @@ function dashboard() {
       // show a thinking indicator and poll until the response is complete.
       const wasStreaming = this._chatWasStreaming || {};
       this._chatWasStreaming = {};
-      for (const agentId of Object.keys(wasStreaming)) {
-        if (this.chatStreamingAgents[agentId]) continue; // stream survived
-        // Stream died — fetch fresh queue status to check if agent is still working
-        try {
-          const resp = await fetch(`${window.__config.apiBase}/queues`);
-          if (resp.ok) this.queueStatus = (await resp.json()).queues;
-        } catch (_) { /* ignore */ }
+      const agentIds = Object.keys(wasStreaming).filter(id => !this.chatStreamingAgents[id]);
+      if (agentIds.length === 0) return;
+      // Fetch queue status once for all agents
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/queues`);
+        if (resp.ok) this.queueStatus = (await resp.json()).queues;
+      } catch (_) { /* ignore */ }
+      for (const agentId of agentIds) {
         if (!this.queueStatus?.[agentId]?.busy) {
           // Agent finished — _loadChatHistory will pick up the completed response
           continue;
@@ -2893,9 +2899,8 @@ function dashboard() {
         delete this._chatAborts[agentId];
       }
       delete this._chatStreamTarget[agentId];
+      this._stopChatRecovery(agentId);
       this.openChats = this.openChats.filter(id => id !== agentId);
-      this.chatLoadingAgents[agentId] = false;
-      this.chatStreamingAgents[agentId] = false;
       // Switch to next open chat or clear
       if (this.activeChatId === agentId) {
         this.activeChatId = this.openChats.length > 0 ? this.openChats[this.openChats.length - 1] : '';
@@ -2908,9 +2913,8 @@ function dashboard() {
         delete this._chatAborts[agentId];
       }
       delete this._chatStreamTarget[agentId];
+      this._stopChatRecovery(agentId);
       this.chatHistories[agentId] = [];
-      this.chatLoadingAgents[agentId] = false;
-      this.chatStreamingAgents[agentId] = false;
       delete this._chatFetchedAt[agentId];
       this._saveChatToSession();
     },
