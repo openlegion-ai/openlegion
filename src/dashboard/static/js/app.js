@@ -39,6 +39,7 @@ function dashboard() {
     lastRefresh: 0,
     unreadEvents: 0,
     _lastSeenEventCount: 0,
+    _lastSeenActivityTs: 0,
     toastQueue: [],
 
     // Fleet
@@ -460,6 +461,8 @@ function dashboard() {
                 this.activityView = route.activityView;
                 this.unreadEvents = 0;
                 this._lastSeenEventCount = this.events.length;
+                this._lastSeenActivityTs = Date.now();
+                try { localStorage.setItem('ol_lastActivityTs', String(this._lastSeenActivityTs)); } catch (_) {}
                 if (route.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
                 else if (route.activityView === 'logs') { this.fetchSystemLogs(); }
               }
@@ -733,7 +736,7 @@ function dashboard() {
       };
       document.addEventListener('visibilitychange', this._visibilityHandler);
 
-      // Restore chat history from localStorage (persists across tabs & browser restarts)
+      // Restore persisted state from localStorage
       try {
         const saved = localStorage.getItem('ol_chats');
         if (saved) {
@@ -741,9 +744,11 @@ function dashboard() {
           if (parsed.histories) this.chatHistories = parsed.histories;
           if (parsed.openChats) this.openChats = parsed.openChats;
           if (parsed.activeChatId) this.activeChatId = parsed.activeChatId;
+          if (parsed.chatPanelMinimized) this.chatPanelMinimized = true;
         }
+        this._lastSeenActivityTs = parseInt(localStorage.getItem('ol_lastActivityTs') || '0', 10);
       } catch (e) {
-        console.debug('chat history fetch skipped:', e.message || e);
+        console.debug('localStorage restore skipped:', e.message || e);
       }
 
       // Sync restored open chats from server so cross-device history is fresh
@@ -822,6 +827,10 @@ function dashboard() {
           if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
           if (this._modelHealthInterval) { clearInterval(this._modelHealthInterval); this._modelHealthInterval = null; }
           this._stopActivityRefresh();
+          // Persist activity read position so page reload doesn't re-count seen events
+          if (this._lastSeenActivityTs > 0) {
+            try { localStorage.setItem('ol_lastActivityTs', String(this._lastSeenActivityTs)); } catch (_) {}
+          }
           // Snapshot which chats had active SSE streams before tab hides
           this._chatWasStreaming = {};
           for (const agentId of this.openChats) {
@@ -921,6 +930,8 @@ function dashboard() {
         if (this.systemTab === 'activity') {
           this.unreadEvents = 0;
           this._lastSeenEventCount = this.events.length;
+          this._lastSeenActivityTs = Date.now();
+          try { localStorage.setItem('ol_lastActivityTs', String(this._lastSeenActivityTs)); } catch (_) {}
           if (this.activityView === 'traces') {
             this.fetchTraces();
             this._startActivityRefresh();
@@ -1019,12 +1030,20 @@ function dashboard() {
       if (this.events.length > 500) this.events.splice(500);
 
       // Track unread events when not viewing the Activity sub-tab.
+      // Only count events newer than the last time the user viewed Activity,
+      // so WebSocket replay of old events doesn't inflate the badge on page load.
       // Skip if the user is actively viewing this agent's chat panel.
       const onActivity = this.activeTab === 'system' && this.systemTab === 'activity';
-      if (!onActivity) {
-        const isViewingAgent = evt.agent && evt.agent === this.activeChatId && !this.chatPanelMinimized;
-        if (!isViewingAgent) {
-          this.unreadEvents++;
+      if (onActivity) {
+        // Advance high-water mark while viewing — persisted on tab hide / nav away
+        this._lastSeenActivityTs = Date.now();
+      } else {
+        const eventMs = evt.timestamp ? new Date(evt.timestamp).getTime() : Date.now();
+        if (eventMs > this._lastSeenActivityTs) {
+          const isViewingAgent = evt.agent && evt.agent === this.activeChatId && !this.chatPanelMinimized;
+          if (!isViewingAgent) {
+            this.unreadEvents++;
+          }
         }
       }
 
@@ -1066,7 +1085,6 @@ function dashboard() {
             tools: [],
             ts: Date.now(),
           });
-          this._saveChatToSession();
           if (this.openChats.includes(evt.agent)) {
             if (this.chatPanelMinimized || this.activeChatId !== evt.agent) {
               this.chatUnread = { ...this.chatUnread, [evt.agent]: (this.chatUnread[evt.agent] || 0) + 1 };
@@ -1079,6 +1097,7 @@ function dashboard() {
             if (!this.activeChatId) this.activeChatId = evt.agent;
             this.$nextTick(() => this._scrollChat(evt.agent));
           }
+          this._saveChatToSession();
         }
       }
 
@@ -2552,6 +2571,7 @@ function dashboard() {
           histories,
           openChats: this.openChats,
           activeChatId: this.activeChatId,
+          chatPanelMinimized: this.chatPanelMinimized,
         });
         localStorage.setItem('ol_chats', payload);
       } catch (e) {
@@ -2906,6 +2926,7 @@ function dashboard() {
       if (this.activeChatId === agentId) {
         this.activeChatId = this.openChats.length > 0 ? this.openChats[this.openChats.length - 1] : '';
       }
+      this._saveChatToSession();
     },
 
     clearChat(agentId) {
