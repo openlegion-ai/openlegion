@@ -164,6 +164,21 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             logger.warning("invoke_tool '%s' failed: %s", name, e)
             return {"error": str(e)}
 
+    @app.post("/heartbeat")
+    async def heartbeat(msg: ChatMessage) -> dict:
+        """Execute an autonomous heartbeat — separate from chat."""
+        result = await loop.execute_heartbeat(sanitize_for_prompt(msg.message))
+        return result
+
+    @app.get("/activity")
+    async def get_activity(limit: int = 100) -> dict:
+        """Return the activity log (heartbeat and autonomous work)."""
+        if not loop.workspace:
+            return {"activity": [], "count": 0}
+        limit = max(1, min(limit, 500))
+        entries = loop.workspace.load_activity(limit=limit)
+        return {"activity": entries, "count": len(entries)}
+
     @app.post("/chat", response_model=ChatResponse)
     async def chat(msg: ChatMessage, request: Request) -> ChatResponse:
         """Interactive chat with the agent. Supports tool use."""

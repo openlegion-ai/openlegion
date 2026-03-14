@@ -84,6 +84,8 @@ class CronScheduler:
         blackboard: Any = None,
         trace_store: Any = None,
         context_fn: Optional[Callable] = None,
+        heartbeat_dispatch_fn: Optional[Callable] = None,
+        event_bus: Any = None,
     ):
         self.config_path = Path(config_path)
         self.jobs: dict[str, CronJob] = {}
@@ -93,6 +95,8 @@ class CronScheduler:
         self.blackboard = blackboard
         self._trace_store = trace_store
         self.context_fn = context_fn
+        self.heartbeat_dispatch_fn = heartbeat_dispatch_fn
+        self._event_bus = event_bus
         self._running = False
         self._job_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._load()
@@ -440,7 +444,36 @@ class CronScheduler:
                             )
 
                         message = "\n\n".join(sections)
-                        response = await self.dispatch_fn(job.agent, message)
+
+                        # Use dedicated heartbeat endpoint when available
+                        if self.heartbeat_dispatch_fn:
+                            hb_result = await self.heartbeat_dispatch_fn(job.agent, message)
+                            # hb_result is a structured dict from execute_heartbeat
+                            if isinstance(hb_result, dict):
+                                if hb_result.get("skipped"):
+                                    logger.debug(
+                                        "Heartbeat %s: agent '%s' busy (%s), skipped",
+                                        job.id, job.agent,
+                                        hb_result.get("reason", "unknown"),
+                                    )
+                                    return None
+                                response = hb_result.get("response", "")
+                                if self._event_bus:
+                                    self._event_bus.emit(
+                                        "heartbeat_complete", agent=job.agent,
+                                        data={
+                                            "summary": hb_result.get("summary", ""),
+                                            "tools_used": hb_result.get("tools_used", []),
+                                            "duration_ms": hb_result.get("duration_ms", 0),
+                                            "tokens_used": hb_result.get("tokens_used", 0),
+                                            "outcome": hb_result.get("outcome", "ok"),
+                                        },
+                                    )
+                            else:
+                                response = str(hb_result) if hb_result else ""
+                        else:
+                            response = await self.dispatch_fn(job.agent, message)
+
                         logger.info(
                             f"Heartbeat {job.id}: dispatched for '{job.agent}' "
                             f"({len(triggered)} probes triggered)"

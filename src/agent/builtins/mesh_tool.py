@@ -37,9 +37,12 @@ async def notify_user(message: str, *, mesh_client=None, workspace_manager=None)
         return {"error": "No mesh_client available"}
     try:
         await mesh_client.notify_user(message)
-        # Persist to chat transcript so notifications survive across devices
+        # During heartbeat mode, skip chat transcript — the heartbeat loop
+        # records notifications in the activity log instead.
         if workspace_manager:
-            workspace_manager.append_chat_message("notification", message)
+            from src.agent.loop import _heartbeat_mode
+            if not _heartbeat_mode.get(False):
+                workspace_manager.append_chat_message("notification", message)
         return {"sent": True}
     except Exception as e:
         return {"error": f"Failed to notify user: {e}"}

@@ -609,6 +609,18 @@ class RuntimeContext:
                 logger.warning("Failed to invoke tool '%s' on '%s': %s", tool_name, agent_name, e)
                 return {"error": str(e)}
 
+        async def heartbeat_dispatch(agent_name: str, message: str) -> dict:
+            """Dispatch heartbeat via dedicated /heartbeat endpoint."""
+            try:
+                return await self.transport.request(
+                    agent_name, "POST", "/heartbeat",
+                    json={"message": message},
+                    timeout=120,
+                )
+            except Exception as e:
+                logger.warning("Heartbeat dispatch failed for '%s': %s", agent_name, e)
+                return {"response": f"Error: {e}", "outcome": "error", "skipped": False}
+
         self.cron_scheduler = CronScheduler(
             dispatch_fn=cron_dispatch,
             workflow_trigger_fn=trigger_workflow,
@@ -616,6 +628,8 @@ class RuntimeContext:
             blackboard=self.blackboard,
             trace_store=self.trace_store,
             context_fn=fetch_heartbeat_context,
+            heartbeat_dispatch_fn=heartbeat_dispatch,
+            event_bus=self.event_bus,
         )
         self._cron_job_count = len(self.cron_scheduler.jobs)
 
