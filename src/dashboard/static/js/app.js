@@ -881,6 +881,8 @@ function dashboard() {
       Object.values(this._stateTimers).forEach(clearTimeout);
       Object.values(this._scrollTimers).forEach(clearTimeout);
       Object.values(this._chatAborts).forEach(c => c?.abort());
+      Object.values(this._chatRecoveryPolls).forEach(clearInterval);
+      this._chatRecoveryPolls = {};
       this.stopHeartbeatTimer();
       if (this._cmdPaletteHandler) document.removeEventListener('keydown', this._cmdPaletteHandler);
       if (this._popstateHandler) window.removeEventListener('popstate', this._popstateHandler);
@@ -2759,14 +2761,15 @@ function dashboard() {
         const resp = await fetch(`/dashboard/api/agents/${agentId}/chat/history`, { credentials: 'same-origin' });
         if (!resp.ok) return;
         const data = await resp.json();
+        const localMsgs = this.chatHistories[agentId] || [];
         if (!data.messages || data.messages.length === 0) {
-          if (this.chatHistories[agentId]?.length > 0) {
+          if (localMsgs.length > 0) {
             this.chatHistories[agentId] = [];
             this._saveChatToSession();
           }
           return;
         }
-        this.chatHistories[agentId] = data.messages.map(m => ({
+        const serverMsgs = data.messages.map(m => ({
           role: m.role,
           content: m.content,
           streaming: false,
@@ -2776,6 +2779,15 @@ function dashboard() {
             typeof t === 'string' ? { name: t, status: 'done', inputPreview: '', outputPreview: '' } : t
           ) : [],
         }));
+        // Preserve local user messages not yet on the server (e.g., sent
+        // right before tab-out, before the server could persist them).
+        const lastServerTs = Math.max(...data.messages.map(m => m.ts || 0));
+        const trailing = localMsgs.filter(m =>
+          (m.ts || 0) > lastServerTs && m.role === 'user'
+        );
+        this.chatHistories[agentId] = trailing.length > 0
+          ? [...serverMsgs, ...trailing]
+          : serverMsgs;
         this._saveChatToSession();
         this.$nextTick(() => this._scrollChat(agentId));
       } catch (e) {
