@@ -3328,7 +3328,7 @@
           </template>
         </div>
         <!-- Messages area -->
-        <div role="log" aria-live="polite" class="flex-1 overflow-y-auto px-4 py-3 space-y-2" :id="'chat-messages-' + activeChatId">
+        <div role="log" aria-live="polite" class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-2" :id="'chat-messages-' + activeChatId">
           <template x-for="(msg, i) in (chatHistories[activeChatId] || [])" :key="i">
             <!-- Single root wrapper required by Alpine x-for. -->
             <div>
