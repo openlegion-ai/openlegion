@@ -25,7 +25,7 @@ class TraceStore:
 
     def __init__(self, db_path: str = "data/traces.db", max_age_hours: int | None = None):
         self.max_age_hours = max_age_hours
-        self._last_age_gc: float = 0.0
+        self._last_age_gc: float = -300.0  # ensure first GC runs regardless of monotonic() epoch
         self._gc_lock = threading.Lock()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)

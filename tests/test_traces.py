@@ -209,7 +209,7 @@ class TestTraceStore:
                 ("tr_old", now - 7200, "repl", "a", "chat"),
             )
             store._conn.commit()
-            store._last_age_gc = 0.0
+            store._last_age_gc = -300.0  # force GC to run on next record()
             store.record("tr_new", "repl", "a", "chat")
             results = store.query()
             trace_ids = {e["trace_id"] for e in results}
