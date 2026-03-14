@@ -64,6 +64,7 @@ _PROVIDERS = [
     {"name": "groq", "label": "Groq"},
     {"name": "minimax", "label": "MiniMax"},
     {"name": "zai", "label": "Z.AI (GLM)"},
+    {"name": "ollama", "label": "Ollama (Local)"},
 ]
 
 

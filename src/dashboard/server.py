@@ -155,8 +155,13 @@ def create_dashboard_router(
     from src.shared.models import get_provider_models
 
     def _is_valid_model(model: str) -> bool:
-        """Check if a model is known (from litellm or featured lists)."""
+        """Check if a model is known (from litellm or featured lists).
+
+        Ollama models are always accepted since they're user-installed locally.
+        """
         provider = model.split("/")[0] if "/" in model else ""
+        if provider in ("ollama", "ollama_chat"):
+            return True
         if provider:
             return model in get_provider_models(provider)
         return any(model in models for models in _PROVIDER_MODELS.values())
@@ -1755,6 +1760,21 @@ def create_dashboard_router(
                 p: models for p, models in _PROVIDER_MODELS.items()
                 if p in active_providers
             }
+
+            # Discover locally-installed Ollama models and merge them in.
+            # Only adds Ollama to the dropdown if it's actually reachable.
+            try:
+                discovered = await credential_vault.discover_ollama_models()
+                if discovered:
+                    featured = available_provider_models.get("ollama", [])
+                    discovered_set = set(discovered)
+                    merged = discovered + [
+                        m for m in featured if m not in discovered_set
+                    ]
+                    available_provider_models["ollama"] = merged
+                    has_llm = True
+            except Exception:
+                pass  # Keep whatever's already there (if any)
 
         all_costs = get_all_model_costs()
         return {
