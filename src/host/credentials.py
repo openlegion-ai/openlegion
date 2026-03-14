@@ -153,8 +153,11 @@ AGENT_PREFIX = "OPENLEGION_CRED_"
 # auto-detecting LLM provider keys.  Derived from _PROVIDER_KEY_MAP.
 SYSTEM_CREDENTIAL_PROVIDERS = frozenset({
     "anthropic", "openai", "gemini", "deepseek", "moonshot",
-    "minimax", "xai", "groq", "zai",
+    "minimax", "xai", "groq", "zai", "ollama",
 })
+
+# Providers that don't require API keys (local inference).
+KEYLESS_PROVIDERS = frozenset({"ollama"})
 SYSTEM_CREDENTIAL_SUFFIXES = ("_api_key", "_api_base")
 
 
@@ -442,6 +445,8 @@ class CredentialVault:
         "gemini/": "gemini",
         "moonshot/": "moonshot",
         "deepseek/": "deepseek",
+        "ollama/": "ollama",
+        "ollama_chat/": "ollama",
         "text-embedding-": "openai",
     }
 
@@ -470,14 +475,65 @@ class CredentialVault:
             return None, {}
         return api_key, {}
 
+    def _is_keyless_provider(self, model: str) -> bool:
+        """Check if a model belongs to a provider that doesn't need API keys.
+
+        Uses ``_PROVIDER_KEY_MAP`` for resolution so that prefixes like
+        ``ollama_chat/`` correctly map to the ``ollama`` provider.
+        """
+        for prefix, provider in self._PROVIDER_KEY_MAP.items():
+            if model.startswith(prefix):
+                return provider in KEYLESS_PROVIDERS
+        return False
+
     def get_providers_with_credentials(self) -> set[str]:
-        """Return the set of provider names that have credentials configured."""
+        """Return the set of provider names that have credentials configured.
+
+        For keyless providers (e.g. Ollama), checks if an API base is
+        configured instead of an API key.  Use ``discover_ollama_models``
+        for runtime availability.
+        """
         providers: set[str] = set()
         for provider in SYSTEM_CREDENTIAL_PROVIDERS:
-            key_name = f"{provider}_api_key"
-            if key_name in self.system_credentials:
-                providers.add(provider)
+            if provider in KEYLESS_PROVIDERS:
+                # Keyless providers: include if explicitly configured
+                if f"{provider}_api_base" in self.api_bases:
+                    providers.add(provider)
+            else:
+                key_name = f"{provider}_api_key"
+                if key_name in self.system_credentials:
+                    providers.add(provider)
         return providers
+
+    _OLLAMA_DEFAULT_BASE = "http://localhost:11434"
+
+    async def discover_ollama_models(self) -> list[str]:
+        """Query the local Ollama instance for installed models.
+
+        Returns model names in ``ollama/<name>`` format.
+        Returns an empty list if Ollama is unreachable.
+        """
+        base = self.api_bases.get(
+            "ollama_api_base", self._OLLAMA_DEFAULT_BASE,
+        )
+        try:
+            client = await self._get_http_client()
+            resp = await client.get(f"{base}/api/tags", timeout=2.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                models: list[str] = []
+                for m in data.get("models", []):
+                    name = m.get("name", "")
+                    if not name:
+                        continue
+                    # Strip `:latest` suffix for cleaner display
+                    if name.endswith(":latest"):
+                        name = name[: -len(":latest")]
+                    models.append(f"ollama/{name}")
+                return sorted(set(models))
+        except Exception:
+            pass
+        return []
 
     def _get_api_base_for_model(self, model: str) -> str | None:
         """Resolve a custom API base URL for a model's provider.
@@ -524,7 +580,7 @@ class CredentialVault:
 
         for model in models:
             api_key, auth_headers = self._get_auth_for_model(model)
-            if not api_key:
+            if not api_key and not self._is_keyless_provider(model):
                 logger.debug(f"No API key for failover candidate '{model}', skipping")
                 continue
             api_base = self._get_api_base_for_model(model)
@@ -966,19 +1022,21 @@ class CredentialVault:
                 return await self._oauth_chat(request, api_key, requested_model)
 
             async def _chat(
-                model: str, api_key: str,
+                model: str, api_key: str | None,
                 api_base: str | None = None,
                 auth_headers: dict[str, str] | None = None,
             ):
                 sanitized, extra = self._prepare_llm_params(
                     request, model, api_base, auth_headers,
                 )
-                return await litellm.acompletion(
-                    model=model,
-                    messages=sanitized,
-                    api_key=api_key,
+                llm_kwargs: dict = {
+                    "model": model,
+                    "messages": sanitized,
                     **extra,
-                )
+                }
+                if api_key:
+                    llm_kwargs["api_key"] = api_key
+                return await litellm.acompletion(**llm_kwargs)
 
             response, used_model = await self._call_llm_with_failover(
                 requested_model, _chat,
@@ -1007,7 +1065,7 @@ class CredentialVault:
         elif request.action == "embed":
             # Embedding models produce incompatible vector spaces — no failover
             api_key, auth_headers = self._get_auth_for_model(requested_model)
-            if not api_key:
+            if not api_key and not self._is_keyless_provider(requested_model):
                 return APIProxyResponse(
                     success=False,
                     error=f"No API key configured for model: {requested_model}",
@@ -1018,10 +1076,11 @@ class CredentialVault:
                 embed_kwargs["api_base"] = api_base
             if auth_headers:
                 embed_kwargs["extra_headers"] = auth_headers
+            if api_key:
+                embed_kwargs["api_key"] = api_key
             response = await litellm.aembedding(
                 model=request.params["model"],
                 input=request.params.get("text", ""),
-                api_key=api_key,
                 **embed_kwargs,
             )
             item = response.data[0]
@@ -1066,20 +1125,22 @@ class CredentialVault:
 
         for model in models_to_try:
             api_key, auth_headers = self._get_auth_for_model(model)
-            if not api_key:
+            if not api_key and not self._is_keyless_provider(model):
                 continue
             api_base = self._get_api_base_for_model(model)
             try:
                 sanitized, extra = self._prepare_llm_params(
                     request, model, api_base, auth_headers,
                 )
-                response = await litellm.acompletion(
-                    model=model,
-                    messages=sanitized,
-                    api_key=api_key,
-                    stream=True,
+                llm_kwargs: dict = {
+                    "model": model,
+                    "messages": sanitized,
+                    "stream": True,
                     **extra,
-                )
+                }
+                if api_key:
+                    llm_kwargs["api_key"] = api_key
+                response = await litellm.acompletion(**llm_kwargs)
                 used_model = model
                 if model != requested_model:
                     logger.info(f"Stream failover: '{requested_model}' → '{model}'")

@@ -213,12 +213,20 @@ class REPLSession:
 
     def _inline_setup(self) -> None:
         """Show onboarding prompts for first-time users (no credentials, no agents)."""
+        from src.host.credentials import KEYLESS_PROVIDERS
         from src.setup_wizard import InlineSetup
 
         has_creds = bool(
             self.ctx.credential_vault
             and (self.ctx.credential_vault.credentials or self.ctx.credential_vault.system_credentials)
         )
+        # Keyless providers (e.g. Ollama) are configured via model selection, not keys.
+        # Check if the default model uses a keyless provider.
+        if not has_creds:
+            default_model = self.ctx.cfg.get("llm", {}).get("default_model", "")
+            provider = default_model.split("/")[0] if "/" in default_model else ""
+            if provider in KEYLESS_PROVIDERS:
+                has_creds = True
         has_agents = bool(self.ctx.agents)
 
         if has_creds and not has_agents:

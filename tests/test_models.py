@@ -169,6 +169,38 @@ class TestGetProviderModels:
             assert m.startswith("openai/")
 
 
+class TestOllamaModels:
+    """Tests for Ollama (local) model support."""
+
+    def test_ollama_cost_is_free(self):
+        """Ollama models always return zero cost."""
+        assert get_model_cost("ollama/llama3") == (0.0, 0.0)
+        assert get_model_cost("ollama/some-custom-model:7b") == (0.0, 0.0)
+
+    def test_ollama_chat_cost_is_free(self):
+        """ollama_chat/ prefix also returns zero cost."""
+        assert get_model_cost("ollama_chat/llama3") == (0.0, 0.0)
+
+    def test_ollama_context_window(self):
+        """Ollama models return the default Ollama context window."""
+        from src.shared.models import _OLLAMA_DEFAULT_CONTEXT
+        assert get_context_window("ollama/llama3") == _OLLAMA_DEFAULT_CONTEXT
+        assert get_context_window("ollama_chat/llama3") == _OLLAMA_DEFAULT_CONTEXT
+
+    def test_ollama_featured_models_exist(self):
+        """Ollama has featured models defined."""
+        assert "ollama" in _FEATURED_MODELS
+        assert len(_FEATURED_MODELS["ollama"]) > 0
+        for m in _FEATURED_MODELS["ollama"]:
+            assert m.startswith("ollama/")
+
+    def test_ollama_provider_models_start_with_featured(self):
+        """get_provider_models returns featured models first for ollama."""
+        models = get_provider_models.__wrapped__("ollama")
+        featured = _FEATURED_MODELS["ollama"]
+        assert models[: len(featured)] == featured
+
+
 class TestGetAllModelCosts:
     def test_returns_dict_with_costs(self):
         """Returns a dict mapping model names to cost tuples."""
@@ -186,3 +218,10 @@ class TestGetAllModelCosts:
         for provider, models in _FEATURED_MODELS.items():
             for model in models:
                 assert model in costs, f"Missing cost for {model}"
+
+    def test_ollama_costs_are_zero(self):
+        """All Ollama models in cost table have zero cost."""
+        costs = get_all_model_costs()
+        for model, cost in costs.items():
+            if model.startswith("ollama/"):
+                assert cost == (0.0, 0.0), f"{model} should be free"

@@ -113,6 +113,16 @@ _FEATURED_MODELS: dict[str, list[str]] = {
     "zai": [
         "zai/glm-5",
     ],
+    "ollama": [
+        "ollama/llama3.3",
+        "ollama/qwen2.5",
+        "ollama/deepseek-r1",
+        "ollama/phi4",
+        "ollama/mistral",
+        "ollama/gemma2",
+        "ollama/command-r",
+        "ollama/codellama",
+    ],
 }
 
 # Providers that use bare model names in litellm (no prefix).
@@ -160,7 +170,11 @@ def get_model_cost(model: str) -> tuple[float, float]:
 
     Converts litellm's per-token costs to our per-1K-token format.
     Falls back to hardcoded data, then a conservative default.
+    Local providers (Ollama) are always free.
     """
+    if model.startswith("ollama/") or model.startswith("ollama_chat/"):
+        return (0.0, 0.0)
+
     key = _resolve_litellm_key(model)
     if key is not None:
         try:
@@ -175,11 +189,18 @@ def get_model_cost(model: str) -> tuple[float, float]:
     return _FALLBACK_COSTS.get(model, _DEFAULT_COST)
 
 
+_OLLAMA_DEFAULT_CONTEXT = 4096
+
+
 def get_context_window(model: str) -> int:
     """Return the max input tokens for a model.
 
     Uses litellm's ``max_input_tokens``, falling back to hardcoded data.
+    Ollama models default to 4096 (Ollama's default ``num_ctx``).
     """
+    if model.startswith("ollama/") or model.startswith("ollama_chat/"):
+        return _OLLAMA_DEFAULT_CONTEXT
+
     key = _resolve_litellm_key(model)
     if key is not None:
         try:

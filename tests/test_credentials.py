@@ -1262,9 +1262,20 @@ class TestGetAuthForModel:
         for provider in ("anthropic", "openai", "gemini", "deepseek",
                          "moonshot", "minimax", "xai", "groq", "zai"):
             monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider.upper()}_API_KEY", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
         v = CredentialVault()
         providers = v.get_providers_with_credentials()
         assert providers == set()
+
+    def test_providers_with_credentials_includes_ollama_with_base(self, monkeypatch):
+        """Ollama is included when its API base is configured (keyless provider)."""
+        for provider in ("anthropic", "openai", "gemini", "deepseek",
+                         "moonshot", "minimax", "xai", "groq", "zai"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider.upper()}_API_KEY", raising=False)
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", "http://localhost:11434")
+        v = CredentialVault()
+        providers = v.get_providers_with_credentials()
+        assert providers == {"ollama"}
 
     def test_get_auth_for_model_oauth_token(self, monkeypatch):
         """OAuth setup-token returns key with empty headers (OAuth bypasses LiteLLM)."""
@@ -1277,6 +1288,133 @@ class TestGetAuthForModel:
         assert api_key.startswith("sk-ant-oat01-")
         # OAuth tokens bypass LiteLLM — headers built in _oauth_headers() instead
         assert headers == {}
+
+
+# ── Keyless providers (Ollama) ──────────────────────────────────
+
+
+class TestKeylessProvider:
+    """Tests for keyless provider handling (e.g. Ollama)."""
+
+    def test_is_keyless_provider_ollama(self, monkeypatch):
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+        v = CredentialVault()
+        assert v._is_keyless_provider("ollama/llama3") is True
+
+    def test_is_keyless_provider_ollama_chat(self, monkeypatch):
+        """ollama_chat/ prefix also maps to the ollama provider."""
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+        v = CredentialVault()
+        assert v._is_keyless_provider("ollama_chat/llama3") is True
+
+    def test_is_keyless_provider_cloud(self, monkeypatch):
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+        v = CredentialVault()
+        assert v._is_keyless_provider("openai/gpt-4o") is False
+        assert v._is_keyless_provider("anthropic/claude-sonnet-4-6") is False
+
+    def test_is_keyless_provider_unknown(self, monkeypatch):
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+        v = CredentialVault()
+        assert v._is_keyless_provider("unknown-model") is False
+
+    @pytest.mark.asyncio
+    async def test_discover_ollama_models_success(self, monkeypatch):
+        """discover_ollama_models parses Ollama API response correctly."""
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+        v = CredentialVault()
+
+        import httpx
+
+        mock_response = httpx.Response(
+            200,
+            json={
+                "models": [
+                    {"name": "llama3.3:latest"},
+                    {"name": "mistral:7b"},
+                    {"name": "codellama:latest"},
+                ]
+            },
+        )
+
+        async def mock_get(*args, **kwargs):
+            return mock_response
+
+        client = await v._get_http_client()
+        monkeypatch.setattr(client, "get", mock_get)
+
+        models = await v.discover_ollama_models()
+        # :latest should be stripped, :7b kept
+        assert "ollama/llama3.3" in models
+        assert "ollama/mistral:7b" in models
+        assert "ollama/codellama" in models
+        # Should be sorted
+        assert models == sorted(models)
+
+    @pytest.mark.asyncio
+    async def test_discover_ollama_models_unreachable(self, monkeypatch):
+        """discover_ollama_models returns empty list on connection error."""
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+        v = CredentialVault()
+
+        import httpx
+
+        async def mock_get(*args, **kwargs):
+            raise httpx.ConnectError("Connection refused")
+
+        client = await v._get_http_client()
+        monkeypatch.setattr(client, "get", mock_get)
+
+        models = await v.discover_ollama_models()
+        assert models == []
+
+    @pytest.mark.asyncio
+    async def test_discover_ollama_models_custom_base(self, monkeypatch):
+        """discover_ollama_models uses custom API base if configured."""
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OLLAMA_API_BASE", "http://192.168.1.100:11434",
+        )
+        v = CredentialVault()
+
+        captured_url = []
+
+        async def mock_get(url, **kwargs):
+            captured_url.append(url)
+            import httpx
+            return httpx.Response(200, json={"models": []})
+
+        client = await v._get_http_client()
+        monkeypatch.setattr(client, "get", mock_get)
+
+        await v.discover_ollama_models()
+        assert captured_url[0] == "http://192.168.1.100:11434/api/tags"
+
+    @pytest.mark.asyncio
+    async def test_discover_ollama_models_deduplicates(self, monkeypatch):
+        """discover_ollama_models deduplicates models."""
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+        v = CredentialVault()
+
+        import httpx
+
+        mock_response = httpx.Response(
+            200,
+            json={
+                "models": [
+                    {"name": "llama3:latest"},
+                    {"name": "llama3:latest"},
+                ]
+            },
+        )
+
+        async def mock_get(*args, **kwargs):
+            return mock_response
+
+        client = await v._get_http_client()
+        monkeypatch.setattr(client, "get", mock_get)
+
+        models = await v.discover_ollama_models()
+        assert models == ["ollama/llama3"]
 
 
 # ── OAuth token detection ──────────────────────────────────────

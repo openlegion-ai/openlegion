@@ -27,6 +27,11 @@ if TYPE_CHECKING:
 # Minimum expected length for a valid OAuth setup-token
 _OAUTH_MIN_LENGTH = 90
 
+# Providers that don't need API keys (local inference).
+_KEYLESS_PROVIDERS = frozenset({"ollama"})
+
+_OLLAMA_DEFAULT_BASE = "http://localhost:11434"
+
 # Validation models: cheapest model per provider for key checks
 _VALIDATION_MODELS = {
     "anthropic": "anthropic/claude-haiku-4-5-20251001",
@@ -191,44 +196,52 @@ class SetupWizard:
         provider = _PROVIDERS[choice - 1]["name"]
         click.echo(f"  Selected: {_PROVIDERS[choice - 1]['label']}\n")
 
-        # Model selection
-        models = _PROVIDER_MODELS[provider]
-        click.echo("  Available models:")
-        for i, m in enumerate(models, 1):
-            click.echo(f"  {i}. {m}")
-        raw = self._prompt_with_back(
-            "\n  Select model",
-            type=click.IntRange(1, len(models)),
-            default=1,
-        )
-        if raw is None:
-            return None
-        model_choice = raw
-        selected_model = models[model_choice - 1]
-        click.echo(f"  Selected: {selected_model}\n")
+        # Ollama: no API key needed — validate connectivity and discover models
+        if provider in _KEYLESS_PROVIDERS:
+            selected_model = self._setup_ollama_provider(
+                _PROVIDER_MODELS, _set_env_key,
+            )
+            if selected_model is None:
+                return None
+        else:
+            # Model selection
+            models = _PROVIDER_MODELS[provider]
+            click.echo("  Available models:")
+            for i, m in enumerate(models, 1):
+                click.echo(f"  {i}. {m}")
+            raw = self._prompt_with_back(
+                "\n  Select model",
+                type=click.IntRange(1, len(models)),
+                default=1,
+            )
+            if raw is None:
+                return None
+            model_choice = raw
+            selected_model = models[model_choice - 1]
+            click.echo(f"  Selected: {selected_model}\n")
 
-        # API key with validation
-        key_name = f"{provider}_api_key"
-        existing_key = (
-            os.environ.get(f"OPENLEGION_SYSTEM_{key_name.upper()}", "")
-            or os.environ.get(f"OPENLEGION_CRED_{key_name.upper()}", "")
-        )
-        if existing_key:
-            click.echo(f"  API key already set for {provider}.")
-            if click.confirm("  Replace it?", default=False):
+            # API key with validation
+            key_name = f"{provider}_api_key"
+            existing_key = (
+                os.environ.get(f"OPENLEGION_SYSTEM_{key_name.upper()}", "")
+                or os.environ.get(f"OPENLEGION_CRED_{key_name.upper()}", "")
+            )
+            if existing_key:
+                click.echo(f"  API key already set for {provider}.")
+                if click.confirm("  Replace it?", default=False):
+                    api_key = self._prompt_and_validate_key_with_oauth(
+                        provider, _PROVIDERS[choice - 1]["label"],
+                    )
+                    if api_key:
+                        _set_env_key(key_name, api_key, system=True)
+            else:
                 api_key = self._prompt_and_validate_key_with_oauth(
                     provider, _PROVIDERS[choice - 1]["label"],
                 )
                 if api_key:
                     _set_env_key(key_name, api_key, system=True)
-        else:
-            api_key = self._prompt_and_validate_key_with_oauth(
-                provider, _PROVIDERS[choice - 1]["label"],
-            )
-            if api_key:
-                _set_env_key(key_name, api_key, system=True)
 
-        click.echo("  Tip: Use /addkey or the dashboard to set a custom API base URL.\n")
+            click.echo("  Tip: Use /addkey or the dashboard to set a custom API base URL.\n")
 
         # Update default model in mesh config
         mesh_cfg: dict = {}
@@ -319,6 +332,112 @@ class SetupWizard:
         click.echo("  Inter-agent collaboration enabled.\n")
 
         return {}
+
+    # ── Ollama setup ────────────────────────────────────────
+
+    def _setup_ollama_provider(self, _PROVIDER_MODELS, _set_env_key) -> str | None:
+        """Handle Ollama provider setup: connectivity check, base URL, model selection.
+
+        Returns selected model string, or None for 'back'.
+        """
+        # Ask for base URL (with sensible default)
+        raw = self._prompt_with_back(
+            "  Ollama URL",
+            default=_OLLAMA_DEFAULT_BASE,
+        )
+        if raw is None:
+            return None
+        base_url = raw.strip().rstrip("/")
+
+        # Validate connectivity and discover models
+        click.echo("  Checking Ollama connectivity...", nl=False)
+        discovered = self._discover_ollama_models(base_url)
+        if discovered is None:
+            click.echo(
+                f" could not connect to {base_url}\n"
+                "  Make sure Ollama is running: ollama serve\n"
+            )
+            if not click.confirm("  Continue anyway?", default=True):
+                return None
+            # Fall back to featured model list
+            discovered = []
+
+        if discovered:
+            click.echo(f" found {len(discovered)} model(s).\n")
+        elif discovered is not None:
+            click.echo(
+                " connected, but no models installed.\n"
+                "  Pull a model first: ollama pull llama3.3\n"
+            )
+
+        # Save custom base URL if non-default
+        if base_url != _OLLAMA_DEFAULT_BASE:
+            _set_env_key("ollama_api_base", base_url, system=True)
+
+        # Build model list: discovered models first, then featured fallbacks
+        featured = list(_PROVIDER_MODELS.get("ollama", []))
+        if discovered:
+            # Discovered models first, then any featured models not yet installed
+            discovered_set = set(discovered)
+            extra = [m for m in featured if m not in discovered_set]
+            models = discovered + extra
+        else:
+            models = featured
+
+        if not models:
+            # No models at all — let user type one
+            raw = self._prompt_with_back(
+                "  Enter model name (e.g. llama3.3)",
+            )
+            if raw is None:
+                return None
+            model_name = raw.strip()
+            if not model_name.startswith("ollama/"):
+                model_name = f"ollama/{model_name}"
+            click.echo(f"  Selected: {model_name}\n")
+            return model_name
+
+        click.echo("  Available models:")
+        for i, m in enumerate(models, 1):
+            click.echo(f"  {i}. {m}")
+        raw = self._prompt_with_back(
+            "\n  Select model",
+            type=click.IntRange(1, len(models)),
+            default=1,
+        )
+        if raw is None:
+            return None
+        selected_model = models[raw - 1]
+        click.echo(f"  Selected: {selected_model}\n")
+        return selected_model
+
+    @staticmethod
+    def _discover_ollama_models(base_url: str) -> list[str] | None:
+        """Query Ollama API for installed models.
+
+        Returns list of model names in ``ollama/<name>`` format,
+        empty list if connected but no models, or None if unreachable.
+        """
+        import httpx as _httpx
+
+        try:
+            resp = _httpx.get(f"{base_url}/api/tags", timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                models: list[str] = []
+                for m in data.get("models", []):
+                    name = m.get("name", "")
+                    if not name:
+                        continue
+                    if name.endswith(":latest"):
+                        name = name[: -len(":latest")]
+                    models.append(f"ollama/{name}")
+                return sorted(set(models))
+            return []
+        except (_httpx.ConnectError, _httpx.TimeoutException):
+            return None
+        except Exception:
+            return None
 
     # ── API key validation ───────────────────────────────────
 
@@ -571,10 +690,18 @@ class InlineSetup:
 
     @staticmethod
     def needs_setup(credential_vault: CredentialVault | None) -> bool:
-        """Return True when no LLM credentials are configured."""
+        """Return True when no LLM credentials or keyless providers are configured."""
         if credential_vault is None:
             return True
-        return not bool(credential_vault.credentials or credential_vault.system_credentials)
+        if credential_vault.credentials or credential_vault.system_credentials:
+            return False
+        # Keyless providers (e.g. Ollama) configured via API base count as set up
+        if credential_vault.api_bases:
+            for base_name in credential_vault.api_bases:
+                provider = base_name.removesuffix("_api_base")
+                if provider in _KEYLESS_PROVIDERS:
+                    return False
+        return True
 
     @staticmethod
     def _prompt_and_validate_inline(
@@ -648,32 +775,47 @@ class InlineSetup:
         click.echo(f"  Selected: {label}\n")
 
         wizard = SetupWizard(self.project_root)
-        api_key = self._prompt_and_validate_inline(wizard, provider, label)
-        if not api_key:
-            return
 
-        # Store the credential (system tier — LLM provider key)
-        service = f"{provider}_api_key"
-        if self.credential_vault:
-            self.credential_vault.add_credential(service, api_key, system=True)
-        _set_env_key(service, api_key, system=True)
-        click.echo(f"  Credential '{service}' stored (system tier).")
-
-        # Model selection
-        models = _PROVIDER_MODELS[provider]
-        click.echo("\n  Available models:")
-        for i, m in enumerate(models, 1):
-            click.echo(f"  {i}. {m}")
-        try:
-            raw = click.prompt(
-                "\n  Select model",
-                type=click.IntRange(1, len(models)),
-                default=1,
+        # Ollama: no API key — handle connectivity + model discovery
+        if provider in _KEYLESS_PROVIDERS:
+            selected_model = wizard._setup_ollama_provider(
+                _PROVIDER_MODELS, _set_env_key,
             )
-        except (EOFError, KeyboardInterrupt):
-            return
-        selected_model = models[raw - 1]
-        click.echo(f"  Selected: {selected_model}\n")
+            if not selected_model:
+                return
+            # Sync custom API base to live credential vault
+            if self.credential_vault:
+                base_key = "ollama_api_base"
+                base_val = os.environ.get(f"OPENLEGION_SYSTEM_{base_key.upper()}", "")
+                if base_val:
+                    self.credential_vault.api_bases[base_key] = base_val
+        else:
+            api_key = self._prompt_and_validate_inline(wizard, provider, label)
+            if not api_key:
+                return
+
+            # Store the credential (system tier — LLM provider key)
+            service = f"{provider}_api_key"
+            if self.credential_vault:
+                self.credential_vault.add_credential(service, api_key, system=True)
+            _set_env_key(service, api_key, system=True)
+            click.echo(f"  Credential '{service}' stored (system tier).")
+
+            # Model selection
+            models = _PROVIDER_MODELS[provider]
+            click.echo("\n  Available models:")
+            for i, m in enumerate(models, 1):
+                click.echo(f"  {i}. {m}")
+            try:
+                raw = click.prompt(
+                    "\n  Select model",
+                    type=click.IntRange(1, len(models)),
+                    default=1,
+                )
+            except (EOFError, KeyboardInterrupt):
+                return
+            selected_model = models[raw - 1]
+            click.echo(f"  Selected: {selected_model}\n")
 
         # Write model to mesh.yaml
         mesh_cfg: dict = {}
@@ -685,4 +827,5 @@ class InlineSetup:
         with open(self.config_file, "w") as f:
             yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
 
-        click.echo("  Tip: Use /addkey or the dashboard to set a custom API base URL.\n")
+        if provider not in _KEYLESS_PROVIDERS:
+            click.echo("  Tip: Use /addkey or the dashboard to set a custom API base URL.\n")
