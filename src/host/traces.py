@@ -1,8 +1,8 @@
-"""TraceStore — SQLite ring buffer for request trace events.
+"""TraceStore — SQLite append-only store for request trace events.
 
 Stores trace events (dispatch, LLM call, transport hop, etc.) keyed by
-trace_id.  Capped at *max_events* rows — oldest events are evicted after
-each insert.
+trace_id.  Events are never silently evicted; optional time-based GC
+removes entries older than *max_age_hours*.
 
 Follows the same SQLite-WAL pattern as ``CostTracker`` and ``Blackboard``.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -20,10 +21,12 @@ logger = setup_logging("host.traces")
 
 
 class TraceStore:
-    """SQLite-backed ring buffer for request trace events."""
+    """SQLite-backed append-only store for request trace events."""
 
-    def __init__(self, db_path: str = "data/traces.db", max_events: int = 10_000):
-        self.max_events = max_events
+    def __init__(self, db_path: str = "data/traces.db", max_age_hours: int | None = None):
+        self.max_age_hours = max_age_hours
+        self._last_age_gc: float = 0.0
+        self._gc_lock = threading.Lock()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -45,6 +48,9 @@ class TraceStore:
         """)
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_traces_trace_id ON traces (trace_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_traces_timestamp ON traces (timestamp)"
         )
         # Add columns if upgrading from older schema
         for col, typedef in [
@@ -71,7 +77,7 @@ class TraceStore:
         error: str = "",
         meta: dict | None = None,
     ) -> None:
-        """Insert a trace event and evict overflow."""
+        """Insert a trace event."""
         meta_json = json.dumps(meta, default=str) if meta else ""
         self._conn.execute(
             "INSERT INTO traces "
@@ -79,14 +85,21 @@ class TraceStore:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (trace_id, time.time(), source, agent, event_type, detail, duration_ms, status, error, meta_json),
         )
-        # Ring-buffer eviction: keep newest N rows regardless of ID gaps
-        self._conn.execute(
-            "DELETE FROM traces WHERE id NOT IN ("
-            "  SELECT id FROM traces ORDER BY id DESC LIMIT ?"
-            ")",
-            (self.max_events,),
-        )
         self._conn.commit()
+        self._maybe_gc_old()
+
+    def _maybe_gc_old(self) -> None:
+        """Remove events older than max_age_hours, throttled to once per 5 minutes."""
+        if self.max_age_hours is None:
+            return
+        with self._gc_lock:
+            now = time.monotonic()
+            if now - self._last_age_gc < 300:
+                return
+            self._last_age_gc = now
+            cutoff = time.time() - (self.max_age_hours * 3600)
+            self._conn.execute("DELETE FROM traces WHERE timestamp < ?", (cutoff,))
+            self._conn.commit()
 
     def _row_to_dict(self, row: tuple) -> dict:
         """Convert a query row to a trace event dict."""
@@ -190,6 +203,43 @@ class TraceStore:
                 "trigger_preview": trigger_preview,
             })
         return results
+
+    def query(
+        self,
+        agent: str | None = None,
+        event_type: str | None = None,
+        since: float | None = None,
+        until: float | None = None,
+        trace_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Query trace events with optional filters. Returns newest first."""
+        conditions = []
+        params: list = []
+        if agent is not None:
+            conditions.append("agent = ?")
+            params.append(agent)
+        if event_type is not None:
+            conditions.append("event_type = ?")
+            params.append(event_type)
+        if since is not None:
+            conditions.append("timestamp >= ?")
+            params.append(since)
+        if until is not None:
+            conditions.append("timestamp <= ?")
+            params.append(until)
+        if trace_id is not None:
+            conditions.append("trace_id = ?")
+            params.append(trace_id)
+
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.append(max(1, min(limit, 1000)))
+
+        cur = self._conn.execute(
+            f"SELECT {self._TRACE_COLS} FROM traces{where} ORDER BY id DESC LIMIT ?",
+            params,
+        )
+        return [self._row_to_dict(row) for row in cur.fetchall()]
 
     def close(self) -> None:
         """Close the database connection."""
