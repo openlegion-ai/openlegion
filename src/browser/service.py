@@ -147,8 +147,10 @@ _JS_A11Y_TREE = r"""(rootEl) => {
     }
     function isVisible(el) {
         if (el.getAttribute('aria-hidden') === 'true') return false;
+        const s = getComputedStyle(el);
+        if (s.visibility === 'hidden' || s.visibility === 'collapse') return false;
+        if (parseFloat(s.opacity) === 0) return false;
         if (!el.offsetParent && el !== document.body && el !== document.documentElement) {
-            const s = getComputedStyle(el);
             if (s.display === 'none') return false;
             if (s.position !== 'fixed' && s.position !== 'sticky') return false;
         }
@@ -205,7 +207,8 @@ class CamoufoxInstance:
         self.last_activity = time.time()
         self.refs: dict[str, dict] = {}  # ref_id -> {"role", "name", "index", "disabled"}
         self.credential_filled_refs: set[str] = set()
-        self.dialog_active: bool = False  # True when snapshot found a modal dialog
+        self.dialog_active: bool = False  # True when snapshot scoped to a modal dialog
+        self.dialog_detected: bool = False  # True when a modal was found (even if scoping failed)
         self.lock = asyncio.Lock()  # serialize page operations per instance
 
     def touch(self):
@@ -458,6 +461,7 @@ class BrowserManager:
             try:
                 await inst.page.goto(url, wait_until=wait_until, timeout=30000)
                 inst.dialog_active = False  # New page — stale modal state
+                inst.dialog_detected = False
                 if wait_ms > 0:
                     await asyncio.sleep(wait_ms / 1000 + navigation_jitter())
                 title = await inst.page.title()
@@ -611,22 +615,67 @@ class BrowserManager:
                     visible_modals = deduped if deduped else visible_modals
 
                 if visible_modals:
+                    inst.dialog_detected = True
                     inst.dialog_active = True
                     lines.append("** Modal dialog is open — only dialog elements are shown **")
                     for el in visible_modals:
                         subtree = await self._build_a11y_tree(inst, root=el)
                         if subtree:
                             _walk(subtree)
-                    # Safety fallback: if scoping produced no refs, snapshot(root=)
-                    # likely failed (e.g. Camoufox quirk). Fall back to full tree
-                    # so the agent isn't blind.
-                    if not refs:
-                        logger.debug("Modal scoping produced 0 refs — falling back to full tree")
+                    # Check for *actionable* refs (buttons, textboxes, etc.).
+                    # Context-only refs (dialog, heading, img) don't count —
+                    # the agent needs something it can click or type into.
+                    actionable_refs = [
+                        r for r in refs.values() if r["role"] in _ACTIONABLE_ROLES
+                    ]
+                    if not actionable_refs:
+                        # Modal content may still be rendering (React concurrent
+                        # mode, X animations). Brief wait and retry the scoped
+                        # snapshot before falling back to full tree.
+                        logger.debug(
+                            "Modal scoping produced 0 actionable refs — "
+                            "retrying after short wait"
+                        )
+                        await asyncio.sleep(0.3)
+                        refs.clear()
+                        lines.clear()
+                        ref_counter[0] = 0
+                        occurrence_counts.clear()
+                        lines.append("** Modal dialog is open — only dialog elements are shown **")
+                        for el in visible_modals:
+                            try:
+                                subtree = await self._build_a11y_tree(
+                                    inst, root=el
+                                )
+                                if subtree:
+                                    _walk(subtree)
+                            except Exception:
+                                pass
+                    # Recheck after retry.
+                    actionable_refs = [
+                        r for r in refs.values() if r["role"] in _ACTIONABLE_ROLES
+                    ]
+                    if not actionable_refs:
+                        # Scoping truly failed — fall back to full tree so the
+                        # agent isn't blind.  Keep dialog_detected=True so
+                        # auto-force on disabled buttons is suppressed (they're
+                        # likely behind the overlay).
+                        logger.warning(
+                            "Modal detected but scoping produced 0 actionable "
+                            "refs after retry — falling back to full tree "
+                            "for %s", agent_id,
+                        )
                         inst.dialog_active = False
                         lines.clear()
+                        lines.append(
+                            "** A modal dialog is open but its elements could "
+                            "not be isolated — some elements below may be "
+                            "behind the overlay **"
+                        )
                         _walk(tree)
                 else:
                     inst.dialog_active = False
+                    inst.dialog_detected = False
                     _walk(tree)
 
                 inst.refs = refs  # Store refs for click/type by ref ID
@@ -688,9 +737,16 @@ class BrowserManager:
                     ref_info = inst.refs[ref]
                     # Auto-force for disabled button/link roles — aria-disabled
                     # on SPA buttons doesn't mean the JS click handler won't fire.
+                    # BUT: when a modal was detected and scoping failed
+                    # (dialog_detected=True, dialog_active=False), disabled
+                    # buttons are likely behind the overlay — don't force them.
+                    modal_unscoped = (
+                        inst.dialog_detected and not inst.dialog_active
+                    )
                     if (not use_force
                             and ref_info.get("disabled")
-                            and ref_info.get("role") in _ARIA_FORCE_ROLES):
+                            and ref_info.get("role") in _ARIA_FORCE_ROLES
+                            and not modal_unscoped):
                         use_force = True
                         logger.debug(
                             "Auto-force click on disabled %s ref=%s for '%s'",
@@ -1009,6 +1065,7 @@ class BrowserManager:
             try:
                 response = await inst.page.go_back(timeout=10000)
                 inst.dialog_active = False  # New page — stale modal state
+                inst.dialog_detected = False
                 await asyncio.sleep(action_delay())
                 title = await inst.page.title()
                 url = self.redactor.redact(agent_id, inst.page.url)
@@ -1026,6 +1083,7 @@ class BrowserManager:
             try:
                 response = await inst.page.go_forward(timeout=10000)
                 inst.dialog_active = False  # New page — stale modal state
+                inst.dialog_detected = False
                 await asyncio.sleep(action_delay())
                 title = await inst.page.title()
                 url = self.redactor.redact(agent_id, inst.page.url)
@@ -1078,6 +1136,7 @@ class BrowserManager:
                     await inst.page.bring_to_front()
                     inst.refs = {}  # Stale refs from previous tab's snapshot
                     inst.dialog_active = False  # New tab may not have a dialog
+                    inst.dialog_detected = False
                     active_index = tab_index
                     for t in tabs:
                         t["active"] = t["index"] == tab_index
