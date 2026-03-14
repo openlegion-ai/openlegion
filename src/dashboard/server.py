@@ -1621,6 +1621,24 @@ def create_dashboard_router(
             raise HTTPException(status_code=404, detail="Trace not found")
         return {"trace_id": trace_id, "events": events}
 
+    @api_router.get("/api/audit")
+    async def api_audit(
+        agent: str | None = None,
+        event_type: str | None = None,
+        since: float | None = None,
+        until: float | None = None,
+        limit: int = 100,
+    ) -> dict:
+        """Query audit trail with filters."""
+        if trace_store is None:
+            return {"events": [], "total": 0}
+        limit = max(1, min(limit, 1000))
+        events = trace_store.query(
+            agent=agent, event_type=event_type,
+            since=since, until=until, limit=limit,
+        )
+        return {"events": events, "total": len(events)}
+
     # ── Queue status ─────────────────────────────────────────
 
     @api_router.get("/api/queues")

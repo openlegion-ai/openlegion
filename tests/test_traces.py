@@ -6,6 +6,7 @@ import asyncio
 import os
 import shutil
 import tempfile
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,7 +20,7 @@ class TestTraceStore:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
         self.db_path = os.path.join(self._tmpdir, "traces.db")
-        self.store = TraceStore(db_path=self.db_path, max_events=100)
+        self.store = TraceStore(db_path=self.db_path)
 
     def teardown_method(self):
         self.store.close()
@@ -51,23 +52,15 @@ class TestTraceStore:
         recent = self.store.list_recent(limit=3)
         assert len(recent) == 3
 
-    def test_ring_buffer_eviction(self):
-        """Insert more than max_events and verify oldest are evicted."""
-        small_store = TraceStore(
-            db_path=os.path.join(self._tmpdir, "small.db"), max_events=5,
-        )
-        try:
-            for i in range(10):
-                small_store.record(f"tr_{i:03d}", "repl", "a", "chat", f"msg-{i}")
-            recent = small_store.list_recent(limit=100)
-            assert len(recent) <= 5
-            # Newest should still be present
-            trace_ids = {e["trace_id"] for e in recent}
-            assert "tr_009" in trace_ids
-            # Oldest should be evicted
-            assert "tr_000" not in trace_ids
-        finally:
-            small_store.close()
+    def test_append_only_no_eviction(self):
+        """Records are never silently dropped — append-only store."""
+        for i in range(200):
+            self.store.record(f"tr_{i:03d}", "repl", "a", "chat", f"msg-{i}")
+        recent = self.store.list_recent(limit=300)
+        assert len(recent) == 200
+        trace_ids = {e["trace_id"] for e in recent}
+        assert "tr_000" in trace_ids
+        assert "tr_199" in trace_ids
 
     def test_get_trace_empty(self):
         events = self.store.get_trace("tr_nonexistent")
@@ -149,6 +142,100 @@ class TestTraceStore:
         self.store.record("tr_long", "dispatch", "a", "chat", detail=long_detail)
         summaries = self.store.list_trace_summaries(limit=10)
         assert len(summaries[0]["trigger_preview"]) == 120
+
+    def test_query_by_agent(self):
+        self.store.record("tr_1", "repl", "alpha", "chat")
+        self.store.record("tr_2", "repl", "beta", "chat")
+        self.store.record("tr_3", "repl", "alpha", "llm_call")
+        results = self.store.query(agent="alpha")
+        assert len(results) == 2
+        assert all(e["agent"] == "alpha" for e in results)
+
+    def test_query_by_event_type(self):
+        self.store.record("tr_1", "repl", "a", "chat")
+        self.store.record("tr_2", "mesh", "a", "llm_call")
+        self.store.record("tr_3", "repl", "b", "chat")
+        results = self.store.query(event_type="llm_call")
+        assert len(results) == 1
+        assert results[0]["event_type"] == "llm_call"
+
+    def test_query_by_time_range(self):
+        now = time.time()
+        self.store._conn.execute(
+            "INSERT INTO traces (trace_id, timestamp, source, agent, event_type) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("tr_old", now - 7200, "repl", "a", "chat"),
+        )
+        self.store._conn.execute(
+            "INSERT INTO traces (trace_id, timestamp, source, agent, event_type) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("tr_new", now, "repl", "a", "chat"),
+        )
+        self.store._conn.commit()
+        results = self.store.query(since=now - 3600)
+        assert len(results) == 1
+        assert results[0]["trace_id"] == "tr_new"
+
+    def test_query_combined_filters(self):
+        self.store.record("tr_1", "repl", "alpha", "chat")
+        self.store.record("tr_2", "repl", "beta", "llm_call")
+        self.store.record("tr_3", "mesh", "alpha", "llm_call")
+        results = self.store.query(agent="alpha", event_type="llm_call")
+        assert len(results) == 1
+
+    def test_query_respects_limit(self):
+        for i in range(20):
+            self.store.record(f"tr_{i}", "repl", "a", "chat")
+        results = self.store.query(limit=5)
+        assert len(results) == 5
+
+    def test_query_default_newest_first(self):
+        self.store.record("tr_1", "repl", "a", "chat", "first")
+        self.store.record("tr_2", "repl", "a", "chat", "second")
+        results = self.store.query()
+        assert results[0]["trace_id"] == "tr_2"
+
+    def test_max_age_gc_removes_old_events(self):
+        """Time-based GC removes events older than max_age_hours."""
+        store = TraceStore(
+            db_path=os.path.join(self._tmpdir, "age.db"),
+            max_age_hours=1,
+        )
+        try:
+            now = time.time()
+            store._conn.execute(
+                "INSERT INTO traces (trace_id, timestamp, source, agent, event_type) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("tr_old", now - 7200, "repl", "a", "chat"),
+            )
+            store._conn.commit()
+            store._last_age_gc = -300.0  # force GC to run on next record()
+            store.record("tr_new", "repl", "a", "chat")
+            results = store.query()
+            trace_ids = {e["trace_id"] for e in results}
+            assert "tr_old" not in trace_ids
+            assert "tr_new" in trace_ids
+        finally:
+            store.close()
+
+    def test_no_max_age_keeps_everything(self):
+        """Without max_age_hours, all events are kept."""
+        store = TraceStore(
+            db_path=os.path.join(self._tmpdir, "noage.db"),
+        )
+        try:
+            now = time.time()
+            store._conn.execute(
+                "INSERT INTO traces (trace_id, timestamp, source, agent, event_type) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("tr_ancient", now - 999999, "repl", "a", "chat"),
+            )
+            store._conn.commit()
+            store.record("tr_new", "repl", "a", "chat")
+            results = store.query()
+            assert len(results) == 2
+        finally:
+            store.close()
 
 
 # ── _extract_prompt_preview ──────────────────────────────────
