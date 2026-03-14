@@ -2886,7 +2886,11 @@ class TestDialogScoping:
         """When a modal is detected but scoping failed, auto-force on disabled
         buttons should be suppressed to prevent clicking behind the overlay.
         """
-        from src.browser.service import BrowserManager, CamoufoxInstance, _CLICK_TIMEOUT_MS
+        from src.browser.service import (
+            _CLICK_TIMEOUT_MS,
+            BrowserManager,
+            CamoufoxInstance,
+        )
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
         # Build mock chain: page.get_by_role(...).nth(0).click()
@@ -2922,7 +2926,12 @@ class TestDialogScoping:
         """When a modal is properly scoped, auto-force on disabled buttons
         should still work (SPA buttons behind aria-disabled are clickable).
         """
-        from src.browser.service import BrowserManager, CamoufoxInstance, _CLICK_TIMEOUT_MS, _MODAL_SELECTOR
+        from src.browser.service import (
+            _CLICK_TIMEOUT_MS,
+            _MODAL_SELECTOR,
+            BrowserManager,
+            CamoufoxInstance,
+        )
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
         # Build mock chain: page.locator(selector).get_by_role(...).nth(0).click()
