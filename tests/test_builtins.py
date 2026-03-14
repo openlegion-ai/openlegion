@@ -110,6 +110,29 @@ class TestFileTool:
         with pytest.raises(ValueError, match="Absolute"):
             self._ft._safe_path("/etc/passwd")
 
+    def test_data_prefix_stripped(self):
+        """Agents sometimes pass /data/foo.txt instead of foo.txt — should work."""
+        self._ft.write_file(path="session_log.md", content="log data")
+        result = self._ft.read_file(path="/data/session_log.md")
+        assert result["content"] == "log data"
+
+    def test_data_prefix_bare(self):
+        """/data alone should resolve to the root directory."""
+        self._ft.write_file(path="a.txt", content="a")
+        result = self._ft.list_files(path="/data")
+        assert result["count"] >= 1
+
+    def test_data_prefix_trailing_slash(self):
+        """/data/ with trailing slash should resolve to root directory."""
+        self._ft.write_file(path="hello.txt", content="hi")
+        result = self._ft.list_files(path="/data/")
+        assert result["count"] >= 1
+
+    def test_data_prefix_traversal_blocked(self):
+        """/data/../etc/passwd should still be blocked by traversal check."""
+        with pytest.raises(ValueError, match="traversal"):
+            self._ft._safe_path("/data/../etc/passwd")
+
     def test_read_with_offset_limit(self):
         self._ft.write_file(path="lines.txt", content="line0\nline1\nline2\nline3\n")
         result = self._ft.read_file(path="lines.txt", offset=1, limit=2)

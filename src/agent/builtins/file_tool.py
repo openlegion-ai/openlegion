@@ -32,8 +32,13 @@ def _safe_path(path: str) -> Path:
     """
     root = Path(_ALLOWED_ROOT).resolve()
 
-    # Stage 0: reject absolute paths immediately — agents must use
-    # relative paths within their sandbox root.
+    # Stage 0: strip /data/ prefix if present — agents sometimes pass
+    # absolute paths like "/data/session_log.md" instead of relative ones.
+    # After stripping, reject any remaining absolute paths.
+    if path.startswith("/data/"):
+        path = path[len("/data/"):] or "."
+    elif path == "/data":
+        path = "."
     if path.startswith("/") or path.startswith("\\"):
         raise ValueError(f"Absolute paths not allowed: {path}")
 

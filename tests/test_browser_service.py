@@ -2780,6 +2780,191 @@ class TestDialogScoping:
         assert inst.dialog_active is False
 
     @pytest.mark.asyncio
+    async def test_snapshot_retry_finds_elements_after_wait(self):
+        """When scoped snapshot initially finds no actionable refs, a retry
+        after a short wait should pick up elements that finished rendering.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        full_tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Post", "disabled": True},
+                {"role": "link", "name": "Home"},
+            ],
+        }
+        # First call: dialog detected but only context role (no actionable)
+        dialog_empty = {"role": "dialog", "name": "Compose"}
+        # Second call (after retry): content has rendered
+        dialog_full = {
+            "role": "dialog", "name": "Compose",
+            "children": [
+                {"role": "textbox", "name": "What is happening?!"},
+                {"role": "button", "name": "Post"},
+            ],
+        }
+        call_count = [0]
+
+        mock_page = AsyncMock()
+        mock_modal_el = AsyncMock()
+        mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
+
+        async def _snapshot(root=None):
+            if root is not None:
+                call_count[0] += 1
+                return dialog_empty if call_count[0] <= 1 else dialog_full
+            return full_tree
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(side_effect=_snapshot)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        refs = result["data"]["refs"]
+        snap = result["data"]["snapshot"]
+
+        # Retry should have found the elements
+        assert call_count[0] == 2  # Called twice (initial + retry)
+        assert "What is happening?!" in snap
+        post_refs = [r for r in refs.values() if r["name"] == "Post"]
+        assert len(post_refs) == 1
+        assert inst.dialog_active is True
+        assert inst.dialog_detected is True
+        assert "Home" not in snap  # Sidebar excluded
+
+    @pytest.mark.asyncio
+    async def test_snapshot_context_only_refs_trigger_retry(self):
+        """Dialog with only context roles (dialog/heading) but no actionable
+        roles (button/textbox) should trigger the retry path.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        full_tree = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "button", "name": "Submit"}],
+        }
+        # Dialog has a heading (context role) but no actionable elements
+        dialog_subtree = {
+            "role": "dialog", "name": "Confirm",
+            "children": [
+                {"role": "heading", "name": "Are you sure?"},
+            ],
+        }
+        mock_page = AsyncMock()
+        mock_modal_el = AsyncMock()
+        mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
+
+        async def _snapshot(root=None):
+            if root is not None:
+                return dialog_subtree
+            return full_tree
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(side_effect=_snapshot)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        snap = result["data"]["snapshot"]
+
+        # Should have fallen back to full tree since dialog had no actionable refs
+        assert "Submit" in snap
+        assert inst.dialog_active is False
+        # dialog_detected stays True — modal existed, just couldn't scope
+        assert inst.dialog_detected is True
+        assert "could not be isolated" in snap
+
+    @pytest.mark.asyncio
+    async def test_auto_force_suppressed_when_modal_unscoped(self):
+        """When a modal is detected but scoping failed, auto-force on disabled
+        buttons should be suppressed to prevent clicking behind the overlay.
+        """
+        from src.browser.service import (
+            _CLICK_TIMEOUT_MS,
+            BrowserManager,
+            CamoufoxInstance,
+        )
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        # Build mock chain: page.get_by_role(...).nth(0).click()
+        # get_by_role and nth are sync; click is async.
+        mock_click = AsyncMock()
+        mock_nth = MagicMock()
+        mock_nth.click = mock_click
+        mock_role_locator = MagicMock()
+        mock_role_locator.nth.return_value = mock_nth
+        mock_page = MagicMock()
+        mock_page.get_by_role = MagicMock(return_value=mock_role_locator)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        # Simulate: modal detected but scoping failed (full-tree fallback)
+        inst.dialog_detected = True
+        inst.dialog_active = False
+        inst.refs = {
+            "e0": {"role": "button", "name": "Post", "index": 0, "disabled": True},
+        }
+
+        result = await mgr.click("a1", ref="e0")
+        assert result["success"] is True
+
+        # Verify Playwright was called WITHOUT force
+        mock_click.assert_awaited_once_with(
+            timeout=_CLICK_TIMEOUT_MS, force=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_auto_force_active_when_modal_scoped(self):
+        """When a modal is properly scoped, auto-force on disabled buttons
+        should still work (SPA buttons behind aria-disabled are clickable).
+        """
+        from src.browser.service import (
+            _CLICK_TIMEOUT_MS,
+            _MODAL_SELECTOR,
+            BrowserManager,
+            CamoufoxInstance,
+        )
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        # Build mock chain: page.locator(selector).get_by_role(...).nth(0).click()
+        mock_click = AsyncMock()
+        mock_nth = MagicMock()
+        mock_nth.click = mock_click
+        mock_role_locator = MagicMock()
+        mock_role_locator.nth.return_value = mock_nth
+        mock_modal_locator = MagicMock()
+        mock_modal_locator.get_by_role = MagicMock(return_value=mock_role_locator)
+        mock_page = MagicMock()
+        mock_page.locator = MagicMock(return_value=mock_modal_locator)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        # Simulate: modal detected AND scoping succeeded
+        inst.dialog_detected = True
+        inst.dialog_active = True
+        inst.refs = {
+            "e0": {"role": "button", "name": "Post", "index": 0, "disabled": True},
+        }
+
+        result = await mgr.click("a1", ref="e0")
+        assert result["success"] is True
+
+        # Verify Playwright was called WITH force (auto-force should fire)
+        mock_page.locator.assert_called_with(_MODAL_SELECTOR)
+        mock_click.assert_awaited_once_with(
+            timeout=_CLICK_TIMEOUT_MS, force=True,
+        )
+
+    @pytest.mark.asyncio
     async def test_snapshot_fallback_when_scoped_snapshot_empty(self):
         """If snapshot(root=modal) returns None for all modals, fall back to full tree.
 
@@ -2825,7 +3010,8 @@ class TestDialogScoping:
         assert len(refs) > 0
         assert "Home" in snap  # Full tree elements visible
         assert inst.dialog_active is False  # Fallback clears dialog flag
-        assert "Modal dialog" not in snap  # Fallback clears modal banner
+        assert inst.dialog_detected is True  # Modal was detected
+        assert "could not be isolated" in snap  # Warning preserved
 
     @pytest.mark.asyncio
     async def test_snapshot_fallback_when_scoped_snapshot_raises(self):
@@ -2864,6 +3050,7 @@ class TestDialogScoping:
         assert len(refs) == 1
         assert refs["e0"]["name"] == "Submit"
         assert inst.dialog_active is False
+        assert inst.dialog_detected is True  # Modal was detected
 
     @pytest.mark.asyncio
     async def test_navigate_resets_dialog_active(self):
@@ -2878,11 +3065,13 @@ class TestDialogScoping:
         mock_page.evaluate = AsyncMock(return_value="")
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.dialog_active = True  # Stale state from previous page
+        inst.dialog_detected = True
         mgr._instances["a1"] = inst
 
         result = await mgr.navigate("a1", "https://example.com", wait_ms=0)
         assert result["success"] is True
         assert inst.dialog_active is False
+        assert inst.dialog_detected is False
 
     @pytest.mark.asyncio
     async def test_snapshot_nested_modals_deduped(self):
