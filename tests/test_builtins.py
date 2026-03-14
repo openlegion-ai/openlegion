@@ -1702,8 +1702,8 @@ class TestNotifyUser:
 
     @pytest.mark.asyncio
     async def test_notify_user_skips_transcript_during_heartbeat(self):
-        from src.agent.loop import _heartbeat_mode
         from src.agent.builtins.mesh_tool import notify_user
+        from src.agent.loop import _heartbeat_mode
 
         mock_mesh = AsyncMock()
         mock_mesh.notify_user = AsyncMock()
