@@ -279,7 +279,7 @@ class CronScheduler:
         """Manually trigger a job. Returns the agent response."""
         if job_id not in self.jobs:
             return None
-        return await self._execute_job(self.jobs[job_id])
+        return await self._execute_job(self.jobs[job_id], manual=True)
 
     async def start(self) -> None:
         self._running = True
@@ -299,7 +299,7 @@ class CronScheduler:
             if self._is_due(job, now):
                 asyncio.create_task(self._execute_job(job))
 
-    async def _execute_job(self, job: CronJob) -> str | None:
+    async def _execute_job(self, job: CronJob, manual: bool = False) -> str | None:
         lock = self._job_locks[job.id]
         if lock.locked():
             logger.debug("Job %s already running, skipping this tick", job.id)
@@ -364,7 +364,8 @@ class CronScheduler:
                         has_activity = ctx.get("has_recent_activity", False)
 
                         # Skip-LLM optimization: no custom rules, no activity, no probes
-                        if is_default and not has_activity and not triggered:
+                        # Always dispatch when manually triggered (user expects it to run)
+                        if not manual and is_default and not has_activity and not triggered:
                             logger.debug(
                                 "Heartbeat %s: skipped (default rules, no activity, "
                                 "no probes) for '%s'", job.id, job.agent,

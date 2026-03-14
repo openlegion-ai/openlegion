@@ -426,6 +426,33 @@ class TestEnrichedHeartbeat:
         dispatch.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_heartbeat_manual_trigger_bypasses_skip(self):
+        """Manual trigger should always dispatch, even with default rules and no activity."""
+        dispatch = AsyncMock(return_value="manual response")
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "",
+            "daily_logs": "",
+            "is_default_heartbeat": True,
+            "has_recent_activity": False,
+        })
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        with patch.object(sched, "_run_heartbeat_probes", return_value=[]):
+            result = await sched.run_job(job.id)
+        assert result == "manual response"
+        dispatch.assert_called_once()
+        call_msg = dispatch.call_args[0][1]
+        assert "Heartbeat for test" in call_msg
+        assert "Heartbeat Operating Rules" in call_msg
+
+    @pytest.mark.asyncio
     async def test_heartbeat_dispatches_custom_rules(self):
         """Message includes HEARTBEAT.md content when custom rules exist."""
         dispatch = AsyncMock(return_value="Done")
