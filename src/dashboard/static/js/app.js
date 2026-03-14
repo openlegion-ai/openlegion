@@ -8,6 +8,7 @@ const _IDENTITY_TABS = [
   { id: 'config', label: 'Config', file: null, access: 'user' },
   { id: 'identity', label: 'Identity', file: null, access: 'user' },
   { id: 'memory', label: 'Memory', file: null, access: 'agent' },
+  { id: 'activity', label: 'Activity', file: null, access: 'auto' },
   { id: 'logs', label: 'Logs', file: null, access: 'auto' },
   { id: 'capabilities', label: 'Tools', file: null, access: 'auto' },
   { id: 'files', label: 'Files', file: null, access: 'auto' },
@@ -164,6 +165,7 @@ function dashboard() {
     chatLoadingAgents: {},     // { agentId: true/false }
     chatStreamingAgents: {},   // { agentId: true/false }
     _chatAborts: {},           // { agentId: AbortController }
+    _chatStreamTarget: {},     // { agentId: idx } — mutable target for SSE loop (steer redirect)
     _chatFetchedAt: {},        // { agentId: timestamp } — debounce refetches
     activeChatId: '',          // Currently active chat tab
     chatPanelMinimized: false, // Whether the chat panel is minimized to pill
@@ -186,6 +188,8 @@ function dashboard() {
     configSaving: false,
     identityLogs: null,
     agentCapabilities: null,
+    agentActivity: [],
+    agentActivityLoading: false,
 
     // Connection state
     connectionError: false,
@@ -1087,6 +1091,15 @@ function dashboard() {
         }
       }
 
+      // Auto-refresh activity tab when a heartbeat completes for the agent being viewed
+      if (evt.type === 'heartbeat_complete' && evt.agent) {
+        const viewing = this.selectedAgent || this.detailAgent;
+        if (viewing === evt.agent && this.identityTab === 'activity') {
+          if (this._activityDebounce) clearTimeout(this._activityDebounce);
+          this._activityDebounce = setTimeout(() => this.fetchAgentActivity(viewing), 1000);
+        }
+      }
+
       // Debounced cost panel refresh on llm_call events
       if (evt.type === 'llm_call' && this.activeTab === 'system') {
         if (this._costDebounce) clearTimeout(this._costDebounce);
@@ -1229,6 +1242,7 @@ function dashboard() {
       this.identityEditBuffer = '';
       this.identityLogs = null;
       this.identityLearnings = null;
+      this.agentActivity = [];
       this.agentFiles = [];
       this.agentFilesPath = '.';
       this.agentFilePreview = null;
@@ -1261,6 +1275,9 @@ function dashboard() {
         }
         this.identityContentLoading = false;
         return;
+      }
+      if (tab.id === 'activity') {
+        await this.fetchAgentActivity(agentId);
       }
       if (tab.id === 'logs') {
         await this.fetchIdentityLogs(agentId);
@@ -1508,6 +1525,18 @@ function dashboard() {
         if (resp.ok) this.identityLearnings = await resp.json();
       } catch (e) { console.warn('fetchIdentityLearnings failed:', e); }
       this.identityLearningsLoading = false;
+    },
+
+    async fetchAgentActivity(agentId) {
+      this.agentActivityLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/activity?limit=100`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.agentActivity = (data.activity || []).reverse();
+        }
+      } catch (e) { console.warn('fetchAgentActivity failed:', e); }
+      this.agentActivityLoading = false;
     },
 
     async fetchProject() {
@@ -2771,6 +2800,7 @@ function dashboard() {
         this._chatAborts[agentId].abort();
         delete this._chatAborts[agentId];
       }
+      delete this._chatStreamTarget[agentId];
       this.openChats = this.openChats.filter(id => id !== agentId);
       this.chatLoadingAgents[agentId] = false;
       this.chatStreamingAgents[agentId] = false;
@@ -2785,6 +2815,7 @@ function dashboard() {
         this._chatAborts[agentId].abort();
         delete this._chatAborts[agentId];
       }
+      delete this._chatStreamTarget[agentId];
       this.chatHistories[agentId] = [];
       this.chatLoadingAgents[agentId] = false;
       this.chatStreamingAgents[agentId] = false;
@@ -2915,6 +2946,25 @@ function dashboard() {
       return -1;
     },
 
+    chatHeaderStatus(agentId) {
+      if (!this.chatStreamingAgents[agentId] && !this.chatLoadingAgents[agentId]) {
+        return { label: 'Online', color: 'text-gray-600', dot: 'bg-gray-600' };
+      }
+      if (this.chatLoadingAgents[agentId]) {
+        return { label: 'Thinking...', color: 'text-purple-400', dot: 'bg-purple-400' };
+      }
+      const hist = this.chatHistories[agentId] || [];
+      for (let i = hist.length - 1; i >= 0; i--) {
+        const msg = hist[i];
+        if (msg.role === 'agent' && msg.streaming) {
+          if (msg.phase === 'tool') return { label: 'Using tools...', color: 'text-blue-400', dot: 'bg-blue-400' };
+          if (msg.phase === 'thinking') return { label: 'Thinking...', color: 'text-purple-400', dot: 'bg-purple-400' };
+          if (msg.phase === 'responding') return { label: 'Responding...', color: 'text-green-400', dot: 'bg-green-400' };
+        }
+      }
+      return { label: 'Responding...', color: 'text-green-400', dot: 'bg-green-400' };
+    },
+
     _chatPhaseStepLabel(phase) {
       const labels = {
         thinking: 'Thinking',
@@ -2973,6 +3023,7 @@ function dashboard() {
         ts: Date.now(),
       });
       const idx = this.chatHistories[agentId].length - 1;
+      this._chatStreamTarget[agentId] = idx;
       this._pushChatTimelinePhase(this.chatHistories[agentId][idx], 'thinking');
       this.$nextTick(() => this._scrollChat(agentId));
 
@@ -3014,7 +3065,7 @@ function dashboard() {
             let data;
             try { data = JSON.parse(line.slice(6)); } catch (_) { continue; }
 
-            const entry = this.chatHistories[agentId][idx];
+            const entry = this.chatHistories[agentId][this._chatStreamTarget[agentId]];
 
             if (data.type === 'text_delta') {
               if (firstToken) { this.chatLoadingAgents[agentId] = false; firstToken = false; }
@@ -3076,13 +3127,14 @@ function dashboard() {
             }
           }
         }
-        this.chatHistories[agentId][idx].streaming = false;
-        if (this.chatHistories[agentId][idx].role !== 'error' && this.chatHistories[agentId][idx].phase !== 'done') {
-          this.chatHistories[agentId][idx].phase = 'done';
+        const finalIdx = this._chatStreamTarget[agentId];
+        this.chatHistories[agentId][finalIdx].streaming = false;
+        if (this.chatHistories[agentId][finalIdx].role !== 'error' && this.chatHistories[agentId][finalIdx].phase !== 'done') {
+          this.chatHistories[agentId][finalIdx].phase = 'done';
         }
       } catch (e) {
         if (e.name === 'AbortError') return;
-        const entry = this.chatHistories[agentId][idx];
+        const entry = this.chatHistories[agentId][this._chatStreamTarget[agentId]];
         const hadContent = !!(entry.content || (entry.tools && entry.tools.length > 0));
         if (hadContent) {
           // Stream interrupted (e.g. tab backgrounded on mobile) but we have partial data.
@@ -3105,6 +3157,7 @@ function dashboard() {
         }
       }
       delete this._chatAborts[agentId];
+      delete this._chatStreamTarget[agentId];
       this.chatLoadingAgents[agentId] = false;
       this.chatStreamingAgents[agentId] = false;
       this.$nextTick(() => this._scrollChat(agentId));
@@ -3121,7 +3174,44 @@ function dashboard() {
       const msg = (message || '').trim();
       if (!msg) return;
       if (!this.chatHistories[agentId]) this.chatHistories[agentId] = [];
+
+      // If an SSE stream is active, finalize the current bubble so the
+      // agent's continued response appears below the steer message.
+      if (this.chatStreamingAgents[agentId] && this._chatStreamTarget[agentId] !== undefined) {
+        const oldIdx = this._chatStreamTarget[agentId];
+        const oldEntry = this.chatHistories[agentId][oldIdx];
+        if (oldEntry && oldEntry.streaming) {
+          if (Array.isArray(oldEntry.tools)) {
+            oldEntry.tools.forEach(t => { if (t.status === 'running') t.status = 'done'; });
+          }
+          if (Array.isArray(oldEntry.timeline)) {
+            oldEntry.timeline.forEach(t => { if (t.status === 'running') t.status = 'done'; });
+          }
+          oldEntry.streaming = false;
+          oldEntry.phase = 'done';
+        }
+      }
+
       this.chatHistories[agentId].push({ role: 'user', content: `[steer] ${msg}`, ts: Date.now() });
+
+      // Create a new agent response bubble after the steer message
+      if (this.chatStreamingAgents[agentId]) {
+        this.chatHistories[agentId].push({
+          role: 'agent',
+          content: '',
+          streaming: true,
+          phase: 'thinking',
+          tools: [],
+          timeline: [],
+          _sawTextDelta: false,
+          ts: Date.now(),
+        });
+        const newIdx = this.chatHistories[agentId].length - 1;
+        this._chatStreamTarget[agentId] = newIdx;
+        this._pushChatTimelinePhase(this.chatHistories[agentId][newIdx], 'thinking');
+        this.$nextTick(() => this._scrollChat(agentId));
+      }
+
       try {
         await fetch(`${window.__config.apiBase}/agents/${agentId}/steer`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -3620,6 +3710,7 @@ function dashboard() {
       this.configEditing = false;
       this.identityLogs = null;
       this.identityLearnings = null;
+      this.agentActivity = [];
       this.agentFiles = [];
       this.agentFilesPath = '.';
       this.agentFilePreview = null;
