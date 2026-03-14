@@ -1062,6 +1062,7 @@ function dashboard() {
             role: 'notification',
             content: evt.data?.message || '',
             streaming: false,
+            phase: 'done',
             tools: [],
             ts: Date.now(),
           });
@@ -3503,8 +3504,14 @@ function dashboard() {
       this.showConfirm('Reset Conversation', `Start a fresh conversation with "${agentId}"? The conversation thread is wiped, but memories and skills are preserved.`, async () => {
         try {
           const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/reset`, { method: 'POST' });
-          if (resp.ok) this.showToast(`${agentId} conversation reset`);
-          else this.showToast('Reset failed');
+          if (resp.ok) {
+            this.showToast(`${agentId} conversation reset`);
+            this.chatHistories[agentId] = [];
+            delete this._chatFetchedAt[agentId];
+            this._saveChatToSession();
+          } else {
+            this.showToast('Reset failed');
+          }
         } catch (e) { this.showToast(`Error: ${e.message}`); }
       }, true);
     },
