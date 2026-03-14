@@ -2184,6 +2184,22 @@ def create_dashboard_router(
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
+    # ── Agent Activity Log ────────────────────────────────────
+
+    @api_router.get("/api/agents/{agent_id}/activity")
+    async def api_agent_activity(agent_id: str, limit: int = 100) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        limit = max(1, min(limit, 500))
+        try:
+            return await transport.request(
+                agent_id, "GET", f"/activity?limit={limit}", timeout=10,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
     # ── Logs ──────────────────────────────────────────────────
 
     @api_router.get("/api/logs")

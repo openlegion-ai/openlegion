@@ -102,6 +102,7 @@ class WorkspaceManager:
     CORRECTIONS_FILE = "learnings/corrections.md"
     CHAT_TRANSCRIPT = "chat_transcript.jsonl"
     CHAT_ARCHIVE_DIR = "chat_archive"
+    ACTIVITY_LOG = "activity.jsonl"
 
     def __init__(
         self,
@@ -471,6 +472,69 @@ class WorkspaceManager:
             path.rename(archive_dir / f"{ts}.jsonl")
         except Exception as e:
             logger.debug("Failed to archive chat transcript: %s", e)
+
+    # ── Activity log ────────────────────────────────────────
+
+    def append_activity(
+        self,
+        trigger: str,
+        summary: str,
+        *,
+        tools_used: list[str] | None = None,
+        duration_ms: int = 0,
+        tokens_used: int = 0,
+        outcome: str = "ok",
+        notifications: list[str] | None = None,
+    ) -> None:
+        """Append an entry to the activity log (JSONL).
+
+        Used by heartbeat executions to record autonomous work separate from
+        the chat transcript.  Rotates like chat_transcript when too large.
+        """
+        path = self.root / self.ACTIVITY_LOG
+        entry: dict = {
+            "trigger": trigger,
+            "summary": summary,
+            "ts": time.time(),
+            "tools": tools_used or [],
+            "duration_ms": duration_ms,
+            "tokens_used": tokens_used,
+            "outcome": outcome,
+        }
+        if notifications:
+            entry["notifications"] = notifications
+        try:
+            with path.open("a") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+            if path.stat().st_size > self._MAX_TRANSCRIPT_SIZE:
+                lines = path.read_text(errors="replace").strip().split("\n")
+                half = len(lines) // 2
+                path.write_text("\n".join(lines[half:]) + "\n")
+        except Exception as e:
+            logger.debug("Failed to write activity log: %s", e)
+
+    def load_activity(self, limit: int = 100) -> list[dict]:
+        """Load recent entries from the activity log."""
+        path = self.root / self.ACTIVITY_LOG
+        if not path.exists():
+            return []
+        try:
+            text = path.read_text(errors="replace").strip()
+            if not text:
+                return []
+            lines = text.split("\n")
+            entries = []
+            for line in lines[-limit:]:
+                if not line.strip():
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            return entries
+        except Exception as e:
+            logger.debug("Failed to read activity log: %s", e)
+            return []
 
     def _rotate_if_large(self, path: Path) -> None:
         """Trim old entries when a learning file exceeds the size limit."""

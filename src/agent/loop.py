@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
@@ -37,6 +38,10 @@ _TOOL_TIMEOUT = 300  # seconds — hard ceiling for a single tool execution
 _FLEET_ROSTER_TTL = 600  # seconds — cache TTL for fleet roster
 _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
 _TOOL_HISTORY_LIMIT = 10  # recent tool outcomes in system prompt
+HEARTBEAT_MAX_ITERATIONS = 10  # tighter bound for heartbeat (cheaper than task/chat)
+
+# ContextVar so tools (e.g. notify_user) can detect heartbeat mode
+_heartbeat_mode: ContextVar[bool] = ContextVar("_heartbeat_mode", default=False)
 
 # Tools that require a project blackboard — excluded for standalone agents.
 _BLACKBOARD_TOOLS = frozenset({
@@ -752,6 +757,240 @@ class AgentLoop:
             return parsed.get("result", {"raw": content}), parsed.get("promote", {})
         except (json.JSONDecodeError, AttributeError):
             return {"raw": content}, {}
+
+    # ── Heartbeat mode ────────────────────────────────────────
+
+    async def execute_heartbeat(self, message: str) -> dict:
+        """Execute an autonomous heartbeat — stateless, separate from chat.
+
+        Returns a structured dict with response, tools used, duration, etc.
+        Does NOT touch _chat_messages or chat_transcript.  Uses its own
+        message list and the _heartbeat_mode ContextVar so tools like
+        notify_user can route output to activity.jsonl instead of chat.
+        """
+        # Don't run if the agent is busy with a task, chat, or queued chat
+        if self.state != "idle" or self._chat_lock.locked():
+            return {"skipped": True, "reason": "agent_busy"}
+
+        token = _heartbeat_mode.set(True)
+        start = time.time()
+        total_tokens = 0
+        tools_used: list[str] = []
+        notifications: list[str] = []
+        self._loop_detector.reset()
+        self.state = "working"
+
+        try:
+            # Build a lean system prompt
+            introspect_data = await self._fetch_introspect_cached()
+            tools_desc = self.skills.get_descriptions(exclude=self._excluded_tools)
+            parts: list[str] = []
+            if self.workspace:
+                bootstrap = self.workspace.get_bootstrap_content()
+                if bootstrap:
+                    parts.append(sanitize_for_prompt(bootstrap))
+            parts.append(
+                f"You are the '{self.role}' agent.\n\n"
+                f"## Available Tools\n\n{tools_desc}\n\n"
+                f"## Operating Rules\n"
+                f"- This is a HEARTBEAT wakeup, not a user conversation.\n"
+                f"- Be economical. Only call tools if there is actual work to do.\n"
+                f"- You have max {HEARTBEAT_MAX_ITERATIONS} iterations.\n"
+                f"- Use notify_user to report results to the user.\n"
+            )
+            if introspect_data:
+                runtime_ctx = self._format_runtime_context(introspect_data)
+                if runtime_ctx:
+                    parts.append(runtime_ctx)
+            system_prompt = "\n\n".join(parts)
+
+            # Stateless message list — fresh each heartbeat
+            messages: list[dict] = [{"role": "user", "content": message}]
+
+            for _iteration in range(HEARTBEAT_MAX_ITERATIONS):
+                if self._cancel_requested:
+                    self._cancel_requested = False
+                    self.state = "idle"
+                    duration_ms = int((time.time() - start) * 1000)
+                    if self.workspace:
+                        self.workspace.append_activity(
+                            trigger="heartbeat",
+                            summary="Cancelled",
+                            tools_used=tools_used,
+                            duration_ms=duration_ms,
+                            tokens_used=total_tokens,
+                            outcome="cancelled",
+                        )
+                    return {
+                        "response": "",
+                        "summary": "Cancelled",
+                        "tools_used": tools_used,
+                        "duration_ms": duration_ms,
+                        "tokens_used": total_tokens,
+                        "outcome": "cancelled",
+                        "skipped": False,
+                    }
+
+                llm_response = await _llm_call_with_retry(
+                    self.llm.chat,
+                    system=system_prompt,
+                    messages=messages,
+                    tools=self.skills.get_tool_definitions(exclude=self._excluded_tools) or None,
+                )
+                total_tokens += llm_response.tokens_used
+
+                if not llm_response.tool_calls:
+                    # Final answer
+                    content = llm_response.content or ""
+                    duration_ms = int((time.time() - start) * 1000)
+
+                    summary = truncate(content.replace("\n", " ").strip(), 200)
+                    if self.workspace:
+                        tools_str = ", ".join(tools_used) if tools_used else "none"
+                        self.workspace.append_daily_log(
+                            f"Heartbeat complete | {total_tokens} tokens, "
+                            f"{duration_ms}ms | Tools: {tools_str}"
+                        )
+                        self.workspace.append_activity(
+                            trigger="heartbeat",
+                            summary=summary,
+                            tools_used=tools_used,
+                            duration_ms=duration_ms,
+                            tokens_used=total_tokens,
+                            outcome="ok",
+                            notifications=notifications or None,
+                        )
+
+                    self.state = "idle"
+                    return {
+                        "response": content,
+                        "summary": summary,
+                        "tools_used": tools_used,
+                        "duration_ms": duration_ms,
+                        "tokens_used": total_tokens,
+                        "outcome": "ok",
+                        "skipped": False,
+                    }
+
+                # Pre-scan for terminate
+                terminate_msg = self._check_tool_loop_terminate(llm_response.tool_calls)
+                if terminate_msg:
+                    self.state = "idle"
+                    duration_ms = int((time.time() - start) * 1000)
+                    if self.workspace:
+                        self.workspace.append_activity(
+                            trigger="heartbeat",
+                            summary=f"Tool loop: {terminate_msg}",
+                            tools_used=tools_used,
+                            duration_ms=duration_ms,
+                            tokens_used=total_tokens,
+                            outcome="error",
+                        )
+                    return {
+                        "response": terminate_msg,
+                        "summary": terminate_msg,
+                        "tools_used": tools_used,
+                        "duration_ms": duration_ms,
+                        "tokens_used": total_tokens,
+                        "outcome": "error",
+                        "skipped": False,
+                    }
+
+                # Execute tool calls
+                tool_call_entries = [
+                    {
+                        "id": f"call_{generate_id('tc')}",
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments),
+                        },
+                    }
+                    for tc in llm_response.tool_calls
+                ]
+                messages.append({
+                    "role": "assistant",
+                    "content": llm_response.content or "",
+                    "tool_calls": tool_call_entries,
+                })
+
+                for i, tool_call in enumerate(llm_response.tool_calls):
+                    if tool_call.name not in tools_used:
+                        tools_used.append(tool_call.name)
+                    # Capture notify_user calls for activity log
+                    if tool_call.name == "notify_user":
+                        msg_arg = tool_call.arguments.get("message", "")
+                        if msg_arg:
+                            notifications.append(msg_arg)
+                    result_str, _result = await self._run_tool(tool_call)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call_entries[i]["id"],
+                        "content": result_str,
+                    })
+
+                # Trim if context grows large
+                messages = self._trim_context(messages, max_tokens=_FALLBACK_MAX_TOKENS)
+
+            # Max iterations reached
+            self.state = "idle"
+            duration_ms = int((time.time() - start) * 1000)
+            if self.workspace:
+                self.workspace.append_activity(
+                    trigger="heartbeat",
+                    summary=f"Max iterations ({HEARTBEAT_MAX_ITERATIONS}) reached",
+                    tools_used=tools_used,
+                    duration_ms=duration_ms,
+                    tokens_used=total_tokens,
+                    outcome="max_iterations",
+                )
+            return {
+                "response": f"Max iterations ({HEARTBEAT_MAX_ITERATIONS}) reached",
+                "summary": f"Max iterations ({HEARTBEAT_MAX_ITERATIONS}) reached",
+                "tools_used": tools_used,
+                "duration_ms": duration_ms,
+                "tokens_used": total_tokens,
+                "outcome": "max_iterations",
+                "skipped": False,
+            }
+
+        except asyncio.CancelledError:
+            self.state = "idle"
+            duration_ms = int((time.time() - start) * 1000)
+            if self.workspace:
+                self.workspace.append_activity(
+                    trigger="heartbeat",
+                    summary="Cancelled",
+                    tools_used=tools_used,
+                    duration_ms=duration_ms,
+                    tokens_used=total_tokens,
+                    outcome="cancelled",
+                )
+            raise
+        except Exception as e:
+            self.state = "idle"
+            duration_ms = int((time.time() - start) * 1000)
+            logger.error("Heartbeat failed: %s", e, exc_info=True)
+            if self.workspace:
+                self.workspace.append_activity(
+                    trigger="heartbeat",
+                    summary=f"Error: {e}",
+                    tools_used=tools_used,
+                    duration_ms=duration_ms,
+                    tokens_used=total_tokens,
+                    outcome="error",
+                )
+            return {
+                "response": f"Error: {e}",
+                "summary": f"Error: {e}",
+                "tools_used": tools_used,
+                "duration_ms": duration_ms,
+                "tokens_used": total_tokens,
+                "outcome": "error",
+                "skipped": False,
+            }
+        finally:
+            _heartbeat_mode.reset(token)
 
     # ── Chat mode ──────────────────────────────────────────────
 

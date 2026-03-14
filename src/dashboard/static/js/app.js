@@ -165,6 +165,8 @@ function dashboard() {
     chatStreamingAgents: {},   // { agentId: true/false }
     _chatAborts: {},           // { agentId: AbortController }
     _chatFetchedAt: {},        // { agentId: timestamp } — debounce refetches
+    _chatWasStreaming: {},     // { agentId: true } — tracks streams active when tab was hidden
+    _chatRecoveryPolls: {},   // { agentId: intervalId } — polls for stream recovery after tab return
     activeChatId: '',          // Currently active chat tab
     chatPanelMinimized: false, // Whether the chat panel is minimized to pill
     chatFullScreen: false,     // Whether the chat panel is expanded to full screen
@@ -816,6 +818,11 @@ function dashboard() {
           if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
           if (this._modelHealthInterval) { clearInterval(this._modelHealthInterval); this._modelHealthInterval = null; }
           this._stopActivityRefresh();
+          // Snapshot which chats had active SSE streams before tab hides
+          this._chatWasStreaming = {};
+          for (const agentId of this.openChats) {
+            if (this.chatStreamingAgents[agentId]) this._chatWasStreaming[agentId] = true;
+          }
         } else {
           // Clear favicon badge
           document.title = document.title.replace(/^\(\d+\)\s*/, '');
@@ -848,6 +855,8 @@ function dashboard() {
             delete this._chatFetchedAt[agentId];
             this._loadChatHistory(agentId);
           }
+          // Recover chats whose SSE streams died while the tab was hidden
+          this._recoverDeadStreams();
         }
       });
     },
@@ -2742,6 +2751,77 @@ function dashboard() {
         this.$nextTick(() => this._scrollChat(agentId));
       } catch (e) {
         console.debug('_loadChatHistory failed for', agentId, e.message || e);
+      }
+    },
+
+    async _recoverDeadStreams() {
+      // After tab return, check if any formerly-streaming chats had their
+      // SSE connection killed by the browser.  If the agent is still busy,
+      // show a thinking indicator and poll until the response is complete.
+      const wasStreaming = this._chatWasStreaming || {};
+      this._chatWasStreaming = {};
+      for (const agentId of Object.keys(wasStreaming)) {
+        if (this.chatStreamingAgents[agentId]) continue; // stream survived
+        // Stream died — fetch fresh queue status to check if agent is still working
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/queues`);
+          if (resp.ok) this.queueStatus = (await resp.json()).queues;
+        } catch (_) { /* ignore */ }
+        if (!this.queueStatus?.[agentId]?.busy) {
+          // Agent finished — _loadChatHistory will pick up the completed response
+          continue;
+        }
+        // Agent is still working — show thinking state and poll for completion
+        this.chatLoadingAgents[agentId] = true;
+        this.chatStreamingAgents[agentId] = true;
+        // Add a fresh thinking bubble if the last message isn't already one
+        if (!this.chatHistories[agentId]) this.chatHistories[agentId] = [];
+        const hist = this.chatHistories[agentId];
+        const last = hist[hist.length - 1];
+        if (!last || last.role !== 'agent' || last.phase === 'done' || last.phase === 'error') {
+          hist.push({
+            role: 'agent', content: '', streaming: true,
+            phase: 'thinking', tools: [], timeline: [], _sawTextDelta: false,
+            ts: Date.now(),
+          });
+          this._pushChatTimelinePhase(hist[hist.length - 1], 'thinking');
+        } else {
+          last.streaming = true;
+          last.phase = 'thinking';
+        }
+        this.$nextTick(() => this._scrollChat(agentId));
+        // Poll every 3s — refresh history and check if agent is done
+        this._chatRecoveryPolls[agentId] = setInterval(async () => {
+          try {
+            const qr = await fetch(`${window.__config.apiBase}/queues`);
+            if (qr.ok) this.queueStatus = (await qr.json()).queues;
+          } catch (_) { /* ignore */ }
+          const stillBusy = this.queueStatus?.[agentId]?.busy;
+          // Always refresh history to pick up incremental progress
+          delete this._chatFetchedAt[agentId];
+          // Temporarily allow _loadChatHistory to run by clearing streaming flag
+          if (!stillBusy) {
+            this._stopChatRecovery(agentId);
+            this._loadChatHistory(agentId);
+          }
+        }, 3000);
+      }
+    },
+
+    _stopChatRecovery(agentId) {
+      if (this._chatRecoveryPolls[agentId]) {
+        clearInterval(this._chatRecoveryPolls[agentId]);
+        delete this._chatRecoveryPolls[agentId];
+      }
+      this.chatLoadingAgents[agentId] = false;
+      this.chatStreamingAgents[agentId] = false;
+      // Finalize any streaming bubble
+      const hist = this.chatHistories[agentId] || [];
+      for (const msg of hist) {
+        if (msg.streaming) {
+          msg.streaming = false;
+          if (msg.phase !== 'error') msg.phase = 'done';
+        }
       }
     },
 
