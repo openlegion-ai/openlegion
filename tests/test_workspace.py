@@ -887,3 +887,80 @@ class TestChatTranscript:
             assert "Message 0" not in contents
         finally:
             WorkspaceManager._MAX_TRANSCRIPT_SIZE = original_max
+
+
+class TestActivityLog:
+    """Tests for activity log (JSONL) — heartbeat and autonomous work."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.ws = WorkspaceManager(workspace_dir=self._tmpdir)
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_append_and_load(self):
+        self.ws.append_activity(
+            trigger="heartbeat", summary="Checked email",
+            tools_used=["http_request"], duration_ms=1200,
+            tokens_used=500, outcome="ok",
+        )
+        entries = self.ws.load_activity()
+        assert len(entries) == 1
+        assert entries[0]["trigger"] == "heartbeat"
+        assert entries[0]["summary"] == "Checked email"
+        assert entries[0]["tools"] == ["http_request"]
+        assert entries[0]["duration_ms"] == 1200
+        assert entries[0]["tokens_used"] == 500
+        assert entries[0]["outcome"] == "ok"
+        assert "ts" in entries[0]
+
+    def test_load_empty(self):
+        assert self.ws.load_activity() == []
+
+    def test_load_with_limit(self):
+        for i in range(10):
+            self.ws.append_activity(
+                trigger="heartbeat", summary=f"Run {i}",
+            )
+        entries = self.ws.load_activity(limit=3)
+        assert len(entries) == 3
+        assert entries[0]["summary"] == "Run 7"
+        assert entries[2]["summary"] == "Run 9"
+
+    def test_notifications_included(self):
+        self.ws.append_activity(
+            trigger="heartbeat", summary="Notified user",
+            notifications=["Price dropped", "Alert sent"],
+        )
+        entries = self.ws.load_activity()
+        assert entries[0]["notifications"] == ["Price dropped", "Alert sent"]
+
+    def test_notifications_omitted_when_none(self):
+        self.ws.append_activity(trigger="heartbeat", summary="Nothing")
+        entries = self.ws.load_activity()
+        assert "notifications" not in entries[0]
+
+    def test_rotation_drops_oldest_half(self):
+        original_max = WorkspaceManager._MAX_TRANSCRIPT_SIZE
+        try:
+            WorkspaceManager._MAX_TRANSCRIPT_SIZE = 200
+            for i in range(20):
+                self.ws.append_activity(trigger="heartbeat", summary=f"Run {i}")
+            entries = self.ws.load_activity()
+            assert len(entries) < 20
+            assert entries[-1]["summary"] == "Run 19"
+            summaries = [e["summary"] for e in entries]
+            assert "Run 0" not in summaries
+        finally:
+            WorkspaceManager._MAX_TRANSCRIPT_SIZE = original_max
+
+    def test_malformed_lines_skipped(self):
+        path = Path(self._tmpdir) / "activity.jsonl"
+        path.write_text(
+            '{"trigger":"heartbeat","summary":"Good","ts":1}\n'
+            'not valid json\n'
+            '{"trigger":"heartbeat","summary":"Also good","ts":2}\n'
+        )
+        entries = self.ws.load_activity()
+        assert len(entries) == 2

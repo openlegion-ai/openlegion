@@ -1686,6 +1686,42 @@ class TestNotifyUser:
         assert "error" in result
         assert "connection refused" in result["error"]
 
+    @pytest.mark.asyncio
+    async def test_notify_user_writes_transcript_outside_heartbeat(self):
+        from src.agent.builtins.mesh_tool import notify_user
+
+        mock_mesh = AsyncMock()
+        mock_mesh.notify_user = AsyncMock()
+        mock_ws = MagicMock()
+
+        result = await notify_user(
+            message="Update", mesh_client=mock_mesh, workspace_manager=mock_ws,
+        )
+        assert result == {"sent": True}
+        mock_ws.append_chat_message.assert_called_once_with("notification", "Update")
+
+    @pytest.mark.asyncio
+    async def test_notify_user_skips_transcript_during_heartbeat(self):
+        from src.agent.loop import _heartbeat_mode
+        from src.agent.builtins.mesh_tool import notify_user
+
+        mock_mesh = AsyncMock()
+        mock_mesh.notify_user = AsyncMock()
+        mock_ws = MagicMock()
+
+        token = _heartbeat_mode.set(True)
+        try:
+            result = await notify_user(
+                message="Alert", mesh_client=mock_mesh, workspace_manager=mock_ws,
+            )
+            assert result == {"sent": True}
+            # Should NOT write to chat transcript during heartbeat
+            mock_ws.append_chat_message.assert_not_called()
+            # But mesh notification should still be sent
+            mock_mesh.notify_user.assert_awaited_once_with("Alert")
+        finally:
+            _heartbeat_mode.reset(token)
+
 
 # ── LLMClient embedding model ───────────────────────────────
 

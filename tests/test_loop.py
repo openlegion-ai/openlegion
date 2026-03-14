@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.agent.loop import _BLACKBOARD_TOOLS, AgentLoop
+from src.agent.loop import HEARTBEAT_MAX_ITERATIONS, _BLACKBOARD_TOOLS, _heartbeat_mode, AgentLoop
 from src.shared.types import LLMResponse, TaskAssignment, TokenBudget, ToolCallInfo
 
 
@@ -1653,3 +1653,204 @@ async def test_trim_context_handles_multimodal_tool_content():
     summary_msg = trimmed[1]
     assert summary_msg["role"] == "user"
     assert "screenshot captured" in summary_msg["content"]
+
+
+# ── Heartbeat mode ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_simple_completion():
+    """Heartbeat returns structured result when LLM gives final answer."""
+    loop = _make_loop()
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="HEARTBEAT_OK", tokens_used=50))
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    result = await loop.execute_heartbeat("Check stuff")
+
+    assert result["skipped"] is False
+    assert result["outcome"] == "ok"
+    assert result["response"] == "HEARTBEAT_OK"
+    assert result["tokens_used"] == 50
+    assert result["duration_ms"] >= 0
+    assert result["tools_used"] == []
+    assert loop.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_skips_when_busy():
+    """Heartbeat returns skipped when agent state is not idle."""
+    loop = _make_loop()
+    loop.state = "working"  # simulate task in progress
+
+    result = await loop.execute_heartbeat("Check stuff")
+
+    assert result["skipped"] is True
+    assert result["reason"] == "agent_busy"
+    # State should not have been modified
+    assert loop.state == "working"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_skips_when_chat_locked():
+    """Heartbeat returns skipped when chat lock is held."""
+    loop = _make_loop()
+    await loop._chat_lock.acquire()
+    try:
+        result = await loop.execute_heartbeat("Check stuff")
+        assert result["skipped"] is True
+        assert result["reason"] == "agent_busy"
+    finally:
+        loop._chat_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_with_tool_calls():
+    """Heartbeat executes tools and tracks them in result."""
+    tool_call_response = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="notify_user", arguments={"message": "Alert!"})],
+        tokens_used=80,
+    )
+    final_response = LLMResponse(content="Done", tokens_used=30)
+
+    loop = _make_loop([tool_call_response, final_response])
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "notify_user"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"sent": True})
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.workspace = MagicMock()
+    loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.append_daily_log = MagicMock()
+    loop.workspace.append_activity = MagicMock()
+
+    result = await loop.execute_heartbeat("Check alerts")
+
+    assert result["outcome"] == "ok"
+    assert "notify_user" in result["tools_used"]
+    assert result["tokens_used"] == 110
+    assert loop.state == "idle"
+    # Notifications should be passed to append_activity
+    call_kwargs = loop.workspace.append_activity.call_args[1]
+    assert call_kwargs["notifications"] == ["Alert!"]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_does_not_touch_chat():
+    """Heartbeat doesn't modify _chat_messages or call append_chat_message."""
+    loop = _make_loop()
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="ok", tokens_used=10))
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.workspace = MagicMock()
+    loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.append_daily_log = MagicMock()
+    loop.workspace.append_activity = MagicMock()
+
+    loop._chat_messages.append({"role": "user", "content": "existing chat"})
+
+    await loop.execute_heartbeat("heartbeat check")
+
+    # Chat messages should be untouched
+    assert len(loop._chat_messages) == 1
+    assert loop._chat_messages[0]["content"] == "existing chat"
+    # append_chat_message should NOT be called
+    loop.workspace.append_chat_message.assert_not_called()
+    # But activity log should be written
+    loop.workspace.append_activity.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_logs_to_activity():
+    """Heartbeat writes structured entry to workspace activity log."""
+    loop = _make_loop()
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="All clear", tokens_used=25))
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.workspace = MagicMock()
+    loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.append_daily_log = MagicMock()
+    loop.workspace.append_activity = MagicMock()
+
+    await loop.execute_heartbeat("check")
+
+    loop.workspace.append_activity.assert_called_once()
+    call_kwargs = loop.workspace.append_activity.call_args
+    assert call_kwargs.kwargs["trigger"] == "heartbeat"  # or positional
+    # Also verify daily log was written
+    loop.workspace.append_daily_log.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_max_iterations():
+    """Heartbeat stops after HEARTBEAT_MAX_ITERATIONS."""
+    # Create responses that always return tool calls (never a final answer)
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCallInfo(name="search", arguments={"q": f"query_{i}"})],
+            tokens_used=10,
+        )
+        for i in range(HEARTBEAT_MAX_ITERATIONS + 5)
+    ]
+
+    loop = _make_loop(responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "search"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    result = await loop.execute_heartbeat("infinite loop")
+
+    assert result["outcome"] == "max_iterations"
+    assert loop.state == "idle"
+    # LLM should have been called exactly HEARTBEAT_MAX_ITERATIONS times
+    assert loop.llm.chat.call_count == HEARTBEAT_MAX_ITERATIONS
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_sets_contextvar():
+    """_heartbeat_mode ContextVar is True during heartbeat and reset after."""
+    captured = []
+
+    original_execute = None
+
+    async def spy_execute(name, args, **kwargs):
+        captured.append(_heartbeat_mode.get(False))
+        return {"sent": True}
+
+    tool_call_response = LLMResponse(
+        content="",
+        tool_calls=[ToolCallInfo(name="notify_user", arguments={"message": "hi"})],
+        tokens_used=10,
+    )
+    final_response = LLMResponse(content="done", tokens_used=10)
+
+    loop = _make_loop([tool_call_response, final_response])
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "notify_user"}}]
+    )
+    loop.skills.execute = spy_execute
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    await loop.execute_heartbeat("check")
+
+    # During tool execution, _heartbeat_mode should have been True
+    assert captured == [True]
+    # After heartbeat, should be reset to False
+    assert _heartbeat_mode.get(False) is False
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_error_handling():
+    """Heartbeat catches exceptions and returns error outcome."""
+    loop = _make_loop()
+    loop.llm.chat = AsyncMock(side_effect=RuntimeError("Budget exceeded"))
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    result = await loop.execute_heartbeat("check")
+
+    assert result["outcome"] == "error"
+    assert "Budget exceeded" in result["response"]
+    assert loop.state == "idle"
+    # ContextVar should be reset even on error
+    assert _heartbeat_mode.get(False) is False

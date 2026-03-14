@@ -654,6 +654,129 @@ class TestEnrichedHeartbeat:
         assert rules_pos < custom_pos
 
 
+class TestHeartbeatDispatchFn:
+    """Tests for dedicated heartbeat_dispatch_fn path."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_uses_dispatch_fn(self):
+        """When heartbeat_dispatch_fn is set, heartbeats use it instead of dispatch_fn."""
+        dispatch = AsyncMock(return_value="should not be called")
+        hb_dispatch = AsyncMock(return_value={
+            "response": "All clear",
+            "summary": "Nothing to do",
+            "tools_used": [],
+            "duration_ms": 500,
+            "tokens_used": 100,
+            "outcome": "ok",
+            "skipped": False,
+        })
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "# Rules\nDo stuff",
+            "is_default_heartbeat": False,
+            "has_recent_activity": True,
+        })
+        sched = CronScheduler(
+            config_path=self.config_path,
+            dispatch_fn=dispatch,
+            heartbeat_dispatch_fn=hb_dispatch,
+            context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        await sched._execute_job(job)
+
+        hb_dispatch.assert_called_once()
+        dispatch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_skipped_returns_none(self):
+        """When agent is busy, heartbeat_dispatch_fn returns skipped and cron returns None."""
+        hb_dispatch = AsyncMock(return_value={
+            "skipped": True,
+            "reason": "agent_busy",
+        })
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "# Rules",
+            "is_default_heartbeat": False,
+            "has_recent_activity": True,
+        })
+        sched = CronScheduler(
+            config_path=self.config_path,
+            dispatch_fn=AsyncMock(),
+            heartbeat_dispatch_fn=hb_dispatch,
+            context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        result = await sched._execute_job(job)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_emits_event(self):
+        """heartbeat_complete event is emitted with structured data."""
+        hb_dispatch = AsyncMock(return_value={
+            "response": "Done",
+            "summary": "Checked alerts",
+            "tools_used": ["http_request"],
+            "duration_ms": 2000,
+            "tokens_used": 300,
+            "outcome": "ok",
+            "skipped": False,
+        })
+        context_fn = AsyncMock(return_value={
+            "is_default_heartbeat": False,
+            "has_recent_activity": True,
+        })
+        event_bus = MagicMock()
+        sched = CronScheduler(
+            config_path=self.config_path,
+            dispatch_fn=AsyncMock(),
+            heartbeat_dispatch_fn=hb_dispatch,
+            context_fn=context_fn,
+            event_bus=event_bus,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        await sched._execute_job(job)
+
+        event_bus.emit.assert_called_once()
+        call_args = event_bus.emit.call_args
+        assert call_args[0][0] == "heartbeat_complete"
+        assert call_args[1]["agent"] == "test"
+        assert call_args[1]["data"]["summary"] == "Checked alerts"
+        assert call_args[1]["data"]["outcome"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_falls_back_to_dispatch_fn(self):
+        """Without heartbeat_dispatch_fn, heartbeats use dispatch_fn."""
+        dispatch = AsyncMock(return_value="Handled")
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "# Rules\nStuff",
+            "is_default_heartbeat": False,
+            "has_recent_activity": True,
+        })
+        sched = CronScheduler(
+            config_path=self.config_path,
+            dispatch_fn=dispatch,
+            context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        await sched._execute_job(job)
+        dispatch.assert_called_once()
+
+
 class TestToolInvoke:
     """Tests for tool-type cron jobs — direct tool execution without LLM."""
 
