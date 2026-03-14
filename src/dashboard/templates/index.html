@@ -191,12 +191,7 @@
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
               </template>
               <span x-text="tab.id === 'fleet' && agents.length ? 'Agents (' + runningAgents.length + ')' : tab.label"></span>
-              <span
-                x-show="tab.id === 'system' && unreadEvents > 0 && !(activeTab === 'system' && systemTab === 'activity')"
-                x-text="unreadEvents >= 100 ? '99+' : unreadEvents"
-                class="absolute -top-1 -right-1 bg-indigo-500 text-white text-[10px] font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-1"
-                x-cloak
-              ></span>
+              <!-- unread event badge removed -->
             </button>
           </template>
         </div>
@@ -2081,14 +2076,11 @@
         <!-- System sub-tab bar -->
         <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
           <template x-for="st in systemTabs" :key="st.id">
-            <button @click="if (systemTab === 'activity' && st.id !== 'activity') _stopActivityRefresh(); systemTab = st.id; _pushUrl(false); if (st.id === 'connections') { fetchChannels(); fetchWebhooks(); fetchSettings(); } if (st.id === 'storage') { fetchUploads(); fetchStorage(); } if (st.id === 'settings') { fetchBrowserSettings(); } if (st.id === 'activity') { unreadEvents = 0; _lastSeenEventCount = events.length; _lastSeenActivityTs = Date.now(); try { localStorage.setItem('ol_lastActivityTs', String(_lastSeenActivityTs)); } catch (_) {} if (activityView === 'traces') { fetchTraces(); _startActivityRefresh(); } else if (activityView === 'logs') { fetchSystemLogs(); } }"
+            <button @click="if (systemTab === 'activity' && st.id !== 'activity') _stopActivityRefresh(); systemTab = st.id; _pushUrl(false); if (st.id === 'connections') { fetchChannels(); fetchWebhooks(); fetchSettings(); } if (st.id === 'storage') { fetchUploads(); fetchStorage(); } if (st.id === 'settings') { fetchBrowserSettings(); } if (st.id === 'activity') { if (activityView === 'traces') { fetchTraces(); _startActivityRefresh(); } else if (activityView === 'logs') { fetchSystemLogs(); } }"
               class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative"
               :class="systemTab === st.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
               <span x-text="st.label"></span>
-              <span x-show="st.id === 'activity' && unreadEvents > 0 && systemTab !== 'activity'"
-                x-text="unreadEvents >= 100 ? '99+' : unreadEvents"
-                class="ml-1.5 bg-indigo-500 text-white text-[10px] font-bold rounded-full min-w-[16px] h-4 inline-flex items-center justify-center px-1"
-                x-cloak></span>
+              <!-- unread event badge removed -->
             </button>
           </template>
         </div>

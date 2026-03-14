@@ -37,9 +37,6 @@ function dashboard() {
     connected: false,
     loading: true,
     lastRefresh: 0,
-    unreadEvents: 0,
-    _lastSeenEventCount: 0,
-    _lastSeenActivityTs: 0,
     toastQueue: [],
 
     // Fleet
@@ -334,7 +331,7 @@ function dashboard() {
     _queuePollInterval: null,
     _cronInterval: null,
     _seenEventIds: new Set(),
-    _initTime: new Date().toISOString(),  // page-load timestamp for replay filtering
+
 
     // URL routing
     _skipPush: false,
@@ -459,10 +456,6 @@ function dashboard() {
               }
               if (route.systemTab === 'activity') {
                 this.activityView = route.activityView;
-                this.unreadEvents = 0;
-                this._lastSeenEventCount = this.events.length;
-                this._lastSeenActivityTs = Date.now();
-                try { localStorage.setItem('ol_lastActivityTs', String(this._lastSeenActivityTs)); } catch (_) {}
                 if (route.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
                 else if (route.activityView === 'logs') { this.fetchSystemLogs(); }
               }
@@ -746,7 +739,6 @@ function dashboard() {
           if (parsed.activeChatId) this.activeChatId = parsed.activeChatId;
           if (parsed.chatPanelMinimized) this.chatPanelMinimized = true;
         }
-        this._lastSeenActivityTs = parseInt(localStorage.getItem('ol_lastActivityTs') || '0', 10);
       } catch (e) {
         console.debug('localStorage restore skipped:', e.message || e);
       }
@@ -827,10 +819,6 @@ function dashboard() {
           if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
           if (this._modelHealthInterval) { clearInterval(this._modelHealthInterval); this._modelHealthInterval = null; }
           this._stopActivityRefresh();
-          // Persist activity read position so page reload doesn't re-count seen events
-          if (this._lastSeenActivityTs > 0) {
-            try { localStorage.setItem('ol_lastActivityTs', String(this._lastSeenActivityTs)); } catch (_) {}
-          }
           // Snapshot which chats had active SSE streams before tab hides
           this._chatWasStreaming = {};
           for (const agentId of this.openChats) {
@@ -928,10 +916,6 @@ function dashboard() {
           this.fetchBrowserSettings();
         }
         if (this.systemTab === 'activity') {
-          this.unreadEvents = 0;
-          this._lastSeenEventCount = this.events.length;
-          this._lastSeenActivityTs = Date.now();
-          try { localStorage.setItem('ol_lastActivityTs', String(this._lastSeenActivityTs)); } catch (_) {}
           if (this.activityView === 'traces') {
             this.fetchTraces();
             this._startActivityRefresh();
@@ -1029,30 +1013,6 @@ function dashboard() {
       this.events.unshift(evt);
       if (this.events.length > 500) this.events.splice(500);
 
-      // Track unread events when not viewing the Activity sub-tab.
-      // Only count events newer than the last time the user viewed Activity,
-      // so WebSocket replay of old events doesn't inflate the badge on page load.
-      // Skip if the user is actively viewing this agent's chat panel.
-      const onActivity = this.activeTab === 'system' && this.systemTab === 'activity';
-      if (onActivity) {
-        // Advance high-water mark while viewing — persisted on tab hide / nav away
-        this._lastSeenActivityTs = Date.now();
-      } else {
-        const eventMs = evt.timestamp ? new Date(evt.timestamp).getTime() : Date.now();
-        if (eventMs > this._lastSeenActivityTs) {
-          const isViewingAgent = evt.agent && evt.agent === this.activeChatId && !this.chatPanelMinimized;
-          if (!isViewingAgent) {
-            this.unreadEvents++;
-          }
-        }
-      }
-
-      // Favicon badge: prefix document title with unread count when tab not visible
-      if (document.hidden && this.unreadEvents > 0) {
-        const base = document.title.replace(/^\(\d+\)\s*/, '');
-        document.title = `(${this.unreadEvents}) ${base}`;
-      }
-
       // Update agent activity state
       const agent = evt.agent;
       if (agent) {
@@ -1067,38 +1027,6 @@ function dashboard() {
       // Refresh model health on health_change events
       if (evt.type === 'health_change') {
         this.fetchModelHealth();
-      }
-
-      // Show toast for agent notifications + inject into chat panel.
-      // Skip replayed events (timestamp before page load) to avoid
-      // re-showing old toasts and duplicating chat history on reconnect.
-      if (evt.type === 'notification' && evt.agent) {
-        const isReplay = evt.timestamp && evt.timestamp < this._initTime;
-        if (!isReplay) {
-          this.showToast(`[${evt.agent}] ${(evt.data?.message || '').substring(0, 120)}`);
-          if (!this.chatHistories[evt.agent]) this.chatHistories[evt.agent] = [];
-          this.chatHistories[evt.agent].push({
-            role: 'notification',
-            content: evt.data?.message || '',
-            streaming: false,
-            phase: 'done',
-            tools: [],
-            ts: Date.now(),
-          });
-          if (this.openChats.includes(evt.agent)) {
-            if (this.chatPanelMinimized || this.activeChatId !== evt.agent) {
-              this.chatUnread = { ...this.chatUnread, [evt.agent]: (this.chatUnread[evt.agent] || 0) + 1 };
-            } else {
-              this.$nextTick(() => this._scrollChat(evt.agent));
-            }
-          } else {
-            // Open a new chat tab without stealing focus
-            this.openChats.push(evt.agent);
-            if (!this.activeChatId) this.activeChatId = evt.agent;
-            this.$nextTick(() => this._scrollChat(evt.agent));
-          }
-          this._saveChatToSession();
-        }
       }
 
       // Highlight blackboard writes + update comms badge
