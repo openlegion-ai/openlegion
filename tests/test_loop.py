@@ -13,7 +13,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.agent.loop import HEARTBEAT_MAX_ITERATIONS, _BLACKBOARD_TOOLS, _heartbeat_mode, AgentLoop
+from src.agent.loop import (
+    _BLACKBOARD_TOOLS,
+    HEARTBEAT_MAX_ITERATIONS,
+    AgentLoop,
+    _heartbeat_mode,
+)
 from src.shared.types import LLMResponse, TaskAssignment, TokenBudget, ToolCallInfo
 
 
@@ -1811,8 +1816,6 @@ async def test_heartbeat_max_iterations():
 async def test_heartbeat_sets_contextvar():
     """_heartbeat_mode ContextVar is True during heartbeat and reset after."""
     captured = []
-
-    original_execute = None
 
     async def spy_execute(name, args, **kwargs):
         captured.append(_heartbeat_mode.get(False))
