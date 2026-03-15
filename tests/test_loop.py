@@ -59,6 +59,7 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
     mesh_client.is_standalone = False
     mesh_client.send_system_message = AsyncMock(return_value={})
     mesh_client.read_blackboard = AsyncMock(return_value=None)
+    mesh_client.list_agents = AsyncMock(return_value={})
 
     loop = AgentLoop(
         agent_id="test_agent",
@@ -1794,6 +1795,7 @@ async def test_heartbeat_with_tool_calls():
     loop.mesh_client.introspect = AsyncMock(return_value={})
     loop.workspace = MagicMock()
     loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.get_learnings_context = MagicMock(return_value="")
     loop.workspace.append_daily_log = MagicMock()
     loop.workspace.append_activity = MagicMock()
 
@@ -1816,6 +1818,7 @@ async def test_heartbeat_does_not_touch_chat():
     loop.mesh_client.introspect = AsyncMock(return_value={})
     loop.workspace = MagicMock()
     loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.get_learnings_context = MagicMock(return_value="")
     loop.workspace.append_daily_log = MagicMock()
     loop.workspace.append_activity = MagicMock()
 
@@ -1840,6 +1843,7 @@ async def test_heartbeat_logs_to_activity():
     loop.mesh_client.introspect = AsyncMock(return_value={})
     loop.workspace = MagicMock()
     loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.get_learnings_context = MagicMock(return_value="")
     loop.workspace.append_daily_log = MagicMock()
     loop.workspace.append_activity = MagicMock()
 
@@ -2030,3 +2034,114 @@ async def test_heartbeat_error_handling():
     assert loop.state == "idle"
     # ContextVar should be reset even on error
     assert _heartbeat_mode.get(False) is False
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_includes_goals_in_system_prompt():
+    """Heartbeat system prompt includes goals when they exist on the blackboard."""
+    captured_system = []
+
+    async def _capture_llm(*, system, messages, **kw):
+        captured_system.append(system)
+        return LLMResponse(content="Done", tokens_used=10)
+
+    loop = _make_loop([])
+    loop.llm.chat = AsyncMock(side_effect=_capture_llm)
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.mesh_client.read_blackboard = AsyncMock(
+        return_value={"value": {"primary": "Monitor sales pipeline"}}
+    )
+
+    await loop.execute_heartbeat("wakeup")
+
+    assert len(captured_system) == 1
+    assert "Your Current Goals" in captured_system[0]
+    assert "Monitor sales pipeline" in captured_system[0]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_includes_fleet_roster():
+    """Heartbeat system prompt includes fleet roster for multi-agent setups."""
+    captured_system = []
+
+    async def _capture_llm(*, system, messages, **kw):
+        captured_system.append(system)
+        return LLMResponse(content="Done", tokens_used=10)
+
+    loop = _make_loop([])
+    loop.llm.chat = AsyncMock(side_effect=_capture_llm)
+    loop.mesh_client.is_standalone = False
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.mesh_client.list_agents = AsyncMock(return_value={
+        "writer": {"role": "content writer"},
+        "test_agent": {"role": "research"},  # self — should be excluded
+    })
+
+    await loop.execute_heartbeat("wakeup")
+
+    assert len(captured_system) == 1
+    assert "Your Team" in captured_system[0]
+    assert "writer" in captured_system[0]
+    assert "content writer" in captured_system[0]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_skips_fleet_for_standalone():
+    """Heartbeat does not call list_agents for standalone agents."""
+    loop = _make_loop([])
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="ok", tokens_used=10))
+    loop.mesh_client.is_standalone = True
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    await loop.execute_heartbeat("wakeup")
+
+    loop.mesh_client.list_agents.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_includes_learnings():
+    """Heartbeat system prompt includes learnings from workspace."""
+    captured_system = []
+
+    async def _capture_llm(*, system, messages, **kw):
+        captured_system.append(system)
+        return LLMResponse(content="Done", tokens_used=10)
+
+    loop = _make_loop([])
+    loop.llm.chat = AsyncMock(side_effect=_capture_llm)
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.workspace = MagicMock()
+    loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.get_learnings_context = MagicMock(
+        return_value="- Always verify API response status before parsing"
+    )
+    loop.workspace.append_daily_log = MagicMock()
+    loop.workspace.append_activity = MagicMock()
+
+    await loop.execute_heartbeat("wakeup")
+
+    assert len(captured_system) == 1
+    assert "Learnings from Past Sessions" in captured_system[0]
+    assert "Always verify API response status" in captured_system[0]
+    # Heartbeat uses half the chat-mode cap (3000 → 1500)
+    loop.workspace.get_learnings_context.assert_called_once_with(max_chars=1500)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_includes_self_evolution():
+    """Heartbeat system prompt includes self-evolution nudge."""
+    captured_system = []
+
+    async def _capture_llm(*, system, messages, **kw):
+        captured_system.append(system)
+        return LLMResponse(content="Done", tokens_used=10)
+
+    loop = _make_loop([])
+    loop.llm.chat = AsyncMock(side_effect=_capture_llm)
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    await loop.execute_heartbeat("wakeup")
+
+    assert len(captured_system) == 1
+    assert "Self-Evolution" in captured_system[0]
+    assert "INSTRUCTIONS.md" in captured_system[0]
