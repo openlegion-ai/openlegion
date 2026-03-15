@@ -3481,19 +3481,21 @@ function dashboard() {
       if (this._browserToggling) return;
       this._browserToggling = true;
       try {
-        // Focus the correct agent's window BEFORE loading the VNC iframe
         const agentId = this.selectedAgent;
-        if (agentId) {
-          await this.focusBrowser(agentId);
-        }
-        // Bail if user navigated to a different agent while focusing
-        if (this.selectedAgent !== agentId) return;
+        // Show the iframe immediately so the user sees the loading spinner
+        // while the focus call runs in parallel. The VNC connection and
+        // browser focus happen concurrently — by the time VNC connects,
+        // focus is usually already done.
         this.showBrowserViewer = true;
         this.$nextTick(() => {
           if (this.$refs.vncLoading) {
             this.$refs.vncLoading.style.opacity = '1';
           }
         });
+        // Fire focus in background — don't block the UI
+        if (agentId) {
+          this.focusBrowser(agentId);
+        }
       } finally {
         this._browserToggling = false;
       }
