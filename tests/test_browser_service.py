@@ -187,10 +187,28 @@ class TestBrowserManagerRefResolution:
         inst.refs = {"e0": {"role": "button", "name": "Submit", "index": 0}}
 
         locator = mgr._locator_from_ref(inst, "e0")
-        mock_page.get_by_role.assert_called_once_with("button", name="Submit")
+        mock_page.get_by_role.assert_called_once_with("button", name="Submit", exact=True)
         # .nth(0) is called to target the specific occurrence
         mock_page.get_by_role.return_value.nth.assert_called_once_with(0)
         assert locator is mock_locator.nth.return_value
+
+    @pytest.mark.asyncio
+    async def test_locator_from_ref_uses_data_olref(self):
+        """Refs with has_olref=True use direct data-olref locator."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = MagicMock()
+        mock_locator = MagicMock()
+        mock_page.locator.return_value = mock_locator
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.refs = {"e0": {"role": "button", "name": "Submit", "index": 0, "has_olref": True}}
+
+        locator = mgr._locator_from_ref(inst, "e0")
+        mock_page.locator.assert_called_once_with('[data-olref="e0"]')
+        assert locator is mock_locator
+        # Should NOT use get_by_role
+        mock_page.get_by_role.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_locator_from_ref_no_name(self):
@@ -1125,23 +1143,23 @@ class TestHumanTiming:
     def test_action_delay_range(self):
         from src.browser.timing import action_delay
         samples = [action_delay() for _ in range(1000)]
-        assert all(0.15 <= s <= 0.50 for s in samples)
+        assert all(0.08 <= s <= 0.30 for s in samples)
         mean = sum(samples) / len(samples)
-        assert 0.25 <= mean <= 0.35
+        assert 0.14 <= mean <= 0.22
 
     def test_navigation_jitter_range(self):
         from src.browser.timing import navigation_jitter
         samples = [navigation_jitter() for _ in range(1000)]
-        assert all(0.0 <= s <= 0.50 for s in samples)
+        assert all(0.0 <= s <= 0.20 for s in samples)
         mean = sum(samples) / len(samples)
-        assert 0.12 <= mean <= 0.28
+        assert 0.04 <= mean <= 0.12
 
     def test_keystroke_delay_alpha(self):
         from src.browser.timing import keystroke_delay
         samples = [keystroke_delay("a") for _ in range(1000)]
-        assert all(0.04 <= s <= 0.20 for s in samples)
+        assert all(0.020 <= s <= 0.090 for s in samples)
         mean = sum(samples) / len(samples)
-        assert 0.06 <= mean <= 0.10
+        assert 0.035 <= mean <= 0.055
 
     def test_keystroke_delay_symbol_slower(self):
         from src.browser.timing import keystroke_delay
@@ -1159,9 +1177,9 @@ class TestHumanTiming:
     def test_think_pause_range(self):
         from src.browser.timing import think_pause
         samples = [think_pause() for _ in range(1000)]
-        assert all(0.30 <= s <= 1.50 for s in samples)
+        assert all(0.20 <= s <= 0.90 for s in samples)
         mean = sum(samples) / len(samples)
-        assert 0.50 <= mean <= 0.80
+        assert 0.30 <= mean <= 0.50
 
     def test_word_boundary_chars_constant(self):
         """_WORD_BOUNDARY_CHARS must contain expected characters."""
@@ -1340,8 +1358,8 @@ class TestClickRandomDelay:
             for _ in range(10):
                 await mgr.click("a1", selector="#btn")
 
-        # All delays should be in action_delay range, not exactly 0.3
-        assert all(0.15 <= d <= 0.50 for d in delays)
+        # All delays should be in action_delay range
+        assert all(0.08 <= d <= 0.30 for d in delays)
         # At least some variance (not all identical)
         assert len(set(f"{d:.4f}" for d in delays)) > 1
 
@@ -1383,7 +1401,7 @@ class TestTypeWithVariance:
         press_chars = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert press_chars == ["H", "i", "!"]
         assert len(delays) == 3
-        assert all(0.04 <= d <= 0.20 for d in delays)
+        assert all(0.020 <= d <= 0.110 for d in delays)
 
     @pytest.mark.asyncio
     async def test_type_with_variance_falls_back_to_keyboard_type(self):
@@ -1429,6 +1447,215 @@ class TestTypeWithVariance:
         assert mock_page.evaluate.await_count == 0
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert press_calls == ["a", "Enter", "b", "Tab", "c"]
+
+
+class TestTypeFast:
+    """Tests for _type_fast minimal-delay mode."""
+
+    @pytest.mark.asyncio
+    async def test_type_fast_uses_fixed_delay(self):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+
+        delays: list[float] = []
+
+        async def capture_sleep(t: float):
+            delays.append(t)
+
+        with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
+            await mgr._type_fast(mock_page, "hello")
+
+        assert mock_page.keyboard.press.await_count == 5
+        assert len(delays) == 5
+        assert all(d == 0.008 for d in delays), f"Expected all 0.008, got {delays}"
+
+    @pytest.mark.asyncio
+    async def test_type_fast_handles_special_keys(self):
+        from src.browser.service import BrowserManager
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+
+        with patch("src.browser.service.asyncio.sleep"):
+            await mgr._type_fast(mock_page, "a\nb")
+
+        press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
+        assert press_calls == ["a", "Enter", "b"]
+
+    @pytest.mark.asyncio
+    async def test_type_text_fast_flag(self):
+        """fast=True in type_text should use _type_fast, not _type_with_variance."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.keyboard = AsyncMock()
+        mock_page.keyboard.press = AsyncMock()
+        mock_locator = AsyncMock()
+        mock_page.locator = MagicMock(return_value=mock_locator)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.refs = {"e0": {"role": "textbox", "name": "Search", "index": 0, "has_olref": True}}
+        mgr._instances["a1"] = inst
+
+        delays: list[float] = []
+
+        async def capture_sleep(t: float):
+            delays.append(t)
+
+        with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
+            result = await mgr.type_text("a1", ref="e0", text="test", fast=True)
+
+        assert result["success"] is True
+        typing_delays = [d for d in delays if d == 0.008]
+        assert len(typing_delays) == 4
+
+
+class TestSnapshotAfter:
+    """Tests for compound action snapshot_after parameter."""
+
+    @pytest.mark.asyncio
+    async def test_click_snapshot_after(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr._js_snapshot_mode = True
+
+        mock_page = AsyncMock()
+        mock_page.click = AsyncMock()
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        mock_page.evaluate = AsyncMock(return_value={
+            "role": "WebArea", "name": "Test",
+            "children": [{"role": "button", "name": "OK", "refId": "e0"}],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.click("a1", selector="#btn", snapshot_after=True)
+
+        assert result["success"] is True
+        assert "snapshot" in result
+        assert "snapshot" in result["snapshot"]
+        assert "refs" in result["snapshot"]
+
+    @pytest.mark.asyncio
+    async def test_click_without_snapshot_after(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.click = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.click("a1", selector="#btn", snapshot_after=False)
+
+        assert result["success"] is True
+        assert "snapshot" not in result
+
+
+class TestNavigateRetry:
+    """Tests for navigation timeout retry."""
+
+    @pytest.mark.asyncio
+    async def test_navigate_retries_on_timeout(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock(
+            side_effect=[Exception("Timeout 30000ms exceeded"), None]
+        )
+        mock_page.title = AsyncMock(return_value="OK")
+        mock_page.url = "https://example.com"
+        mock_page.evaluate = AsyncMock(return_value="body text")
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.navigate("a1", "https://example.com", wait_ms=0)
+
+        assert result["success"] is True
+        assert mock_page.goto.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_navigate_no_retry_on_non_timeout(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_NAME_NOT_RESOLVED"))
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.navigate("a1", "https://bad.invalid", wait_ms=0)
+
+        assert result["success"] is False
+        assert mock_page.goto.await_count == 1
+
+
+class TestLandmarkAnnotations:
+    """Tests for structural landmark context in snapshot output."""
+
+    @pytest.mark.asyncio
+    async def test_landmark_context_in_snapshot(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr._js_snapshot_mode = True
+
+        tree = {
+            "role": "WebArea", "name": "Test Page",
+            "children": [
+                {"role": "button", "name": "Post", "refId": "e0", "landmark": "navigation"},
+                {"role": "button", "name": "Post", "refId": "e1", "landmark": "dialog: Compose"},
+            ],
+        }
+        mock_page = AsyncMock()
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        mock_page.evaluate = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+
+        snapshot_text = result["data"]["snapshot"]
+        assert "(navigation)" in snapshot_text
+        assert "(dialog: Compose)" in snapshot_text
+        assert 'button "Post"' in snapshot_text
+        assert "dup:2" in snapshot_text
+
+    @pytest.mark.asyncio
+    async def test_no_landmark_when_absent(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr._js_snapshot_mode = True
+
+        tree = {
+            "role": "WebArea", "name": "Test",
+            "children": [{"role": "button", "name": "OK", "refId": "e0"}],
+        }
+        mock_page = AsyncMock()
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+        mock_page.evaluate = AsyncMock(return_value=tree)
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+
+        snapshot_text = result["data"]["snapshot"]
+        assert "(" not in snapshot_text
+        assert '[e0] button "OK"' in snapshot_text
 
 
 class TestNavigateWaitUntil:
@@ -1775,22 +2002,22 @@ class TestWordBoundaryPause:
         async def capture_sleep(t: float):
             sleep_calls.append(t)
 
-        # 0.05 is between 0.025 (non-boundary threshold) and 0.12 (boundary threshold)
+        # 0.05 is between 0.015 (non-boundary threshold) and 0.08 (boundary threshold)
         # So: fires only when prev_char was a boundary char
         with patch("src.browser.service.random.random", return_value=0.05):
             with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
                 # "h w": h=no-pause, ' '=no-pause, w=PAUSE (prev ' ')
                 await mgr._type_with_variance(mock_page, "h w")
 
-        # think_pause values are in [0.30, 1.50]; keystroke_delay values are in [0.03, 0.20]
-        think_pauses = [t for t in sleep_calls if t >= 0.30]
+        # think_pause values are in [0.20, 0.90]; keystroke_delay values are in [0.018, 0.110]
+        think_pauses = [t for t in sleep_calls if t >= 0.20]
         assert len(think_pauses) == 1, (
             f"Expected exactly 1 think_pause for 'h w' with random=0.05, got {think_pauses}"
         )
 
     @pytest.mark.asyncio
     async def test_no_think_pause_when_random_above_boundary_threshold(self):
-        """With random.random()=0.15, no pauses fire (0.15 > 0.12)."""
+        """With random.random()=0.15, no pauses fire (0.15 > 0.08)."""
         from src.browser.service import BrowserManager
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
@@ -1808,7 +2035,7 @@ class TestWordBoundaryPause:
             with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
                 await mgr._type_with_variance(mock_page, "hello world")
 
-        think_pauses = [t for t in sleep_calls if t >= 0.30]
+        think_pauses = [t for t in sleep_calls if t >= 0.20]
         assert len(think_pauses) == 0
 
 
@@ -2727,7 +2954,7 @@ class TestDialogScoping:
         call_args = mock_page.locator.call_args[0][0]
         assert '[role="dialog"]' in call_args
         assert '[aria-modal="true"]' in call_args
-        mock_dialog_locator.get_by_role.assert_called_once_with("button", name="Post")
+        mock_dialog_locator.get_by_role.assert_called_once_with("button", name="Post", exact=True)
         mock_role_locator.nth.assert_called_once_with(0)
         assert locator is mock_role_locator.nth.return_value
 
@@ -2749,7 +2976,7 @@ class TestDialogScoping:
         mgr._locator_from_ref(inst, "e0")
 
         mock_page.locator.assert_not_called()
-        mock_page.get_by_role.assert_called_once_with("button", name="Post")
+        mock_page.get_by_role.assert_called_once_with("button", name="Post", exact=True)
 
     @pytest.mark.asyncio
     async def test_snapshot_hidden_dialog_ignored(self):

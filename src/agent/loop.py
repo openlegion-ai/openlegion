@@ -1598,10 +1598,20 @@ class AgentLoop:
             rules += (
                 "\n## Browser\n"
                 "browser_navigate → browser_get_elements (get refs) → "
-                "browser_click(ref=)/browser_type(ref=). Re-snapshot after changes.\n"
-                "Use browser_screenshot when you need visual context: verifying "
-                "actions succeeded, reading visual content (charts, images, complex "
-                "layouts), or diagnosing why element interaction failed.\n"
+                "browser_click(ref=)/browser_type(ref=). **Always re-snapshot "
+                "after actions that change the page** (clicking, typing, scrolling).\n"
+                "- Elements show structural context like (navigation), (dialog: Name). "
+                "When duplicates exist, prefer the one inside the relevant container "
+                "(e.g. a button in a dialog over one in navigation).\n"
+                "- Use snapshot_after=true on navigate/click/type to combine the "
+                "action with a snapshot in one call.\n"
+                "- Use fast=true on browser_type for search queries, URLs, and "
+                "non-sensitive fields. Use normal speed for login forms and "
+                "social media composition.\n"
+                "- Use browser_screenshot when you need visual context: verifying "
+                "actions succeeded, reading visual content, or diagnosing failures.\n"
+                "- Use browser_wait_for before interacting with elements on SPAs "
+                "that animate content in after page load.\n"
             )
 
         rules += (

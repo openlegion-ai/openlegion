@@ -64,7 +64,9 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             raise HTTPException(400, "url required")
         wait_ms = body.get("wait_ms", 1000)
         wait_until = body.get("wait_until", "domcontentloaded")
-        return await manager.navigate(agent_id, url, wait_ms, wait_until)
+        snapshot_after = body.get("snapshot_after", False)
+        return await manager.navigate(agent_id, url, wait_ms, wait_until,
+                                      snapshot_after=snapshot_after)
 
     @app.post("/browser/{agent_id}/snapshot")
     async def snapshot(agent_id: str, request: Request):
@@ -80,6 +82,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             ref=body.get("ref"),
             selector=body.get("selector"),
             force=body.get("force", False),
+            snapshot_after=body.get("snapshot_after", False),
         )
 
     @app.post("/browser/{agent_id}/wait_for")
@@ -117,6 +120,8 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             text=body.get("text", ""),
             clear=body.get("clear", True),
             is_credential=body.get("is_credential", False),
+            fast=body.get("fast", False),
+            snapshot_after=body.get("snapshot_after", False),
         )
 
     # /browser/{agent_id}/evaluate endpoint intentionally removed —

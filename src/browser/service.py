@@ -38,6 +38,7 @@ _ACTIONABLE_ROLES = frozenset({
 
 _CONTEXT_ROLES = frozenset({
     "heading", "img", "dialog", "alertdialog", "alert",
+    "listbox", "tree", "grid", "toolbar", "menu", "status",
 })
 
 _MAX_SNAPSHOT_ELEMENTS = 200
@@ -86,16 +87,26 @@ _MODAL_SELECTOR = (
 #   page.evaluate(_JS_A11Y_TREE)          — full page tree
 #   element_handle.evaluate(_JS_A11Y_TREE) — scoped to element
 _JS_A11Y_TREE = r"""(rootEl) => {
-    const ROLES = new Set([
+    const ACTIONABLE = new Set([
         'button','link','textbox','checkbox','radio','combobox','searchbox',
         'slider','spinbutton','switch','tab','menuitem','menuitemcheckbox',
-        'menuitemradio','option','treeitem',
-        'heading','img','dialog','alertdialog','alert'
+        'menuitemradio','option','treeitem'
+    ]);
+    const CONTEXT = new Set([
+        'heading','img','dialog','alertdialog','alert',
+        'listbox','tree','grid','toolbar','menu','status'
+    ]);
+    const ROLES = new Set([...ACTIONABLE, ...CONTEXT]);
+    const LANDMARK = new Set([
+        'navigation','main','complementary','banner','contentinfo',
+        'form','region','dialog','alertdialog'
     ]);
     const IMPLICIT = {
         BUTTON:'button',TEXTAREA:'textbox',SELECT:'combobox',OPTION:'option',
         IMG:'img',H1:'heading',H2:'heading',H3:'heading',
-        H4:'heading',H5:'heading',H6:'heading',DIALOG:'dialog'
+        H4:'heading',H5:'heading',H6:'heading',DIALOG:'dialog',
+        NAV:'navigation',MAIN:'main',HEADER:'banner',FOOTER:'contentinfo',
+        ASIDE:'complementary',FORM:'form'
     };
     const INPUT_ROLES = {
         text:'textbox',email:'textbox',url:'textbox',tel:'textbox',
@@ -104,11 +115,13 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         range:'slider',number:'spinbutton',
         submit:'button',reset:'button',button:'button'
     };
+    let refCounter = 0;
     function getRole(el) {
         const r = el.getAttribute('role');
         if (r) return r.split(/\s+/)[0].toLowerCase();
         if (el.tagName === 'A') return el.hasAttribute('href') ? 'link' : null;
         if (el.tagName === 'INPUT') return INPUT_ROLES[(el.type||'text').toLowerCase()] || null;
+        if (el.getAttribute('contenteditable') === 'true') return 'textbox';
         return IMPLICIT[el.tagName] || null;
     }
     function getName(el, role) {
@@ -138,7 +151,8 @@ _JS_A11Y_TREE = r"""(rootEl) => {
             return (el.placeholder || el.title || '').trim();
         }
         if (['button','link','tab','menuitem','menuitemcheckbox','menuitemradio',
-            'switch','option','treeitem','heading','alert','alertdialog','dialog'
+            'switch','option','treeitem','heading','alert','alertdialog','dialog',
+            'listbox','toolbar','menu','status'
         ].includes(role)) {
             const t = el.textContent;
             if (t) { const s = t.trim(); if (s) return s.slice(0, 200); }
@@ -156,16 +170,21 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         }
         return true;
     }
-    function walk(el, d) {
+    function walk(el, d, parentLandmark) {
         if (d > 50 || !el || el.nodeType !== 1) return null;
         const tag = el.tagName;
         if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE')
             return null;
         if (!isVisible(el)) return null;
         const role = getRole(el);
+        let childLandmark = parentLandmark;
+        if (role && LANDMARK.has(role)) {
+            const lname = getName(el, role);
+            childLandmark = lname ? role + ': ' + lname.slice(0, 50) : role;
+        }
         const children = [];
         for (const child of el.children) {
-            const r = walk(child, d + 1);
+            const r = walk(child, d + 1, childLandmark);
             if (r) children.push(r);
         }
         if (!role || !ROLES.has(role)) {
@@ -174,6 +193,13 @@ _JS_A11Y_TREE = r"""(rootEl) => {
             return { role: 'none', name: '', children };
         }
         const nd = { role, name: getName(el, role) };
+        if (refCounter < 200) {
+            const refId = 'e' + refCounter;
+            el.setAttribute('data-olref', refId);
+            nd.refId = refId;
+            refCounter++;
+        }
+        if (parentLandmark) nd.landmark = parentLandmark;
         if (el.disabled || el.getAttribute('aria-disabled') === 'true') nd.disabled = true;
         const chkRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio'];
         if (chkRoles.includes(role)) {
@@ -183,11 +209,16 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.value !== '') {
             nd.value = String(el.value).slice(0, 500);
         }
+        if (el.getAttribute('contenteditable') === 'true' && el.textContent) {
+            const cv = el.textContent.trim();
+            if (cv && !nd.value) nd.value = cv.slice(0, 500);
+        }
         if (children.length) nd.children = children;
         return nd;
     }
+    document.querySelectorAll('[data-olref]').forEach(el => el.removeAttribute('data-olref'));
     const start = rootEl || document.body || document.documentElement;
-    const tree = walk(start, 0);
+    const tree = walk(start, 0, null);
     if (rootEl) return tree || { role: 'none', name: '', children: [] };
     if (!tree) return { role: 'WebArea', name: document.title || '', children: [] };
     if (tree.role === 'none')
@@ -433,6 +464,7 @@ class BrowserManager:
     async def navigate(
         self, agent_id: str, url: str, wait_ms: int = 1000,
         wait_until: str = "domcontentloaded",
+        snapshot_after: bool = False,
     ) -> dict:
         """Navigate to URL and return page text.
 
@@ -458,17 +490,27 @@ class BrowserManager:
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
+            # Single retry on timeout — transient network issues get a second chance.
+            for attempt in range(2):
+                try:
+                    await inst.page.goto(url, wait_until=wait_until, timeout=30000)
+                    break
+                except Exception as e:
+                    if attempt == 0 and "timeout" in str(e).lower():
+                        logger.debug("Navigation timeout, retrying: %s", url)
+                        await asyncio.sleep(2)
+                        continue
+                    return {"success": False, "error": str(e)}
+
+            inst.dialog_active = False
+            inst.dialog_detected = False
+            if wait_ms > 0:
+                await asyncio.sleep(wait_ms / 1000 + navigation_jitter())
             try:
-                await inst.page.goto(url, wait_until=wait_until, timeout=30000)
-                inst.dialog_active = False  # New page — stale modal state
-                inst.dialog_detected = False
-                if wait_ms > 0:
-                    await asyncio.sleep(wait_ms / 1000 + navigation_jitter())
                 title = await inst.page.title()
                 current_url = inst.page.url
-                # Extract body text for the agent (truncated to prevent huge payloads)
-                body_text = await inst.page.evaluate("() => document.body?.innerText?.slice(0, 20000) || ''")
-                return {
+                body_text = await inst.page.evaluate("() => document.body?.innerText?.slice(0, 5000) || ''")
+                result = {
                     "success": True,
                     "data": {
                         "url": self.redactor.redact(agent_id, current_url),
@@ -476,6 +518,10 @@ class BrowserManager:
                         "body": self.redactor.redact(agent_id, body_text),
                     },
                 }
+                if snapshot_after:
+                    snap = await self._snapshot_impl(inst, agent_id)
+                    result["snapshot"] = snap.get("data", {})
+                return result
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
@@ -517,204 +563,200 @@ class BrowserManager:
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
-            try:
-                tree = await self._build_a11y_tree(inst)
-                if not tree:
-                    return {"success": True, "data": {"snapshot": "(empty page)", "refs": {}}}
+            return await self._snapshot_impl(inst, agent_id)
 
-                lines = []
-                refs: dict[str, dict] = {}
-                ref_counter = [0]
-                # Counts occurrences of each (role, name) pair so we can
-                # disambiguate duplicate elements (e.g. X's two composer nodes).
-                occurrence_counts: dict[tuple, int] = {}
+    async def _snapshot_impl(self, inst: CamoufoxInstance, agent_id: str) -> dict:
+        """Snapshot implementation.  Caller must hold ``inst.lock``."""
+        try:
+            tree = await self._build_a11y_tree(inst)
+            if not tree:
+                return {"success": True, "data": {"snapshot": "(empty page)", "refs": {}}}
 
-                _MAX_WALK_DEPTH = 50
+            lines: list[str] = []
+            refs: dict[str, dict] = {}
+            ref_counter = [0]
+            # Counts occurrences of each (role, name) pair so we can
+            # disambiguate duplicate elements (e.g. X's two composer nodes).
+            occurrence_counts: dict[tuple, int] = {}
 
-                def _walk(node, depth=0):
-                    if depth > _MAX_WALK_DEPTH:
-                        return
-                    role = node.get("role", "")
-                    name = node.get("name", "")
-                    if role in _ACTIONABLE_ROLES or role in _CONTEXT_ROLES:
-                        if ref_counter[0] < _MAX_SNAPSHOT_ELEMENTS:
-                            ref_id = f"e{ref_counter[0]}"
-                            ref_counter[0] += 1
+            _MAX_WALK_DEPTH = 50
 
-                            # Track how many times this (role, name) combo has
-                            # appeared so we can use .nth(index) at click time.
-                            key = (role, name)
-                            occ = occurrence_counts.get(key, 0)
-                            occurrence_counts[key] = occ + 1
+            def _walk(node, depth=0):
+                if depth > _MAX_WALK_DEPTH:
+                    return
+                role = node.get("role", "")
+                name = node.get("name", "")
+                if role in _ACTIONABLE_ROLES or role in _CONTEXT_ROLES:
+                    if ref_counter[0] < _MAX_SNAPSHOT_ELEMENTS:
+                        # Use ref ID stamped by JS walker when available
+                        ref_id = node.get("refId") or f"e{ref_counter[0]}"
+                        ref_counter[0] += 1
 
-                            attrs = []
-                            if node.get("checked") is not None:
-                                attrs.append(f"checked={node['checked']}")
-                            if node.get("selected"):
-                                attrs.append("selected")
-                            if node.get("disabled"):
-                                attrs.append("disabled")
-                            if node.get("value"):
-                                val = node["value"]
-                                if ref_id in inst.credential_filled_refs:
-                                    val = "****"
-                                attrs.append(f"value={val}")
-                            # Flag duplicates so the agent knows which element
-                            # is which when a SPA renders multiple instances
-                            # with the same role/name (e.g. X's composer).
-                            if occ > 0:
-                                attrs.append(f"dup:{occ + 1}")
-                            attr_str = f" [{', '.join(attrs)}]" if attrs else ""
-                            line = f"{'  ' * depth}- [{ref_id}] {role} \"{name}\"{attr_str}"
-                            lines.append(line)
-                            refs[ref_id] = {
-                                "role": role, "name": name, "index": occ,
-                                "disabled": bool(node.get("disabled")),
-                            }
-                    for child in node.get("children", []):
-                        _walk(child, depth + 1)
+                        key = (role, name)
+                        occ = occurrence_counts.get(key, 0)
+                        occurrence_counts[key] = occ + 1
 
-                # When a modal dialog is open, scope to only dialog elements
-                # so agents don't see/click elements behind the overlay
-                # (e.g. X's sidebar "Post" button behind the compose modal).
-                #
-                # Detection uses DOM queries (CSS selectors) rather than
-                # accessibility tree roles, because some SPAs (Twitter/X)
-                # set role="dialog" and aria-modal="true" in the DOM but
-                # Playwright's a11y tree may not surface the dialog role.
-                # If a visible modal is found in the DOM, we re-snapshot
-                # with root=element to get only the dialog's subtree.
-                modal_els = await inst.page.query_selector_all(_MODAL_SELECTOR)
-                visible_modals = []
-                for el in modal_els:
-                    try:
-                        if await el.is_visible():
-                            visible_modals.append(el)
-                    except Exception:
-                        pass  # Element may have been removed between query and check
+                        attrs = []
+                        if node.get("checked") is not None:
+                            attrs.append(f"checked={node['checked']}")
+                        if node.get("selected"):
+                            attrs.append("selected")
+                        if node.get("disabled"):
+                            attrs.append("disabled")
+                        if node.get("value"):
+                            val = node["value"]
+                            if ref_id in inst.credential_filled_refs:
+                                val = "****"
+                            attrs.append(f"value={val}")
+                        if occ > 0:
+                            attrs.append(f"dup:{occ + 1}")
+                        attr_str = f" [{', '.join(attrs)}]" if attrs else ""
 
-                # Deduplicate nested modals: if modal A contains modal B,
-                # snapshot(root=A) already includes B's elements. Walking
-                # both would double-count refs with wrong occurrence indices.
-                if len(visible_modals) > 1:
-                    deduped = []
-                    for i, el in enumerate(visible_modals):
-                        is_nested = False
-                        for j, other in enumerate(visible_modals):
-                            if i != j:
-                                try:
-                                    if await other.evaluate(
-                                        "(parent, child) => parent.contains(child)", el
-                                    ):
-                                        is_nested = True
-                                        break
-                                except Exception:
-                                    pass
-                        if not is_nested:
-                            deduped.append(el)
-                    visible_modals = deduped if deduped else visible_modals
+                        # Structural context from nearest landmark ancestor
+                        landmark = node.get("landmark", "")
+                        ctx_str = f" ({landmark})" if landmark else ""
 
-                if visible_modals:
-                    inst.dialog_detected = True
-                    inst.dialog_active = True
-                    lines.append("** Modal dialog is open — only dialog elements are shown **")
-                    for el in visible_modals:
-                        subtree = await self._build_a11y_tree(inst, root=el)
-                        if subtree:
-                            _walk(subtree)
-                    # Check for *actionable* refs (buttons, textboxes, etc.).
-                    # Context-only refs (dialog, heading, img) don't count —
-                    # the agent needs something it can click or type into.
-                    actionable_refs = [
-                        r for r in refs.values() if r["role"] in _ACTIONABLE_ROLES
-                    ]
-                    if not actionable_refs:
-                        # Modal content may still be rendering (React concurrent
-                        # mode, X animations). Brief wait and retry the scoped
-                        # snapshot before falling back to full tree.
-                        logger.debug(
-                            "Modal scoping produced 0 actionable refs — "
-                            "retrying after short wait"
-                        )
-                        await asyncio.sleep(0.3)
-                        refs.clear()
-                        lines.clear()
-                        ref_counter[0] = 0
-                        occurrence_counts.clear()
-                        lines.append("** Modal dialog is open — only dialog elements are shown **")
-                        for el in visible_modals:
+                        line = f"{'  ' * depth}- [{ref_id}] {role} \"{name}\"{attr_str}{ctx_str}"
+                        lines.append(line)
+                        refs[ref_id] = {
+                            "role": role, "name": name, "index": occ,
+                            "disabled": bool(node.get("disabled")),
+                            "has_olref": bool(node.get("refId")),
+                        }
+                for child in node.get("children", []):
+                    _walk(child, depth + 1)
+
+            # When a modal dialog is open, scope to only dialog elements
+            # so agents don't see/click elements behind the overlay
+            # (e.g. X's sidebar "Post" button behind the compose modal).
+            modal_els = await inst.page.query_selector_all(_MODAL_SELECTOR)
+            visible_modals = []
+            for el in modal_els:
+                try:
+                    if await el.is_visible():
+                        visible_modals.append(el)
+                except Exception:
+                    pass
+
+            # Deduplicate nested modals: if modal A contains modal B,
+            # snapshot(root=A) already includes B's elements.
+            if len(visible_modals) > 1:
+                deduped = []
+                for i, el in enumerate(visible_modals):
+                    is_nested = False
+                    for j, other in enumerate(visible_modals):
+                        if i != j:
                             try:
-                                subtree = await self._build_a11y_tree(
-                                    inst, root=el
-                                )
-                                if subtree:
-                                    _walk(subtree)
+                                if await other.evaluate(
+                                    "(parent, child) => parent.contains(child)", el
+                                ):
+                                    is_nested = True
+                                    break
                             except Exception:
                                 pass
-                    # Recheck after retry.
+                    if not is_nested:
+                        deduped.append(el)
+                visible_modals = deduped if deduped else visible_modals
+
+            if visible_modals:
+                inst.dialog_detected = True
+                inst.dialog_active = True
+                lines.append("** Modal dialog is open — only dialog elements are shown **")
+                for el in visible_modals:
+                    subtree = await self._build_a11y_tree(inst, root=el)
+                    if subtree:
+                        _walk(subtree)
+                actionable_refs = [
+                    r for r in refs.values() if r["role"] in _ACTIONABLE_ROLES
+                ]
+                # Progressive retry: 300 ms then 500 ms — gives SPAs like X
+                # enough time for modal animations and Lexical editor init.
+                retry_waits = [0.3, 0.5]
+                while not actionable_refs and retry_waits:
+                    wait = retry_waits.pop(0)
+                    logger.debug(
+                        "Modal scoping produced 0 actionable refs — "
+                        "retrying after %.0f ms", wait * 1000,
+                    )
+                    await asyncio.sleep(wait)
+                    refs.clear()
+                    lines.clear()
+                    ref_counter[0] = 0
+                    occurrence_counts.clear()
+                    lines.append("** Modal dialog is open — only dialog elements are shown **")
+                    for el in visible_modals:
+                        try:
+                            subtree = await self._build_a11y_tree(inst, root=el)
+                            if subtree:
+                                _walk(subtree)
+                        except Exception:
+                            pass
                     actionable_refs = [
                         r for r in refs.values() if r["role"] in _ACTIONABLE_ROLES
                     ]
-                    if not actionable_refs:
-                        # Scoping truly failed — fall back to full tree so the
-                        # agent isn't blind.  Keep dialog_detected=True so
-                        # auto-force on disabled buttons is suppressed (they're
-                        # likely behind the overlay).
-                        logger.warning(
-                            "Modal detected but scoping produced 0 actionable "
-                            "refs after retry — falling back to full tree "
-                            "for %s", agent_id,
-                        )
-                        inst.dialog_active = False
-                        lines.clear()
-                        lines.append(
-                            "** A modal dialog is open but its elements could "
-                            "not be isolated — some elements below may be "
-                            "behind the overlay **"
-                        )
-                        _walk(tree)
-                else:
+                if not actionable_refs:
+                    logger.warning(
+                        "Modal detected but scoping produced 0 actionable "
+                        "refs after retries — falling back to full tree "
+                        "for %s", agent_id,
+                    )
                     inst.dialog_active = False
-                    inst.dialog_detected = False
+                    lines.clear()
+                    lines.append(
+                        "** A modal dialog is open but its elements could "
+                        "not be isolated — elements with a (dialog: ...) "
+                        "or similar landmark annotation are in the modal; "
+                        "others are behind the overlay **"
+                    )
                     _walk(tree)
+            else:
+                inst.dialog_active = False
+                inst.dialog_detected = False
+                _walk(tree)
 
-                inst.refs = refs  # Store refs for click/type by ref ID
-                snapshot_text = "\n".join(lines) if lines else "(no interactive elements)"
-                snapshot_text = self.redactor.redact(agent_id, snapshot_text)
-                return {"success": True, "data": {"snapshot": snapshot_text, "refs": refs}}
-            except Exception as e:
-                return {"success": False, "error": str(e)}
+            inst.refs = refs
+            snapshot_text = "\n".join(lines) if lines else "(no interactive elements)"
+            snapshot_text = self.redactor.redact(agent_id, snapshot_text)
+            return {"success": True, "data": {"snapshot": snapshot_text, "refs": refs}}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     def _locator_from_ref(self, inst: CamoufoxInstance, ref: str):
-        """Build a Playwright locator from a stored ref's role, name, and index.
+        """Build a Playwright locator from a stored ref.
 
-        Uses .nth(index) to target the exact occurrence found during snapshot.
-        This disambiguates duplicate elements with the same role+name — e.g.
-        X's SPA may render two composer nodes; without nth() we'd hit the wrong one.
+        Primary strategy: use the ``data-olref`` attribute stamped on the DOM
+        element during the JS accessibility tree walk.  This is an exact,
+        unambiguous pointer to the element the snapshot saw — immune to
+        scope mismatches and substring-matching issues.
 
-        When a modal dialog was detected in the last snapshot, scopes the search
-        to the dialog element so .nth(index) matches dialog-only occurrence
-        counts and doesn't accidentally target elements behind the overlay.
+        Fallback (when the native Playwright accessibility API was used
+        instead of the JS walker, or when the data attribute was removed
+        by a framework re-render): semantic locator via role + exact name
+        + nth(index), scoped to the modal when one is active.
         """
         info = inst.refs.get(ref)
         if not info:
             return None
+
+        # Primary: direct locator via data-olref stamped during snapshot
+        if info.get("has_olref"):
+            return inst.page.locator(f'[data-olref="{ref}"]')
+
+        # Fallback: semantic locator
         role = info["role"]
         name = info.get("name", "")
         idx = info.get("index", 0)
-        # Scope to dialog when one is active — occurrence indices were counted
-        # within the dialog subtree, so the locator must search the same scope.
-        # Matches the same selector used for DOM-based modal detection in snapshot().
         if inst.dialog_active:
             base = inst.page.locator(_MODAL_SELECTOR)
         else:
             base = inst.page
-        locator = base.get_by_role(role, name=name) if name else base.get_by_role(role)
+        locator = base.get_by_role(role, name=name, exact=True) if name else base.get_by_role(role)
         return locator.nth(idx)
 
     async def click(
         self, agent_id: str, ref: str | None = None,
         selector: str | None = None, force: bool = False,
+        snapshot_after: bool = False,
     ) -> dict:
         """Click element by ref or CSS selector.
 
@@ -762,7 +804,11 @@ class BrowserManager:
                 else:
                     return {"success": False, "error": "Must provide ref or selector"}
                 await asyncio.sleep(action_delay())
-                return {"success": True, "data": {"clicked": ref or selector}}
+                result = {"success": True, "data": {"clicked": ref or selector}}
+                if snapshot_after:
+                    snap = await self._snapshot_impl(inst, agent_id)
+                    result["snapshot"] = snap.get("data", {})
+                return result
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
@@ -795,8 +841,15 @@ class BrowserManager:
                 return {"success": False, "error": str(e)}
 
     async def type_text(self, agent_id: str, ref: str | None = None, selector: str | None = None,
-                        text: str = "", clear: bool = True, is_credential: bool = False) -> dict:
-        """Type text into element. Credential values should be pre-resolved by agent."""
+                        text: str = "", clear: bool = True, is_credential: bool = False,
+                        fast: bool = False, snapshot_after: bool = False) -> dict:
+        """Type text into element. Credential values should be pre-resolved by agent.
+
+        fast=True uses minimal inter-key delays (8 ms) — still fires real
+        keyDown/keyUp events for framework compatibility, but skips
+        human-variance timing and think pauses.  Suitable for search
+        queries, URLs, and non-sensitive form fields.
+        """
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
@@ -817,31 +870,32 @@ class BrowserManager:
                     return {"success": False, "error": "Must provide ref or selector"}
 
                 # Settle after focus — SPA editors (Lexical, ProseMirror, Draft.js)
-                # may expand or initialise event listeners on focus click.  Without
-                # this pause, keystrokes can arrive before the editor is ready,
-                # producing visible DOM text that the framework's internal state
-                # doesn't track (e.g. X's composer expands on first click).
-                await asyncio.sleep(action_delay())
+                # may expand or initialise event listeners on focus click.
+                await asyncio.sleep(0.10 if fast else action_delay())
 
                 if clear:
                     await inst.page.keyboard.press("Control+a")
                     await asyncio.sleep(0.05)
 
-                await self._type_with_variance(inst.page, text)
+                if fast:
+                    await self._type_fast(inst.page, text)
+                else:
+                    await self._type_with_variance(inst.page, text)
 
                 # Settle after typing — framework state (React, Lexical, Vue)
-                # batches DOM reconciliation asynchronously.  Without this pause,
-                # a snapshot taken immediately after typing may see stale attributes
-                # like aria-disabled="true" on submit buttons that are actually
-                # enabled (e.g. X's Post button).
-                await asyncio.sleep(action_delay())
+                # batches DOM reconciliation asynchronously.
+                await asyncio.sleep(0.10 if fast else action_delay())
 
                 if is_credential:
                     self.redactor.track_resolved_value(agent_id, text)
                     if ref:
                         inst.credential_filled_refs.add(ref)
 
-                return {"success": True, "data": {"typed_into": ref or selector, "length": len(text)}}
+                result = {"success": True, "data": {"typed_into": ref or selector, "length": len(text)}}
+                if snapshot_after:
+                    snap = await self._snapshot_impl(inst, agent_id)
+                    result["snapshot"] = snap.get("data", {})
+                return result
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
@@ -900,14 +954,14 @@ class BrowserManager:
         map, e.g. accented letters, emoji), use keyboard.type() so the character
         at least appears.
 
-        Think-pauses are weighted to word/clause boundaries: 12 % probability
-        before the first character of each new word, 2.5 % mid-word.
+        Think-pauses are weighted to word/clause boundaries: 8 % probability
+        before the first character of each new word, 1.5 % mid-word.
         """
         prev_char = ""
         for char in text:
             # Word-boundary characters signal a clause break — higher pause
             # probability for the character starting the next word/clause.
-            pause_prob = 0.12 if prev_char in _WORD_BOUNDARY_CHARS else 0.025
+            pause_prob = 0.08 if prev_char in _WORD_BOUNDARY_CHARS else 0.015
             if random.random() < pause_prob:
                 await asyncio.sleep(think_pause())
 
@@ -926,6 +980,27 @@ class BrowserManager:
                     await page.keyboard.type(char)
             await asyncio.sleep(keystroke_delay(char))
             prev_char = char
+
+    async def _type_fast(self, page, text: str) -> None:
+        """Type text with minimal delay — still fires real key events.
+
+        Uses keyboard.press(char) for isTrusted=true events so React/Lexical
+        state updates work, but with a fixed 8 ms inter-key delay (no
+        variance, no think pauses).  Suitable for search queries, URLs,
+        and non-sensitive form fields where human-realistic timing is
+        unnecessary.
+        """
+        for char in text:
+            if char == "\n":
+                await page.keyboard.press("Enter")
+            elif char == "\t":
+                await page.keyboard.press("Tab")
+            else:
+                try:
+                    await page.keyboard.press(char)
+                except Exception:
+                    await page.keyboard.type(char)
+            await asyncio.sleep(0.008)
 
     async def scroll(self, agent_id: str, direction: str = "down",
                      amount: int = 0, ref: str | None = None) -> dict:

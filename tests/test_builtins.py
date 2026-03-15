@@ -849,7 +849,8 @@ class TestBrowserNavigateHttpClient:
 
         mc.browser_command.assert_awaited_once_with(
             "navigate",
-            {"url": "https://example.com", "wait_ms": 1000, "wait_until": "domcontentloaded"},
+            {"url": "https://example.com", "wait_ms": 1000, "wait_until": "domcontentloaded",
+             "snapshot_after": False},
         )
         assert result["url"] == "https://example.com"
         assert result["content"] == "Hello world"
@@ -865,7 +866,8 @@ class TestBrowserNavigateHttpClient:
 
         mc.browser_command.assert_awaited_once_with(
             "navigate",
-            {"url": "https://example.com", "wait_ms": 5000, "wait_until": "domcontentloaded"},
+            {"url": "https://example.com", "wait_ms": 5000, "wait_until": "domcontentloaded",
+             "snapshot_after": False},
         )
 
     @pytest.mark.asyncio
@@ -912,7 +914,8 @@ class TestBrowserClickHttpClient:
 
         result = await browser_click(ref="e1", mesh_client=mc)
 
-        mc.browser_command.assert_awaited_once_with("click", {"ref": "e1", "selector": "", "force": False})
+        mc.browser_command.assert_awaited_once_with("click", {"ref": "e1", "selector": "", "force": False,
+                                                               "snapshot_after": False})
         assert result["clicked"] == "e1"
 
     @pytest.mark.asyncio
@@ -924,7 +927,8 @@ class TestBrowserClickHttpClient:
 
         result = await browser_click(selector="#btn", mesh_client=mc)
 
-        mc.browser_command.assert_awaited_once_with("click", {"ref": "", "selector": "#btn", "force": False})
+        mc.browser_command.assert_awaited_once_with("click", {"ref": "", "selector": "#btn", "force": False,
+                                                               "snapshot_after": False})
         assert result["clicked"] == "#btn"
 
     @pytest.mark.asyncio
@@ -950,7 +954,7 @@ class TestBrowserTypeHttpClient:
 
         mc.browser_command.assert_awaited_once_with(
             "type", {"ref": "e5", "selector": "", "text": "hello", "clear": True,
-                     "is_credential": False},
+                     "is_credential": False, "fast": False, "snapshot_after": False},
         )
         assert result["success"] is True
 
