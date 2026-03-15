@@ -150,7 +150,7 @@ class AgentLoop:
         self._fleet_roster_ts: float = 0  # timestamp of last fetch
         self._introspect_cache: dict | None = None
         self._introspect_cache_ts: float = 0
-        self._goals_cache: dict | None = None
+        self._goals_cache: dict | None | object = AgentLoop._GOALS_NOT_FETCHED
         self._goals_cache_ts: float = 0
         self._loop_detector = ToolLoopDetector()
         # Standalone agents have no project blackboard — hide those tools
@@ -527,10 +527,12 @@ class AgentLoop:
             self._last_result = result
             return result
 
+    _GOALS_NOT_FETCHED = object()  # sentinel distinct from None
+
     async def _fetch_goals(self) -> dict | None:
         """Read this agent's current goals from the shared blackboard (TTL: 5 min)."""
         now = time.time()
-        if self._goals_cache is not None and (now - self._goals_cache_ts) < _GOALS_TTL:
+        if self._goals_cache is not self._GOALS_NOT_FETCHED and (now - self._goals_cache_ts) < _GOALS_TTL:
             return self._goals_cache
         try:
             entry = await self.mesh_client.read_blackboard(f"goals/{self.agent_id}")
@@ -539,7 +541,7 @@ class AgentLoop:
         except Exception as e:
             logger.debug("Failed to fetch goals for '%s': %s", self.agent_id, e)
             # Keep stale cache on failure rather than returning None
-        return self._goals_cache
+        return self._goals_cache if self._goals_cache is not self._GOALS_NOT_FETCHED else None
 
     async def _build_initial_context(self, assignment: TaskAssignment) -> list[dict]:
         """Build initial user message with task, goals, memory, and blackboard context."""

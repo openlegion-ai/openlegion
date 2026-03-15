@@ -491,13 +491,11 @@ class BrowserManager:
         inst.touch()
         async with inst.lock:
             # Single retry on timeout — transient network issues get a second chance.
-            last_err = None
             for attempt in range(2):
                 try:
                     await inst.page.goto(url, wait_until=wait_until, timeout=30000)
                     break
                 except Exception as e:
-                    last_err = e
                     if attempt == 0 and "timeout" in str(e).lower():
                         logger.debug("Navigation timeout, retrying: %s", url)
                         await asyncio.sleep(2)

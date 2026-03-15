@@ -42,6 +42,7 @@ class HeartbeatProbeResult:
     name: str
     triggered: bool
     detail: str = ""
+    entries: list | None = None  # cached blackboard entries to avoid re-query
 
 
 @dataclass
@@ -520,6 +521,7 @@ class CronScheduler:
                     name="pending_signals",
                     triggered=len(signals) > 0,
                     detail=f"{len(signals)} pending signal(s)",
+                    entries=signals if signals else None,
                 ))
             except Exception as e:
                 logger.debug("Pending signals probe failed for '%s': %s", agent, e)
@@ -531,6 +533,7 @@ class CronScheduler:
                     name="pending_tasks",
                     triggered=len(tasks) > 0,
                     detail=f"{len(tasks)} pending task(s)",
+                    entries=tasks if tasks else None,
                 ))
             except Exception as e:
                 logger.debug("Pending tasks probe failed for '%s': %s", agent, e)
@@ -545,42 +548,26 @@ class CronScheduler:
     ) -> str:
         """Format actual blackboard entry content for pending signals/tasks.
 
-        Reuses probe results to determine which prefixes have entries,
-        avoiding duplicate blackboard queries.
+        Uses cached entries from probe results instead of re-querying the
+        blackboard.
         """
-        if not self.blackboard:
-            return ""
-        # Only fetch details for prefixes that probes already found entries for
         probe_map = {p.name: p for p in probes}
         parts: list[str] = []
 
-        if probe_map.get("pending_signals", HeartbeatProbeResult("", False)).triggered:
-            try:
-                signals = self.blackboard.list_by_prefix(f"signals/{agent}")
-                if signals:
-                    lines = []
-                    for entry in signals[:max_items]:
-                        val = json.dumps(entry.value, default=str)
-                        if len(val) > 200:
-                            val = val[:200] + "..."
-                        lines.append(f"- `{entry.key}`: {val}")
-                    parts.append("## Pending Signals\n\n" + "\n".join(lines))
-            except Exception as e:
-                logger.debug("Failed to get signal details for '%s': %s", agent, e)
+        for probe_name, heading in [
+            ("pending_signals", "## Pending Signals"),
+            ("pending_tasks", "## Pending Tasks"),
+        ]:
+            probe = probe_map.get(probe_name)
+            if probe and probe.triggered and probe.entries:
+                lines = []
+                for entry in probe.entries[:max_items]:
+                    val = json.dumps(entry.value, default=str)
+                    if len(val) > 200:
+                        val = val[:200] + "..."
+                    lines.append(f"- `{entry.key}`: {val}")
+                parts.append(f"{heading}\n\n" + "\n".join(lines))
 
-        if probe_map.get("pending_tasks", HeartbeatProbeResult("", False)).triggered:
-            try:
-                tasks = self.blackboard.list_by_prefix(f"tasks/{agent}")
-                if tasks:
-                    lines = []
-                    for entry in tasks[:max_items]:
-                        val = json.dumps(entry.value, default=str)
-                        if len(val) > 200:
-                            val = val[:200] + "..."
-                        lines.append(f"- `{entry.key}`: {val}")
-                    parts.append("## Pending Tasks\n\n" + "\n".join(lines))
-            except Exception as e:
-                logger.debug("Failed to get task details for '%s': %s", agent, e)
         return "\n\n".join(parts)
 
     def _is_due(self, job: CronJob, now: datetime) -> bool:
