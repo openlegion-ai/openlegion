@@ -706,9 +706,9 @@ class BrowserManager:
                     lines.clear()
                     lines.append(
                         "** A modal dialog is open but its elements could "
-                        "not be isolated — elements annotated with a dialog "
-                        "landmark are in the modal; others are behind the "
-                        "overlay **"
+                        "not be isolated — elements with a (dialog: ...) "
+                        "or similar landmark annotation are in the modal; "
+                        "others are behind the overlay **"
                     )
                     _walk(tree)
             else:
