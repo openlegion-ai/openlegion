@@ -27,8 +27,23 @@ _skill_staging: dict[str, dict] = {}
 _skill_staging_lock = threading.Lock()
 
 
-def skill(name: str, description: str, parameters: dict):
-    """Decorator to register a function as an agent skill."""
+def skill(
+    name: str,
+    description: str,
+    parameters: dict,
+    parallel_safe: bool = True,
+    loop_exempt: bool = False,
+):
+    """Decorator to register a function as an agent skill.
+
+    *parallel_safe* — when ``True`` (default), the tool may be executed
+    concurrently with other parallel-safe tools via ``asyncio.gather``.
+    Set to ``False`` for tools that hold exclusive resources (e.g. browser).
+
+    *loop_exempt* — when ``True``, the tool is exempt from warn/block
+    escalation in the loop detector (but still respects the terminate
+    threshold as a hard safety cap).
+    """
 
     def decorator(func):
         sig = inspect.signature(func)
@@ -44,6 +59,8 @@ def skill(name: str, description: str, parameters: dict):
                 p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
             ),
             "_sig_is_coroutine": inspect.iscoroutinefunction(func),
+            "_parallel_safe": parallel_safe,
+            "_loop_exempt": loop_exempt,
         }
         return func
 
@@ -217,6 +234,20 @@ class SkillRegistry:
             else:
                 result[name] = "custom"
         return result
+
+    def is_parallel_safe(self, name: str) -> bool:
+        """Return whether a skill is safe to execute concurrently."""
+        info = self.skills.get(name)
+        if not info:
+            return True  # unknown tools default to safe
+        return info.get("_parallel_safe", True)
+
+    def get_loop_exempt_tools(self) -> frozenset[str]:
+        """Return the set of tool names marked loop_exempt."""
+        return frozenset(
+            name for name, info in self.skills.items()
+            if info.get("_loop_exempt", False)
+        )
 
     def list_skills(self, exclude: frozenset[str] | None = None) -> list[str]:
         """Return list of available skill names."""

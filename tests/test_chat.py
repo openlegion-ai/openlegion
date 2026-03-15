@@ -15,13 +15,14 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None) -> AgentLoop:
     memory = MagicMock()
     memory.get_high_salience_facts = MagicMock(return_value=[])
     memory.search = AsyncMock(return_value=[])
-    memory.store_fact = AsyncMock(return_value="fact_123")
     memory.log_action = AsyncMock()
 
     skills = MagicMock()
     skills.get_tool_definitions = MagicMock(return_value=[])
     skills.get_descriptions = MagicMock(return_value="- no tools")
     skills.list_skills = MagicMock(return_value=[])
+    skills.is_parallel_safe = MagicMock(return_value=True)
+    skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
     if llm_responses:

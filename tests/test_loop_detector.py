@@ -57,14 +57,19 @@ def test_terminate_after_threshold():
     assert d.check_before("web_search", args) == "terminate"
 
 
-def test_exempt_tools_always_ok():
-    """memory_search should always return 'ok'."""
+def test_exempt_tools_skip_warn_block():
+    """Exempt tools skip warn/block but still respect terminate threshold."""
     d = ToolLoopDetector()
     args = {"query": "test"}
     result = '{"results": []}'
-    for _ in range(10):
+    # 4 identical calls would normally trigger block — exempt tool gets "ok"
+    for _ in range(4):
         d.record("memory_search", args, result)
     assert d.check_before("memory_search", args) == "ok"
+    # 9 calls with same params triggers terminate even for exempt tools
+    for _ in range(5):
+        d.record("memory_search", args, result)
+    assert d.check_before("memory_search", args) == "terminate"
 
 
 def test_sliding_window_eviction():
@@ -160,9 +165,25 @@ def test_would_terminate_false_below_threshold():
 
 
 def test_would_terminate_exempt_tools():
-    """would_terminate returns False for exempt tools even above threshold."""
+    """would_terminate returns True for exempt tools above threshold (hard cap)."""
     d = ToolLoopDetector()
     args = {"query": "test"}
     for _ in range(10):
         d.record("memory_search", args, '{"results": []}')
-    assert d.would_terminate("memory_search", args) is False
+    # Terminate is a hard safety cap — applies to ALL tools including exempt
+    assert d.would_terminate("memory_search", args) is True
+
+
+def test_custom_exempt_tools():
+    """Custom exempt_tools from skill registry are merged with defaults."""
+    d = ToolLoopDetector(exempt_tools=frozenset({"http_request", "read_file"}))
+    args = {"url": "http://example.com"}
+    result = '{"status": 200}'
+    # 4 identical calls would normally trigger block — exempt tool gets "ok"
+    for _ in range(4):
+        d.record("http_request", args, result)
+    assert d.check_before("http_request", args) == "ok"
+    # Default exempt tool still works
+    for _ in range(4):
+        d.record("memory_search", {"q": "test"}, '{"r": []}')
+    assert d.check_before("memory_search", {"q": "test"}) == "ok"

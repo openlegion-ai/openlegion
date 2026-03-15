@@ -118,6 +118,7 @@ async def _browser_command(mesh_client, action: str, params: dict | None = None)
             "default": False,
         },
     },
+    parallel_safe=False,
 )
 async def browser_navigate(
     url: str, wait_ms: int = 1000, wait_until: str = "domcontentloaded",
@@ -144,6 +145,7 @@ async def browser_navigate(
         "browser_screenshot for that."
     ),
     parameters={},
+    parallel_safe=False,
 )
 async def browser_get_elements(*, mesh_client=None) -> dict:
     """Return an accessibility tree snapshot with element refs."""
@@ -181,6 +183,7 @@ async def browser_get_elements(*, mesh_client=None) -> dict:
             "default": 10000,
         },
     },
+    parallel_safe=False,
 )
 async def browser_wait_for(
     selector: str, state: str = "visible", timeout_ms: int = 10000,
@@ -208,6 +211,8 @@ async def browser_wait_for(
             "default": False,
         },
     },
+    parallel_safe=False,
+    loop_exempt=True,
 )
 async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> dict:
     """Take a screenshot via the browser service.
@@ -284,6 +289,7 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
             "default": False,
         },
     },
+    parallel_safe=False,
 )
 async def browser_click(
     selector: str = "", ref: str = "", force: bool = False,
@@ -346,6 +352,7 @@ async def browser_click(
             "default": False,
         },
     },
+    parallel_safe=False,
 )
 async def browser_type(
     text: str, selector: str = "", ref: str = "", fast: bool = False,
@@ -409,6 +416,7 @@ async def browser_type(
             "default": "",
         },
     },
+    parallel_safe=False,
 )
 async def browser_hover(
     selector: str = "", ref: str = "", *, mesh_client=None,
@@ -447,6 +455,7 @@ async def browser_hover(
             "default": "",
         },
     },
+    parallel_safe=False,
 )
 async def browser_scroll(
     direction: str = "down", amount: int = 0, ref: str = "", *, mesh_client=None,
@@ -466,6 +475,7 @@ async def browser_scroll(
         "Profile is preserved — cookies and sessions survive."
     ),
     parameters={},
+    parallel_safe=False,
 )
 async def browser_reset(*, mesh_client=None) -> dict:
     """Force-close the browser session so the next call gets a fresh one."""
@@ -493,6 +503,7 @@ async def browser_reset(*, mesh_client=None) -> dict:
             ),
         },
     },
+    parallel_safe=False,
 )
 async def browser_press_key(key: str, *, mesh_client=None) -> dict:
     """Press a keyboard key or combination."""
@@ -508,6 +519,7 @@ async def browser_press_key(key: str, *, mesh_client=None) -> dict:
         "Returns the URL and title of the page navigated to."
     ),
     parameters={},
+    parallel_safe=False,
 )
 async def browser_go_back(*, mesh_client=None) -> dict:
     """Go back one page in browser history."""
@@ -521,6 +533,7 @@ async def browser_go_back(*, mesh_client=None) -> dict:
         "Returns the URL and title of the page navigated to."
     ),
     parameters={},
+    parallel_safe=False,
 )
 async def browser_go_forward(*, mesh_client=None) -> dict:
     """Go forward one page in browser history."""
@@ -546,6 +559,7 @@ async def browser_go_forward(*, mesh_client=None) -> dict:
             "default": -1,
         },
     },
+    parallel_safe=False,
 )
 async def browser_switch_tab(tab_index: int = -1, *, mesh_client=None) -> dict:
     """List open tabs and optionally switch to one."""
@@ -562,6 +576,7 @@ async def browser_switch_tab(tab_index: int = -1, *, mesh_client=None) -> dict:
         "Use this when you suspect a CAPTCHA is blocking progress."
     ),
     parameters={},
+    parallel_safe=False,
 )
 async def browser_solve_captcha(*, mesh_client=None) -> dict:
     """Detect CAPTCHAs on the current page."""

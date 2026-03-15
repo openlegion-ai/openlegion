@@ -37,7 +37,6 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
         memory.decay_all = AsyncMock()
         memory.search = AsyncMock(return_value=[])
         memory.search_hierarchical = AsyncMock(return_value=[])
-        memory.store_fact = AsyncMock(return_value="fact_123")
         memory.log_action = AsyncMock()
         memory.store_tool_outcome = AsyncMock()
         memory.get_tool_history = MagicMock(return_value=[])
@@ -46,6 +45,8 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
     skills.get_tool_definitions = MagicMock(return_value=[])
     skills.get_descriptions = MagicMock(return_value="- no tools")
     skills.list_skills = MagicMock(return_value=[])
+    skills.is_parallel_safe = MagicMock(return_value=True)
+    skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
     if llm_responses:

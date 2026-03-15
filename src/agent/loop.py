@@ -41,6 +41,13 @@ _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
 _TOOL_HISTORY_LIMIT = 10  # recent tool outcomes in system prompt
 HEARTBEAT_MAX_ITERATIONS = 10  # tighter bound for heartbeat (cheaper than task/chat)
 
+# Files already injected via bootstrap — skip in first-message auto-search
+# to avoid duplicate content.  Matches WorkspaceManager._BOOTSTRAP_FILES.
+_BOOTSTRAP_SEARCH_EXCLUDE = frozenset({
+    "PROJECT.md", "SYSTEM.md", "INSTRUCTIONS.md",
+    "SOUL.md", "USER.md", "MEMORY.md",
+})
+
 # ContextVar so tools (e.g. notify_user) can detect heartbeat mode
 _heartbeat_mode: ContextVar[bool] = ContextVar("_heartbeat_mode", default=False)
 
@@ -152,7 +159,9 @@ class AgentLoop:
         self._introspect_cache_ts: float = 0
         self._goals_cache: dict | None | object = AgentLoop._GOALS_NOT_FETCHED
         self._goals_cache_ts: float = 0
-        self._loop_detector = ToolLoopDetector()
+        self._loop_detector = ToolLoopDetector(
+            exempt_tools=skills.get_loop_exempt_tools(),
+        )
         # Standalone agents have no project blackboard — hide those tools
         self._excluded_tools: frozenset[str] | None = (
             _BLACKBOARD_TOOLS if mesh_client.is_standalone else None
@@ -386,6 +395,21 @@ class AgentLoop:
                 if assignment.token_budget:
                     assignment.token_budget.record_usage(llm_response.tokens_used, self.llm.default_model)
 
+                # Early cancel check after LLM call — avoids executing
+                # tools from a response we're about to discard.
+                if self._cancel_requested:
+                    self._cancel_requested = False
+                    self.state = "idle"
+                    self.current_task = None
+                    result = TaskResult(
+                        task_id=assignment.task_id,
+                        status="cancelled",
+                        tokens_used=total_tokens,
+                        duration_ms=int((time.time() - start) * 1000),
+                    )
+                    self._last_result = result
+                    return result
+
                 # === ACT ===
                 if llm_response.tool_calls:
                     # Pre-scan for terminate BEFORE appending assistant message
@@ -422,9 +446,11 @@ class AgentLoop:
                         "tool_calls": tool_call_entries,
                     })
 
-                    # Execute each tool and append results with CORRECT role
-                    for i, tool_call in enumerate(llm_response.tool_calls):
-                        result_str, _result = await self._run_tool(tool_call)
+                    # Execute tools — parallel-safe tools run concurrently
+                    tool_results = await self._run_tools_parallel(
+                        llm_response.tool_calls,
+                    )
+                    for i, (result_str, _result) in enumerate(tool_results):
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call_entries[i]["id"],
@@ -647,22 +673,17 @@ class AgentLoop:
             input_summary=truncate(str(tool_input), 200),
             output_summary=truncate(str(tool_output), 200),
         )
-        # Record structured tool outcome
+        # Record structured tool outcome (hash-deduplicated, searchable
+        # via get_tool_history).  Automatic fact extraction was removed in
+        # Phase 3 — it generated 3-10 embedding calls per tool execution
+        # with minimal retrieval value.  Agents retain memory_save for
+        # explicit storage and context compaction captures important facts.
         await self.memory.store_tool_outcome(
             tool_name=tool_name,
             arguments=tool_input,
             outcome=truncate(str(tool_output), 500),
             success=True,
         )
-        if isinstance(tool_output, dict):
-            for key, value in tool_output.items():
-                if isinstance(value, (str, int, float, bool)):
-                    await self.memory.store_fact(
-                        key=f"{tool_name}_{key}",
-                        value=str(value),
-                        category=tool_name,
-                        source=f"tool:{tool_name}",
-                    )
 
     async def _record_failure(
         self, tool_name: str, error: str, context: str = "", arguments: dict | None = None,
@@ -883,6 +904,30 @@ class AgentLoop:
                 )
                 total_tokens += llm_response.tokens_used
 
+                # Early cancel check after LLM call
+                if self._cancel_requested:
+                    self._cancel_requested = False
+                    self.state = "idle"
+                    duration_ms = int((time.time() - start) * 1000)
+                    if self.workspace:
+                        self.workspace.append_activity(
+                            trigger="heartbeat",
+                            summary="Cancelled",
+                            tools_used=tools_used,
+                            duration_ms=duration_ms,
+                            tokens_used=total_tokens,
+                            outcome="cancelled",
+                        )
+                    return {
+                        "response": "",
+                        "summary": "Cancelled",
+                        "tools_used": tools_used,
+                        "duration_ms": duration_ms,
+                        "tokens_used": total_tokens,
+                        "outcome": "cancelled",
+                        "skipped": False,
+                    }
+
                 # On the last iteration, ignore any tool_calls — the LLM
                 # shouldn't return them (tools were withheld) but guard
                 # against provider edge cases.
@@ -968,15 +1013,20 @@ class AgentLoop:
                     "tool_calls": tool_call_entries,
                 })
 
-                for i, tool_call in enumerate(llm_response.tool_calls):
+                # Capture metadata before execution
+                for tool_call in llm_response.tool_calls:
                     if tool_call.name not in tools_used:
                         tools_used.append(tool_call.name)
-                    # Capture notify_user calls for activity log
                     if tool_call.name == "notify_user":
                         msg_arg = tool_call.arguments.get("message", "")
                         if msg_arg:
                             notifications.append(msg_arg)
-                    result_str, _result = await self._run_tool(tool_call)
+
+                # Execute tools — parallel-safe tools run concurrently
+                tool_results = await self._run_tools_parallel(
+                    llm_response.tool_calls,
+                )
+                for i, (result_str, _result) in enumerate(tool_results):
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call_entries[i]["id"],
@@ -1121,8 +1171,8 @@ class AgentLoop:
 
         Returns (possibly-enriched user_message, system_prompt).
         """
-        goals = await self._fetch_goals()
-
+        # Correction check uses only workspace + _chat_messages — no I/O,
+        # safe to run before the parallel fetch.
         if (
             self.workspace
             and self._chat_messages
@@ -1143,7 +1193,9 @@ class AgentLoop:
             self.workspace.append_chat_message("user", user_message)
 
         if not self._chat_messages and self.workspace:
-            memory_hits = self.workspace.search(user_message, max_results=3)
+            memory_hits = self.workspace.search(
+                user_message, max_results=3, exclude_files=_BOOTSTRAP_SEARCH_EXCLUDE,
+            )
             if memory_hits:
                 memory_context = sanitize_for_prompt("\n".join(
                     f"- [{h['file']}] {h['snippet']}" for h in memory_hits
@@ -1175,8 +1227,18 @@ class AgentLoop:
                 for s in steered:
                     self.workspace.append_chat_message("user", f"[steer] {s}")
 
-        roster = [] if self.mesh_client.is_standalone else await self._fetch_fleet_roster()
-        introspect_data = await self._fetch_introspect_cached()
+        # Parallel fetch: goals, fleet roster (if multi-agent), introspect.
+        # Saves 30-100ms per turn vs sequential requests.
+        if self.mesh_client.is_standalone:
+            goals, introspect_data = await asyncio.gather(
+                self._fetch_goals(), self._fetch_introspect_cached(),
+            )
+            roster: list[dict] = []
+        else:
+            goals, roster, introspect_data = await asyncio.gather(
+                self._fetch_goals(), self._fetch_fleet_roster(),
+                self._fetch_introspect_cached(),
+            )
         system = self._build_chat_system_prompt(
             goals=goals, fleet_roster=roster, introspect_data=introspect_data,
         )
@@ -1297,6 +1359,54 @@ class AgentLoop:
             )
             return result_str, result
 
+    async def _run_tools_parallel(
+        self,
+        tool_calls: list,
+    ) -> list[tuple[str | list, dict]]:
+        """Execute tool calls with parallel-safe tools gathered concurrently.
+
+        Partitions tool calls into batches: consecutive parallel-safe tools
+        run via ``asyncio.gather``, non-parallel-safe tools run sequentially.
+        Returns results in the original order.
+
+        Uses ``return_exceptions=True`` so individual tool failures don't
+        abort the whole batch — consistent with Phase 1 error-fill behavior.
+        """
+        if len(tool_calls) <= 1:
+            return [await self._run_tool(tool_calls[0])]
+
+        # Partition into batches: (start_idx, end_idx, is_parallel)
+        batches: list[tuple[int, int, bool]] = []
+        i = 0
+        n = len(tool_calls)
+        while i < n:
+            safe = self.skills.is_parallel_safe(tool_calls[i].name)
+            j = i + 1
+            if safe:
+                while j < n and self.skills.is_parallel_safe(tool_calls[j].name):
+                    j += 1
+            batches.append((i, j, safe and (j - i) > 1))
+            i = j
+
+        results: list[tuple[str | list, dict] | None] = [None] * n
+
+        for start, end, is_parallel in batches:
+            if is_parallel:
+                coros = [self._run_tool(tool_calls[k]) for k in range(start, end)]
+                batch_results = await asyncio.gather(*coros, return_exceptions=True)
+                for k, br in enumerate(batch_results):
+                    idx = start + k
+                    if isinstance(br, BaseException):
+                        err_str = json.dumps({"error": f"Tool execution failed: {br}"})
+                        results[idx] = (err_str, {"error": str(br)})
+                    else:
+                        results[idx] = br
+            else:
+                for k in range(start, end):
+                    results[k] = await self._run_tool(tool_calls[k])
+
+        return results  # type: ignore[return-value]
+
     async def _execute_chat_tool_call(
         self, tool_call, tool_call_id: str, tool_outputs: list[dict],
     ) -> dict:
@@ -1310,6 +1420,29 @@ class AgentLoop:
         output = {"tool": tool_call.name, "input": tool_call.arguments, "output": result}
         tool_outputs.append(output)
         return output
+
+    async def _execute_chat_tools_parallel(
+        self,
+        tool_calls: list,
+        entries: list[dict],
+        tool_outputs: list[dict],
+    ) -> None:
+        """Execute chat tool calls with parallel-safe tools gathered concurrently.
+
+        Appends results to ``self._chat_messages`` in the original order.
+        """
+        tool_results = await self._run_tools_parallel(tool_calls)
+        for i, (result_str, result) in enumerate(tool_results):
+            self._chat_messages.append({
+                "role": "tool",
+                "tool_call_id": entries[i]["id"],
+                "content": result_str,
+            })
+            tool_outputs.append({
+                "tool": tool_calls[i].name,
+                "input": tool_calls[i].arguments,
+                "output": result,
+            })
 
     async def _compact_chat_context(self, system: str) -> None:
         """Run context compaction and drain any pending steer messages."""
@@ -1405,24 +1538,25 @@ class AgentLoop:
                     }
 
                 entries = self._build_tool_call_entries(llm_response)
-                for i, tool_call in enumerate(llm_response.tool_calls):
-                    try:
-                        await self._execute_chat_tool_call(tool_call, entries[i]["id"], tool_outputs)
-                    except Exception as tool_err:
-                        logger.error("Tool %s raised unexpected error: %s", tool_call.name, tool_err)
-                        self._chat_messages.append({
-                            "role": "tool",
-                            "tool_call_id": entries[i]["id"],
-                            "content": json.dumps({"error": f"Internal error: {tool_err}"}),
-                        })
-                        # Fill in error results for remaining unexecuted tools
-                        for j in range(i + 1, len(llm_response.tool_calls)):
+                try:
+                    await self._execute_chat_tools_parallel(
+                        llm_response.tool_calls, entries, tool_outputs,
+                    )
+                except Exception as tool_err:
+                    logger.error("Chat tool batch raised unexpected error: %s", tool_err)
+                    # Error-fill any missing tool results to maintain role alternation
+                    existing_ids = {
+                        m["tool_call_id"]
+                        for m in self._chat_messages
+                        if m.get("role") == "tool" and "tool_call_id" in m
+                    }
+                    for entry in entries:
+                        if entry["id"] not in existing_ids:
                             self._chat_messages.append({
                                 "role": "tool",
-                                "tool_call_id": entries[j]["id"],
-                                "content": json.dumps({"error": "Skipped due to prior tool failure"}),
+                                "tool_call_id": entry["id"],
+                                "content": json.dumps({"error": f"Internal error: {tool_err}"}),
                             })
-                        break
                 self._chat_total_rounds += 1
 
                 if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
@@ -1792,28 +1926,35 @@ class AgentLoop:
                     return
 
                 entries = self._build_tool_call_entries(llm_response)
-                for i, tool_call in enumerate(llm_response.tool_calls):
+                # Emit tool_start events for all tools upfront
+                for tool_call in llm_response.tool_calls:
                     yield {"type": "tool_start", "name": tool_call.name, "input": tool_call.arguments}
-                    try:
-                        output = await self._execute_chat_tool_call(tool_call, entries[i]["id"], tool_outputs)
-                        yield {"type": "tool_result", "name": tool_call.name, "output": output["output"]}
-                    except Exception as tool_err:
-                        logger.error("Tool %s raised unexpected error: %s", tool_call.name, tool_err)
-                        self._chat_messages.append({
-                            "role": "tool",
-                            "tool_call_id": entries[i]["id"],
-                            "content": json.dumps({"error": f"Internal error: {tool_err}"}),
-                        })
-                        yield {"type": "tool_result", "name": tool_call.name, "output": {"error": str(tool_err)}}
-                        for j in range(i + 1, len(llm_response.tool_calls)):
-                            remaining_tc = llm_response.tool_calls[j]
+                try:
+                    await self._execute_chat_tools_parallel(
+                        llm_response.tool_calls, entries, tool_outputs,
+                    )
+                    # Emit tool_result events for all completed tools
+                    for output in tool_outputs[-len(llm_response.tool_calls):]:
+                        yield {"type": "tool_result", "name": output["tool"], "output": output["output"]}
+                except Exception as tool_err:
+                    logger.error("Chat tool batch raised unexpected error: %s", tool_err)
+                    existing_ids = {
+                        m["tool_call_id"]
+                        for m in self._chat_messages
+                        if m.get("role") == "tool" and "tool_call_id" in m
+                    }
+                    for idx, entry in enumerate(entries):
+                        if entry["id"] not in existing_ids:
                             self._chat_messages.append({
                                 "role": "tool",
-                                "tool_call_id": entries[j]["id"],
-                                "content": json.dumps({"error": "Skipped due to prior tool failure"}),
+                                "tool_call_id": entry["id"],
+                                "content": json.dumps({"error": f"Internal error: {tool_err}"}),
                             })
-                            yield {"type": "tool_result", "name": remaining_tc.name, "output": {"error": "Skipped"}}
-                        break
+                            yield {
+                                "type": "tool_result",
+                                "name": llm_response.tool_calls[idx].name,
+                                "output": {"error": str(tool_err)},
+                            }
                 self._chat_total_rounds += 1
 
                 if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:

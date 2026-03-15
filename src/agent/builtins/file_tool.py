@@ -106,6 +106,7 @@ def _is_protected_workspace_file(resolved: Path) -> bool:
             "default": 0,
         },
     },
+    loop_exempt=True,
 )
 def read_file(path: str, offset: int = 0, limit: int = 0) -> dict:
     """Read file contents with optional line offset/limit."""
