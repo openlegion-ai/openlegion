@@ -3473,18 +3473,29 @@ function dashboard() {
       } catch (e) { console.warn('focusBrowser failed:', e); }
     },
 
-    toggleBrowser() {
-      this.showBrowserViewer = !this.showBrowserViewer;
+    async toggleBrowser() {
       if (this.showBrowserViewer) {
-        // Reset loading overlay for fresh connection
+        this.showBrowserViewer = false;
+        return;
+      }
+      if (this._browserToggling) return;
+      this._browserToggling = true;
+      try {
+        // Focus the correct agent's window BEFORE loading the VNC iframe
+        const agentId = this.selectedAgent;
+        if (agentId) {
+          await this.focusBrowser(agentId);
+        }
+        // Bail if user navigated to a different agent while focusing
+        if (this.selectedAgent !== agentId) return;
+        this.showBrowserViewer = true;
         this.$nextTick(() => {
           if (this.$refs.vncLoading) {
             this.$refs.vncLoading.style.opacity = '1';
           }
         });
-        if (this.selectedAgent) {
-          this.focusBrowser(this.selectedAgent);
-        }
+      } finally {
+        this._browserToggling = false;
       }
     },
 
