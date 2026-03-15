@@ -820,14 +820,33 @@ class AgentLoop:
         self.state = "working"
 
         try:
-            # Build a lean system prompt
-            introspect_data = await self._fetch_introspect_cached()
+            # Parallel fetch of goals + introspect + fleet roster
+            is_standalone = self.mesh_client.is_standalone
+            if is_standalone:
+                goals, introspect_data = await asyncio.gather(
+                    self._fetch_goals(), self._fetch_introspect_cached(),
+                )
+                roster: list[dict] = []
+            else:
+                goals, roster, introspect_data = await asyncio.gather(
+                    self._fetch_goals(), self._fetch_fleet_roster(),
+                    self._fetch_introspect_cached(),
+                )
+
             tools_desc = self.skills.get_descriptions(exclude=self._excluded_tools)
             parts: list[str] = []
+
+            # 1. Goals — the agent's north star
+            if goals:
+                parts.append(f"## Your Current Goals\n\n{sanitize_for_prompt(format_dict(goals))}")
+
+            # 2. Bootstrap (identity, instructions, project)
             if self.workspace:
                 bootstrap = self.workspace.get_bootstrap_content()
                 if bootstrap:
                     parts.append(bootstrap)  # pre-sanitized by workspace cache
+
+            # 3. Core rules
             parts.append(
                 f"You are the '{self.role}' agent.\n\n"
                 f"## Available Tools\n\n{tools_desc}\n\n"
@@ -837,10 +856,36 @@ class AgentLoop:
                 f"- You have max {HEARTBEAT_MAX_ITERATIONS} iterations.\n"
                 f"- Use notify_user to report results to the user.\n"
             )
+
+            # 4. Learnings — avoid repeating past mistakes (half of chat cap)
+            if self.workspace:
+                learnings = self.workspace.get_learnings_context(max_chars=1500)
+                if learnings:
+                    parts.append(f"## Learnings from Past Sessions\n\n{learnings}")
+
+            # 5. Fleet context — know your teammates (multi-agent only)
+            has_fleet_ctx = False
+            if roster:
+                fleet_ctx = self._build_fleet_context(roster)
+                if fleet_ctx:
+                    parts.append(fleet_ctx)
+                    has_fleet_ctx = True
+
+            # 6. Self-evolution nudge
+            parts.append(
+                "## Self-Evolution\n"
+                "You can update INSTRUCTIONS.md, SOUL.md, USER.md, and "
+                "HEARTBEAT.md during heartbeats to improve future sessions."
+            )
+
+            # 7. Runtime context (budget, permissions, cron)
             if introspect_data:
-                runtime_ctx = self._format_runtime_context(introspect_data)
+                runtime_ctx = self._format_runtime_context(
+                    introspect_data, exclude_fleet=has_fleet_ctx,
+                )
                 if runtime_ctx:
                     parts.append(runtime_ctx)
+
             system_prompt = "\n\n".join(parts)
 
             # Stateless message list — fresh each heartbeat
