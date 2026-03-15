@@ -756,12 +756,18 @@ async def test_system_prompt_goals_sanitized():
 
 @pytest.mark.asyncio
 async def test_system_prompt_learnings_sanitized():
-    """Workspace learnings with invisible chars are sanitized in system prompt."""
+    """Workspace learnings are pre-sanitized by the workspace cache.
+
+    get_learnings_context() now pre-sanitizes via sanitize_for_prompt()
+    before caching, so the loop receives clean content.
+    """
+    from src.shared.utils import sanitize_for_prompt
     loop = _make_loop()
     loop.workspace = MagicMock()
     loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    raw = "lesson\u200B one\u202E important"
     loop.workspace.get_learnings_context = MagicMock(
-        return_value="lesson\u200B one\u202E important"
+        return_value=sanitize_for_prompt(raw)
     )
     prompt = loop._build_chat_system_prompt()
     assert "\u200B" not in prompt

@@ -90,7 +90,9 @@ async def _browser_command(mesh_client, action: str, params: dict | None = None)
         "web apps. You can then use browser_get_elements to get element refs, "
         "then browser_click and browser_type with refs to interact. "
         "For heavy SPAs (X/Twitter, Gmail, etc.) use wait_until='networkidle' or "
-        "wait_until='load' so the page fully renders before you read elements."
+        "wait_until='load' so the page fully renders before you read elements. "
+        "Set snapshot_after=true to include element refs in the response (saves "
+        "a separate browser_get_elements call)."
     ),
     parameters={
         "url": {"type": "string", "description": "URL to navigate to"},
@@ -110,16 +112,23 @@ async def _browser_command(mesh_client, action: str, params: dict | None = None)
             ),
             "default": "domcontentloaded",
         },
+        "snapshot_after": {
+            "type": "boolean",
+            "description": "Include element snapshot in the response (default false)",
+            "default": False,
+        },
     },
 )
 async def browser_navigate(
     url: str, wait_ms: int = 1000, wait_until: str = "domcontentloaded",
+    snapshot_after: bool = False,
     *, mesh_client=None,
 ) -> dict:
     """Navigate to a URL via the browser service."""
     return await _browser_command(
         mesh_client, "navigate",
-        {"url": url, "wait_ms": wait_ms, "wait_until": wait_until},
+        {"url": url, "wait_ms": wait_ms, "wait_until": wait_until,
+         "snapshot_after": snapshot_after},
     )
 
 
@@ -243,7 +252,8 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
         "be clicked — SPAs like X/Twitter use aria-disabled on buttons that are "
         "visually active, and the system handles this automatically. "
         "If the click times out because of an overlay or animation, try "
-        "browser_wait_for first, or set force=true to bypass actionability checks."
+        "browser_wait_for first, or set force=true to bypass actionability checks. "
+        "Set snapshot_after=true to include updated element refs in the response."
     ),
     parameters={
         "selector": {
@@ -268,17 +278,24 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
             ),
             "default": False,
         },
+        "snapshot_after": {
+            "type": "boolean",
+            "description": "Include element snapshot in the response (default false)",
+            "default": False,
+        },
     },
 )
 async def browser_click(
-    selector: str = "", ref: str = "", force: bool = False, *, mesh_client=None,
+    selector: str = "", ref: str = "", force: bool = False,
+    snapshot_after: bool = False, *, mesh_client=None,
 ) -> dict:
     """Click an element by ref or CSS selector."""
     if not selector and not ref:
         return {"error": "Provide either 'ref' (from browser_get_elements) or 'selector' (CSS)"}
     return await _browser_command(
         mesh_client, "click",
-        {"ref": ref, "selector": selector, "force": force},
+        {"ref": ref, "selector": selector, "force": force,
+         "snapshot_after": snapshot_after},
     )
 
 
@@ -289,7 +306,9 @@ async def browser_click(
         "then enters the new text. Preferred: use ref from browser_get_elements "
         "(e.g. ref='e5'). Fallback: use a CSS selector. "
         "Use $CRED{name} handles to type secrets (e.g. text='$CRED{twitter_password}') "
-        "— the value is resolved from the vault and never exposed to you."
+        "— the value is resolved from the vault and never exposed to you. "
+        "Set fast=true for search queries, URLs, and non-sensitive fields to "
+        "type quickly. Set snapshot_after=true to include updated element refs."
     ),
     parameters={
         "selector": {
@@ -312,10 +331,25 @@ async def browser_click(
             ),
             "default": "",
         },
+        "fast": {
+            "type": "boolean",
+            "description": (
+                "Type quickly with minimal delay. Use for search queries, "
+                "URLs, and non-sensitive fields. Don't use for login forms "
+                "or social media post composition. Default false."
+            ),
+            "default": False,
+        },
+        "snapshot_after": {
+            "type": "boolean",
+            "description": "Include element snapshot in the response (default false)",
+            "default": False,
+        },
     },
 )
 async def browser_type(
-    text: str, selector: str = "", ref: str = "", *, mesh_client=None,
+    text: str, selector: str = "", ref: str = "", fast: bool = False,
+    snapshot_after: bool = False, *, mesh_client=None,
 ) -> dict:
     """Type text into an element. Resolves $CRED{} handles agent-side."""
     if not text:
@@ -343,7 +377,8 @@ async def browser_type(
     result = await _browser_command(
         mesh_client, "type",
         {"ref": ref, "selector": selector, "text": actual_text, "clear": True,
-         "is_credential": is_credential},
+         "is_credential": is_credential, "fast": fast,
+         "snapshot_after": snapshot_after},
     )
 
     # Never return credential values to the LLM

@@ -31,11 +31,19 @@ def skill(name: str, description: str, parameters: dict):
     """Decorator to register a function as an agent skill."""
 
     def decorator(func):
+        sig = inspect.signature(func)
+        param_names = set(sig.parameters.keys())
         _skill_staging[name] = {
             "name": name,
             "description": description,
             "parameters": parameters,
             "function": func,
+            # Cached signature metadata — avoids inspect.signature() on every execute()
+            "_sig_params": param_names,
+            "_sig_has_var_keyword": any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            ),
+            "_sig_is_coroutine": inspect.iscoroutinefunction(func),
         }
         return func
 
@@ -57,6 +65,9 @@ class SkillRegistry:
         self._mcp_client = mcp_client
         self.skills: dict[str, dict] = {}
         self._builtin_functions: frozenset = frozenset()
+        # Memoization caches — cleared on reload()
+        self._tool_defs_cache: dict[frozenset[str] | None, list[dict]] = {}
+        self._descriptions_cache: dict[frozenset[str] | None, str] = {}
         with _skill_staging_lock:
             self._discover_builtins()
             self._builtin_functions = frozenset(
@@ -121,6 +132,8 @@ class SkillRegistry:
             self._discover(self.MARKETPLACE_SKILLS_DIR)
             self.skills = dict(_skill_staging)
         self._register_mcp_tools()
+        self._tool_defs_cache.clear()
+        self._descriptions_cache.clear()
         logger.info(f"Reloaded {len(self.skills)} skills")
         return len(self.skills)
 
@@ -139,36 +152,46 @@ class SkillRegistry:
         if name not in self.skills:
             raise ValueError(f"Unknown skill: {name}")
 
-        func = self.skills[name]["function"]
+        info = self.skills[name]
+        func = info["function"]
         call_args = dict(arguments)
 
-        sig = inspect.signature(func)
+        # Use cached signature metadata (computed at registration time via @skill)
+        sig_params = info.get("_sig_params")
+        if sig_params is not None:
+            has_var_keyword = info["_sig_has_var_keyword"]
+            is_coroutine = info["_sig_is_coroutine"]
+        else:
+            # Fallback for dynamically registered skills (MCP, marketplace)
+            sig = inspect.signature(func)
+            sig_params = set(sig.parameters.keys())
+            has_var_keyword = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in sig.parameters.values()
+            )
+            is_coroutine = inspect.iscoroutinefunction(func)
 
         # Inject framework-provided dependencies if the function accepts them.
-        if "mesh_client" in sig.parameters:
+        if "mesh_client" in sig_params:
             call_args["mesh_client"] = mesh_client
-        if "workspace_manager" in sig.parameters:
+        if "workspace_manager" in sig_params:
             call_args["workspace_manager"] = workspace_manager
-        if "memory_store" in sig.parameters:
+        if "memory_store" in sig_params:
             call_args["memory_store"] = memory_store
 
         # Filter out LLM-hallucinated parameters that the function doesn't
         # accept.  Without this, an LLM sending e.g. {"raw": ""} to a
         # zero-parameter tool like vault_list() causes a TypeError crash.
         # We only filter when the function does NOT accept **kwargs.
-        if not any(
-            p.kind == inspect.Parameter.VAR_KEYWORD
-            for p in sig.parameters.values()
-        ):
-            valid_params = set(sig.parameters.keys())
-            extra = set(call_args) - valid_params
+        if not has_var_keyword:
+            extra = set(call_args) - sig_params
             if extra:
                 logger.debug(
                     "Dropping unknown args %s for skill '%s'", extra, name,
                 )
-                call_args = {k: v for k, v in call_args.items() if k in valid_params}
+                call_args = {k: v for k, v in call_args.items() if k in sig_params}
 
-        if inspect.iscoroutinefunction(func):
+        if is_coroutine:
             return await func(**call_args)
         return await asyncio.get_running_loop().run_in_executor(None, lambda: func(**call_args))
 
@@ -202,7 +225,15 @@ class SkillRegistry:
         return list(self.skills.keys())
 
     def get_descriptions(self, exclude: frozenset[str] | None = None) -> str:
-        """Return human-readable descriptions of all skills."""
+        """Return human-readable descriptions of all skills (memoized)."""
+        cache = getattr(self, "_descriptions_cache", None)
+        if cache is None:
+            self._descriptions_cache = cache = {}
+        cache_key = exclude
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         lines = []
         for name, info in self.skills.items():
             if exclude and name in exclude:
@@ -216,10 +247,20 @@ class SkillRegistry:
                 params = ", ".join(f"{k}: {v.get('type', 'any')}" for k, v in raw_params.items())
             desc = " ".join(info["description"].split())
             lines.append(f"- {name}({params}): {desc}")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        self._descriptions_cache[cache_key] = result
+        return result
 
     def get_tool_definitions(self, exclude: frozenset[str] | None = None) -> list[dict]:
-        """Return OpenAI-compatible tool definitions for LLM function calling."""
+        """Return OpenAI-compatible tool definitions for LLM function calling (memoized)."""
+        cache = getattr(self, "_tool_defs_cache", None)
+        if cache is None:
+            self._tool_defs_cache = cache = {}
+        cache_key = exclude
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         tools = []
         for name, info in self.skills.items():
             if exclude and name in exclude:
@@ -265,4 +306,5 @@ class SkillRegistry:
                     },
                 },
             })
+        self._tool_defs_cache[cache_key] = tools
         return tools

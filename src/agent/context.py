@@ -206,7 +206,10 @@ class ContextManager:
 
         # Step 1: Extract important facts and flush to MEMORY.md + DB
         if self.workspace and self.llm:
-            await self._flush_to_memory(system_prompt, messages)
+            try:
+                await self._flush_to_memory(system_prompt, messages)
+            except Exception as e:
+                logger.warning("Flush to memory failed during compaction, proceeding with summarization: %s", e)
 
         # Step 2: Summarize and compress
         if self.llm:
@@ -249,7 +252,10 @@ class ContextManager:
         self._flush_triggered = False
 
         if self.workspace and self.llm:
-            await self._flush_to_memory(system_prompt, messages)
+            try:
+                await self._flush_to_memory(system_prompt, messages)
+            except Exception as e:
+                logger.warning("Flush to memory failed during force-compact, proceeding: %s", e)
 
         if self.llm:
             result = await self._summarize_compact(system_prompt, messages)
@@ -460,13 +466,25 @@ class ContextManager:
         kept = groups[:1] + groups[-4:]
         pruned = [msg for group in kept for msg in group]
 
-        # Prevent consecutive same-role messages across the gap
-        if (len(pruned) >= 2
-                and pruned[0].get("role") == pruned[1].get("role") == "user"):
-            pruned.insert(1, {
-                "role": "assistant",
-                "content": "Understood, continuing from above.",
-            })
+        # Prevent consecutive same-role messages across pruning gaps
+        i = 0
+        while i < len(pruned) - 1:
+            role_a = pruned[i].get("role")
+            role_b = pruned[i + 1].get("role")
+            if role_a == role_b == "user":
+                pruned.insert(i + 1, {
+                    "role": "assistant",
+                    "content": "Understood, continuing from above.",
+                })
+                i += 2  # skip past the bridge
+            elif role_a == role_b == "assistant":
+                pruned.insert(i + 1, {
+                    "role": "user",
+                    "content": "Continue.",
+                })
+                i += 2
+            else:
+                i += 1
 
         logger.warning(f"Hard-pruned {len(messages)} -> {len(pruned)} messages (group-aware)")
         return pruned
