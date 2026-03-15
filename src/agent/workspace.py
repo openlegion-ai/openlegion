@@ -225,7 +225,6 @@ class WorkspaceManager:
         ):
             return self._bootstrap_cache
 
-
         caps = {
             "INSTRUCTIONS.md": _MAX_INSTRUCTIONS,
             "SOUL.md": _MAX_SOUL,
