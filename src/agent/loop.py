@@ -17,7 +17,7 @@ import httpx
 from src.agent.attachments import enrich_message_with_attachments
 from src.agent.loop_detector import ToolLoopDetector
 from src.agent.workspace import INTROSPECT_PERM_KEYS
-from src.shared.types import SILENT_REPLY_TOKEN, AgentStatus, TaskAssignment, TaskResult
+from src.shared.types import SILENT_REPLY_TOKEN, AgentStatus, LLMResponse, TaskAssignment, TaskResult
 from src.shared.utils import format_dict, generate_id, sanitize_for_prompt, setup_logging, truncate
 
 if TYPE_CHECKING:
@@ -831,13 +831,54 @@ class AgentLoop:
                         "skipped": False,
                     }
 
+                # When approaching the iteration limit, nudge the agent to
+                # wrap up so it finishes with a proper summary instead of
+                # being cut off with "Max iterations reached".
+                _remaining = HEARTBEAT_MAX_ITERATIONS - _iteration
+                if _remaining == 2:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[SYSTEM] You have 2 iterations remaining. "
+                            "Start wrapping up — use notify_user to report "
+                            "your results, then give your final answer."
+                        ),
+                    })
+                elif _remaining == 1:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[SYSTEM] LAST iteration. Give your final answer "
+                            "now. Do NOT call any more tools."
+                        ),
+                    })
+
+                # On the very last iteration, withhold tools so the LLM is
+                # forced to produce a text-only response.
+                iter_tools = (
+                    None if _remaining == 1
+                    else self.skills.get_tool_definitions(
+                        exclude=self._excluded_tools,
+                    ) or None
+                )
+
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat,
                     system=system_prompt,
                     messages=messages,
-                    tools=self.skills.get_tool_definitions(exclude=self._excluded_tools) or None,
+                    tools=iter_tools,
                 )
                 total_tokens += llm_response.tokens_used
+
+                # On the last iteration, ignore any tool_calls — the LLM
+                # shouldn't return them (tools were withheld) but guard
+                # against provider edge cases.
+                if _remaining == 1 and llm_response.tool_calls:
+                    llm_response = LLMResponse(
+                        content=llm_response.content or "Heartbeat complete.",
+                        tool_calls=[],
+                        tokens_used=0,
+                    )
 
                 if not llm_response.tool_calls:
                     # Final answer
@@ -932,7 +973,8 @@ class AgentLoop:
                 # Trim if context grows large
                 messages = self._trim_context(messages, max_tokens=_FALLBACK_MAX_TOKENS)
 
-            # Max iterations reached
+            # Safety net — should not normally be reached because the last
+            # iteration withholds tools and forces a text response.
             self.state = "idle"
             duration_ms = int((time.time() - start) * 1000)
             if self.workspace:
