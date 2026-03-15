@@ -1786,30 +1786,135 @@ async def test_heartbeat_logs_to_activity():
 
 @pytest.mark.asyncio
 async def test_heartbeat_max_iterations():
-    """Heartbeat stops after HEARTBEAT_MAX_ITERATIONS."""
-    # Create responses that always return tool calls (never a final answer)
-    responses = [
-        LLMResponse(
-            content="",
-            tool_calls=[ToolCallInfo(name="search", arguments={"q": f"query_{i}"})],
-            tokens_used=10,
-        )
-        for i in range(HEARTBEAT_MAX_ITERATIONS + 5)
-    ]
+    """Heartbeat wraps up gracefully when approaching iteration limit.
 
-    loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
-        return_value=[{"type": "function", "function": {"name": "search"}}]
-    )
+    On the last iteration tools are withheld, so the LLM produces a text
+    answer and the heartbeat finishes with outcome "ok" instead of being
+    cut off with "max_iterations".
+    """
+    tool_defs = [{"type": "function", "function": {"name": "search"}}]
+
+    # Simulate an LLM that calls tools when they are available but gives
+    # a text answer when tools are withheld (last iteration).
+    call_count = 0
+
+    async def _smart_llm(*, system, messages, tools=None, **kw):
+        nonlocal call_count
+        call_count += 1
+        if tools:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallInfo(name="search", arguments={"q": f"query_{call_count}"})],
+                tokens_used=10,
+            )
+        # No tools → forced text answer
+        return LLMResponse(content="Wrapping up.", tool_calls=[], tokens_used=10)
+
+    loop = _make_loop([])  # responses unused — overridden by side_effect
+    loop.llm.chat = AsyncMock(side_effect=_smart_llm)
+    loop.skills.get_tool_definitions = MagicMock(return_value=tool_defs)
     loop.skills.execute = AsyncMock(return_value={"result": "ok"})
     loop.mesh_client.introspect = AsyncMock(return_value={})
 
     result = await loop.execute_heartbeat("infinite loop")
 
-    assert result["outcome"] == "max_iterations"
+    # The last iteration withholds tools → text answer → outcome "ok"
+    assert result["outcome"] == "ok"
+    assert result["response"] == "Wrapping up."
     assert loop.state == "idle"
-    # LLM should have been called exactly HEARTBEAT_MAX_ITERATIONS times
+    assert call_count == HEARTBEAT_MAX_ITERATIONS
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_windup_nudge_messages():
+    """Nudge messages are injected at _remaining==2 and _remaining==1."""
+    tool_defs = [{"type": "function", "function": {"name": "search"}}]
+    captured_messages: list[list[dict]] = []
+
+    async def _capture_llm(*, system, messages, tools=None, **kw):
+        # Snapshot the message list the LLM receives on each call
+        captured_messages.append([m.copy() for m in messages])
+        if tools:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallInfo(name="search", arguments={"q": "x"})],
+                tokens_used=10,
+            )
+        return LLMResponse(content="Done.", tool_calls=[], tokens_used=10)
+
+    loop = _make_loop([])
+    loop.llm.chat = AsyncMock(side_effect=_capture_llm)
+    loop.skills.get_tool_definitions = MagicMock(return_value=tool_defs)
+    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    await loop.execute_heartbeat("go")
+
+    assert len(captured_messages) == HEARTBEAT_MAX_ITERATIONS
+
+    # The second-to-last call (index MAX-2) should include the wrap-up nudge
+    penultimate_msgs = captured_messages[HEARTBEAT_MAX_ITERATIONS - 2]
+    nudge_texts = [m["content"] for m in penultimate_msgs if m["role"] == "user"]
+    assert any("2 iterations remaining" in t for t in nudge_texts)
+
+    # The last call (index MAX-1) should include the final nudge
+    last_msgs = captured_messages[HEARTBEAT_MAX_ITERATIONS - 1]
+    nudge_texts = [m["content"] for m in last_msgs if m["role"] == "user"]
+    assert any("LAST iteration" in t for t in nudge_texts)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_forced_wrapup_on_unexpected_tool_calls():
+    """If the LLM returns tool_calls on the last iteration (tools withheld),
+    they are ignored and the text content is used as the final answer."""
+    tool_defs = [{"type": "function", "function": {"name": "search"}}]
+
+    async def _stubborn_llm(*, system, messages, tools=None, **kw):
+        # Always returns tool_calls, even when tools=None
+        return LLMResponse(
+            content="Almost done",
+            tool_calls=[ToolCallInfo(name="search", arguments={"q": "x"})],
+            tokens_used=10,
+        )
+
+    loop = _make_loop([])
+    loop.llm.chat = AsyncMock(side_effect=_stubborn_llm)
+    loop.skills.get_tool_definitions = MagicMock(return_value=tool_defs)
+    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    result = await loop.execute_heartbeat("go")
+
+    # Should wrap up with "ok" — NOT "max_iterations"
+    assert result["outcome"] == "ok"
+    assert result["response"] == "Almost done"
     assert loop.llm.chat.call_count == HEARTBEAT_MAX_ITERATIONS
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_forced_wrapup_empty_content():
+    """When forced wrap-up discards tool_calls and content is empty,
+    a fallback message is used."""
+    tool_defs = [{"type": "function", "function": {"name": "search"}}]
+
+    async def _empty_llm(*, system, messages, tools=None, **kw):
+        return LLMResponse(
+            content="",
+            tool_calls=[ToolCallInfo(name="search", arguments={"q": "x"})],
+            tokens_used=10,
+        )
+
+    loop = _make_loop([])
+    loop.llm.chat = AsyncMock(side_effect=_empty_llm)
+    loop.skills.get_tool_definitions = MagicMock(return_value=tool_defs)
+    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    result = await loop.execute_heartbeat("go")
+
+    assert result["outcome"] == "ok"
+    # Fallback content used when LLM content was empty
+    assert result["response"] == "Heartbeat complete."
 
 
 @pytest.mark.asyncio
