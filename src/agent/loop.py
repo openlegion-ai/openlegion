@@ -47,6 +47,7 @@ _BOOTSTRAP_SEARCH_EXCLUDE = frozenset({
     "PROJECT.md", "SYSTEM.md", "INSTRUCTIONS.md",
     "SOUL.md", "USER.md", "MEMORY.md",
 })
+_MAX_STEER_INTERRUPTS = 3  # max times a steer can interrupt a final answer per turn
 
 # ContextVar so tools (e.g. notify_user) can detect heartbeat mode
 _heartbeat_mode: ContextVar[bool] = ContextVar("_heartbeat_mode", default=False)
@@ -291,6 +292,10 @@ class AgentLoop:
         """Inject a steer message. Returns True if agent is working."""
         await self._steer_queue.put(message)
         return self.state == "working"
+
+    def _has_pending_steers(self) -> bool:
+        """Check if steer messages are waiting without draining them."""
+        return not self._steer_queue.empty()
 
     def _drain_steer_messages(self) -> list[str]:
         """Non-blocking drain of all pending steer messages."""
@@ -1504,6 +1509,7 @@ class AgentLoop:
                     return {"response": msg, "tool_outputs": [], "tokens_used": 0}
                 await self._auto_continue_session(system)
 
+            steer_interrupts = 0
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat,
@@ -1515,6 +1521,27 @@ class AgentLoop:
 
                 if not llm_response.tool_calls:
                     content = self._resolve_content(llm_response)
+                    # Check for steers that arrived during the LLM call.
+                    # If present, keep the assistant's response in context,
+                    # inject steers as user interjection, and continue the
+                    # loop so the LLM can adjust its answer.
+                    if (
+                        self._has_pending_steers()
+                        and steer_interrupts < _MAX_STEER_INTERRUPTS
+                    ):
+                        steer_interrupts += 1
+                        self._chat_messages.append({"role": "assistant", "content": content})
+                        steered = self._drain_steer_messages()
+                        combined = "\n\n".join(
+                            f"[User interjection]: {s}" for s in steered
+                        )
+                        self._chat_messages.append({"role": "user", "content": combined})
+                        if self.workspace:
+                            for s in steered:
+                                self.workspace.append_chat_message("user", f"[steer] {s}")
+                        self._chat_total_rounds += 1
+                        await self._compact_chat_context(system)
+                        continue
                     self._chat_messages.append({"role": "assistant", "content": content})
                     self._log_chat_turn(user_message, content)
                     self.state = "idle"
@@ -1865,6 +1892,7 @@ class AgentLoop:
                     return
                 await self._auto_continue_session(system)
 
+            steer_interrupts = 0
             for _ in range(self.CHAT_MAX_TOOL_ROUNDS):
                 # Try token-level streaming, fall back to non-streaming on error
                 llm_response = None
@@ -1897,6 +1925,26 @@ class AgentLoop:
 
                 if not llm_response.tool_calls:
                     content = self._resolve_content(llm_response)
+                    # Check for steers that arrived during the LLM call.
+                    if (
+                        self._has_pending_steers()
+                        and steer_interrupts < _MAX_STEER_INTERRUPTS
+                    ):
+                        steer_interrupts += 1
+                        if not streamed and not any_text_streamed and content:
+                            yield {"type": "text_delta", "content": content}
+                        self._chat_messages.append({"role": "assistant", "content": content})
+                        steered = self._drain_steer_messages()
+                        combined = "\n\n".join(
+                            f"[User interjection]: {s}" for s in steered
+                        )
+                        self._chat_messages.append({"role": "user", "content": combined})
+                        if self.workspace:
+                            for s in steered:
+                                self.workspace.append_chat_message("user", f"[steer] {s}")
+                        self._chat_total_rounds += 1
+                        await self._compact_chat_context(system)
+                        continue
                     # Emit text_delta for non-streaming fallback only if no tokens
                     # were already streamed (avoids doubled content on partial failure)
                     if not streamed and not any_text_streamed and content:
