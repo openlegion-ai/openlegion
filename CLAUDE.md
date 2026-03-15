@@ -330,4 +330,26 @@ pytest tests/test_loop.py -x -v
 
 ## Review State
 
-(Empty — ready for the next review cycle)
+### Categories & Findings
+
+| Category | Files | Issues Found |
+|---|---|---|
+| **Error Handling** | loop.py, context.py | 10 issues: uncaught tool failures break LLM role alternation, compaction failures crash sessions, json.dumps on exotic types, missing state reset in streaming |
+| **Performance** | workspace.py, skills.py, loop.py, cron.py | 7 issues: bootstrap/learnings re-read from disk every turn, inspect.signature() on every tool call, tool definitions rebuilt per LLM call, goals fetched every chat turn, duplicate blackboard queries in heartbeat |
+| **Resilience** | memory.py, context.py | 3 issues: unbounded log table growth, _hard_prune misses assistant-assistant consecutive roles, flush failure aborts compaction |
+
+### Phases
+
+- **Phase 1 (applied):** Top 5 highest-impact fixes across all categories
+- **Phase 2 (planned):** Remaining error-handling hardening
+- **Phase 3 (planned):** Remaining performance optimizations
+
+### Phase 1 Fixes (applied)
+
+| ID | Category | File(s) | Fix |
+|---|---|---|---|
+| E1 | Error Handling | loop.py | Tool failure error-fill: when a tool raises, fill remaining tool_call_ids with error results so LLM role alternation is never broken |
+| E4 | Error Handling | loop.py, context.py | Wrap compaction in try/except with trim fallback; wrap _flush_to_memory so flush failure doesn't abort compaction |
+| P1 | Performance | workspace.py, loop.py | Mtime-cached + pre-sanitized bootstrap and learnings; callers skip redundant sanitize_for_prompt() |
+| P2 | Performance | skills.py | Cache inspect.signature() at decoration time; memoize get_tool_definitions() and get_descriptions() |
+| P5 | Performance | loop.py, cron.py | TTL-cached goals fetch (300s); cached heartbeat probe entries to eliminate duplicate blackboard queries |

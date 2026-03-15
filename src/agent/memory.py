@@ -438,6 +438,8 @@ class MemoryStore:
                 logger.warning(f"Failed to store fact '{key}': {e}")
         return stored
 
+    _MAX_LOG_ENTRIES = 1000
+
     def _log_action_sync(
         self, action: str, input_summary: str, output_summary: str,
         task_id: str | None, tokens_used: int, duration_ms: int,
@@ -446,6 +448,12 @@ class MemoryStore:
             "INSERT INTO logs (id, action, input_summary, output_summary, task_id, tokens_used, duration_ms) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (generate_id("log"), action, input_summary, output_summary, task_id, tokens_used, duration_ms),
+        )
+        # Prune to bounded size — prevents unbounded table growth
+        self.db.execute(
+            "DELETE FROM logs WHERE id NOT IN "
+            "(SELECT id FROM logs ORDER BY timestamp DESC LIMIT ?)",
+            (self._MAX_LOG_ENTRIES,),
         )
         self.db.commit()
 

@@ -30,7 +30,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.shared.utils import setup_logging
+from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.workspace")
 
@@ -117,6 +117,12 @@ class WorkspaceManager:
         self._initial_heartbeat = initial_heartbeat
         self._ensure_scaffold()
 
+        # Caches — invalidated by mtime changes or explicit writes
+        self._bootstrap_cache: str | None = None
+        self._bootstrap_mtimes: dict[str, float] = {}
+        self._learnings_cache: str | None = None
+        self._learnings_mtimes: dict[str, float] = {}
+
     def _ensure_scaffold(self) -> None:
         """Create workspace directory and default files if they don't exist."""
         self.root.mkdir(parents=True, exist_ok=True)
@@ -177,6 +183,32 @@ class WorkspaceManager:
                 parts.append(f"## Session Log: {date.isoformat()}\n\n{content.strip()}")
         return "\n\n".join(parts) if parts else ""
 
+    _BOOTSTRAP_FILES = ("PROJECT.md", "SYSTEM.md", "INSTRUCTIONS.md", "SOUL.md", "USER.md", "MEMORY.md")
+
+    @staticmethod
+    def _get_mtime(path: Path) -> float:
+        """Get file mtime, returning 0.0 if the file doesn't exist."""
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _check_mtimes(self, filenames: tuple | list, cached_mtimes: dict) -> bool:
+        """Return True if any file's mtime differs from the cached value."""
+        for filename in filenames:
+            if cached_mtimes.get(filename) != self._get_mtime(self.root / filename):
+                return True
+        return False
+
+    def _snapshot_mtimes(self, filenames: tuple | list, target: dict) -> None:
+        """Record current mtimes for the given filenames."""
+        for filename in filenames:
+            target[filename] = self._get_mtime(self.root / filename)
+
+    def invalidate_bootstrap_cache(self) -> None:
+        """Explicitly invalidate the bootstrap cache."""
+        self._bootstrap_cache = None
+
     def get_bootstrap_content(self) -> str:
         """Load workspace files for system prompt with per-file and total caps.
 
@@ -185,7 +217,14 @@ class WorkspaceManager:
         a total cap across all files.
 
         Daily logs are NOT included — agents access them via memory_search.
+
+        Results are cached with mtime-based invalidation and pre-sanitized.
         """
+        if self._bootstrap_cache is not None and not self._check_mtimes(
+            self._BOOTSTRAP_FILES, self._bootstrap_mtimes,
+        ):
+            return self._bootstrap_cache
+
         caps = {
             "INSTRUCTIONS.md": _MAX_INSTRUCTIONS,
             "SOUL.md": _MAX_SOUL,
@@ -224,6 +263,11 @@ class WorkspaceManager:
             combined = combined[:_MAX_BOOTSTRAP] + (
                 "\n\n... (bootstrap truncated, use memory_search for full content)"
             )
+        # Pre-sanitize so callers never need to re-sanitize unchanged content
+        combined = sanitize_for_prompt(combined)
+
+        self._snapshot_mtimes(self._BOOTSTRAP_FILES, self._bootstrap_mtimes)
+        self._bootstrap_cache = combined
         return combined
 
     def _read_file(self, relative_path: str) -> str | None:
@@ -252,6 +296,7 @@ class WorkspaceManager:
         path = self.root / self.MEMORY_FILE
         with path.open("a") as f:
             f.write(f"\n{content}\n")
+        self._bootstrap_cache = None  # MEMORY.md is part of bootstrap
 
     # Files agents are allowed to update themselves
     AGENT_WRITABLE = frozenset({"HEARTBEAT.md", "USER.md", "SOUL.md", "INSTRUCTIONS.md"})
@@ -288,6 +333,7 @@ class WorkspaceManager:
             self._rotate_backups(backup_dir, filename)
 
         path.write_text(content)
+        self._bootstrap_cache = None  # invalidate — file changed
         self.append_daily_log(f"Updated workspace file: {filename}")
         return {
             "filename": filename,
@@ -366,6 +412,7 @@ class WorkspaceManager:
             entry += f"\n  Context: {context}"
         with path.open("a") as f:
             f.write(entry + "\n")
+        self._learnings_cache = None
 
     def record_correction(self, original: str, correction: str) -> None:
         """Record a user correction for learning."""
@@ -378,6 +425,7 @@ class WorkspaceManager:
         )
         with path.open("a") as f:
             f.write(entry)
+        self._learnings_cache = None
 
     @staticmethod
     def looks_like_correction(message: str) -> bool:
@@ -385,8 +433,18 @@ class WorkspaceManager:
         lower = message.lower().strip()
         return any(lower.startswith(s) for s in _CORRECTION_SIGNALS)
 
+    _LEARNINGS_FILES = (ERRORS_FILE, CORRECTIONS_FILE)
+
     def get_learnings_context(self, max_chars: int = 3000) -> str:
-        """Load recent errors and corrections for system prompt injection."""
+        """Load recent errors and corrections for system prompt injection.
+
+        Results are cached with mtime-based invalidation and pre-sanitized.
+        """
+        if self._learnings_cache is not None and not self._check_mtimes(
+            self._LEARNINGS_FILES, self._learnings_mtimes,
+        ):
+            return self._learnings_cache
+
         parts: list[str] = []
         for relpath, heading in [
             (self.ERRORS_FILE, "## Recent Errors (avoid repeating)"),
@@ -398,7 +456,14 @@ class WorkspaceManager:
                 tail = "\n".join(lines[-20:])
                 parts.append(f"{heading}\n\n{tail}")
         combined = "\n\n".join(parts)
-        return combined[:max_chars] if combined else ""
+        combined = combined[:max_chars] if combined else ""
+
+        if combined:
+            combined = sanitize_for_prompt(combined)
+
+        self._snapshot_mtimes(self._LEARNINGS_FILES, self._learnings_mtimes)
+        self._learnings_cache = combined
+        return combined
 
     def load_heartbeat_rules(self) -> str:
         """Load HEARTBEAT.md content for autonomous operation."""

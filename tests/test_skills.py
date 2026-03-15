@@ -194,6 +194,9 @@ class TestSkillReload:
         registry = SkillRegistry.__new__(SkillRegistry)
         registry.skills_dir = self._tmpdir
         registry.skills = {}
+        registry._mcp_client = None
+        registry._tool_defs_cache = {}
+        registry._descriptions_cache = {}
 
         # Write a new skill file
         skill_code = '''

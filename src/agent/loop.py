@@ -36,6 +36,7 @@ _MAX_RETRIES = 3
 _BACKOFF_BASE = 1  # seconds: 1, 2, 4
 _TOOL_TIMEOUT = 300  # seconds — hard ceiling for a single tool execution
 _FLEET_ROSTER_TTL = 600  # seconds — cache TTL for fleet roster
+_GOALS_TTL = 300  # seconds — cache TTL for goals fetch
 _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
 _TOOL_HISTORY_LIMIT = 10  # recent tool outcomes in system prompt
 HEARTBEAT_MAX_ITERATIONS = 10  # tighter bound for heartbeat (cheaper than task/chat)
@@ -149,6 +150,8 @@ class AgentLoop:
         self._fleet_roster_ts: float = 0  # timestamp of last fetch
         self._introspect_cache: dict | None = None
         self._introspect_cache_ts: float = 0
+        self._goals_cache: dict | None | object = AgentLoop._GOALS_NOT_FETCHED
+        self._goals_cache_ts: float = 0
         self._loop_detector = ToolLoopDetector()
         # Standalone agents have no project blackboard — hide those tools
         self._excluded_tools: frozenset[str] | None = (
@@ -429,7 +432,11 @@ class AgentLoop:
                         })
 
                     if self.context_manager:
-                        messages, _ = await self.context_manager.maybe_compact(system_prompt, messages)
+                        try:
+                            messages, _ = await self.context_manager.maybe_compact(system_prompt, messages)
+                        except Exception as compact_err:
+                            logger.warning("Task compaction failed, falling back to trim: %s", compact_err)
+                            messages = self._trim_context(messages, max_tokens=_FALLBACK_MAX_TOKENS)
                     else:
                         messages = self._trim_context(messages, max_tokens=_FALLBACK_MAX_TOKENS)
 
@@ -520,15 +527,21 @@ class AgentLoop:
             self._last_result = result
             return result
 
+    _GOALS_NOT_FETCHED = object()  # sentinel distinct from None
+
     async def _fetch_goals(self) -> dict | None:
-        """Read this agent's current goals from the shared blackboard."""
+        """Read this agent's current goals from the shared blackboard (TTL: 5 min)."""
+        now = time.time()
+        if self._goals_cache is not self._GOALS_NOT_FETCHED and (now - self._goals_cache_ts) < _GOALS_TTL:
+            return self._goals_cache
         try:
             entry = await self.mesh_client.read_blackboard(f"goals/{self.agent_id}")
-            if entry:
-                return entry.get("value", entry)
+            self._goals_cache = entry.get("value", entry) if entry else None
+            self._goals_cache_ts = now
         except Exception as e:
             logger.debug("Failed to fetch goals for '%s': %s", self.agent_id, e)
-        return None
+            # Keep stale cache on failure rather than returning None
+        return self._goals_cache if self._goals_cache is not self._GOALS_NOT_FETCHED else None
 
     async def _build_initial_context(self, assignment: TaskAssignment) -> list[dict]:
         """Build initial user message with task, goals, memory, and blackboard context."""
@@ -705,7 +718,7 @@ class AgentLoop:
         if self.workspace:
             bootstrap = self.workspace.get_bootstrap_content()
             if bootstrap:
-                parts.append(sanitize_for_prompt(bootstrap))
+                parts.append(bootstrap)  # pre-sanitized by workspace cache
 
         is_standalone = self.mesh_client.is_standalone
         rules = (
@@ -738,7 +751,7 @@ class AgentLoop:
         if self.workspace:
             learnings = self.workspace.get_learnings_context()
             if learnings:
-                parts.append(f"## Learnings\n\n{sanitize_for_prompt(learnings)}")
+                parts.append(f"## Learnings\n\n{learnings}")  # pre-sanitized
         tool_history = self._build_tool_history_context()
         if tool_history:
             parts.append(sanitize_for_prompt(tool_history))
@@ -788,7 +801,7 @@ class AgentLoop:
             if self.workspace:
                 bootstrap = self.workspace.get_bootstrap_content()
                 if bootstrap:
-                    parts.append(sanitize_for_prompt(bootstrap))
+                    parts.append(bootstrap)  # pre-sanitized by workspace cache
             parts.append(
                 f"You are the '{self.role}' agent.\n\n"
                 f"## Available Tools\n\n{tools_desc}\n\n"
@@ -1229,7 +1242,11 @@ class AgentLoop:
             if isinstance(result, dict):
                 image_block = result.pop("_image", None)
 
-            result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+            try:
+                result_str = json.dumps(result, default=str) if isinstance(result, dict) else str(result)
+            except (TypeError, ValueError, OverflowError) as ser_err:
+                logger.warning("JSON serialization of %s result failed: %s", tool_call.name, ser_err)
+                result_str = str(result)[:2000]
             result_str = sanitize_for_prompt(result_str)
             self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
             if loop_verdict == "warn":
@@ -1297,13 +1314,19 @@ class AgentLoop:
     async def _compact_chat_context(self, system: str) -> None:
         """Run context compaction and drain any pending steer messages."""
         if self.context_manager:
-            self._chat_messages, compacted = await self.context_manager.maybe_compact(
-                system, self._chat_messages,
-            )
-            if compacted and self.workspace:
-                self.workspace.append_chat_message(
-                    "system",
-                    "Context compacted — key facts saved to memory, conversation summarized.",
+            try:
+                self._chat_messages, compacted = await self.context_manager.maybe_compact(
+                    system, self._chat_messages,
+                )
+                if compacted and self.workspace:
+                    self.workspace.append_chat_message(
+                        "system",
+                        "Context compacted — key facts saved to memory, conversation summarized.",
+                    )
+            except Exception as e:
+                logger.warning("Context compaction failed, falling back to trim: %s", e)
+                self._chat_messages = self._trim_context(
+                    self._chat_messages, max_tokens=_FALLBACK_MAX_TOKENS,
                 )
         else:
             self._chat_messages = self._trim_context(self._chat_messages, max_tokens=_FALLBACK_MAX_TOKENS)
@@ -1383,7 +1406,23 @@ class AgentLoop:
 
                 entries = self._build_tool_call_entries(llm_response)
                 for i, tool_call in enumerate(llm_response.tool_calls):
-                    await self._execute_chat_tool_call(tool_call, entries[i]["id"], tool_outputs)
+                    try:
+                        await self._execute_chat_tool_call(tool_call, entries[i]["id"], tool_outputs)
+                    except Exception as tool_err:
+                        logger.error("Tool %s raised unexpected error: %s", tool_call.name, tool_err)
+                        self._chat_messages.append({
+                            "role": "tool",
+                            "tool_call_id": entries[i]["id"],
+                            "content": json.dumps({"error": f"Internal error: {tool_err}"}),
+                        })
+                        # Fill in error results for remaining unexecuted tools
+                        for j in range(i + 1, len(llm_response.tool_calls)):
+                            self._chat_messages.append({
+                                "role": "tool",
+                                "tool_call_id": entries[j]["id"],
+                                "content": json.dumps({"error": "Skipped due to prior tool failure"}),
+                            })
+                        break
                 self._chat_total_rounds += 1
 
                 if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
@@ -1532,11 +1571,11 @@ class AgentLoop:
         if self.workspace:
             bootstrap = self.workspace.get_bootstrap_content()
             if bootstrap:
-                parts.append(sanitize_for_prompt(bootstrap))
+                parts.append(bootstrap)  # pre-sanitized by workspace cache
 
             learnings = self.workspace.get_learnings_context()
             if learnings:
-                parts.append(f"## Learnings from Past Sessions\n\n{sanitize_for_prompt(learnings)}")
+                parts.append(f"## Learnings from Past Sessions\n\n{learnings}")  # pre-sanitized
 
         has_browser = "browser_navigate" in self.skills.list_skills(exclude=self._excluded_tools)
 
@@ -1669,7 +1708,6 @@ class AgentLoop:
 
             if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
                 if self._chat_auto_continues >= self._MAX_SESSION_CONTINUES:
-                    self.state = "idle"
                     msg = (
                         "Chat session has reached its absolute limit "
                         f"({self._MAX_SESSION_CONTINUES} continuations × "
@@ -1721,7 +1759,6 @@ class AgentLoop:
                         yield {"type": "text_delta", "content": content}
                     self._chat_messages.append({"role": "assistant", "content": content})
                     self._log_chat_turn(user_message, content)
-                    self.state = "idle"
                     yield {
                         "type": "done",
                         "response": content,
@@ -1733,7 +1770,6 @@ class AgentLoop:
                 # Pre-scan for terminate before appending assistant message
                 terminate_msg = self._check_tool_loop_terminate(llm_response.tool_calls)
                 if terminate_msg:
-                    self.state = "idle"
                     msg = f"Stopped: {terminate_msg}"
                     if self.workspace:
                         self.workspace.append_chat_message("assistant", msg)
@@ -1748,8 +1784,26 @@ class AgentLoop:
                 entries = self._build_tool_call_entries(llm_response)
                 for i, tool_call in enumerate(llm_response.tool_calls):
                     yield {"type": "tool_start", "name": tool_call.name, "input": tool_call.arguments}
-                    output = await self._execute_chat_tool_call(tool_call, entries[i]["id"], tool_outputs)
-                    yield {"type": "tool_result", "name": tool_call.name, "output": output["output"]}
+                    try:
+                        output = await self._execute_chat_tool_call(tool_call, entries[i]["id"], tool_outputs)
+                        yield {"type": "tool_result", "name": tool_call.name, "output": output["output"]}
+                    except Exception as tool_err:
+                        logger.error("Tool %s raised unexpected error: %s", tool_call.name, tool_err)
+                        self._chat_messages.append({
+                            "role": "tool",
+                            "tool_call_id": entries[i]["id"],
+                            "content": json.dumps({"error": f"Internal error: {tool_err}"}),
+                        })
+                        yield {"type": "tool_result", "name": tool_call.name, "output": {"error": str(tool_err)}}
+                        for j in range(i + 1, len(llm_response.tool_calls)):
+                            remaining_tc = llm_response.tool_calls[j]
+                            self._chat_messages.append({
+                                "role": "tool",
+                                "tool_call_id": entries[j]["id"],
+                                "content": json.dumps({"error": "Skipped due to prior tool failure"}),
+                            })
+                            yield {"type": "tool_result", "name": remaining_tc.name, "output": {"error": "Skipped"}}
+                        break
                 self._chat_total_rounds += 1
 
                 if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
@@ -1774,7 +1828,6 @@ class AgentLoop:
                 yield {"type": "text_delta", "content": content}
             self._chat_messages.append({"role": "assistant", "content": content})
             self._log_chat_turn(user_message, content)
-            self.state = "idle"
             yield {
                 "type": "done",
                 "response": content,
@@ -1784,10 +1837,8 @@ class AgentLoop:
             }
 
         except asyncio.CancelledError:
-            self.state = "idle"
             raise
         except Exception as e:
-            self.state = "idle"
             logger.error(f"Streaming chat failed: {e}", exc_info=True)
             msg = f"Error: {e}"
             if self.workspace:
@@ -1798,3 +1849,5 @@ class AgentLoop:
                 "tool_outputs": tool_outputs,
                 "tokens_used": total_tokens,
             }
+        finally:
+            self.state = "idle"
