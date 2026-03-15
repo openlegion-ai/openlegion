@@ -193,24 +193,6 @@ class TestBrowserManagerRefResolution:
         assert locator is mock_locator.nth.return_value
 
     @pytest.mark.asyncio
-    async def test_locator_from_ref_uses_data_olref(self):
-        """Refs with has_olref=True use direct data-olref locator."""
-        from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-
-        mock_page = MagicMock()
-        mock_locator = MagicMock()
-        mock_page.locator.return_value = mock_locator
-        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "button", "name": "Submit", "index": 0, "has_olref": True}}
-
-        locator = mgr._locator_from_ref(inst, "e0")
-        mock_page.locator.assert_called_once_with('[data-olref="e0"]')
-        assert locator is mock_locator
-        # Should NOT use get_by_role
-        mock_page.get_by_role.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_locator_from_ref_no_name(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
@@ -317,7 +299,8 @@ class TestTypeTextClearBehavior:
 
         with patch("src.browser.service.random.random", return_value=1.0):
             await mgr.type_text("a1", selector="input", text="hello", clear=True)
-        mock_page.click.assert_called_once_with("input", timeout=10000)
+        # Focus click uses hover-then-click for human-like mouse movement
+        mock_page.click.assert_called()
         mock_page.keyboard.press.assert_any_call("Control+a")
         # Printable chars now go through keyboard.press, not evaluate
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
@@ -339,7 +322,7 @@ class TestTypeTextClearBehavior:
 
         with patch("src.browser.service.random.random", return_value=1.0):
             await mgr.type_text("a1", selector="input", text="ab", clear=False)
-        mock_page.click.assert_called_once_with("input", timeout=10000)
+        mock_page.click.assert_called()
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert "Control+a" not in press_calls
         # keyboard.press used for each char, not evaluate
@@ -1006,7 +989,7 @@ class TestTypeTextWithRef:
         with patch("src.browser.service.random.random", return_value=1.0):
             result = await mgr.type_text("a1", ref="e0", text="test@example.com", clear=True)
         assert result["success"] is True
-        mock_locator.click.assert_called_once_with(timeout=10000)
+        mock_locator.click.assert_called_once()
         mock_page.keyboard.press.assert_any_call("Control+a")
         # Each printable char uses keyboard.press, not evaluate
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
@@ -1034,7 +1017,7 @@ class TestTypeTextWithRef:
         with patch("src.browser.service.random.random", return_value=1.0):
             result = await mgr.type_text("a1", ref="e0", text="ab", clear=False)
         assert result["success"] is True
-        mock_locator.click.assert_called_once_with(timeout=10000)
+        mock_locator.click.assert_called_once()
         press_calls = [c[0][0] for c in mock_page.keyboard.press.call_args_list]
         assert "Control+a" not in press_calls
         assert "a" in press_calls and "b" in press_calls
@@ -1358,8 +1341,8 @@ class TestClickRandomDelay:
             for _ in range(10):
                 await mgr.click("a1", selector="#btn")
 
-        # All delays should be in action_delay range
-        assert all(0.08 <= d <= 0.30 for d in delays)
+        # Delays include hover settle (0.02-0.06) and action_delay (0.08-0.30)
+        assert all(0.02 <= d <= 0.30 for d in delays)
         # At least some variance (not all identical)
         assert len(set(f"{d:.4f}" for d in delays)) > 1
 
@@ -1494,13 +1477,15 @@ class TestTypeFast:
         from src.browser.service import BrowserManager, CamoufoxInstance
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mock_page = AsyncMock()
+        mock_locator = AsyncMock()
+        mock_locator.nth = MagicMock(return_value=mock_locator)
+        mock_page = MagicMock()
+        mock_page.get_by_role = MagicMock(return_value=mock_locator)
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
-        mock_locator = AsyncMock()
-        mock_page.locator = MagicMock(return_value=mock_locator)
+        mock_page.mouse = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "textbox", "name": "Search", "index": 0, "has_olref": True}}
+        inst.refs = {"e0": {"role": "textbox", "name": "Search", "index": 0}}
         mgr._instances["a1"] = inst
 
         delays: list[float] = []

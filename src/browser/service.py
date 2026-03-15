@@ -115,7 +115,6 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         range:'slider',number:'spinbutton',
         submit:'button',reset:'button',button:'button'
     };
-    let refCounter = 0;
     function getRole(el) {
         const r = el.getAttribute('role');
         if (r) return r.split(/\s+/)[0].toLowerCase();
@@ -193,12 +192,6 @@ _JS_A11Y_TREE = r"""(rootEl) => {
             return { role: 'none', name: '', children };
         }
         const nd = { role, name: getName(el, role) };
-        if (refCounter < 200) {
-            const refId = 'e' + refCounter;
-            el.setAttribute('data-olref', refId);
-            nd.refId = refId;
-            refCounter++;
-        }
         if (parentLandmark) nd.landmark = parentLandmark;
         if (el.disabled || el.getAttribute('aria-disabled') === 'true') nd.disabled = true;
         const chkRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio'];
@@ -216,7 +209,6 @@ _JS_A11Y_TREE = r"""(rootEl) => {
         if (children.length) nd.children = children;
         return nd;
     }
-    document.querySelectorAll('[data-olref]').forEach(el => el.removeAttribute('data-olref'));
     const start = rootEl || document.body || document.documentElement;
     const tree = walk(start, 0, null);
     if (rootEl) return tree || { role: 'none', name: '', children: [] };
@@ -588,8 +580,7 @@ class BrowserManager:
                 name = node.get("name", "")
                 if role in _ACTIONABLE_ROLES or role in _CONTEXT_ROLES:
                     if ref_counter[0] < _MAX_SNAPSHOT_ELEMENTS:
-                        # Use ref ID stamped by JS walker when available
-                        ref_id = node.get("refId") or f"e{ref_counter[0]}"
+                        ref_id = f"e{ref_counter[0]}"
                         ref_counter[0] += 1
 
                         key = (role, name)
@@ -621,7 +612,6 @@ class BrowserManager:
                         refs[ref_id] = {
                             "role": role, "name": name, "index": occ,
                             "disabled": bool(node.get("disabled")),
-                            "has_olref": bool(node.get("refId")),
                         }
                 for child in node.get("children", []):
                     _walk(child, depth + 1)
@@ -722,27 +712,18 @@ class BrowserManager:
             return {"success": False, "error": str(e)}
 
     def _locator_from_ref(self, inst: CamoufoxInstance, ref: str):
-        """Build a Playwright locator from a stored ref.
+        """Build a Playwright locator from a stored ref's role, name, and index.
 
-        Primary strategy: use the ``data-olref`` attribute stamped on the DOM
-        element during the JS accessibility tree walk.  This is an exact,
-        unambiguous pointer to the element the snapshot saw — immune to
-        scope mismatches and substring-matching issues.
+        Uses ``get_by_role`` with ``exact=True`` to prevent substring matches
+        (e.g. "Post" matching "Repost").  ``.nth(index)`` targets the exact
+        occurrence found during snapshot.
 
-        Fallback (when the native Playwright accessibility API was used
-        instead of the JS walker, or when the data attribute was removed
-        by a framework re-render): semantic locator via role + exact name
-        + nth(index), scoped to the modal when one is active.
+        When a modal dialog was detected in the last snapshot, scopes the
+        search to the dialog element so occurrence indices match.
         """
         info = inst.refs.get(ref)
         if not info:
             return None
-
-        # Primary: direct locator via data-olref stamped during snapshot
-        if info.get("has_olref"):
-            return inst.page.locator(f'[data-olref="{ref}"]')
-
-        # Fallback: semantic locator
         role = info["role"]
         name = info.get("name", "")
         idx = info.get("index", 0)
@@ -752,6 +733,68 @@ class BrowserManager:
             base = inst.page
         locator = base.get_by_role(role, name=name, exact=True) if name else base.get_by_role(role)
         return locator.nth(idx)
+
+    async def _human_click(self, page, locator, *, force: bool = False,
+                           timeout: int = _CLICK_TIMEOUT_MS) -> None:
+        """Click with a preceding hover so the mouse visibly moves to the target.
+
+        Playwright's ``locator.click()`` dispatches a click at the element's
+        center coordinates but does NOT generate the ``mousemove`` events a
+        real user produces while moving the cursor to the target.  Anti-bot
+        systems (X/Twitter, Cloudflare) track mouse-movement patterns and
+        flag clicks that appear without any prior movement.
+
+        The hover-then-click pattern:
+        1. ``locator.hover()`` — Playwright scrolls the element into view and
+           moves the mouse along a path to the element center.  With Camoufox's
+           ``humanize=True``, this path includes natural-looking Bézier curves.
+        2. Brief settle (20–60 ms) — models the human reaction gap between
+           arriving at the target and pressing the button.
+        3. ``page.mouse.click(x, y)`` — fires the mousedown/mouseup at the
+           current mouse position (already on the element from the hover).
+
+        When ``force=True``, falls back to ``locator.click(force=True)`` since
+        hover may fail on elements obscured by overlays.
+        """
+        if force:
+            await locator.click(timeout=timeout, force=True)
+            return
+        try:
+            await locator.hover(timeout=timeout)
+        except Exception:
+            # Hover failed (element covered, not visible) — fall back to direct click
+            await locator.click(timeout=timeout, force=False)
+            return
+        # Small settle before clicking — human reaction gap
+        await asyncio.sleep(random.uniform(0.02, 0.06))
+        try:
+            box = await locator.bounding_box()
+            if box and isinstance(box, dict) and "x" in box:
+                x = box["x"] + box["width"] / 2 + random.uniform(-2, 2)
+                y = box["y"] + box["height"] / 2 + random.uniform(-2, 2)
+                await page.mouse.click(x, y)
+                return
+        except Exception:
+            pass
+        # bounding_box unavailable — click at current mouse position
+        await locator.click(timeout=timeout, force=False)
+
+    async def _human_click_selector(self, page, selector: str, *,
+                                    force: bool = False,
+                                    timeout: int = _CLICK_TIMEOUT_MS) -> None:
+        """Like _human_click but takes a CSS selector instead of a locator.
+
+        Hovers first to generate natural mouse movement, then clicks.
+        """
+        if force:
+            await page.click(selector, timeout=timeout, force=True)
+            return
+        try:
+            await page.hover(selector, timeout=timeout)
+            await asyncio.sleep(random.uniform(0.02, 0.06))
+        except Exception:
+            pass  # Hover failed — click will still work
+        await page.click(selector, timeout=timeout, force=False)
 
     async def click(
         self, agent_id: str, ref: str | None = None,
@@ -796,11 +839,11 @@ class BrowserManager:
                         )
                     locator = self._locator_from_ref(inst, ref)
                     if locator:
-                        await locator.click(timeout=_CLICK_TIMEOUT_MS, force=use_force)
+                        await self._human_click(inst.page, locator, force=use_force)
                     else:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
                 elif selector:
-                    await inst.page.click(selector, timeout=_CLICK_TIMEOUT_MS, force=force)
+                    await self._human_click_selector(inst.page, selector, force=force)
                 else:
                     return {"success": False, "error": "Must provide ref or selector"}
                 await asyncio.sleep(action_delay())
@@ -863,9 +906,9 @@ class BrowserManager:
                     locator = self._locator_from_ref(inst, ref)
                     if not locator:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
-                    await locator.click(timeout=_CLICK_TIMEOUT_MS)
+                    await self._human_click(inst.page, locator)
                 elif selector:
-                    await inst.page.click(selector, timeout=_CLICK_TIMEOUT_MS)
+                    await self._human_click_selector(inst.page, selector)
                 else:
                     return {"success": False, "error": "Must provide ref or selector"}
 
