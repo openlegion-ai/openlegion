@@ -53,43 +53,45 @@ def _scaled(mean: float, stddev: float, low: float, high: float) -> float:
 
 
 def action_delay() -> float:
-    """Post-click pause (seconds). Base: μ=0.30, σ=0.08, range 0.15–0.50."""
-    return _scaled(0.30, 0.08, 0.15, 0.50)
+    """Post-click pause (seconds). Base: μ=0.18, σ=0.05, range 0.08–0.30."""
+    return _scaled(0.18, 0.05, 0.08, 0.30)
 
 
 def navigation_jitter() -> float:
     """Extra jitter added on top of wait_ms after navigation (seconds).
 
-    Base: μ=0.20, σ=0.10, range 0.0–0.50.
+    Base: μ=0.08, σ=0.04, range 0.0–0.20.
     """
-    return _scaled(0.20, 0.10, 0.0, 0.50)
+    return _scaled(0.08, 0.04, 0.0, 0.20)
 
 
 def keystroke_delay(char: str) -> float:
     """Per-key delay (seconds). Symbols/digits are slower than letters.
 
     Base values (scaled by speed factor):
-    Letters: μ=0.08, σ=0.025, range 0.04–0.20.
-    Symbols/digits: μ=0.11, σ=0.03, range 0.04–0.20.
-    Spaces: μ=0.06, σ=0.02, range 0.03–0.12 (faster, word boundary rhythm).
+    Letters: μ=0.045, σ=0.015, range 0.020–0.090.
+    Symbols/digits: μ=0.065, σ=0.020, range 0.025–0.110.
+    Spaces: μ=0.035, σ=0.010, range 0.018–0.070 (faster, word boundary rhythm).
+
+    At speed=1.0, this is ≈270 CPM / 54 WPM — a moderate typist.
     """
     if char == " ":
-        return _scaled(0.06, 0.02, 0.03, 0.12)
+        return _scaled(0.035, 0.010, 0.018, 0.070)
     if char.isalpha():
-        return _scaled(0.08, 0.025, 0.04, 0.20)
-    return _scaled(0.11, 0.03, 0.04, 0.20)
+        return _scaled(0.045, 0.015, 0.020, 0.090)
+    return _scaled(0.065, 0.020, 0.025, 0.110)
 
 
 def think_pause() -> float:
     """Mid-typing hesitation (seconds).
 
-    Simulates the natural 0.3–1.5 s pauses humans make while composing text —
+    Simulates the natural pauses humans make while composing text —
     e.g. after finishing a clause or before a difficult word.
-    Apply stochastically (≈5 % of characters) rather than on every keystroke.
+    Apply stochastically (≈1.5 % mid-word, ≈8 % at word boundaries).
 
-    Base: μ=0.65, σ=0.25, range 0.30–1.50.
+    Base: μ=0.40, σ=0.15, range 0.20–0.90.
     """
-    return _scaled(0.65, 0.25, 0.30, 1.50)
+    return _scaled(0.40, 0.15, 0.20, 0.90)
 
 
 # ── Scroll timing ─────────────────────────────────────────────
