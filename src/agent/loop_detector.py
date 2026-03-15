@@ -7,6 +7,9 @@ Three escalation levels:
   - warn:      >= 2 prior identical calls (about to be 3rd)
   - block:     >= 4 prior identical calls (about to be 5th)
   - terminate: >= 9 prior calls with same tool+params regardless of result
+
+Tools marked ``loop_exempt`` via the ``@skill`` decorator skip warn/block
+but still respect the terminate threshold (hard safety cap).
 """
 
 from __future__ import annotations
@@ -20,8 +23,8 @@ from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.loop_detector")
 
-# Tools that should never be flagged (idempotent retrieval)
-_EXEMPT_TOOLS = frozenset({"memory_search"})
+# Hardcoded exempt tools — augmented at runtime by skill-level loop_exempt.
+_DEFAULT_EXEMPT_TOOLS = frozenset({"memory_search"})
 
 # Escalation thresholds (checked against prior completed calls in window)
 _WARN_THRESHOLD = 2       # >= 2 prior identical → warn
@@ -38,17 +41,26 @@ def _hash_json(data: Any) -> str:
 class ToolLoopDetector:
     """Sliding-window detector for stuck tool-call loops."""
 
-    def __init__(self, window_size: int = 15):
+    def __init__(
+        self,
+        window_size: int = 15,
+        exempt_tools: frozenset[str] | None = None,
+    ):
         # Each entry: (tool_name, params_hash, result_hash)
         self._window: deque[tuple[str, str, str]] = deque(maxlen=window_size)
+        self._exempt_tools = (
+            _DEFAULT_EXEMPT_TOOLS | exempt_tools
+            if exempt_tools
+            else _DEFAULT_EXEMPT_TOOLS
+        )
 
     def would_terminate(self, tool_name: str, arguments: dict) -> bool:
         """Check only the terminate condition (no logging for lower levels).
 
         Used by the pre-scan to avoid duplicate log lines from check_before.
+        Applies to ALL tools including exempt ones — terminate is a hard
+        safety cap that cannot be bypassed.
         """
-        if tool_name in _EXEMPT_TOOLS:
-            return False
         params_hash = _hash_json(arguments)
         return self._count_any(tool_name, params_hash) >= _TERMINATE_THRESHOLD
 
@@ -56,13 +68,14 @@ class ToolLoopDetector:
         """Pre-check before executing a tool call.
 
         Returns one of: "ok", "warn", "block", "terminate".
-        """
-        if tool_name in _EXEMPT_TOOLS:
-            return "ok"
 
+        Exempt tools skip warn/block but still respect terminate (hard cap).
+        """
         params_hash = _hash_json(arguments)
 
-        # Count ALL prior calls with same (tool, params) regardless of result
+        # Count ALL prior calls with same (tool, params) regardless of result.
+        # Terminate threshold applies to ALL tools including exempt ones —
+        # this is the hard safety cap.
         any_count = self._count_any(tool_name, params_hash)
         if any_count >= _TERMINATE_THRESHOLD:
             logger.warning(
@@ -70,6 +83,10 @@ class ToolLoopDetector:
                 tool_name, any_count,
             )
             return "terminate"
+
+        # Exempt tools skip warn/block escalation
+        if tool_name in self._exempt_tools:
+            return "ok"
 
         # Count prior calls with same (tool, params, most-frequent-result)
         identical_count = self._count_identical(tool_name, params_hash)

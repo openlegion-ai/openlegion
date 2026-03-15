@@ -31,13 +31,14 @@ def _make_loop_with_workspace(
     memory = MagicMock()
     memory.get_high_salience_facts = MagicMock(return_value=[])
     memory.search = AsyncMock(return_value=[])
-    memory.store_fact = AsyncMock(return_value="fact_123")
     memory.log_action = AsyncMock()
 
     skills = MagicMock()
     skills.get_tool_definitions = MagicMock(return_value=[])
     skills.get_descriptions = MagicMock(return_value="- memory_search\n- memory_save")
     skills.list_skills = MagicMock(return_value=["memory_search", "memory_save"])
+    skills.is_parallel_safe = MagicMock(return_value=True)
+    skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
     if llm_responses:
@@ -111,7 +112,12 @@ class TestChatWithWorkspace:
 
     @pytest.mark.asyncio
     async def test_first_message_preloads_relevant_memory(self):
-        (Path(self._tmpdir) / "MEMORY.md").write_text(
+        # Write to a daily log file (not a bootstrap file like MEMORY.md)
+        # because bootstrap files are excluded from auto-search to avoid
+        # duplicate content — they're already in the system prompt.
+        daily_dir = Path(self._tmpdir) / "memory"
+        daily_dir.mkdir(exist_ok=True)
+        (daily_dir / "2026-03-01.md").write_text(
             "User is building a machine learning pipeline.\n"
         )
         loop = _make_loop_with_workspace(self._tmpdir)

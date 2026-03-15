@@ -316,6 +316,7 @@ def _redact(text: str, secrets: list[str]) -> str:
             "default": 30,
         },
     },
+    loop_exempt=True,
 )
 async def http_request(
     url: str,

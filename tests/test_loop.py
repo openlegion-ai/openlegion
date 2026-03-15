@@ -37,7 +37,6 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
         memory.decay_all = AsyncMock()
         memory.search = AsyncMock(return_value=[])
         memory.search_hierarchical = AsyncMock(return_value=[])
-        memory.store_fact = AsyncMock(return_value="fact_123")
         memory.log_action = AsyncMock()
         memory.store_tool_outcome = AsyncMock()
         memory.get_tool_history = MagicMock(return_value=[])
@@ -46,6 +45,8 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
     skills.get_tool_definitions = MagicMock(return_value=[])
     skills.get_descriptions = MagicMock(return_value="- no tools")
     skills.list_skills = MagicMock(return_value=[])
+    skills.is_parallel_safe = MagicMock(return_value=True)
+    skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
     if llm_responses:
@@ -493,6 +494,67 @@ async def test_multiple_steers_combined():
     user_msg = loop._chat_messages[0]["content"]
     assert "first update" in user_msg
     assert "second update" in user_msg
+
+
+@pytest.mark.asyncio
+async def test_steer_during_final_response_continues_loop():
+    """Steer arriving during LLM's final answer re-enters the loop.
+
+    When the LLM returns text (no tool calls), a pending steer should
+    prevent immediate return — the assistant's response stays in context
+    and the steer is injected so the next LLM call can adjust.
+    """
+    responses = [
+        LLMResponse(content="Here is my original answer.", tokens_used=50),
+        LLMResponse(content="Updated answer after steer.", tokens_used=50),
+    ]
+
+    loop = _make_loop(responses)
+
+    original_chat = loop.llm.chat
+    steer_injected = False
+
+    async def chat_with_steer(system, messages, tools=None, **kwargs):
+        nonlocal steer_injected
+        result = await original_chat(system=system, messages=messages, tools=tools, **kwargs)
+        if not steer_injected:
+            steer_injected = True
+            await loop.inject_steer("actually focus on Y instead")
+        return result
+
+    loop.llm.chat = chat_with_steer
+
+    result = await loop.chat("Research X")
+
+    # The final response should be the SECOND (steered) response
+    assert result["response"] == "Updated answer after steer."
+
+
+@pytest.mark.asyncio
+async def test_steer_interrupt_limit():
+    """After _MAX_STEER_INTERRUPTS, agent returns even with pending steers."""
+    from src.agent.loop import _MAX_STEER_INTERRUPTS
+
+    responses = [
+        LLMResponse(content=f"attempt {i}", tokens_used=10)
+        for i in range(_MAX_STEER_INTERRUPTS + 1)
+    ]
+
+    loop = _make_loop(responses)
+
+    original_chat = loop.llm.chat
+
+    async def always_steer(system, messages, tools=None, **kwargs):
+        result = await original_chat(system=system, messages=messages, tools=tools, **kwargs)
+        await loop.inject_steer("redirect again")
+        return result
+
+    loop.llm.chat = always_steer
+
+    result = await loop.chat("start")
+
+    # Should have returned the last response without looping forever
+    assert result["response"] == f"attempt {_MAX_STEER_INTERRUPTS}"
 
 
 # === Context Warning Integration ===

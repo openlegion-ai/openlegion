@@ -354,8 +354,15 @@ class WorkspaceManager:
 
     # ── Search ───────────────────────────────────────────────
 
-    def search(self, query: str, max_results: int = 5) -> list[dict]:
+    def search(
+        self, query: str, max_results: int = 5,
+        exclude_files: set[str] | None = None,
+    ) -> list[dict]:
         """BM25 keyword search over all markdown files in workspace.
+
+        *exclude_files* — optional set of filenames (relative to workspace
+        root, e.g. ``{"MEMORY.md", "SOUL.md"}``) to skip.  Useful when the
+        caller has already injected those files (e.g. bootstrap content).
 
         Returns list of {"file": str, "snippet": str, "score": float}.
         """
@@ -365,10 +372,12 @@ class WorkspaceManager:
 
         documents: list[tuple[str, list[str], str]] = []
         for md_file in sorted(self.root.rglob("*.md")):
+            rel = str(md_file.relative_to(self.root))
+            if exclude_files and rel in exclude_files:
+                continue
             content = md_file.read_text(errors="replace")[:_MAX_FILE_SIZE]
             if not content.strip():
                 continue
-            rel = str(md_file.relative_to(self.root))
             tokens = _tokenize(content)
             documents.append((rel, tokens, content))
 

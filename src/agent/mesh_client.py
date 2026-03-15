@@ -76,6 +76,45 @@ class MeshClient:
         from src.shared.trace import trace_headers
         return trace_headers()
 
+    # Retry config for idempotent reads — resilience to transient mesh errors
+    _GET_MAX_RETRIES = 2
+    _GET_BACKOFFS = (0.5, 1.0)  # seconds per retry
+    _GET_RETRYABLE_STATUS = frozenset({502, 503})
+
+    async def _get_with_retry(
+        self, url: str, *, params: dict | None = None,
+        headers: dict | None = None, timeout: int = 30,
+    ) -> httpx.Response:
+        """GET with automatic retries on transient errors.
+
+        Retries on ConnectError, TimeoutException, 502, 503.
+        Only used for idempotent read-only endpoints.
+        """
+        hdrs = {**(headers or {}), **self._trace_headers()}
+        last_exc: Exception | None = None
+        for attempt in range(self._GET_MAX_RETRIES + 1):
+            try:
+                client = await self._get_client()
+                response = await client.get(
+                    url, params=params, headers=hdrs, timeout=timeout,
+                )
+                if response.status_code in self._GET_RETRYABLE_STATUS:
+                    if attempt < self._GET_MAX_RETRIES:
+                        await asyncio.sleep(self._GET_BACKOFFS[attempt])
+                        continue
+                return response
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                last_exc = e
+                if attempt < self._GET_MAX_RETRIES:
+                    logger.debug(
+                        "GET %s failed (%s), retrying in %ss",
+                        url, type(e).__name__, self._GET_BACKOFFS[attempt],
+                    )
+                    await asyncio.sleep(self._GET_BACKOFFS[attempt])
+                    continue
+                raise
+        raise last_exc  # type: ignore[misc]
+
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
@@ -97,11 +136,9 @@ class MeshClient:
     async def read_blackboard(self, key: str) -> Optional[dict]:
         """Read a value from the shared blackboard."""
         scoped = self._scope_key(key)
-        client = await self._get_client()
-        response = await client.get(
+        response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/blackboard/{scoped}",
             params={"agent_id": self.agent_id},
-            headers=self._trace_headers(),
         )
         if response.status_code == 404:
             return None
@@ -145,11 +182,9 @@ class MeshClient:
     async def list_blackboard(self, prefix: str) -> list[dict]:
         """List blackboard entries by key prefix."""
         scoped = self._scope_key(prefix)
-        client = await self._get_client()
-        response = await client.get(
+        response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/blackboard/",
             params={"agent_id": self.agent_id, "prefix": scoped},
-            headers=self._trace_headers(),
         )
         response.raise_for_status()
         entries = response.json()
@@ -223,16 +258,14 @@ class MeshClient:
 
     async def list_agents(self) -> dict:
         """List agents visible to this agent (project-scoped or self-only)."""
-        client = await self._get_client()
         params: dict[str, str] = {}
         if self.project_name:
             params["project"] = self.project_name
         else:
             params["agent_id"] = self.agent_id
-        response = await client.get(
+        response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/agents",
             params=params,
-            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -263,11 +296,9 @@ class MeshClient:
 
     async def list_cron(self) -> list[dict]:
         """List cron jobs for this agent."""
-        client = await self._get_client()
-        response = await client.get(
+        response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/cron",
             params={"agent_id": self.agent_id},
-            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -319,11 +350,9 @@ class MeshClient:
 
     async def get_agent_history(self, agent_id: str) -> dict:
         """Read another agent's daily logs (permission-checked on server)."""
-        client = await self._get_client()
-        response = await client.get(
+        response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/agents/{agent_id}/history",
             params={"requesting_agent": self.agent_id},
-            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -343,22 +372,18 @@ class MeshClient:
 
     async def vault_list(self) -> list[str]:
         """List credential names stored in the vault."""
-        client = await self._get_client()
-        response = await client.get(
+        response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/vault/list",
             params={"agent_id": self.agent_id},
-            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json().get("credentials", [])
 
     async def vault_status(self, name: str) -> dict:
         """Check whether a credential exists."""
-        client = await self._get_client()
-        response = await client.get(
+        response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/vault/status/{name}",
             params={"agent_id": self.agent_id},
-            headers=self._trace_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -382,11 +407,10 @@ class MeshClient:
 
     async def introspect(self, section: str = "all") -> dict:
         """Query runtime state from the mesh (permissions, budget, fleet, etc.)."""
-        client = await self._get_client()
-        response = await client.get(
+        response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/introspect",
             params={"section": section},
-            headers={"X-Agent-ID": self.agent_id, **self._trace_headers()},
+            headers={"X-Agent-ID": self.agent_id},
         )
         response.raise_for_status()
         return response.json()
