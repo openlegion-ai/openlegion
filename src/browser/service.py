@@ -297,6 +297,29 @@ class BrowserManager:
                 inst.touch()
             return len(self._instances)
 
+    async def refocus_active(self) -> None:
+        """Re-assert X11 focus on the most recently active browser window.
+
+        Called periodically by the VNC keepalive.  When a modal, popup, or
+        internal Firefox dialog steals X11 focus, subsequent VNC mouse clicks
+        go to the wrong window and appear to do nothing.
+        """
+        async with self._lock:
+            if not self._instances:
+                return
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["xdotool", "search", "--class", "firefox",
+                     "windowmap", "--sync", "windowraise", "windowfocus"],
+                    capture_output=True, timeout=3,
+                ),
+            )
+        except Exception:
+            pass
+
     async def get_or_start(self, agent_id: str) -> CamoufoxInstance:
         """Get existing browser or start a new one for the agent."""
         if not _AGENT_ID_RE.match(agent_id):
@@ -761,22 +784,9 @@ class BrowserManager:
             return
         try:
             await locator.hover(timeout=timeout)
+            await asyncio.sleep(random.uniform(0.02, 0.06))
         except Exception:
-            # Hover failed (element covered, not visible) — fall back to direct click
-            await locator.click(timeout=timeout, force=False)
-            return
-        # Small settle before clicking — human reaction gap
-        await asyncio.sleep(random.uniform(0.02, 0.06))
-        try:
-            box = await locator.bounding_box()
-            if box and isinstance(box, dict) and "x" in box:
-                x = box["x"] + box["width"] / 2 + random.uniform(-2, 2)
-                y = box["y"] + box["height"] / 2 + random.uniform(-2, 2)
-                await page.mouse.click(x, y)
-                return
-        except Exception:
-            pass
-        # bounding_box unavailable — click at current mouse position
+            pass  # Hover failed — click below will still attempt
         await locator.click(timeout=timeout, force=False)
 
     async def _human_click_selector(self, page, selector: str, *,

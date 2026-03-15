@@ -48,6 +48,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         """
         _verify_auth(request)
         touched = await manager.touch_all()
+        await manager.refocus_active()
         return {"touched": touched}
 
     @app.get("/browser/{agent_id}/status")

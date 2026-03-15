@@ -1274,7 +1274,7 @@ def create_mesh_app(
                         import httpx as _httpx
                         async with _httpx.AsyncClient(timeout=5) as _client:
                             while True:
-                                await asyncio.sleep(300)
+                                await asyncio.sleep(30)
                                 try:
                                     await _client.post(
                                         f"{svc_url}/browser/keepalive",
