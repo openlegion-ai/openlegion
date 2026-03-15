@@ -1738,7 +1738,10 @@ class AgentLoop:
             if learnings:
                 parts.append(f"## Learnings from Past Sessions\n\n{learnings}")  # pre-sanitized
 
-        has_browser = "browser_navigate" in self.skills.list_skills(exclude=self._excluded_tools)
+        has_browser = (
+            "browser_navigate" in self.skills.skills
+            and (not self._excluded_tools or "browser_navigate" not in self._excluded_tools)
+        )
 
         is_standalone = self.mesh_client.is_standalone
         rules = (
