@@ -1967,7 +1967,11 @@ function dashboard() {
         can_spawn: cfg.can_spawn ?? false,
         can_manage_cron: cfg.can_manage_cron ?? false,
         can_use_wallet: cfg.can_use_wallet ?? false,
-        wallet_allowed_chains: (cfg.wallet_allowed_chains || []).join(', '),
+        _walletChains: Object.fromEntries(
+          (cfg.wallet_available_chains || []).map(
+            ch => [ch.id, (cfg.wallet_allowed_chains || []).includes(ch.id)]
+          )
+        ),
         allowed_credentials: credsStr,
         _credMode: credMode,
       };
@@ -2043,9 +2047,10 @@ function dashboard() {
       for (const flag of ['can_use_browser', 'can_spawn', 'can_manage_cron', 'can_use_wallet']) {
         if (this.editForm[flag] !== (cfg[flag] ?? false)) permBody[flag] = this.editForm[flag];
       }
-      // Wallet allowed chains
-      const newChains = (this.editForm.wallet_allowed_chains || '').split(',').map(s => s.trim()).filter(Boolean);
-      const oldChains = cfg.wallet_allowed_chains || [];
+      // Wallet allowed chains (from checkbox state)
+      const wc = this.editForm._walletChains || {};
+      const newChains = Object.keys(wc).filter(k => wc[k]).sort();
+      const oldChains = [...(cfg.wallet_allowed_chains || [])].sort();
       if (JSON.stringify(newChains) !== JSON.stringify(oldChains)) {
         permBody.wallet_allowed_chains = newChains;
       }
@@ -3679,6 +3684,19 @@ function dashboard() {
     hideWalletSeed() {
       this.walletSeed = '';
       this.walletSeedVisible = false;
+    },
+
+    async enableWalletForAgent(agentId) {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/wallet/enable/${agentId}`, { method: 'POST' });
+        if (resp.ok) {
+          this.showToast(`Wallet enabled for ${agentId}`);
+          await this.fetchWallet();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Failed'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
     },
 
     copyToClipboard(text) {

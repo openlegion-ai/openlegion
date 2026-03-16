@@ -112,6 +112,16 @@ def _log_cron_task_exception(task: object) -> None:
         logger.error("Background cron job failed: %s", exc, exc_info=exc)
 
 
+def _wallet_chain_label(chain_id: str, cfg: dict) -> str:
+    """Human-friendly chain label for the dashboard UI."""
+    name = chain_id.split(":", 1)[-1].replace("-", " ").title()
+    eco = cfg.get("ecosystem", "").upper()
+    symbol = cfg.get("symbol", "")
+    if "devnet" in chain_id or "sepolia" in chain_id:
+        return f"{name} ({eco} Testnet)"
+    return f"{name} ({eco} · {symbol})"
+
+
 def create_dashboard_router(
     blackboard: Blackboard,
     health_monitor: HealthMonitor | None,
@@ -612,14 +622,21 @@ def create_dashboard_router(
                 agent_perms.wallet_allowed_chains if agent_perms else []
             ),
         }
-        # Derive wallet addresses if wallet is configured and agent has access
+        # Wallet: available chains + derived addresses
         _ws_ref_local = wallet_service_ref or [None]
-        if _ws_ref_local[0] is not None and cfg_result["can_use_wallet"]:
+        ws = _ws_ref_local[0]
+        cfg_result["wallet_configured"] = ws is not None
+        if ws is not None:
+            cfg_result["wallet_available_chains"] = [
+                {"id": cid, "label": _wallet_chain_label(cid, ccfg), "ecosystem": ccfg["ecosystem"]}
+                for cid, ccfg in ws.chains.items()
+            ]
+        else:
+            cfg_result["wallet_available_chains"] = []
+        if ws is not None and cfg_result["can_use_wallet"]:
             try:
-                evm_addr = await _ws_ref_local[0].get_address(agent_id, "evm:ethereum")
-                sol_addr = await _ws_ref_local[0].get_address(
-                    agent_id, "solana:mainnet",
-                )
+                evm_addr = await ws.get_address(agent_id, "evm:ethereum")
+                sol_addr = await ws.get_address(agent_id, "solana:mainnet")
                 cfg_result["wallet_addresses"] = {
                     "evm": evm_addr, "solana": sol_addr,
                 }
@@ -1385,12 +1402,47 @@ def create_dashboard_router(
                     })
                 except Exception:
                     agents.append({"agent_id": aid, "index": idx, "error": "derivation failed"})
-            return {"configured": True, "agents": agents}
+            # Include all registered agents with their wallet status
+            # so the UI can show quick-enable for agents without wallets
+            all_agent_wallet_status = []
+            wallet_agent_ids = {a["agent_id"] for a in agents}
+            for aid in sorted(agent_registry.keys()):
+                enabled = (
+                    permissions.can_use_wallet(aid) if permissions else False
+                )
+                all_agent_wallet_status.append({
+                    "agent_id": aid,
+                    "wallet_enabled": enabled,
+                    "has_addresses": aid in wallet_agent_ids,
+                })
+            return {
+                "configured": True,
+                "agents": agents,
+                "all_agents": all_agent_wallet_status,
+            }
         except Exception as e:
             return {"configured": True, "agents": [], "error": str(e)}
         finally:
             if temp_ws is not None:
                 temp_ws.close()
+
+    @api_router.post("/api/wallet/enable/{agent_id}")
+    async def api_wallet_enable_agent(agent_id: str, request: Request) -> dict:
+        """Quick-enable wallet for an agent with all chains."""
+        _verify_dashboard_auth(request)
+        if permissions is None:
+            raise HTTPException(status_code=503, detail="Permissions not available")
+        from src.cli.config import _load_permissions, _save_permissions
+
+        perms_data = _load_permissions()
+        agent_perms = perms_data.get("permissions", {}).get(agent_id, {})
+        agent_perms["can_use_wallet"] = True
+        if not agent_perms.get("wallet_allowed_chains"):
+            agent_perms["wallet_allowed_chains"] = ["*"]
+        perms_data.setdefault("permissions", {})[agent_id] = agent_perms
+        _save_permissions(perms_data)
+        permissions.reload()
+        return {"enabled": True, "agent_id": agent_id}
 
     # ── Cost detail per agent ────────────────────────────────
 

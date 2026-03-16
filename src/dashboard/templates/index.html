@@ -1548,35 +1548,41 @@
                               <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_manage_cron ? 'bg-indigo-400' : 'bg-gray-600'"></span>
                               Cron Jobs
                             </span>
-                            <span class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded"
-                              :class="agentConfigs[selectedAgent]?.can_use_wallet ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'">
-                              <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_use_wallet ? 'bg-indigo-400' : 'bg-gray-600'"></span>
-                              Wallet
-                            </span>
                           </div>
                         </div>
-                        <!-- Wallet Addresses (read-only) -->
-                        <div class="bg-gray-800/50 rounded p-3 md:col-span-2" x-show="agentConfigs[selectedAgent]?.wallet_addresses">
-                          <div class="text-xs text-gray-500 mb-1">Wallet Addresses</div>
-                          <div class="space-y-1.5">
-                            <div class="flex items-center gap-2">
-                              <span class="text-[10px] text-gray-500 w-12">EVM</span>
-                              <code class="text-xs text-gray-300 font-mono" x-text="agentConfigs[selectedAgent]?.wallet_addresses?.evm"></code>
-                              <button @click="copyToClipboard(agentConfigs[selectedAgent]?.wallet_addresses?.evm)" class="text-gray-600 hover:text-gray-400 transition-colors" title="Copy">
-                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
-                              </button>
+                        <!-- Wallet (read-only) -->
+                        <div class="bg-gray-800/50 rounded p-3 md:col-span-2" x-show="agentConfigs[selectedAgent]?.wallet_configured">
+                          <div class="text-xs text-gray-500 mb-2">Wallet</div>
+                          <template x-if="agentConfigs[selectedAgent]?.can_use_wallet">
+                            <div>
+                              <!-- Allowed chains as badges -->
+                              <div class="flex flex-wrap gap-1.5 mb-3">
+                                <template x-for="ch in agentConfigs[selectedAgent]?.wallet_allowed_chains || []" :key="ch">
+                                  <span class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/50" x-text="ch"></span>
+                                </template>
+                              </div>
+                              <!-- Addresses -->
+                              <div x-show="agentConfigs[selectedAgent]?.wallet_addresses" class="space-y-1.5">
+                                <div class="flex items-center gap-2">
+                                  <span class="text-[10px] text-gray-500 w-12">EVM</span>
+                                  <code class="text-xs text-gray-300 font-mono" x-text="agentConfigs[selectedAgent]?.wallet_addresses?.evm"></code>
+                                  <button @click="copyToClipboard(agentConfigs[selectedAgent]?.wallet_addresses?.evm)" class="text-gray-600 hover:text-gray-400 transition-colors" title="Copy">
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                                  </button>
+                                </div>
+                                <div class="flex items-center gap-2">
+                                  <span class="text-[10px] text-gray-500 w-12">Solana</span>
+                                  <code class="text-xs text-gray-300 font-mono" x-text="agentConfigs[selectedAgent]?.wallet_addresses?.solana"></code>
+                                  <button @click="copyToClipboard(agentConfigs[selectedAgent]?.wallet_addresses?.solana)" class="text-gray-600 hover:text-gray-400 transition-colors" title="Copy">
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                                  </button>
+                                </div>
+                              </div>
                             </div>
-                            <div class="flex items-center gap-2">
-                              <span class="text-[10px] text-gray-500 w-12">Solana</span>
-                              <code class="text-xs text-gray-300 font-mono" x-text="agentConfigs[selectedAgent]?.wallet_addresses?.solana"></code>
-                              <button @click="copyToClipboard(agentConfigs[selectedAgent]?.wallet_addresses?.solana)" class="text-gray-600 hover:text-gray-400 transition-colors" title="Copy">
-                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
-                              </button>
-                            </div>
-                          </div>
-                          <div class="text-[10px] text-gray-600 mt-1.5" x-show="agentConfigs[selectedAgent]?.wallet_allowed_chains?.length">
-                            Chains: <span x-text="(agentConfigs[selectedAgent]?.wallet_allowed_chains || []).join(', ')"></span>
-                          </div>
+                          </template>
+                          <template x-if="!agentConfigs[selectedAgent]?.can_use_wallet">
+                            <div class="text-xs text-gray-600">Wallet not enabled for this agent</div>
+                          </template>
                         </div>
                         <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
                           <div class="text-xs text-gray-500 mb-1">Credential Access</div>
@@ -1742,6 +1748,12 @@
                                 </button>
                                 <span class="text-xs" :class="editForm.can_manage_cron ? 'text-gray-200' : 'text-gray-500'">Cron Jobs</span>
                               </label>
+                            </div>
+                          </div>
+                          <!-- Wallet -->
+                          <div class="md:col-span-2" x-show="agentConfigs[selectedAgent]?.wallet_configured">
+                            <div class="flex items-center gap-3 mb-2">
+                              <label class="text-xs text-gray-500">Wallet</label>
                               <label class="flex items-center gap-2 cursor-pointer">
                                 <button type="button" @click="editForm.can_use_wallet = !editForm.can_use_wallet"
                                   class="relative inline-flex w-7 h-4 rounded-full transition-colors flex-shrink-0"
@@ -1749,17 +1761,27 @@
                                   <span class="absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform"
                                     :class="editForm.can_use_wallet ? 'translate-x-3' : ''"></span>
                                 </button>
-                                <span class="text-xs" :class="editForm.can_use_wallet ? 'text-gray-200' : 'text-gray-500'">Wallet</span>
+                                <span class="text-xs" :class="editForm.can_use_wallet ? 'text-gray-200' : 'text-gray-500'"
+                                  x-text="editForm.can_use_wallet ? 'Enabled' : 'Disabled'"></span>
                               </label>
                             </div>
-                          </div>
-                          <!-- Wallet chains (shown when wallet enabled) -->
-                          <div class="md:col-span-2" x-show="editForm.can_use_wallet" x-transition>
-                            <label class="text-xs text-gray-500 mb-1.5 block">Allowed Chains</label>
-                            <input type="text" x-model="editForm.wallet_allowed_chains"
-                              class="dash-input w-full text-xs"
-                              placeholder="evm:base, evm:ethereum, solana:mainnet">
-                            <div class="text-[10px] text-gray-600 mt-1">Comma-separated chain IDs. Use * for all chains.</div>
+                            <div x-show="editForm.can_use_wallet" x-transition>
+                              <div class="text-[10px] text-gray-500 mb-1.5">Allowed Chains</div>
+                              <div class="flex flex-wrap gap-2">
+                                <template x-for="ch in agentConfigs[selectedAgent]?.wallet_available_chains || []" :key="ch.id">
+                                  <label class="flex items-center gap-1.5 cursor-pointer text-xs px-2.5 py-1 rounded border transition-colors"
+                                    :class="editForm._walletChains?.[ch.id]
+                                      ? 'bg-indigo-900/30 text-indigo-300 border-indigo-700/50'
+                                      : 'bg-gray-800/50 text-gray-500 border-gray-700 hover:border-gray-600'">
+                                    <input type="checkbox" class="hidden"
+                                      :checked="editForm._walletChains?.[ch.id]"
+                                      @change="editForm._walletChains[ch.id] = $event.target.checked">
+                                    <span class="w-1.5 h-1.5 rounded-full" :class="editForm._walletChains?.[ch.id] ? 'bg-indigo-400' : 'bg-gray-600'"></span>
+                                    <span x-text="ch.label"></span>
+                                  </label>
+                                </template>
+                              </div>
+                            </div>
                           </div>
                           <div class="md:col-span-2">
                             <label class="text-xs text-gray-500 mb-1.5 block">Credential Access</label>
@@ -2767,9 +2789,26 @@
                 </table>
               </div>
 
-              <!-- No agents yet -->
-              <div x-show="!walletData.agents?.length" class="bg-gray-900 border border-gray-800 rounded-lg p-4 text-center">
-                <p class="text-xs text-gray-500">No agents have been assigned wallet addresses yet. Addresses are created automatically when an agent first uses a wallet tool.</p>
+              <!-- Agent wallet status -->
+              <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mt-4" x-show="walletData.all_agents?.length">
+                <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Wallet Access</div>
+                <div class="space-y-2">
+                  <template x-for="a in walletData.all_agents || []" :key="a.agent_id">
+                    <div class="flex items-center justify-between text-xs">
+                      <div class="flex items-center gap-2">
+                        <span class="w-1.5 h-1.5 rounded-full" :class="a.wallet_enabled ? 'bg-green-500' : 'bg-gray-600'"></span>
+                        <span class="text-gray-300" x-text="a.agent_id"></span>
+                      </div>
+                      <div>
+                        <span x-show="a.wallet_enabled" class="text-green-500/70 text-[10px]">Enabled</span>
+                        <button x-show="!a.wallet_enabled" @click="enableWalletForAgent(a.agent_id)"
+                          class="text-[10px] px-2 py-0.5 rounded bg-indigo-600/80 hover:bg-indigo-500 text-white transition-colors">
+                          Enable
+                        </button>
+                      </div>
+                    </div>
+                  </template>
+                </div>
               </div>
             </div>
           </template>
