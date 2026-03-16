@@ -234,7 +234,7 @@
     </nav>
 
     <!-- Main content -->
-    <main class="flex-1 overflow-auto p-2 sm:p-4 lg:p-6 transition-[margin] duration-200" :class="openChats.length > 0 && !chatPanelMinimized && (chatFullScreen ? 'hidden' : 'sm:mr-[50vw]')">
+    <main class="flex-1 overflow-auto p-2 sm:p-4 lg:p-6 transition-[margin] duration-200" :class="openChats.length > 0 && !chatPanelMinimized && (chatFullScreen ? 'hidden' : 'messenger-margin')">
 
       <!-- Connection error banner -->
       <div x-show="connectionError" x-cloak class="mb-4 bg-red-900/30 border border-red-800 rounded-lg px-4 py-3 flex items-center gap-3">
@@ -2815,6 +2815,33 @@
               </div>
             </div>
           </template>
+
+          <!-- RPC Settings -->
+          <div x-show="walletData?.configured" x-effect="if (systemTab === 'wallet' && walletData?.configured && !walletRpcChains.length) fetchWalletRpc()" class="mt-4">
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">RPC Endpoints</div>
+              <p class="text-[11px] text-gray-600 mb-3">Custom RPC URLs for better reliability and higher rate limits. Leave empty to use the public default.</p>
+              <div class="space-y-2">
+                <template x-for="ch in walletRpcChains" :key="ch.chain_id">
+                  <div>
+                    <div class="flex items-center justify-between text-xs">
+                      <div class="flex items-center gap-2 min-w-0 flex-1">
+                        <span class="text-gray-300 w-40 shrink-0" x-text="ch.label"></span>
+                        <code class="text-[11px] font-mono truncate min-w-0" :class="ch.is_custom ? 'text-indigo-400' : 'text-gray-600'" x-text="ch.rpc_current" :title="ch.rpc_current"></code>
+                      </div>
+                      <button @click="startRpcEdit(ch)" x-show="walletRpcEditing !== ch.chain_id" class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors shrink-0 ml-2" x-text="ch.is_custom ? 'Edit' : 'Set Custom'"></button>
+                    </div>
+                    <div x-show="walletRpcEditing === ch.chain_id" x-cloak x-transition class="mt-1.5 flex items-center gap-2">
+                      <input type="text" x-model="walletRpcValue" :disabled="walletRpcSaving" class="dash-input text-xs flex-1" :placeholder="ch.rpc_default">
+                      <button @click="saveRpcUrl(ch.chain_id)" :disabled="walletRpcSaving" class="text-[10px] px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50" x-text="walletRpcSaving ? '...' : 'Save'"></button>
+                      <button x-show="ch.is_custom" @click="walletRpcValue = ''; saveRpcUrl(ch.chain_id)" :disabled="walletRpcSaving" class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 disabled:opacity-50">Reset</button>
+                      <button @click="cancelRpcEdit()" class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400">Cancel</button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
 
           <!-- Loading state -->
           <div x-show="walletLoading && !walletData" class="text-center py-8">
