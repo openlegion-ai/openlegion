@@ -1548,6 +1548,34 @@
                               <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_manage_cron ? 'bg-indigo-400' : 'bg-gray-600'"></span>
                               Cron Jobs
                             </span>
+                            <span class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded"
+                              :class="agentConfigs[selectedAgent]?.can_use_wallet ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'">
+                              <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_use_wallet ? 'bg-indigo-400' : 'bg-gray-600'"></span>
+                              Wallet
+                            </span>
+                          </div>
+                        </div>
+                        <!-- Wallet Addresses (read-only) -->
+                        <div class="bg-gray-800/50 rounded p-3 md:col-span-2" x-show="agentConfigs[selectedAgent]?.wallet_addresses">
+                          <div class="text-xs text-gray-500 mb-1">Wallet Addresses</div>
+                          <div class="space-y-1.5">
+                            <div class="flex items-center gap-2">
+                              <span class="text-[10px] text-gray-500 w-12">EVM</span>
+                              <code class="text-xs text-gray-300 font-mono" x-text="agentConfigs[selectedAgent]?.wallet_addresses?.evm"></code>
+                              <button @click="copyToClipboard(agentConfigs[selectedAgent]?.wallet_addresses?.evm)" class="text-gray-600 hover:text-gray-400 transition-colors" title="Copy">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                              </button>
+                            </div>
+                            <div class="flex items-center gap-2">
+                              <span class="text-[10px] text-gray-500 w-12">Solana</span>
+                              <code class="text-xs text-gray-300 font-mono" x-text="agentConfigs[selectedAgent]?.wallet_addresses?.solana"></code>
+                              <button @click="copyToClipboard(agentConfigs[selectedAgent]?.wallet_addresses?.solana)" class="text-gray-600 hover:text-gray-400 transition-colors" title="Copy">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                              </button>
+                            </div>
+                          </div>
+                          <div class="text-[10px] text-gray-600 mt-1.5" x-show="agentConfigs[selectedAgent]?.wallet_allowed_chains?.length">
+                            Chains: <span x-text="(agentConfigs[selectedAgent]?.wallet_allowed_chains || []).join(', ')"></span>
                           </div>
                         </div>
                         <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
@@ -1714,7 +1742,24 @@
                                 </button>
                                 <span class="text-xs" :class="editForm.can_manage_cron ? 'text-gray-200' : 'text-gray-500'">Cron Jobs</span>
                               </label>
+                              <label class="flex items-center gap-2 cursor-pointer">
+                                <button type="button" @click="editForm.can_use_wallet = !editForm.can_use_wallet"
+                                  class="relative inline-flex w-7 h-4 rounded-full transition-colors flex-shrink-0"
+                                  :class="editForm.can_use_wallet ? 'bg-indigo-600' : 'bg-gray-700'">
+                                  <span class="absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform"
+                                    :class="editForm.can_use_wallet ? 'translate-x-3' : ''"></span>
+                                </button>
+                                <span class="text-xs" :class="editForm.can_use_wallet ? 'text-gray-200' : 'text-gray-500'">Wallet</span>
+                              </label>
                             </div>
+                          </div>
+                          <!-- Wallet chains (shown when wallet enabled) -->
+                          <div class="md:col-span-2" x-show="editForm.can_use_wallet" x-transition>
+                            <label class="text-xs text-gray-500 mb-1.5 block">Allowed Chains</label>
+                            <input type="text" x-model="editForm.wallet_allowed_chains"
+                              class="dash-input w-full text-xs"
+                              placeholder="evm:base, evm:ethereum, solana:mainnet">
+                            <div class="text-[10px] text-gray-600 mt-1">Comma-separated chain IDs. Use * for all chains.</div>
                           </div>
                           <div class="md:col-span-2">
                             <label class="text-xs text-gray-500 mb-1.5 block">Credential Access</label>

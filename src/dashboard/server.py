@@ -607,7 +607,26 @@ def create_dashboard_router(
             "can_use_browser": agent_perms.can_use_browser if agent_perms else False,
             "can_spawn": agent_perms.can_spawn if agent_perms else False,
             "can_manage_cron": agent_perms.can_manage_cron if agent_perms else False,
+            "can_use_wallet": agent_perms.can_use_wallet if agent_perms else False,
+            "wallet_allowed_chains": (
+                agent_perms.wallet_allowed_chains if agent_perms else []
+            ),
         }
+        # Derive wallet addresses if wallet is configured and agent has access
+        _ws_ref_local = wallet_service_ref or [None]
+        if _ws_ref_local[0] is not None and cfg_result["can_use_wallet"]:
+            try:
+                evm_addr = await _ws_ref_local[0].get_address(agent_id, "evm:ethereum")
+                sol_addr = await _ws_ref_local[0].get_address(
+                    agent_id, "solana:mainnet",
+                )
+                cfg_result["wallet_addresses"] = {
+                    "evm": evm_addr, "solana": sol_addr,
+                }
+            except Exception:
+                cfg_result["wallet_addresses"] = None
+        else:
+            cfg_result["wallet_addresses"] = None
         vnc_url = _browser_vnc_url_for_request(request)
         if vnc_url:
             cfg_result["vnc_url"] = vnc_url
@@ -805,10 +824,19 @@ def create_dashboard_router(
                 raise HTTPException(status_code=400, detail="allowed_apis must be a list of strings")
             agent_perms["allowed_apis"] = val
             updated.append("allowed_apis")
-        for flag in ("can_use_browser", "can_spawn", "can_manage_cron"):
+        for flag in ("can_use_browser", "can_spawn", "can_manage_cron", "can_use_wallet"):
             if flag in body:
                 agent_perms[flag] = bool(body[flag])
                 updated.append(flag)
+        if "wallet_allowed_chains" in body:
+            val = body["wallet_allowed_chains"]
+            if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
+                raise HTTPException(
+                    status_code=400,
+                    detail="wallet_allowed_chains must be a list of strings",
+                )
+            agent_perms["wallet_allowed_chains"] = val
+            updated.append("wallet_allowed_chains")
 
         perms_data.setdefault("permissions", {})[agent_id] = agent_perms
         _save_permissions(perms_data)

@@ -1965,6 +1965,8 @@ function dashboard() {
         can_use_browser: cfg.can_use_browser ?? false,
         can_spawn: cfg.can_spawn ?? false,
         can_manage_cron: cfg.can_manage_cron ?? false,
+        can_use_wallet: cfg.can_use_wallet ?? false,
+        wallet_allowed_chains: (cfg.wallet_allowed_chains || []).join(', '),
         allowed_credentials: credsStr,
         _credMode: credMode,
       };
@@ -2037,8 +2039,14 @@ function dashboard() {
       const credsChanged = JSON.stringify(newCreds) !== JSON.stringify(oldCreds);
       const permBody = {};
       if (credsChanged) permBody.allowed_credentials = newCreds;
-      for (const flag of ['can_use_browser', 'can_spawn', 'can_manage_cron']) {
+      for (const flag of ['can_use_browser', 'can_spawn', 'can_manage_cron', 'can_use_wallet']) {
         if (this.editForm[flag] !== (cfg[flag] ?? false)) permBody[flag] = this.editForm[flag];
+      }
+      // Wallet allowed chains
+      const newChains = (this.editForm.wallet_allowed_chains || '').split(',').map(s => s.trim()).filter(Boolean);
+      const oldChains = cfg.wallet_allowed_chains || [];
+      if (JSON.stringify(newChains) !== JSON.stringify(oldChains)) {
+        permBody.wallet_allowed_chains = newChains;
       }
       const permsChanged = Object.keys(permBody).length > 0;
       if (Object.keys(body).length === 0 && !permsChanged) {
