@@ -1061,6 +1061,15 @@ class CredentialVault:
             # Fallback: some litellm versions put thinking in a separate attribute
             if thinking_content is None:
                 thinking_content = getattr(msg, "reasoning_content", None) or None
+            # Also check alternative attribute names (Ollama thinking field)
+            if thinking_content is None:
+                for attr in ("thinking", "reasoning", "thought"):
+                    thinking_content = getattr(msg, attr, None) or None
+                    if thinking_content:
+                        break
+            # Use thinking as content when model produced only reasoning
+            if not content and thinking_content:
+                content = thinking_content
             data = {
                 "content": content,
                 "tokens_used": usage.total_tokens if usage else 0,
@@ -1178,6 +1187,7 @@ class CredentialVault:
             collected_content = ""
             collected_thinking = ""
             collected_tool_calls: list[dict] = []
+            chunk_count = 0
 
             # Iterate with keepalive: send SSE comments every 15s so
             # downstream read timeouts (agent → mesh, dashboard → agent)
@@ -1200,16 +1210,47 @@ class CredentialVault:
                     except StopAsyncIteration:
                         break
 
+                    chunk_count += 1
                     delta = chunk.choices[0].delta if chunk.choices else None
+                    # Log the first chunk from local models to aid debugging
+                    # empty-response issues.
+                    if chunk_count == 1 and self._is_keyless_provider(used_model):
+                        try:
+                            delta_dict = delta.model_dump() if delta and hasattr(delta, "model_dump") else repr(delta)
+                        except Exception:
+                            delta_dict = repr(delta)
+                        logger.debug(
+                            "First streaming chunk for %s: choices=%d delta=%s",
+                            used_model,
+                            len(chunk.choices) if chunk.choices else 0,
+                            delta_dict,
+                        )
                     if delta is not None:
                         if delta.content:
                             collected_content += delta.content
                             yield f"data: {json.dumps({'type': 'text_delta', 'content': delta.content})}\n\n"
 
-                        # Collect thinking/reasoning tokens but don't stream them
+                        # Collect thinking/reasoning tokens.  For local
+                        # providers (Ollama) we also stream them so the user
+                        # sees progress — they are the only output for many
+                        # reasoning models (e.g. deepseek-r1, qwen3).
                         reasoning = getattr(delta, "reasoning_content", None)
                         if reasoning and isinstance(reasoning, str):
                             collected_thinking += reasoning
+                            if self._is_keyless_provider(used_model):
+                                yield f"data: {json.dumps({'type': 'text_delta', 'content': reasoning})}\n\n"
+
+                        # Some Ollama versions return thinking in a 'thinking'
+                        # attribute that LiteLLM doesn't always map.  Check
+                        # common alternative attribute names as fallback.
+                        if not delta.content and not reasoning:
+                            for attr in ("thinking", "reasoning", "thought"):
+                                alt = getattr(delta, attr, None)
+                                if alt and isinstance(alt, str):
+                                    collected_thinking += alt
+                                    if self._is_keyless_provider(used_model):
+                                        yield f"data: {json.dumps({'type': 'text_delta', 'content': alt})}\n\n"
+                                    break
 
                         if delta.tool_calls:
                             for tc in delta.tool_calls:
@@ -1238,6 +1279,22 @@ class CredentialVault:
                 tokens_used = response.usage.total_tokens
                 prompt_tokens = getattr(response.usage, 'prompt_tokens', 0) or 0
                 completion_tokens = getattr(response.usage, 'completion_tokens', 0) or 0
+
+            # If the model produced only reasoning tokens (common with
+            # Ollama thinking models like deepseek-r1, qwen3), use that
+            # as content so the response is not empty.
+            if not collected_content and collected_thinking:
+                collected_content = collected_thinking
+                logger.info(
+                    "Model %s returned only reasoning tokens — using as content",
+                    used_model,
+                )
+            elif not collected_content and not collected_thinking:
+                logger.warning(
+                    "Model %s produced no content and no reasoning tokens "
+                    "(tokens_used=%d)",
+                    used_model, tokens_used,
+                )
 
             self._health_tracker.record_success(used_model)
             done_data: dict = {
