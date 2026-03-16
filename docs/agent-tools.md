@@ -119,8 +119,19 @@ Agents never see credential values. All operations return opaque `$CRED{name}` h
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `vault_generate_secret` | `name`, `length`, `charset` | Generate a random secret and store it (returns handle only) |
-| `vault_capture_from_page` | `name`, `selector` or `ref` | Read text from a browser element and store as credential |
 | `vault_list` | -- | List credential names the agent can access (names only, filtered by permissions) |
+
+### Wallet
+
+Agents can interact with EVM and Solana blockchains through the wallet signing service. Private keys never enter agent containers — the mesh holds the master seed and signs transactions server-side. Wallet access requires `can_use_wallet: true` in `config/permissions.json`.
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `wallet_get_address` | `chain` | Returns your wallet address on a specific chain. `chain`: one of `evm:ethereum`, `evm:base`, `evm:arbitrum`, `evm:polygon`, `evm:sepolia`, `solana:mainnet`, `solana:devnet`. |
+| `wallet_get_balance` | `chain`, `token` | Check wallet balance in human-readable form. `token`: `native` (default) for ETH/SOL, or a token contract address for tokens like USDC. |
+| `wallet_read_contract` | `chain`, `contract`, `function`, `args` | Read onchain data without sending a transaction. EVM: call a contract read function (e.g. `balanceOf(address)`). Solana: read account data. `function` (EVM only): Solidity function signature. `args` (EVM only): array of string arguments matching the signature. |
+| `wallet_transfer` | `chain`, `to`, `amount`, `token` | Send tokens to an address — ETH, SOL, USDC, or any token. `to`: recipient address. `amount`: decimal string (e.g. `'0.1'`). `token`: `native` (default) or token contract address. For complex operations use `wallet_execute`. |
+| `wallet_execute` | `chain`, `contract`, `function`, `args`, `value`, `transaction` | Call a smart contract or sign a protocol transaction (swaps, approvals, mints, staking, lending). EVM: provide `contract`, `function` (Solidity signature), `args`, and optional `value` (native token to send, default `'0'`). Solana: provide `transaction` (base64 unsigned tx from a protocol API). |
 
 ### System Introspection
 

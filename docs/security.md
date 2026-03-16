@@ -128,6 +128,7 @@ Agent HTTP requests (`src/agent/builtins/http_tool.py`) are blocked from reachin
 - Resolves hostnames and rejects private, loopback, link-local, and reserved IP ranges
 - Checks both initial URLs and redirect targets (via httpx event hook)
 - IPv4-mapped IPv6 addresses (e.g., `::ffff:127.0.0.1`) are also blocked
+- CGNAT range (100.64.0.0/10, RFC 6598) is also blocked
 - Prevents agents from using the HTTP tool to scan internal networks or access host services
 
 ### Path Traversal Prevention
@@ -155,6 +156,9 @@ Per-agent rate limits on mesh endpoints prevent abuse and resource exhaustion:
 | `blackboard_write` | 100 requests | 60 seconds |
 | `publish` | 200 requests | 60 seconds |
 | `cron_create` | 10 requests | 3600 seconds |
+| `wallet_read` | 120 requests | 60 seconds |
+| `wallet_transfer` | 10 requests | 3600 seconds |
+| `wallet_execute` | 10 requests | 3600 seconds |
 
 Exceeding a rate limit returns HTTP 429. Rate-limit buckets are automatically cleaned up when agents are deregistered.
 

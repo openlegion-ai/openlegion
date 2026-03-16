@@ -8,7 +8,7 @@
    
 [![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
-[![Tests: 2070](https://img.shields.io/badge/tests-2070%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
+[![Tests: 2240](https://img.shields.io/badge/tests-2240%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
 [![Twitter](https://img.shields.io/badge/Twitter-@openlegion-1DA1F2?logo=x&logoColor=white)](https://x.com/openlegion)
 [![LiteLLM](https://img.shields.io/badge/LLM-100%2B%20providers-orange.svg)](https://litellm.ai)
@@ -111,10 +111,10 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **API key storage** | Agent config files | Vault proxy — agents never see keys |
 | **Agent isolation** | Process-level | Docker container per agent + microVM option |
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
-| **Multi-agent routing** | LLM CEO agent | Deterministic YAML DAG workflows |
+| **Multi-agent routing** | LLM CEO agent | Fleet model — blackboard + pub/sub coordination |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 2070 tests including full Docker E2E |
-| **Codebase size** | 430,000+ lines | ~29,000 lines — auditable in a day |
+| **Test coverage** | Minimal | 2240 tests including full Docker E2E |
+| **Codebase size** | 430,000+ lines | ~32,000 lines — auditable in a day |
 
 ---
 
@@ -122,13 +122,13 @@ OpenLegion was designed from day one assuming agents will be compromised.
 
 OpenLegion is an **autonomous AI agent framework** for running multi-agent
 fleets in isolated Docker containers. Each agent gets its own memory, tools, schedule,
-and budget — coordinated through deterministic YAML workflows with no LLM routing layer.
+and budget — coordinated through blackboard shared state and pub/sub events with no LLM routing layer.
 
 Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp**, or CLI. Agents act autonomously
 via cron schedules, webhooks, heartbeat monitoring, and file watchers — without being
 prompted.
 
-**2070 tests passing** across **~29,000 lines** of application code.
+**2240 tests passing** across **~32,000 lines** of application code.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
@@ -410,7 +410,6 @@ canonicalized parameters and results over a 15-call sliding window.
 | `list_subagents` | List active subagents and their status |
 | `wait_for_subagent` | Wait for a subagent to complete and return its result |
 | `vault_generate_secret` | Generate and store a random secret (returns opaque handle) |
-| `vault_capture_from_page` | Capture text from browser element and store as credential |
 | `vault_list` | List credential names (names only, never values) |
 | `get_system_status` | Query own runtime state: permissions, budget, fleet, cron, health |
 | `read_agent_history` | Read another agent's conversation logs |
@@ -607,10 +606,13 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 ├── stop                                       # Stop all containers
 ├── chat [name] [--port PORT]                  # Connect to a running agent
 ├── status [--port PORT] [--wide/-w] [--watch N] [--json]  # Show agent status
-└── version [--verbose/-v]                     # Show version and environment info
+├── version [--verbose/-v]                     # Show version and environment info
+└── wallet                                     # Manage agent wallets
+    ├── init                                   # Generate master wallet seed
+    └── show [agent_id]                        # Show wallet addresses
 ```
 
-> Agent management, credentials, blackboard, cron, workflows, projects, and channels
+> Agent management, credentials, blackboard, cron, projects, and channels
 > are managed via **REPL commands** (below) inside a running session, or via the
 > **web dashboard** at `http://localhost:8420`.
 
@@ -632,7 +634,6 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 /costs                               Show today's LLM spend + context usage + model health
 /blackboard [list|get|set|del]       View/edit shared blackboard entries
 /queue                               Show agent task queue status
-/workflow [list|run]                 List or trigger workflows
 /cron [list|del|pause|resume|run]    Manage cron jobs
 /project [list|use|info]              Manage multi-project namespaces
 /credential [add|list|remove]        Manage API credentials
@@ -723,11 +724,6 @@ agents:
 
 Per-agent access control with glob patterns for blackboard paths and
 explicit allowlists for messaging, pub/sub, and API access.
-
-### `config/workflows/*.yaml` — Workflow Definitions
-
-DAG-based workflows with step dependencies, conditions, timeouts,
-retry policies, and failure handlers.
 
 ### `.env` — API Keys
 
@@ -902,7 +898,7 @@ pytest tests/
 | Memory Integration | 6 | Vector search, cross-task recall, salience |
 | E2E | 17 | Container health, workflow, chat, memory, triggering |
 | Web Search | 2 | DuckDuckGo search tool |
-| **Total** | **2070** | |
+| **Total** | **2240** | |
 
 ---
 
@@ -996,8 +992,7 @@ src/
 │   ├── telegram.py                     # Telegram adapter
 │   ├── discord.py                      # Discord adapter
 │   ├── slack.py                        # Slack adapter (Socket Mode)
-│   ├── whatsapp.py                     # WhatsApp Cloud API adapter
-│   └── webhook.py                      # Workflow trigger webhook adapter
+│   └── whatsapp.py                     # WhatsApp Cloud API adapter
 ├── dashboard/
 │   ├── server.py                       # Dashboard FastAPI router + API
 │   ├── events.py                       # EventBus for real-time streaming
@@ -1011,14 +1006,18 @@ src/
     ├── devteam.yaml                    # Dev team template
     ├── content.yaml                    # Content creation team
     ├── deep-research.yaml              # Deep research and analysis team
-    └── monitor.yaml                    # Autonomous monitoring agent
+    ├── monitor.yaml                    # Autonomous monitoring agent
+    ├── competitive-intel.yaml          # Competitive intelligence team
+    ├── lead-enrichment.yaml            # Lead data enrichment
+    ├── price-intelligence.yaml         # Price monitoring and analysis
+    ├── review-ops.yaml                 # Review and feedback management
+    └── social-listening.yaml           # Social media monitoring
 
 config/
 ├── mesh.yaml                           # Framework settings
 ├── agents.yaml                         # Agent definitions (per-project)
 ├── permissions.json                    # Per-agent ACLs
-├── projects/                           # Multi-project namespaces
-└── workflows/                          # Workflow YAML definitions
+└── projects/                           # Multi-project namespaces
 ```
 
 ---
@@ -1030,8 +1029,8 @@ config/
 | Messages, not method calls | Agents communicate through HTTP/JSON. Never shared memory or direct invocation. |
 | The mesh is the only door | No agent has network access except through the mesh. No agent holds credentials. |
 | Private by default, shared by promotion | Agents keep knowledge private. Facts are explicitly promoted to the blackboard. |
-| Explicit failure handling | Every workflow step declares what happens on failure. No silent error swallowing. |
-| Small enough to audit | ~29,000 total lines. The entire codebase is auditable in a day. |
+| Explicit failure handling | Domain-specific exceptions propagated with context. No silent error swallowing. |
+| Small enough to audit | ~32,000 total lines. The entire codebase is auditable in a day. |
 | Skills over features | New capabilities are agent skills, not mesh code. |
 | SQLite for all state | Single-file databases. No external services. WAL mode for concurrent reads. |
 | Zero vendor lock-in | LiteLLM supports 100+ providers. Markdown workspace files. No proprietary formats. |
@@ -1064,7 +1063,7 @@ Looking for alternatives? OpenLegion is often compared to:
 
 OpenLegion differs from all of these in combining **fleet orchestration,
 Docker isolation, credential vaulting, and cost enforcement** in a single
-~29,000 line auditable codebase.
+~32,000 line auditable codebase.
 
 **Keywords:** autonomous AI agents, multi-agent framework, LLM agent orchestration,
 self-hosted AI agents, Docker AI agents, OpenClaw alternative, AI agent security,
