@@ -70,7 +70,7 @@ _CHAINS: dict[str, dict[str, Any]] = {
     "evm:polygon": {
         "ecosystem": "evm",
         "chain_id": 137,
-        "rpc_default": "https://polygon-rpc.com",
+        "rpc_default": "https://polygon-bor-rpc.publicnode.com",
         "rpc_env": "OPENLEGION_SYSTEM_WALLET_RPC_POLYGON",
         "explorer_tx_fmt": "https://polygonscan.com/tx/{tx_hash}",
         "symbol": "POL",
