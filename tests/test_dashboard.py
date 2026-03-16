@@ -177,7 +177,10 @@ class TestDashboardAgentsAPI:
         _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_api_agents_returns_fleet(self):
+    @patch("src.cli.config._load_config", return_value={
+        "llm": {"default_model": "openai/gpt-4o-mini"}, "agents": {},
+    })
+    def test_api_agents_returns_fleet(self, _mock_load):
         resp = self.client.get("/dashboard/api/agents")
         assert resp.status_code == 200
         data = resp.json()
@@ -186,7 +189,10 @@ class TestDashboardAgentsAPI:
         ids = {a["id"] for a in data["agents"]}
         assert ids == {"alpha", "beta"}
 
-    def test_api_agents_includes_all_fields(self):
+    @patch("src.cli.config._load_config", return_value={
+        "llm": {"default_model": "openai/gpt-4o-mini"}, "agents": {},
+    })
+    def test_api_agents_includes_all_fields(self, _mock_load):
         resp = self.client.get("/dashboard/api/agents")
         data = resp.json()
         agent = data["agents"][0]
@@ -197,7 +203,10 @@ class TestDashboardAgentsAPI:
         }
         assert expected_fields.issubset(agent.keys())
 
-    def test_api_agents_includes_health(self):
+    @patch("src.cli.config._load_config", return_value={
+        "llm": {"default_model": "openai/gpt-4o-mini"}, "agents": {},
+    })
+    def test_api_agents_includes_health(self, _mock_load):
         resp = self.client.get("/dashboard/api/agents")
         data = resp.json()
         alpha = next(a for a in data["agents"] if a["id"] == "alpha")
@@ -205,7 +214,10 @@ class TestDashboardAgentsAPI:
         beta = next(a for a in data["agents"] if a["id"] == "beta")
         assert beta["health_status"] == "unknown"
 
-    def test_api_agents_includes_costs(self):
+    @patch("src.cli.config._load_config", return_value={
+        "llm": {"default_model": "openai/gpt-4o-mini"}, "agents": {},
+    })
+    def test_api_agents_includes_costs(self, _mock_load):
         self.components["cost_tracker"].track("alpha", "openai/gpt-4.1-mini", 500, 100)
         resp = self.client.get("/dashboard/api/agents")
         data = resp.json()
@@ -213,13 +225,19 @@ class TestDashboardAgentsAPI:
         assert alpha["daily_cost"] > 0
         assert alpha["daily_tokens"] > 0
 
-    def test_api_agents_avatar_default(self):
+    @patch("src.cli.config._load_config", return_value={
+        "llm": {"default_model": "openai/gpt-4o-mini"}, "agents": {},
+    })
+    def test_api_agents_avatar_default(self, _mock_load):
         resp = self.client.get("/dashboard/api/agents")
         data = resp.json()
         alpha = next(a for a in data["agents"] if a["id"] == "alpha")
         assert alpha["avatar"] == 1
 
-    def test_api_agents_empty_registry(self):
+    @patch("src.cli.config._load_config", return_value={
+        "llm": {"default_model": "openai/gpt-4o-mini"}, "agents": {},
+    })
+    def test_api_agents_empty_registry(self, _mock_load):
         self.components["agent_registry"].clear()
         resp = self.client.get("/dashboard/api/agents")
         data = resp.json()

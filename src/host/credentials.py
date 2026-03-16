@@ -24,6 +24,7 @@ import httpx
 
 from src.agent.attachments import convert_openai_image_blocks
 from src.host.transcript import sanitize_for_provider
+from src.shared.models import KEYLESS_PROVIDERS, get_known_provider_names
 from src.shared.types import APIProxyRequest, APIProxyResponse
 from src.shared.utils import friendly_streaming_error, setup_logging
 
@@ -150,14 +151,10 @@ AGENT_PREFIX = "OPENLEGION_CRED_"
 
 # System credential patterns — used by is_system_credential() for
 # defense-in-depth permission checks and by CLI/dashboard for
-# auto-detecting LLM provider keys.  Derived from _PROVIDER_KEY_MAP.
-SYSTEM_CREDENTIAL_PROVIDERS = frozenset({
-    "anthropic", "openai", "gemini", "deepseek", "moonshot",
-    "minimax", "xai", "groq", "zai", "ollama",
-})
-
-# Providers that don't require API keys (local inference).
-KEYLESS_PROVIDERS = frozenset({"ollama"})
+# auto-detecting LLM provider keys.  Derived dynamically from the
+# model registry (src/shared/models.py) so adding a provider in one
+# place propagates everywhere.
+SYSTEM_CREDENTIAL_PROVIDERS = get_known_provider_names()
 SYSTEM_CREDENTIAL_SUFFIXES = ("_api_key", "_api_base")
 
 
@@ -272,6 +269,9 @@ class CredentialVault:
 
         Returns a ``$CRED{name}`` handle.
         """
+        # Strip whitespace — trailing spaces/tabs from terminal paste or
+        # form submission silently corrupt tokens and cause auth failures.
+        value = value.strip()
         cred_key = name.lower()
         prefix = SYSTEM_PREFIX if system else AGENT_PREFIX
         if cred_key.endswith("_api_base"):
@@ -430,25 +430,33 @@ class CredentialVault:
                 lock.release()
         return await _execute()
 
-    # Provider prefix → credential key mapping (shared by key + base lookups)
-    _PROVIDER_KEY_MAP = {
-        "anthropic/": "anthropic",
-        "openai/": "openai",
+    # Overrides for non-standard model prefixes.  Standard providers
+    # use ``provider/model`` format and are resolved automatically by
+    # ``_resolve_provider()``.  Only bare-name prefixes (gpt-, o1, …)
+    # and alternate prefixes (ollama_chat/) need explicit entries.
+    _PROVIDER_PREFIX_OVERRIDES = {
         "gpt-": "openai",
         "o1": "openai",
         "o3": "openai",
         "o4": "openai",
-        "minimax/": "minimax",
-        "zai/": "zai",
-        "xai/": "xai",
-        "groq/": "groq",
-        "gemini/": "gemini",
-        "moonshot/": "moonshot",
-        "deepseek/": "deepseek",
-        "ollama/": "ollama",
         "ollama_chat/": "ollama",
         "text-embedding-": "openai",
     }
+
+    def _resolve_provider(self, model: str) -> str | None:
+        """Resolve a model name to its provider.
+
+        Checks explicit overrides first (bare prefixes like ``gpt-``,
+        ``o1``), then falls back to extracting the provider from the
+        standard ``provider/model`` format.  This means any LiteLLM-
+        supported provider works without code changes.
+        """
+        for prefix, provider in self._PROVIDER_PREFIX_OVERRIDES.items():
+            if model.startswith(prefix):
+                return provider
+        if "/" in model:
+            return model.split("/", 1)[0]
+        return None
 
     def _get_api_key_for_model(self, model: str) -> str | None:
         """Resolve the API key for a model based on its provider prefix.
@@ -456,10 +464,9 @@ class CredentialVault:
         Only checks system_credentials — LLM provider keys must use the
         ``OPENLEGION_SYSTEM_`` prefix.
         """
-        for prefix, provider in self._PROVIDER_KEY_MAP.items():
-            if model.startswith(prefix):
-                key_name = f"{provider}_api_key"
-                return self.system_credentials.get(key_name)
+        provider = self._resolve_provider(model)
+        if provider:
+            return self.system_credentials.get(f"{provider}_api_key")
         return None
 
     def _get_auth_for_model(self, model: str) -> tuple[str | None, dict[str, str]]:
@@ -478,16 +485,18 @@ class CredentialVault:
     def _is_keyless_provider(self, model: str) -> bool:
         """Check if a model belongs to a provider that doesn't need API keys.
 
-        Uses ``_PROVIDER_KEY_MAP`` for resolution so that prefixes like
+        Uses ``_resolve_provider()`` so that prefixes like
         ``ollama_chat/`` correctly map to the ``ollama`` provider.
         """
-        for prefix, provider in self._PROVIDER_KEY_MAP.items():
-            if model.startswith(prefix):
-                return provider in KEYLESS_PROVIDERS
-        return False
+        provider = self._resolve_provider(model)
+        return provider in KEYLESS_PROVIDERS if provider else False
 
     def get_providers_with_credentials(self) -> set[str]:
         """Return the set of provider names that have credentials configured.
+
+        Checks known providers from the model registry, plus any provider
+        whose ``{name}_api_key`` is in system_credentials (so dynamically
+        configured providers are detected automatically).
 
         For keyless providers (e.g. Ollama), checks if an API base is
         configured instead of an API key.  Use ``discover_ollama_models``
@@ -496,12 +505,17 @@ class CredentialVault:
         providers: set[str] = set()
         for provider in SYSTEM_CREDENTIAL_PROVIDERS:
             if provider in KEYLESS_PROVIDERS:
-                # Keyless providers: include if explicitly configured
                 if f"{provider}_api_base" in self.api_bases:
                     providers.add(provider)
             else:
-                key_name = f"{provider}_api_key"
-                if key_name in self.system_credentials:
+                if f"{provider}_api_key" in self.system_credentials:
+                    providers.add(provider)
+
+        # Also detect any provider keys not in the curated set
+        for cred_name in self.system_credentials:
+            if cred_name.endswith("_api_key"):
+                provider = cred_name[: -len("_api_key")]
+                if provider and provider not in providers:
                     providers.add(provider)
         return providers
 
@@ -543,9 +557,9 @@ class CredentialVault:
         Returns *None* when no custom base is configured — LiteLLM
         uses its own defaults.
         """
-        for prefix, provider in self._PROVIDER_KEY_MAP.items():
-            if model.startswith(prefix):
-                return self.api_bases.get(f"{provider}_api_base")
+        provider = self._resolve_provider(model)
+        if provider:
+            return self.api_bases.get(f"{provider}_api_base")
         return None
 
     @staticmethod

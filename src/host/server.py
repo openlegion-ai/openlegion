@@ -570,8 +570,8 @@ def create_mesh_app(
             raise HTTPException(403, f"Agent {agent_id} cannot manage vault")
         if credential_vault is None:
             raise HTTPException(503, "No credential vault configured")
-        name = data.get("name", "")
-        value = data.get("value", "")
+        name = data.get("name", "").strip()
+        value = data.get("value", "").strip()
         if not name or not value:
             raise HTTPException(400, "name and value are required")
         if not re.match(r"^[a-zA-Z0-9_.-]{1,128}$", name):
