@@ -492,7 +492,9 @@ class RuntimeContext:
 
         webhook_manager = WebhookManager(dispatch_fn=self.async_dispatch)
 
-        # Wallet signing service (only if master seed is configured)
+        # Wallet signing service (only if master seed is configured).
+        # Wrapped in a single-item list so both mesh and dashboard closures
+        # share a mutable reference — allows hot-loading after dashboard init.
         wallet_service = None
         if os.environ.get("OPENLEGION_SYSTEM_WALLET_MASTER_SEED"):
             from src.host.wallet import WalletService
@@ -502,7 +504,8 @@ class RuntimeContext:
                 "Wallet service initialized (%d chains configured)",
                 len(wallet_service.chains),
             )
-        self._wallet_service = wallet_service
+        wallet_ref = [wallet_service]
+        self._wallet_ref = wallet_ref
 
         app = create_mesh_app(
             self.blackboard, self.pubsub, self.router, self.permissions,
@@ -517,7 +520,7 @@ class RuntimeContext:
             agent_projects=self.cfg.get("_agent_projects", {}),
             lane_manager=self.lane_manager,
             dispatch_loop=self._dispatch_loop,
-            wallet_service=wallet_service,
+            wallet_service_ref=wallet_ref,
         )
         app.include_router(create_webhook_router(self.orchestrator))
         app.include_router(webhook_manager.create_router())
@@ -545,7 +548,7 @@ class RuntimeContext:
             router=self.router,
             webhook_manager=webhook_manager,
             channel_manager=self.channel_manager,
-            wallet_service=wallet_service,
+            wallet_service_ref=wallet_ref,
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking

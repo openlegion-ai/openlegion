@@ -132,7 +132,7 @@ def create_dashboard_router(
     router: Any = None,
     webhook_manager: Any = None,
     channel_manager: Any = None,
-    wallet_service: Any = None,
+    wallet_service_ref: list | None = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     # Plan limits — read once at startup; provisioner restarts engine after updating .env
@@ -1298,18 +1298,17 @@ def create_dashboard_router(
         _persist_to_env("OPENLEGION_SYSTEM_WALLET_MASTER_SEED", words)
         os.environ["OPENLEGION_SYSTEM_WALLET_MASTER_SEED"] = words
 
-        # Derive sample addresses WITHOUT touching the DB (don't assign
-        # index 0 to a fake "agent-0" — just show what index 0 would produce).
+        # Hot-load WalletService into the shared ref so mesh endpoints
+        # work immediately — no restart needed.
         addresses = {}
+        _ws_ref = wallet_service_ref or [None]
         try:
             from src.host.wallet import WalletService
 
             ws = WalletService()
-            try:
-                addresses["evm"] = ws._derive_evm_account(0).address
-                addresses["solana"] = str(ws._derive_solana_keypair(0).pubkey())
-            finally:
-                ws.close()
+            _ws_ref[0] = ws
+            addresses["evm"] = ws._derive_evm_account(0).address
+            addresses["solana"] = str(ws._derive_solana_keypair(0).pubkey())
         except Exception:
             pass
 
@@ -1332,9 +1331,8 @@ def create_dashboard_router(
         if not seed:
             return {"configured": False, "agents": []}
 
-        # Use injected wallet_service if available (runtime started with seed),
-        # otherwise create a temporary instance (seed was added after startup).
-        ws = wallet_service
+        _ws_ref = wallet_service_ref or [None]
+        ws = _ws_ref[0]
         temp_ws = None
         if ws is None:
             try:
@@ -1359,10 +1357,7 @@ def create_dashboard_router(
                     })
                 except Exception:
                     agents.append({"agent_id": aid, "index": idx, "error": "derivation failed"})
-            # If the injected wallet_service is None (seed added after startup),
-            # agents can't use wallets yet — flag it so the UI can inform the user.
-            needs_restart = wallet_service is None
-            return {"configured": True, "agents": agents, "needs_restart": needs_restart}
+            return {"configured": True, "agents": agents}
         except Exception as e:
             return {"configured": True, "agents": [], "error": str(e)}
         finally:

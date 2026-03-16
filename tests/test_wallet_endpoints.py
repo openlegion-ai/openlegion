@@ -57,7 +57,7 @@ def client(mock_wallet_service, mock_permissions, mock_blackboard):
         pubsub=MagicMock(),
         router=MagicMock(),
         permissions=mock_permissions,
-        wallet_service=mock_wallet_service,
+        wallet_service_ref=[mock_wallet_service],
     )
     return TestClient(app)
 
@@ -73,7 +73,7 @@ def denied_client(mock_wallet_service, mock_blackboard):
         pubsub=MagicMock(),
         router=MagicMock(),
         permissions=denied_perms,
-        wallet_service=mock_wallet_service,
+        wallet_service_ref=[mock_wallet_service],
     )
     return TestClient(app)
 
@@ -86,7 +86,7 @@ def no_wallet_client(mock_permissions, mock_blackboard):
         pubsub=MagicMock(),
         router=MagicMock(),
         permissions=mock_permissions,
-        wallet_service=None,
+        wallet_service_ref=[None],
     )
     return TestClient(app)
 

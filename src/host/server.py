@@ -66,7 +66,6 @@ if TYPE_CHECKING:
     from src.host.runtime import RuntimeBackend
     from src.host.traces import TraceStore
     from src.host.transport import Transport
-    from src.host.wallet import WalletService
 
 
 def create_mesh_app(
@@ -88,7 +87,7 @@ def create_mesh_app(
     agent_projects: dict[str, str] | None = None,
     lane_manager: LaneManager | None = None,
     dispatch_loop: asyncio.AbstractEventLoop | None = None,
-    wallet_service: WalletService | None = None,
+    wallet_service_ref: list | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
@@ -639,6 +638,8 @@ def create_mesh_app(
 
     # === Wallet Signing Service ===
 
+    _ws_ref = wallet_service_ref or [None]
+
     @app.get("/mesh/wallet/address")
     async def wallet_address(chain: str, agent_id: str, request: Request) -> dict:
         """Get agent's wallet address for a chain."""
@@ -647,10 +648,10 @@ def create_mesh_app(
             raise HTTPException(403, "Wallet access denied")
         if not permissions.can_use_wallet_chain(agent_id, chain):
             raise HTTPException(403, f"Chain not allowed: {chain}")
-        if wallet_service is None:
+        if _ws_ref[0] is None:
             raise HTTPException(503, "Wallet service not configured")
         try:
-            address = await wallet_service.get_address(agent_id, chain)
+            address = await _ws_ref[0].get_address(agent_id, chain)
             return {"address": address, "chain": chain}
         except ValueError as e:
             raise HTTPException(400, str(e))
@@ -665,10 +666,10 @@ def create_mesh_app(
             raise HTTPException(403, "Wallet access denied")
         if not permissions.can_use_wallet_chain(agent_id, chain):
             raise HTTPException(403, f"Chain not allowed: {chain}")
-        if wallet_service is None:
+        if _ws_ref[0] is None:
             raise HTTPException(503, "Wallet service not configured")
         try:
-            return await wallet_service.get_balance(agent_id, chain, token)
+            return await _ws_ref[0].get_balance(agent_id, chain, token)
         except ValueError as e:
             raise HTTPException(400, str(e))
 
@@ -681,10 +682,10 @@ def create_mesh_app(
             raise HTTPException(403, "Wallet access denied")
         if not permissions.can_use_wallet_chain(agent_id, chain):
             raise HTTPException(403, f"Chain not allowed: {chain}")
-        if wallet_service is None:
+        if _ws_ref[0] is None:
             raise HTTPException(503, "Wallet service not configured")
         try:
-            return await wallet_service.read_contract(
+            return await _ws_ref[0].read_contract(
                 agent_id, chain, data.get("contract", ""),
                 data.get("function", ""), data.get("args", []),
             )
@@ -700,7 +701,7 @@ def create_mesh_app(
             raise HTTPException(403, "Wallet access denied")
         if not permissions.can_use_wallet_chain(agent_id, chain):
             raise HTTPException(403, f"Chain not allowed: {chain}")
-        if wallet_service is None:
+        if _ws_ref[0] is None:
             raise HTTPException(503, "Wallet service not configured")
         await _check_rate_limit("wallet_transfer", agent_id)
         _server_logger.info(
@@ -711,7 +712,7 @@ def create_mesh_app(
             }},
         )
         try:
-            return await wallet_service.transfer(
+            return await _ws_ref[0].transfer(
                 agent_id, chain,
                 data.get("to", ""), data.get("amount", ""),
                 data.get("token", "native"), permissions,
@@ -733,7 +734,7 @@ def create_mesh_app(
             raise HTTPException(403, f"Chain not allowed: {chain}")
         if contract and not permissions.can_access_wallet_contract(agent_id, contract):
             raise HTTPException(403, f"Contract not allowed: {contract}")
-        if wallet_service is None:
+        if _ws_ref[0] is None:
             raise HTTPException(503, "Wallet service not configured")
         await _check_rate_limit("wallet_execute", agent_id)
         _server_logger.info(
@@ -744,7 +745,7 @@ def create_mesh_app(
             }},
         )
         try:
-            return await wallet_service.execute_contract(
+            return await _ws_ref[0].execute_contract(
                 agent_id, chain, contract,
                 data.get("function", ""), data.get("args", []),
                 data.get("value", "0"), data.get("transaction", ""),
