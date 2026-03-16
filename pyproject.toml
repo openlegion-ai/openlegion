@@ -44,6 +44,7 @@ channels = [
 wallet = [
     "web3>=7.0,<8.0",
     "eth-account>=0.13,<1.0",
+    "mnemonic>=0.21",
     "solders>=0.21,<1.0",
     "solana>=0.34,<1.0",
 ]
