@@ -53,6 +53,7 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 | `containers.py` | Backward-compat alias (`ContainerManager = DockerBackend`) |
 | `traces.py` | Request tracing and diagnostics |
 | `transcript.py` | Provider-specific transcript sanitization |
+| `wallet.py` | Wallet signing service for EVM and Solana transactions |
 
 ### Agent (`src/agent/`)
 
@@ -70,6 +71,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `llm.py` | LLM client with streaming (`chat_stream()`) and non-streaming (`chat()`) — routes through mesh proxy |
 | `mesh_client.py` | HTTP client for agent-to-mesh communication |
 | `loop_detector.py` | Stuck tool-call detection with escalating intervention (warn → block → terminate) |
+| `attachments.py` | Multimodal attachment enrichment (images → base64, PDFs → text) |
 | `server.py` | Agent-side FastAPI server (/task, /chat/stream, /status, /cancel, /capabilities, /workspace, /heartbeat-context, and others) |
 
 ### Built-in Tools (`src/agent/builtins/`)
@@ -86,6 +88,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `introspect_tool.py` | Runtime self-inspection (permissions, budget, fleet, cron, health) |
 | `skill_tool.py` | Runtime skill creation and hot-reload |
 | `subagent_tool.py` | In-container subagent spawning and management |
+| `wallet_tool.py` | Blockchain wallet operations (address, balance, transfer, contract calls) |
 | `web_search_tool.py` | DuckDuckGo web search (no API key) |
 
 ### Browser Service (`src/browser/`)
@@ -95,6 +98,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `service.py` | Camoufox session management and lifecycle |
 | `stealth.py` | Anti-detection configuration |
 | `redaction.py` | Credential redaction for browser content |
+| `timing.py` | Human-like timing jitter for browser actions |
 
 ### Channels (`src/channels/`)
 
@@ -112,6 +116,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 |--------|---------|
 | `server.py` | Dashboard FastAPI router with fleet management, chat, and config APIs |
 | `events.py` | EventBus for real-time WebSocket streaming to the dashboard |
+| `auth.py` | Session cookie verification for dashboard access |
 
 ### CLI (`src/cli/`)
 
@@ -131,6 +136,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `types.py` | **THE contract** -- all Pydantic models shared between host and agents |
 | `utils.py` | ID generation, structured logging, prompt injection sanitization |
 | `trace.py` | Distributed trace context propagation |
+| `models.py` | Model cost and context window registry (backed by LiteLLM) |
 
 ## Project Isolation
 

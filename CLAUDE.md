@@ -43,7 +43,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `context.py` | Context window management (write-then-compact, `_SUMMARIZATION_INPUT_LIMIT=20_000`) |
 | `skills.py` | Skill registry and tool discovery |
 | `memory.py` | Per-agent SQLite + sqlite-vec + FTS5 memory store |
-| `workspace.py` | Persistent markdown workspace (SOUL.md, INSTRUCTIONS.md, MEMORY.md, daily logs, learnings) |
+| `workspace.py` | Persistent markdown workspace (SOUL.md, INSTRUCTIONS.md, USER.md, MEMORY.md, SYSTEM.md, HEARTBEAT.md, daily logs, learnings) |
 | `mesh_client.py` | Agent-side HTTP client for mesh communication |
 | `loop_detector.py` | Tool loop detection with escalating responses |
 | `mcp_client.py` | MCP tool server client and lifecycle |
@@ -53,13 +53,14 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `exec_tool.py` | Shell execution scoped to `/data` (`_MAX_TIMEOUT=300`) |
 | `file_tool.py` | File I/O with two-stage path traversal protection (`lstat()` for symlink safety) |
 | `http_tool.py` | HTTP requests with CRED handles, SSRF protection, cross-origin auth header stripping |
-| `memory_tool.py` | Memory search with hierarchical fallback |
-| `mesh_tool.py` | Blackboard (with `sanitize_for_prompt()`), pub/sub, notify_user, list_agents |
+| `memory_tool.py` | Memory search with hierarchical fallback, memory save |
+| `mesh_tool.py` | Blackboard (with `sanitize_for_prompt()`), pub/sub, notify_user, list_agents, artifacts, cron, spawn |
 | `vault_tool.py` | Credential generation without returning actual values |
 | `web_search_tool.py` | DuckDuckGo search (no API key needed) |
 | `skill_tool.py` | Self-authoring with AST validation (`_FORBIDDEN_ATTRS` denylist) |
 | `subagent_tool.py` | In-process subagents (MAX_DEPTH=2, MAX_CONCURRENT=3, MAX_TTL=600s, DEFAULT_MAX_ITERATIONS=10) |
 | `introspect_tool.py` | Runtime state query (permissions, budget, fleet, cron, health) |
+| `wallet_tool.py` | Wallet operations — get address, get balance, read contract, transfer, execute (Ethereum + Solana) |
 | **`src/host/`** | |
 | `server.py` | Mesh FastAPI app factory — 31+ endpoints, all permission-checked. VNC reverse proxy with agent token rejection. Localhost validation for `x-mesh-internal`. |
 | `mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter |
@@ -76,6 +77,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `transcript.py` | Provider-specific transcript sanitization |
 | `webhooks.py` | Named webhook endpoints (payloads sanitized) |
 | `watchers.py` | File watcher with polling (messages sanitized) |
+| `wallet.py` | WalletService — Ethereum and Solana wallet operations |
 | `containers.py` | Backward-compat alias for `DockerBackend` |
 | **`src/browser/`** | |
 | `__main__.py` | Starts KasmVNC (Xvnc), Openbox WM, FastAPI command server |
@@ -176,11 +178,11 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - **No `eval()`/`exec()` on untrusted input.**
 - **Permission checks on all mesh endpoints.** Default deny.
 - **File path traversal protection.** Two-stage validation (reject `..` before resolution, then walk with symlink resolution via `lstat()`).
-- **Container hardening.** Non-root (UID 1000), `no-new-privileges`, 384MB memory, 0.15 CPU, pids_limit.
+- **Container hardening.** Non-root (UID 1000), `no-new-privileges`, `cap_drop=[ALL]`, `read_only=True`, `tmpfs=/tmp`, 384MB memory, 0.15 CPU, `pids_limit=256`.
 - **All untrusted text sanitized** via `sanitize_for_prompt()` before reaching LLM context.
 - **VNC proxy blocks agent Bearer tokens.** Dashboard auth required (`ol_session` cookie on HTTP and WebSocket).
 - **AST validation for skill self-authoring.** `_FORBIDDEN_ATTRS` denylist + forbidden imports/calls.
-- **SSRF protection.** DNS pinning + IP blocking including `0.0.0.0` (`ip.is_unspecified`).
+- **SSRF protection.** DNS pinning + IP blocking including `0.0.0.0` (`ip.is_unspecified`) and CGNAT (`100.64.0.0/10`).
 - **Credential isolation.** Two-tier vault (SYSTEM_*/CRED_*), opaque handles.
 - **Bounded execution.** 20 iterations for tasks, 30 tool rounds for chat, 200 total chat rounds, token budgets per task.
 - **Write-then-compact.** Before discarding context, important facts flush to MEMORY.md.
@@ -199,6 +201,12 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - `websockets` — dashboard real-time updates
 - `pypdf` — PDF text extraction for attachments
 
+### Optional Dependency Groups
+- `channels` — python-telegram-bot, discord.py, slack-bolt
+- `wallet` — web3, eth-account, mnemonic, solders, solana
+- `mcp` — mcp (Model Context Protocol)
+- `dev` — pytest, pytest-asyncio, pytest-cov, ruff
+
 ### Infrastructure
 - **Runtime**: Python 3.10+, FastAPI, asyncio
 - **Isolation**: Docker containers per agent, bridge network (`openlegion_agents`)
@@ -210,7 +218,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 
 1. **Fleet model, not hierarchy.** No CEO agent. Users talk to agents directly. Agents coordinate through blackboard.
 2. **Skills over features.** New agent capabilities added as `@skill` decorated functions, not loop changes.
-3. **Module-level globals.** `_skill_staging` in skills.py (threading lock protected), `_client` in browser tool (connection pooling). Avoid adding more.
+3. **Module-level globals.** `_skill_staging` in skills.py (threading lock protected), `_client` in http_tool.py (connection pooling). Avoid adding more.
 4. **Subagent browser concurrency.** Module-level state means subagents shouldn't use browser concurrently.
 5. **VNC proxy creates httpx client per request** — acceptable at current usage levels.
 6. **`src/shared/types.py` is the contract.** Every cross-component message is a Pydantic model here.
@@ -240,7 +248,7 @@ pytest tests/test_loop.py -x -v
 - Mock LLM responses, not the loop. See `tests/test_loop.py:_make_loop()`.
 - `AsyncMock` for async methods, SQLite in-memory or `tmp_path` for DB paths.
 - E2E tests skip gracefully without Docker + API key.
-- 56 test files covering all modules.
+- 59 test files covering all modules.
 
 ### Test File Mapping
 
@@ -253,6 +261,7 @@ pytest tests/test_loop.py -x -v
 | `src/agent/attachments.py` | `tests/test_attachments.py` |
 | `src/agent/skills.py` + builtins | `tests/test_skills.py`, `tests/test_builtins.py`, `tests/test_memory_tools.py` |
 | `src/agent/builtins/vault_tool.py` | `tests/test_vault.py` |
+| `src/agent/builtins/wallet_tool.py` | `tests/test_wallet.py`, `tests/test_wallet_tool.py` |
 | `src/agent/builtins/subagent_tool.py` | `tests/test_subagent.py` |
 | `src/agent/builtins/web_search_tool.py` | `tests/test_web_search_tool.py` |
 | `src/agent/mcp_client.py` | `tests/test_mcp_client.py`, `tests/test_mcp_e2e.py` |
@@ -263,6 +272,7 @@ pytest tests/test_loop.py -x -v
 | `src/host/credentials.py` | `tests/test_credentials.py` |
 | `src/host/runtime.py` | `tests/test_runtime.py` |
 | `src/host/transport.py` | `tests/test_transport.py` |
+| `src/host/permissions.py` | `tests/test_permissions.py` |
 | `src/host/costs.py` | `tests/test_costs.py` |
 | `src/host/cron.py` | `tests/test_cron.py` |
 | `src/host/health.py` | `tests/test_health.py` |
@@ -272,6 +282,7 @@ pytest tests/test_loop.py -x -v
 | `src/host/failover.py` | `tests/test_failover.py` |
 | `src/host/webhooks.py` | `tests/test_webhooks.py` |
 | `src/host/watchers.py` | `tests/test_watchers.py` |
+| `src/host/wallet.py` | `tests/test_wallet_endpoints.py` |
 | `src/host/server.py` | `tests/test_dashboard.py` |
 | `src/dashboard/server.py` | `tests/test_dashboard.py`, `tests/test_dashboard_workspace.py` |
 | `src/dashboard/auth.py` | `tests/test_dashboard_auth.py` |
@@ -325,20 +336,6 @@ pytest tests/test_loop.py -x -v
 4. Templates auto-discovered by `_load_templates()` in `src/cli/config.py`
 
 ## Review State
-
-### Categories & Findings
-
-| Category | Files | Issues Found |
-|---|---|---|
-| **Error Handling** | loop.py, context.py | 10 issues: uncaught tool failures break LLM role alternation, compaction failures crash sessions, json.dumps on exotic types, missing state reset in streaming |
-| **Performance** | workspace.py, skills.py, loop.py, cron.py | 7 issues: bootstrap/learnings re-read from disk every turn, inspect.signature() on every tool call, tool definitions rebuilt per LLM call, goals fetched every chat turn, duplicate blackboard queries in heartbeat |
-| **Resilience** | memory.py, context.py | 3 issues: unbounded log table growth, _hard_prune misses assistant-assistant consecutive roles, flush failure aborts compaction |
-
-### Phases
-
-- **Phase 1 (applied):** Top 5 highest-impact fixes across all categories
-- **Phase 2 (planned):** Remaining error-handling hardening
-- **Phase 3 (planned):** Remaining performance optimizations
 
 ### Phase 1 Fixes (applied)
 
