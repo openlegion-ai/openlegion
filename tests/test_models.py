@@ -181,11 +181,17 @@ class TestOllamaModels:
         """ollama_chat/ prefix also returns zero cost."""
         assert get_model_cost("ollama_chat/llama3") == (0.0, 0.0)
 
-    def test_ollama_context_window(self):
-        """Ollama models return the default Ollama context window."""
+    def test_ollama_context_window_from_litellm(self):
+        """Ollama models use litellm registry when available."""
+        ctx = get_context_window("ollama/llama3")
+        # litellm knows ollama/llama3 → 8192; should not be the 4096 default
+        assert ctx >= 8192
+
+    def test_ollama_context_window_unknown_model_fallback(self):
+        """Unknown Ollama models fall back to the default num_ctx."""
         from src.shared.models import _OLLAMA_DEFAULT_CONTEXT
-        assert get_context_window("ollama/llama3") == _OLLAMA_DEFAULT_CONTEXT
-        assert get_context_window("ollama_chat/llama3") == _OLLAMA_DEFAULT_CONTEXT
+        assert get_context_window("ollama/some-unknown-model-xyz") == _OLLAMA_DEFAULT_CONTEXT
+        assert get_context_window("ollama_chat/some-unknown-model-xyz") == _OLLAMA_DEFAULT_CONTEXT
 
     def test_ollama_featured_models_exist(self):
         """Ollama has featured models defined."""
