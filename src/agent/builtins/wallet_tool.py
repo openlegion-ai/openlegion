@@ -8,7 +8,7 @@ as LLM calls: agent describes what, mesh decides whether and how.
 from __future__ import annotations
 
 from src.agent.skills import skill
-from src.shared.utils import setup_logging
+from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.wallet")
 
@@ -35,7 +35,7 @@ async def wallet_get_address(chain: str, *, mesh_client=None) -> dict:
     try:
         return await mesh_client.wallet_get_address(chain)
     except Exception as e:
-        return {"error": f"Failed to get address: {e}"}
+        return {"error": sanitize_for_prompt(f"Failed to get address: {e}")}
 
 
 @skill(
@@ -70,7 +70,7 @@ async def wallet_get_balance(
     try:
         return await mesh_client.wallet_get_balance(chain, token)
     except Exception as e:
-        return {"error": f"Failed to get balance: {e}"}
+        return {"error": sanitize_for_prompt(f"Failed to get balance: {e}")}
 
 
 @skill(
@@ -124,7 +124,7 @@ async def wallet_read_contract(
             chain, contract, function, args or [],
         )
     except Exception as e:
-        return {"error": f"Contract read failed: {e}"}
+        return {"error": sanitize_for_prompt(f"Contract read failed: {e}")}
 
 
 @skill(
@@ -178,7 +178,7 @@ async def wallet_transfer(
     try:
         return await mesh_client.wallet_transfer(chain, to, amount, token)
     except Exception as e:
-        return {"error": f"Transfer failed: {e}"}
+        return {"error": sanitize_for_prompt(f"Transfer failed: {e}")}
 
 
 @skill(
@@ -252,4 +252,4 @@ async def wallet_execute(
             chain, contract, function, args or [], value, transaction,
         )
     except Exception as e:
-        return {"error": f"Transaction failed: {e}"}
+        return {"error": sanitize_for_prompt(f"Transaction failed: {e}")}

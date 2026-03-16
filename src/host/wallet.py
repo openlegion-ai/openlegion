@@ -371,13 +371,18 @@ class WalletService:
 
     # ── RPC providers (lazy, cached) ──────────────────────────
 
+    _RPC_TIMEOUT = 30  # seconds
+
     async def _get_evm_provider(self, chain: str):
         if chain in self._evm_providers:
             return self._evm_providers[chain]
         from web3 import AsyncHTTPProvider, AsyncWeb3
 
         cfg = self._chains[chain]
-        provider = AsyncWeb3(AsyncHTTPProvider(cfg["rpc_url"]))
+        provider = AsyncWeb3(AsyncHTTPProvider(
+            cfg["rpc_url"],
+            request_kwargs={"timeout": self._RPC_TIMEOUT},
+        ))
         self._evm_providers[chain] = provider
         return provider
 
@@ -387,7 +392,7 @@ class WalletService:
         from solana.rpc.async_api import AsyncClient
 
         cfg = self._chains[chain]
-        client = AsyncClient(cfg["rpc_url"])
+        client = AsyncClient(cfg["rpc_url"], timeout=self._RPC_TIMEOUT)
         self._solana_clients[chain] = client
         return client
 
@@ -667,7 +672,12 @@ class WalletService:
         }
 
     async def _evm_token_decimals(self, chain: str, token_addr: str) -> int:
-        """Fetch ERC-20 decimals from the contract. Falls back to 18."""
+        """Fetch ERC-20 decimals from the token contract.
+
+        Raises ValueError if the RPC call fails — silently guessing
+        decimals would cause catastrophically wrong transfer amounts
+        (e.g. 1 USDC interpreted as 10^12 USDC with 18 vs 6 decimals).
+        """
         from eth_abi import decode
         from web3 import Web3
 
@@ -677,12 +687,11 @@ class WalletService:
             result = await w3.eth.call({"to": token_addr, "data": selector})
             (decimals,) = decode(["uint8"], result)
             return decimals
-        except Exception:
-            logger.warning(
-                "Could not fetch decimals for %s on %s, assuming 18",
-                token_addr, chain,
+        except Exception as e:
+            raise ValueError(
+                f"Could not fetch decimals for token {token_addr} on {chain}: {e}. "
+                f"Cannot safely determine transfer amount."
             )
-            return 18
 
     async def _evm_read_contract(
         self, chain: str, contract: str, function: str, args: list,

@@ -128,6 +128,7 @@ def create_mesh_app(
         "blackboard_write": (100, 60),
         "publish": (200, 60),
         "cron_create": (10, 3600),
+        "wallet_read": (120, 60),
         "wallet_transfer": (10, 3600),
         "wallet_execute": (10, 3600),
     }
@@ -650,6 +651,7 @@ def create_mesh_app(
             raise HTTPException(403, f"Chain not allowed: {chain}")
         if _ws_ref[0] is None:
             raise HTTPException(503, "Wallet service not configured")
+        await _check_rate_limit("wallet_read", agent_id)
         try:
             address = await _ws_ref[0].get_address(agent_id, chain)
             return {"address": address, "chain": chain}
@@ -668,6 +670,7 @@ def create_mesh_app(
             raise HTTPException(403, f"Chain not allowed: {chain}")
         if _ws_ref[0] is None:
             raise HTTPException(503, "Wallet service not configured")
+        await _check_rate_limit("wallet_read", agent_id)
         try:
             return await _ws_ref[0].get_balance(agent_id, chain, token)
         except ValueError as e:
@@ -684,6 +687,7 @@ def create_mesh_app(
             raise HTTPException(403, f"Chain not allowed: {chain}")
         if _ws_ref[0] is None:
             raise HTTPException(503, "Wallet service not configured")
+        await _check_rate_limit("wallet_read", agent_id)
         try:
             return await _ws_ref[0].read_contract(
                 agent_id, chain, data.get("contract", ""),
