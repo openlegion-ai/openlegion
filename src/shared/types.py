@@ -22,7 +22,7 @@ def _generate_id(prefix: str, length: int = 12) -> str:
 SILENT_REPLY_TOKEN = "__SILENT__"
 """Sentinel returned by agents to suppress empty responses."""
 
-RESERVED_AGENT_IDS = frozenset({"mesh", "orchestrator"})
+RESERVED_AGENT_IDS = frozenset({"mesh"})
 """Internal component names that must not be used as agent IDs."""
 
 # === Inter-Component Messages ===
@@ -44,7 +44,7 @@ class AgentMessage(BaseModel):
 
 
 class TokenBudget(BaseModel):
-    """Token budget for a task or workflow. Prevents runaway API spend."""
+    """Token budget for a task. Prevents runaway API spend."""
 
     max_tokens: int = 500_000
     used_tokens: int = 0
@@ -62,7 +62,7 @@ class TokenBudget(BaseModel):
 
 
 class TaskAssignment(BaseModel):
-    """Sent by orchestrator to an agent to begin work."""
+    """Sent to an agent to begin work on a task."""
 
     task_id: str = Field(default_factory=lambda: _generate_id("task_"))
     workflow_id: str
@@ -127,37 +127,6 @@ class MeshEvent(BaseModel):
     source: str
     payload: dict[str, Any] = {}
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-# === Workflow Definitions (parsed from YAML) ===
-
-
-class WorkflowStep(BaseModel):
-    """A single step in a workflow."""
-
-    id: str
-    agent: Optional[str] = None
-    capability: Optional[str] = None
-    task_type: str
-    input_from: Optional[str] = None
-    depends_on: list[str] = []
-    timeout: int = 120
-    condition: Optional[str] = None
-    on_failure: Literal["retry", "skip", "abort", "fallback"] = "abort"
-    max_retries: int = 3
-    fallback_agent: Optional[str] = None
-    requires_approval: bool = False
-    approval_timeout: int = 3600
-
-
-class WorkflowDefinition(BaseModel):
-    """A complete workflow parsed from YAML."""
-
-    name: str
-    trigger: str
-    steps: list[WorkflowStep]
-    timeout: int = 600
-    on_complete: Optional[str] = None
 
 
 # === Permissions ===

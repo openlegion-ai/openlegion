@@ -70,7 +70,7 @@ class PermissionMatrix:
     @staticmethod
     def _is_trusted(agent_id: str) -> bool:
         """Check if an agent ID is a trusted internal component."""
-        return agent_id in ("mesh", "orchestrator")
+        return agent_id == "mesh"
 
     def can_message(self, from_agent: str, to_agent: str) -> bool:
         if self._is_trusted(from_agent):

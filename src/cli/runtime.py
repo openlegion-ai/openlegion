@@ -63,7 +63,6 @@ class RuntimeContext:
         self.cost_tracker = None
         self.credential_vault = None
         self.router = None
-        self.orchestrator = None
         self.health_monitor = None
         self.cron_scheduler = None
         self.lane_manager = None
@@ -135,7 +134,6 @@ class RuntimeContext:
                 closeables = {
                     "transport": self.transport,
                     "router": self.router,
-                    "orchestrator": self.orchestrator,
                     "credential_vault": self.credential_vault,
                 }
                 await asyncio.gather(
@@ -230,7 +228,6 @@ class RuntimeContext:
         from src.host.costs import CostTracker
         from src.host.credentials import CredentialVault
         from src.host.mesh import Blackboard, MessageRouter, PubSub
-        from src.host.orchestrator import Orchestrator
         from src.host.permissions import PermissionMatrix
         from src.host.traces import TraceStore
 
@@ -241,8 +238,6 @@ class RuntimeContext:
         if self.cfg.get("collaboration", False):
             from src.cli.config import _set_collaborative_permissions
             _set_collaborative_permissions()
-
-        mesh_port = self.cfg["mesh"]["port"]
 
         self.event_bus = EventBus()
         self.trace_store = TraceStore()
@@ -260,20 +255,6 @@ class RuntimeContext:
             trace_store=self.trace_store,
             agent_projects=self.cfg.get("_agent_projects", {}),
         )
-        self.orchestrator = Orchestrator(
-            mesh_url=f"http://localhost:{mesh_port}",
-            blackboard=self.blackboard,
-            pubsub=self.pubsub,
-            container_manager=self.runtime,
-            trace_store=self.trace_store,
-        )
-
-        # Load project-scoped workflows
-        for pname in self.cfg.get("projects", {}):
-            wf_dir = PROJECTS_DIR / pname / "workflows"
-            if wf_dir.exists():
-                self.orchestrator.load_project_workflows(pname, str(wf_dir))
-
         # Create HealthMonitor early so the dashboard router can reference it.
         # Only register() is called here; start() happens in _start_background().
         from src.host.health import HealthMonitor
@@ -484,7 +465,6 @@ class RuntimeContext:
     def _start_mesh_server(self) -> None:
         import uvicorn
 
-        from src.channels.webhook import create_webhook_router
         from src.host.server import create_mesh_app
         from src.host.webhooks import WebhookManager
 
@@ -510,7 +490,7 @@ class RuntimeContext:
         app = create_mesh_app(
             self.blackboard, self.pubsub, self.router, self.permissions,
             self.credential_vault, self.cron_scheduler, self.runtime,
-            self.transport, self.orchestrator,
+            self.transport,
             auth_tokens=self.runtime.auth_tokens,
             trace_store=self.trace_store,
             event_bus=self.event_bus,
@@ -522,7 +502,6 @@ class RuntimeContext:
             dispatch_loop=self._dispatch_loop,
             wallet_service_ref=wallet_ref,
         )
-        app.include_router(create_webhook_router(self.orchestrator))
         app.include_router(webhook_manager.create_router())
 
         self._init_channel_manager()
@@ -539,7 +518,6 @@ class RuntimeContext:
             mesh_port=mesh_port,
             lane_manager=self.lane_manager,
             cron_scheduler=self.cron_scheduler,
-            orchestrator=self.orchestrator,
             pubsub=self.pubsub,
             permissions=self.permissions,
             credential_vault=self.credential_vault,
@@ -602,10 +580,6 @@ class RuntimeContext:
             result = await self.async_dispatch(agent_name, message, trace_id=new_trace_id())
             return result
 
-        async def trigger_workflow(workflow_name: str, payload: dict) -> str:
-            exec_id = await self.orchestrator.trigger_workflow(workflow_name, payload)
-            return f"workflow:{exec_id}"
-
         async def fetch_heartbeat_context(agent_name: str) -> dict:
             try:
                 return await self.transport.request(
@@ -640,7 +614,6 @@ class RuntimeContext:
 
         self.cron_scheduler = CronScheduler(
             dispatch_fn=cron_dispatch,
-            workflow_trigger_fn=trigger_workflow,
             invoke_fn=invoke_tool,
             blackboard=self.blackboard,
             trace_store=self.trace_store,

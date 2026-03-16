@@ -61,10 +61,6 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         cron_scheduler.list_jobs.return_value = []
         cron_scheduler.jobs = {}
 
-        orchestrator = MagicMock()
-        orchestrator.workflows = {}
-        orchestrator.active_executions = {}
-
         pubsub = MagicMock()
         pubsub.subscriptions = {}
 
@@ -92,7 +88,6 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         result.update({
             "lane_manager": lane_manager,
             "cron_scheduler": cron_scheduler,
-            "orchestrator": orchestrator,
             "pubsub": pubsub,
             "permissions": permissions_mock,
             "credential_vault": credential_vault,
@@ -1639,40 +1634,6 @@ class TestDashboardMessages:
         resp = self.client.get("/dashboard/api/messages")
         assert resp.status_code == 200
         assert resp.json()["messages"] == []
-
-
-# ── V2 Tests: Workflows ─────────────────────────────────────
-
-
-class TestDashboardWorkflows:
-    def setup_method(self):
-        self._tmpdir = tempfile.mkdtemp()
-        self.components = _make_components(self._tmpdir, include_v2=True)
-        self.client = _make_client(self.components)
-
-    def teardown_method(self):
-        _teardown(self.components)
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_list_empty(self):
-        resp = self.client.get("/dashboard/api/workflows")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["workflows"] == []
-        assert data["active"] == []
-
-    def test_list_with_definitions(self):
-        mock_wf = MagicMock()
-        mock_wf.name = "test_wf"
-        mock_wf.steps = [1, 2, 3]
-        mock_wf.trigger = "manual"
-        mock_wf.timeout = 300
-        self.components["orchestrator"].workflows = {"test_wf": mock_wf}
-        resp = self.client.get("/dashboard/api/workflows")
-        data = resp.json()
-        assert len(data["workflows"]) == 1
-        assert data["workflows"][0]["name"] == "test_wf"
-        assert data["workflows"][0]["steps"] == 3
 
 
 # ── V2 Tests: Streaming Broadcast ────────────────────────────

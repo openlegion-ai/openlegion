@@ -63,7 +63,6 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | **`src/host/`** | |
 | `server.py` | Mesh FastAPI app factory — 31+ endpoints, all permission-checked. VNC reverse proxy with agent token rejection. Localhost validation for `x-mesh-internal`. |
 | `mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter |
-| `orchestrator.py` | DAG workflow executor with safe condition eval (regex, no eval()) |
 | `runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. Agent network, browser container, VNC URL tracking. `_quote_env_value()` for .env escaping. |
 | `transport.py` | Transport ABC → HttpTransport / SandboxTransport. `_AGENT_ID_RE` validation. |
 | `credentials.py` | Two-tier credential vault (SYSTEM_*/CRED_*) + LLM API proxy. `_convert_messages_to_anthropic()` for OAuth path. |
@@ -91,7 +90,6 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `discord.py` | Discord bot adapter (sanitized streaming) |
 | `slack.py` | Slack adapter (Socket Mode, sanitized streaming) |
 | `whatsapp.py` | WhatsApp Cloud API adapter (`X-Hub-Signature-256` verification) |
-| `webhook.py` | HTTP webhook adapter (Bearer token auth with `hmac.compare_digest`) |
 | **`src/dashboard/`** | |
 | `server.py` | Dashboard FastAPI router + API endpoints + VNC URL injection. Alpine.js SPA with `autoescape=True`, CSP headers, `_verify_dashboard_auth` dependency. |
 | `events.py` | EventBus for real-time WebSocket streaming. `threading.Lock` on `emit()`. |
@@ -175,7 +173,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 ## Security Boundaries
 
 - **Agents never hold API keys.** All LLM/API calls go through mesh credential vault.
-- **No `eval()`/`exec()` on untrusted input.** Workflow conditions use regex-based safe parser.
+- **No `eval()`/`exec()` on untrusted input.**
 - **Permission checks on all mesh endpoints.** Default deny.
 - **File path traversal protection.** Two-stage validation (reject `..` before resolution, then walk with symlink resolution via `lstat()`).
 - **Container hardening.** Non-root (UID 1000), `no-new-privileges`, 384MB memory, 0.15 CPU, pids_limit.
@@ -210,15 +208,14 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 
 ## Known Constraints & Decisions
 
-1. **Fleet model, not hierarchy.** No CEO agent. Users talk to agents directly. Agents coordinate through blackboard and YAML workflows.
+1. **Fleet model, not hierarchy.** No CEO agent. Users talk to agents directly. Agents coordinate through blackboard.
 2. **Skills over features.** New agent capabilities added as `@skill` decorated functions, not loop changes.
-3. **Polling in orchestrator.** `_wait_for_task_result` uses polling instead of push-based notification (known tech debt).
-4. **Module-level globals.** `_skill_staging` in skills.py (threading lock protected), `_client` in browser tool (connection pooling). Avoid adding more.
-5. **Subagent browser concurrency.** Module-level state means subagents shouldn't use browser concurrently.
-6. **VNC proxy creates httpx client per request** — acceptable at current usage levels.
-7. **`src/shared/types.py` is the contract.** Every cross-component message is a Pydantic model here.
-8. **LLM tool-calling message roles must alternate.** `user → assistant(tool_calls) → tool(result) → assistant`. The `_trim_context` method preserves this invariant.
-9. **busy_timeout variance.** Traces uses 5000 while other SQLite connections use 30000.
+3. **Module-level globals.** `_skill_staging` in skills.py (threading lock protected), `_client` in browser tool (connection pooling). Avoid adding more.
+4. **Subagent browser concurrency.** Module-level state means subagents shouldn't use browser concurrently.
+5. **VNC proxy creates httpx client per request** — acceptable at current usage levels.
+6. **`src/shared/types.py` is the contract.** Every cross-component message is a Pydantic model here.
+7. **LLM tool-calling message roles must alternate.** `user → assistant(tool_calls) → tool(result) → assistant`. The `_trim_context` method preserves this invariant.
+8. **busy_timeout variance.** Traces uses 5000 while other SQLite connections use 30000.
 
 ## Git Workflow
 
@@ -263,7 +260,6 @@ pytest tests/test_loop.py -x -v
 | `src/agent/server.py` | `tests/test_agent_server.py` |
 | `src/agent/llm.py` | `tests/test_llm_param_allowlist.py` |
 | `src/host/mesh.py` | `tests/test_mesh.py` |
-| `src/host/orchestrator.py` | `tests/test_orchestrator.py` |
 | `src/host/credentials.py` | `tests/test_credentials.py` |
 | `src/host/runtime.py` | `tests/test_runtime.py` |
 | `src/host/transport.py` | `tests/test_transport.py` |
@@ -325,7 +321,7 @@ pytest tests/test_loop.py -x -v
 
 1. Create `src/templates/your_template.yaml`
 2. Define agents with `role`, `model`, `instructions`, `soul`, `resources`
-3. Optionally include `heartbeat_rules`, `permissions`, `budget`, `workflows`
+3. Optionally include `heartbeat_rules`, `permissions`, `budget`
 4. Templates auto-discovered by `_load_templates()` in `src/cli/config.py`
 
 ## Review State

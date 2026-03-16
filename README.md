@@ -141,27 +141,21 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
    daily and monthly budget caps at the vault layer. Agents physically cannot spend
    what you haven't authorized. View live spend with `/costs` in the REPL.
 
-3. **Deterministic multi-agent orchestration** — YAML-defined DAG workflows with
-   step dependencies, conditions, retries, and failure handlers. No LLM decides
-   what runs next. Predictable, debuggable, auditable.
+3. **Acts autonomously** — cron schedules, heartbeat probes, webhook triggers, and file watchers let agents work without being prompted.
 
-4. **Acts autonomously** — cron schedules, heartbeat probes, webhook triggers, and file watchers let agents work without being prompted.
+4. **Self-aware and self-improving** — agents understand their own permissions, budget, fleet topology, and system architecture via auto-generated `SYSTEM.md` and live runtime context. They learn from tool failures and user corrections, injecting past learnings into future sessions.
 
-5. **Self-aware and self-improving** — agents understand their own permissions, budget, fleet topology, and system architecture via auto-generated `SYSTEM.md` and live runtime context. They learn from tool failures and user corrections, injecting past learnings into future sessions.
+5. **Self-extends** — agents write their own Python skills at runtime and hot-reload them. Agents can also spawn sub-agents for specialized work.
 
-6. **Self-extends** — agents write their own Python skills at runtime and hot-reload them. Agents can also spawn sub-agents for specialized work.
+6. **Multi-channel** — connect agents to Telegram, Discord, Slack, and WhatsApp. Also accessible via CLI and API.
 
-7. **Multi-channel** — connect agents to Telegram, Discord, Slack, and WhatsApp. Also accessible via CLI and API.
+7. **Real-time dashboard** — web-based fleet observability with consolidated navigation, slide-over chat panels, keyboard command palette, grouped request traces, live event streaming, streaming broadcast with real-time per-agent responses, LLM prompt/response previews, agent management, agent settings editor (personality, instructions, preferences, heartbeat rules, memory, activity logs, learnings), cost charts, cron management, and embedded KasmVNC viewer for persistent browser agents.
 
-8. **Real-time dashboard** — web-based fleet observability with consolidated navigation, slide-over chat panels, keyboard command palette, grouped request traces, live event streaming, streaming broadcast with real-time per-agent responses, LLM prompt/response previews, agent management, agent settings editor (personality, instructions, preferences, heartbeat rules, memory, activity logs, learnings), cost charts, cron management, and embedded KasmVNC viewer for persistent browser agents.
+8. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly budget enforcement.
 
-9. **Tracks and caps spend** — per-agent LLM cost tracking with daily and monthly budget enforcement.
+9. **Fails over across providers** — configurable model failover chains cascade across LLM providers with per-model health tracking and exponential cooldown.
 
-10. **Runs deterministic workflows** — YAML-defined DAG workflows chain agents in sequence with conditions, retries, and failure handlers.
-
-11. **Fails over across providers** — configurable model failover chains cascade across LLM providers with per-model health tracking and exponential cooldown.
-
-12. **Token-level streaming** — real-time token-by-token LLM responses across CLI, dashboard, Telegram, Discord, and Slack with progressive message editing and graceful non-streaming fallback.
+10. **Token-level streaming** — real-time token-by-token LLM responses across CLI, dashboard, Telegram, Discord, and Slack with progressive message editing and graceful non-streaming fallback.
 
 ---
 
@@ -198,14 +192,14 @@ connections.
 │  │ TTL, GC    │ │         │ │ routing    │ │ Hunter, Brave Search   │   │
 │  └────────────┘ └─────────┘ └───────────┘ └────────────────────────┘   │
 │                                                                         │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐   │
-│  │ Orchestrator │ │  Permission  │ │  Container   │ │    Cost      │   │
-│  │              │ │  Matrix      │ │  Manager     │ │   Tracker    │   │
-│  │ DAG executor,│ │              │ │              │ │              │   │
-│  │ step deps,   │ │ Per-agent    │ │ Docker life- │ │ Per-agent    │   │
-│  │ conditions,  │ │ ACLs, globs, │ │ cycle, nets, │ │ token/cost,  │   │
-│  │ retry/fail   │ │ default deny │ │ volumes      │ │ budgets      │   │
-│  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘   │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐                    │
+│  │  Permission  │ │  Container   │ │    Cost      │                    │
+│  │  Matrix      │ │  Manager     │ │   Tracker    │                    │
+│  │              │ │              │ │              │                    │
+│  │ Per-agent    │ │ Docker life- │ │ Per-agent    │                    │
+│  │ ACLs, globs, │ │ cycle, nets, │ │ token/cost,  │                    │
+│  │ default deny │ │ volumes      │ │ budgets      │                    │
+│  └──────────────┘ └──────────────┘ └──────────────┘                    │
 └──────────────────────────────────────────────────────────────────────────┘
                │
                │  Docker Network (bridge / host)
@@ -272,7 +266,7 @@ Every inter-agent operation is checked against per-agent ACLs:
 ```json
 {
   "researcher": {
-    "can_message": ["orchestrator"],
+    "can_message": ["*"],
     "can_publish": ["research_complete"],
     "can_subscribe": ["new_lead"],
     "blackboard_read": ["projects/myproject/*"],
@@ -286,26 +280,6 @@ Every inter-agent operation is checked against per-agent ACLs:
 Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
 project, it receives read/write access to that namespace. Standalone agents get
 empty blackboard permissions.
-
-### Orchestrator (Workflow DAG Executor)
-
-Workflows are defined in YAML and executed as directed acyclic graphs:
-
-```yaml
-name: prospect_pipeline
-trigger: new_prospect
-timeout: 600
-steps:
-  - id: research
-    agent: research
-    task_type: research_prospect
-    input_from: trigger.payload
-  - id: qualify
-    agent: qualify
-    task_type: qualify_lead
-    depends_on: [research]
-    condition: "research.result.score >= 5"
-```
 
 ### Container Manager
 
@@ -363,7 +337,7 @@ chat, status, capabilities, and results.
 
 ### Task Mode (`execute_task`)
 
-Accepts a `TaskAssignment` from the orchestrator. Runs a bounded loop
+Accepts a `TaskAssignment` for task execution. Runs a bounded loop
 (max 20 iterations) of decide → act → learn. Returns a `TaskResult` with
 structured output and optional blackboard promotions.
 
@@ -896,7 +870,6 @@ pytest tests/
 | Agent Server | 35 | Workspace API, heartbeat-context endpoint, content sanitization, file allowlist |
 | Skills | 34 | Discovery, execution, injection, MCP integration |
 | Memory Store | 34 | SQLite ops, vector search, categories, hierarchical search, tool outcomes |
-| Orchestrator | 33 | Workflows, conditions, retries, failures |
 | Events | 31 | Event streaming, filtering, WebSocket, notification events |
 | Traces | 30 | Trace recording, grouping, summaries, prompt preview extraction |
 | Setup Wizard | 29 | Quickstart, full setup, API key validation, templates, inline setup, two-tier credentials |
@@ -995,7 +968,6 @@ src/
 ├── host/
 │   ├── server.py                       # Mesh FastAPI server
 │   ├── mesh.py                         # Blackboard, PubSub, MessageRouter
-│   ├── orchestrator.py                 # Workflow DAG executor
 │   ├── permissions.py                  # Permission matrix
 │   ├── credentials.py                  # Credential vault + API proxy
 │   ├── failover.py                     # Model health tracking + failover chains
@@ -1060,7 +1032,7 @@ config/
 | Private by default, shared by promotion | Agents keep knowledge private. Facts are explicitly promoted to the blackboard. |
 | Explicit failure handling | Every workflow step declares what happens on failure. No silent error swallowing. |
 | Small enough to audit | ~29,000 total lines. The entire codebase is auditable in a day. |
-| Skills over features | New capabilities are agent skills, not mesh or orchestrator code. |
+| Skills over features | New capabilities are agent skills, not mesh code. |
 | SQLite for all state | Single-file databases. No external services. WAL mode for concurrent reads. |
 | Zero vendor lock-in | LiteLLM supports 100+ providers. Markdown workspace files. No proprietary formats. |
 

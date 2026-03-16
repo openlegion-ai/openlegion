@@ -133,7 +133,6 @@ def create_dashboard_router(
     # Optional subsystem dependencies (not all deployments include all subsystems)
     lane_manager: Any = None,
     cron_scheduler: Any = None,
-    orchestrator: Any = None,
     pubsub: Any = None,
     permissions: Any = None,
     credential_vault: Any = None,
@@ -1926,16 +1925,6 @@ def create_dashboard_router(
             return {"models": []}
         return {"models": credential_vault.get_model_health()}
 
-    # ── Workflow cancel ──────────────────────────────────
-
-    @api_router.post("/api/workflows/{execution_id}/cancel")
-    async def api_workflow_cancel(execution_id: str) -> dict:
-        if orchestrator is None:
-            raise HTTPException(status_code=503, detail="Orchestrator not available")
-        if orchestrator.cancel_execution(execution_id):
-            return {"cancelled": True, "execution_id": execution_id}
-        raise HTTPException(status_code=404, detail="Execution not found or not running")
-
     # ── Cron management ──────────────────────────────────
 
     @api_router.get("/api/cron")
@@ -2249,36 +2238,6 @@ def create_dashboard_router(
         if router is None:
             return {"messages": []}
         return {"messages": router.message_log[-100:]}
-
-    # ── Workflows ────────────────────────────────────────────
-
-    @api_router.get("/api/workflows")
-    async def api_workflows() -> dict:
-        if orchestrator is None:
-            return {"workflows": [], "active": []}
-        wf_list = [
-            {"name": wf.name, "steps": len(wf.steps), "trigger": wf.trigger, "timeout": wf.timeout}
-            for wf in orchestrator.workflows.values()
-        ]
-        active = [
-            orchestrator.get_execution_status(eid)
-            for eid in orchestrator.active_executions
-        ]
-        return {"workflows": wf_list, "active": [a for a in active if a]}
-
-    @api_router.post("/api/workflows/{name}/run")
-    async def api_workflow_run(name: str, request: Request) -> dict:
-        """Trigger a workflow by name."""
-        if orchestrator is None:
-            raise HTTPException(status_code=503, detail="Orchestrator not available")
-        if name not in orchestrator.workflows:
-            raise HTTPException(status_code=404, detail=f"Workflow '{name}' not found")
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError):
-            body = {}
-        execution_id = await orchestrator.trigger_workflow(name, payload=body)
-        return {"started": True, "execution_id": execution_id, "workflow": name}
 
     # ── Webhooks ──────────────────────────────────────────────
 

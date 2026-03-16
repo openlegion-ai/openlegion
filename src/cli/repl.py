@@ -76,12 +76,6 @@ class _REPLCompleter:
                 subs = ["list", "del", "pause", "resume", "run"]
                 return [s + " " for s in subs if s.startswith(text)]
 
-        if line.startswith("/workflow "):
-            parts = line.split()
-            if len(parts) <= 2:
-                subs = ["list", "run"]
-                return [s + " " for s in subs if s.startswith(text)]
-
         if line.startswith("/project "):
             parts = line.split()
             if len(parts) <= 2:
@@ -146,7 +140,6 @@ class REPLSession:
         ("System", [
             ("/blackboard [list|get|set|del]", "View/edit blackboard entries"),
             ("/queue",                         "Show agent queue status"),
-            ("/workflow [list|run]",            "List or trigger workflows"),
             ("/costs",                         "Show spend, context, and model health"),
             ("/cron [list|del|pause|resume|run]", "Manage cron jobs"),
             ("/traces [id]",                   "Show recent request traces"),
@@ -178,7 +171,6 @@ class REPLSession:
             "/steer":      (self._cmd_steer,      "Redirect busy agent"),
             "/blackboard": (self._cmd_blackboard, "View/edit blackboard entries"),
             "/queue":      (self._cmd_queue,      "Show agent queue status"),
-            "/workflow":   (self._cmd_workflow,   "List or trigger workflows"),
             "/costs":      (self._cmd_costs,      "Show spend, context, and model health"),
             "/debug":      (self._cmd_debug,      "Show recent request traces"),
             "/traces":     (self._cmd_debug,      "Show recent request traces"),
@@ -936,57 +928,6 @@ class REPLSession:
             queued = info.get("queued", 0)
             click.echo(f"  {agent:<20} {state:<10} {queued} queued")
         click.echo()
-
-    def _cmd_workflow(self, arg: str) -> None:
-        if not self.ctx.orchestrator:
-            click.echo("Orchestrator not available.")
-            return
-        parts = arg.strip().split(None, 1)
-        sub = parts[0] if parts else "list"
-
-        if sub in ("list", "ls", ""):
-            workflows = self.ctx.orchestrator.workflows
-            if self._active_project:
-                prefix = f"{self._active_project}/"
-                filtered = {n: w for n, w in workflows.items() if n.startswith(prefix)}
-            else:
-                filtered = workflows
-            if not filtered:
-                label = f" for project '{self._active_project}'" if self._active_project else ""
-                click.echo(f"  No workflows loaded{label}.")
-            else:
-                click.echo("\n  Workflows:")
-                for name, wf in filtered.items():
-                    steps = len(wf.steps) if hasattr(wf, "steps") else "?"
-                    click.echo(f"    {name:<24} {steps} steps")
-
-            active = self.ctx.orchestrator.active_executions
-            if active:
-                click.echo("\n  Active executions:")
-                for eid, ex in active.items():
-                    status = ex.status if hasattr(ex, "status") else "running"
-                    wf_name = ex.workflow.name if hasattr(ex, "workflow") else "?"
-                    click.echo(f"    {eid:<24} {wf_name:<20} {status}")
-            click.echo()
-        elif sub == "run":
-            wf_name = parts[1].strip() if len(parts) > 1 else ""
-            if not wf_name:
-                click.echo("Usage: /workflow run <name>")
-                return
-            # Prepend project prefix if active and not already namespaced
-            if self._active_project and "/" not in wf_name:
-                wf_name = f"{self._active_project}/{wf_name}"
-            try:
-                future = asyncio.run_coroutine_threadsafe(
-                    self.ctx.orchestrator.trigger_workflow(wf_name, {}),
-                    self.ctx.dispatch_loop,
-                )
-                exec_id = future.result(timeout=30)
-                click.echo(f"  Started workflow '{wf_name}' (execution: {exec_id})")
-            except Exception as e:
-                click.echo(f"  Error: {e}")
-        else:
-            click.echo("Usage: /workflow [list|run] ...")
 
     def _cmd_credential(self, arg: str) -> None:
         """Manage credentials (add/list/remove)."""

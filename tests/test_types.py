@@ -6,8 +6,6 @@ from src.shared.types import (
     TaskAssignment,
     TaskResult,
     TokenBudget,
-    WorkflowDefinition,
-    WorkflowStep,
 )
 
 
@@ -64,18 +62,3 @@ def test_token_budget_record_usage_uses_unified_costs():
     assert budget2.estimated_cost_usd > 0
 
 
-def test_workflow_step_defaults():
-    step = WorkflowStep(id="s1", task_type="research")
-    assert step.on_failure == "abort"
-    assert step.max_retries == 3
-    assert step.depends_on == []
-
-
-def test_workflow_definition_parsing():
-    wf = WorkflowDefinition(
-        name="test",
-        trigger="webhook",
-        steps=[WorkflowStep(id="s1", task_type="research")],
-    )
-    assert len(wf.steps) == 1
-    assert wf.timeout == 600

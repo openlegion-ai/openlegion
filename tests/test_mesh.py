@@ -265,7 +265,7 @@ def permissions(tmp_path):
     config = {
         "permissions": {
             "research": {
-                "can_message": ["orchestrator"],
+                "can_message": ["mesh"],
                 "can_publish": ["research_complete"],
                 "can_subscribe": ["new_lead"],
                 "blackboard_read": ["context/*", "tasks/*"],
@@ -273,7 +273,7 @@ def permissions(tmp_path):
                 "allowed_apis": ["anthropic", "brave_search"],
             },
             "qualify": {
-                "can_message": ["orchestrator"],
+                "can_message": ["mesh"],
                 "blackboard_read": ["context/*"],
                 "blackboard_write": [],
                 "allowed_apis": ["anthropic"],
@@ -286,13 +286,13 @@ def permissions(tmp_path):
 
 
 def test_permissions_can_message(permissions):
-    assert permissions.can_message("research", "orchestrator")
+    assert permissions.can_message("research", "mesh")
     assert not permissions.can_message("research", "qualify")
 
 
-def test_permissions_orchestrator_always_allowed(permissions):
-    assert permissions.can_message("orchestrator", "research")
-    assert permissions.can_read_blackboard("orchestrator", "anything")
+def test_permissions_mesh_always_allowed(permissions):
+    assert permissions.can_message("mesh", "research")
+    assert permissions.can_read_blackboard("mesh", "anything")
 
 
 def test_permissions_blackboard_read_glob(permissions):
@@ -313,7 +313,7 @@ def test_permissions_api_access(permissions):
 
 
 def test_permissions_deny_unknown_agent(permissions):
-    assert not permissions.can_message("unknown", "orchestrator")
+    assert not permissions.can_message("unknown", "mesh")
     assert not permissions.can_read_blackboard("unknown", "context/test")
 
 
@@ -364,7 +364,7 @@ def test_router_register_and_unregister():
 
 
 def test_permissions_wildcard_messaging(tmp_path):
-    """Wildcard can_message: ['*'] still works for system/orchestrator use."""
+    """Wildcard can_message: ['*'] still works for system/mesh use."""
     config = {
         "permissions": {
             "ceo": {
@@ -374,7 +374,7 @@ def test_permissions_wildcard_messaging(tmp_path):
                 "allowed_apis": ["llm"],
             },
             "worker": {
-                "can_message": ["orchestrator"],
+                "can_message": ["mesh"],
                 "blackboard_read": ["context/*"],
                 "blackboard_write": [],
                 "allowed_apis": ["llm"],
@@ -389,7 +389,7 @@ def test_permissions_wildcard_messaging(tmp_path):
     assert pm.can_message("ceo", "engineer")
     assert pm.can_message("ceo", "anyone")
     assert not pm.can_message("worker", "ceo")
-    assert pm.can_message("worker", "orchestrator")
+    assert pm.can_message("worker", "mesh")
 
 
 def test_can_manage_vault_default_false(permissions):
@@ -410,7 +410,7 @@ def test_can_manage_vault_granted(tmp_path):
                 "allowed_credentials": ["*"],
             },
             "worker": {
-                "can_message": ["orchestrator"],
+                "can_message": ["mesh"],
                 "blackboard_read": [],
                 "blackboard_write": [],
                 "allowed_apis": [],
@@ -425,9 +425,8 @@ def test_can_manage_vault_granted(tmp_path):
     assert pm.can_manage_vault("worker") is False
 
 
-def test_can_manage_vault_orchestrator_always_allowed(permissions):
-    """Orchestrator and mesh always have vault access."""
-    assert permissions.can_manage_vault("orchestrator") is True
+def test_can_manage_vault_mesh_always_allowed(permissions):
+    """Mesh always has vault access."""
     assert permissions.can_manage_vault("mesh") is True
 
 
@@ -519,14 +518,13 @@ def test_can_access_credential_empty_denied(tmp_path):
     assert pm.can_access_credential("agent", "myapp_password") is False
 
 
-def test_can_access_credential_orchestrator_always_allowed(tmp_path):
-    """Orchestrator and mesh bypass credential scoping."""
+def test_can_access_credential_mesh_always_allowed(tmp_path):
+    """Mesh bypasses credential scoping."""
     config = {"permissions": {}}
     config_path = tmp_path / "permissions.json"
     config_path.write_text(json.dumps(config))
     pm = PermissionMatrix(config_path=str(config_path))
 
-    assert pm.can_access_credential("orchestrator", "anthropic_api_key") is True
     assert pm.can_access_credential("mesh", "openai_api_key") is True
 
 
@@ -535,14 +533,14 @@ def test_allowed_credentials_controls_vault_access(tmp_path):
     config = {
         "permissions": {
             "full_access": {
-                "can_message": ["orchestrator"],
+                "can_message": ["mesh"],
                 "blackboard_read": ["*"],
                 "blackboard_write": [],
                 "allowed_apis": ["llm"],
                 "allowed_credentials": ["*"],
             },
             "restricted": {
-                "can_message": ["orchestrator"],
+                "can_message": ["mesh"],
                 "blackboard_read": [],
                 "blackboard_write": [],
                 "allowed_apis": [],

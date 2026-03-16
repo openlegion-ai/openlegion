@@ -111,23 +111,3 @@ agents:
     budget:
       daily_usd: 3.0
       monthly_usd: 60.0
-
-workflow:
-  name: sales-pipeline
-  trigger: manual
-  timeout: 600
-  steps:
-    - id: research
-      agent: researcher
-      task_type: research
-      timeout: 180
-    - id: qualify
-      agent: qualifier
-      task_type: qualification
-      timeout: 120
-      depends_on: [research]
-    - id: outreach
-      agent: outreach
-      task_type: outreach
-      timeout: 180
-      depends_on: [qualify]

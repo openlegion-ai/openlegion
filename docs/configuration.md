@@ -147,7 +147,7 @@ Per-agent access control lists. Default policy is **deny** -- if not listed, it'
 {
   "permissions": {
     "researcher": {
-      "can_message": ["orchestrator"],
+      "can_message": [],
       "can_publish": ["research_complete"],
       "can_subscribe": ["new_lead"],
       "blackboard_read": ["projects/sales/*"],

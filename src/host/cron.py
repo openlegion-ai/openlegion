@@ -55,8 +55,6 @@ class CronJob:
     enabled: bool = True
     suppress_empty: bool = True
     heartbeat: bool = False
-    workflow: Optional[str] = None
-    workflow_payload: Optional[str] = None
     tool_name: Optional[str] = None    # invoke this tool directly — no LLM involved
     tool_params: Optional[str] = None  # JSON-encoded params dict for the tool
     last_run: Optional[str] = None
@@ -80,7 +78,6 @@ class CronScheduler:
         self,
         config_path: str = "config/cron.json",
         dispatch_fn: Optional[Callable] = None,
-        workflow_trigger_fn: Optional[Callable] = None,
         invoke_fn: Optional[Callable] = None,
         blackboard: Any = None,
         trace_store: Any = None,
@@ -91,7 +88,6 @@ class CronScheduler:
         self.config_path = Path(config_path)
         self.jobs: dict[str, CronJob] = {}
         self.dispatch_fn = dispatch_fn
-        self.workflow_trigger_fn = workflow_trigger_fn
         self.invoke_fn = invoke_fn
         self.blackboard = blackboard
         self._trace_store = trace_store
@@ -109,7 +105,10 @@ class CronScheduler:
             data = json.loads(self.config_path.read_text())
             if not isinstance(data, dict):
                 return
+            _valid_fields = {f.name for f in CronJob.__dataclass_fields__.values()}
             for job_data in data.get("jobs", []):
+                # Strip unknown keys (e.g. removed "workflow" fields) for compat
+                job_data = {k: v for k, v in job_data.items() if k in _valid_fields}
                 job = CronJob(**job_data)
                 self._compute_next_run(job)
                 self.jobs[job.id] = job
@@ -345,11 +344,6 @@ class CronScheduler:
                         "Cron %s invoked tool '%s' on agent '%s'",
                         job.id, job.tool_name, job.agent,
                     )
-                elif job.workflow and self.workflow_trigger_fn:
-                    payload = json.loads(job.workflow_payload) if job.workflow_payload else {}
-                    payload.setdefault("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
-                    response = await self.workflow_trigger_fn(job.workflow, payload)
-                    logger.info(f"Cron {job.id} triggered workflow '{job.workflow}'")
                 elif self.dispatch_fn:
                     if job.heartbeat:
                         probes = self._run_heartbeat_probes(job.agent)

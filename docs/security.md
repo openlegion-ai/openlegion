@@ -103,7 +103,7 @@ Every inter-agent operation checks per-agent ACLs defined in `config/permissions
 ```json
 {
   "researcher": {
-    "can_message": ["orchestrator"],
+    "can_message": [],
     "can_publish": ["research_complete"],
     "can_subscribe": ["new_lead"],
     "blackboard_read": ["projects/sales/*"],
@@ -136,14 +136,6 @@ Agent file tools (`src/agent/builtins/file_tool.py`) validate all paths are with
 - Resolves symlinks before checking
 - Rejects `../` traversal attempts
 - All file operations are scoped to the container's `/data` volume
-
-### Safe Condition Evaluation
-
-Workflow conditions (`src/host/orchestrator.py`) use a regex-based parser:
-- No `eval()` or `exec()` -- ever
-- Supports comparisons (`>=`, `==`, `!=`, `<`, `>`, `<=`)
-- Dot-notation variable access only (`step.result.score`)
-- Single comparison per condition (no boolean operators)
 
 ### Bounded Execution
 

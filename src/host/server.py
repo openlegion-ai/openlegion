@@ -5,7 +5,7 @@ Provides endpoints for:
   - Pub/Sub (event signals)
   - API proxy (agents call external services through mesh)
   - Agent registration
-  - System messaging (orchestrator-to-agent)
+  - System messaging (mesh-to-agent)
 """
 
 from __future__ import annotations
@@ -61,7 +61,6 @@ if TYPE_CHECKING:
     from src.host.health import HealthMonitor
     from src.host.lanes import LaneManager
     from src.host.mesh import Blackboard, MessageRouter, PubSub
-    from src.host.orchestrator import Orchestrator
     from src.host.permissions import PermissionMatrix
     from src.host.runtime import RuntimeBackend
     from src.host.traces import TraceStore
@@ -77,7 +76,6 @@ def create_mesh_app(
     cron_scheduler: CronScheduler | None = None,
     container_manager: RuntimeBackend | None = None,
     transport: Transport | None = None,
-    orchestrator: Orchestrator | None = None,
     auth_tokens: dict[str, str] | None = None,
     trace_store: TraceStore | None = None,
     event_bus: EventBus | None = None,
@@ -239,41 +237,15 @@ def create_mesh_app(
                 return
         raise HTTPException(401, "Invalid authentication token")
 
-    # === System Messaging (orchestrator/mesh → agent) ===
+    # === System Messaging (mesh → agent) ===
 
     @app.post("/mesh/message")
     async def send_message(msg: AgentMessage, request: Request) -> dict:
-        """Route a system message to an agent (task results, orchestrator commands).
-
-        Special case: messages addressed to "orchestrator" with type "task_result"
-        are intercepted and resolved against the orchestrator's pending futures
-        instead of being routed to an agent container.
-        """
+        """Route a message to an agent via the mesh router."""
         msg.from_agent = _resolve_agent_id(msg.from_agent, request)
         if not permissions.can_message(msg.from_agent, msg.to):
             raise HTTPException(403, f"Agent {msg.from_agent} cannot message {msg.to}")
-        if msg.to == "orchestrator" and msg.type == "task_result" and orchestrator is not None:
-            from src.shared.types import TaskResult
-            try:
-                result = TaskResult(**msg.payload)
-                resolved = await orchestrator.resolve_task_result(result.task_id, result)
-                return {"delivered": resolved, "target": "orchestrator"}
-            except Exception as e:
-                return {"error": f"Failed to resolve task result: {e}"}
         return await router.route(msg)
-
-    # === Workflow Cancellation ===
-
-    @app.post("/mesh/cancel/{execution_id}")
-    async def cancel_workflow(execution_id: str, request: Request) -> dict:
-        """Cancel a running workflow execution."""
-        if _auth_tokens:
-            _extract_verified_agent_id(request)
-        if orchestrator is None:
-            raise HTTPException(503, "Orchestrator not available")
-        if orchestrator.cancel_execution(execution_id):
-            return {"cancelled": True, "execution_id": execution_id}
-        raise HTTPException(404, f"No running execution found: {execution_id}")
 
     # === Blackboard ===
     # NOTE: list route must be defined BEFORE the {key:path} route to avoid shadowing

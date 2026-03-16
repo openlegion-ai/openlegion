@@ -112,23 +112,3 @@ agents:
     budget:
       daily_usd: 5.0
       monthly_usd: 100.0
-
-workflow:
-  name: research-pipeline
-  trigger: manual
-  timeout: 900
-  steps:
-    - id: discover
-      agent: scout
-      task_type: research
-      timeout: 300
-    - id: analyze
-      agent: analyst
-      task_type: analysis
-      timeout: 300
-      depends_on: [discover]
-    - id: report
-      agent: writer
-      task_type: writing
-      timeout: 240
-      depends_on: [analyze]

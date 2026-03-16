@@ -241,9 +241,6 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `POST` | `/dashboard/api/broadcast` | Send message to all agents |
 | `POST` | `/dashboard/api/broadcast/stream` | SSE streaming broadcast to all agents |
 | `GET` | `/dashboard/api/messages` | Recent message log |
-| `GET` | `/dashboard/api/workflows` | Workflow definitions |
-| `POST` | `/dashboard/api/workflows/{name}/run` | Trigger a workflow by name |
-| `POST` | `/dashboard/api/workflows/{execution_id}/cancel` | Cancel a workflow execution |
 | `GET` | `/dashboard/api/webhooks` | List configured webhooks |
 | `POST` | `/dashboard/api/webhooks` | Create a webhook endpoint |
 | `DELETE` | `/dashboard/api/webhooks/{name}` | Delete a webhook |
