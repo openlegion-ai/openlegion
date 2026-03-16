@@ -354,11 +354,24 @@ class DockerBackend(RuntimeBackend):
         else:
             max_browsers, browser_mem = min(max_agents, 10), "8g"
 
+        # Override browser settings from dashboard config
+        idle_timeout_minutes = 30
+        settings_path = self.project_root / "config" / "settings.json"
+        if settings_path.exists():
+            try:
+                bsettings = json.loads(settings_path.read_text())
+                if "browser_idle_timeout" in bsettings:
+                    idle_timeout_minutes = int(bsettings["browser_idle_timeout"])
+                if "browser_max_concurrent" in bsettings:
+                    max_browsers = min(int(bsettings["browser_max_concurrent"]), max_browsers)
+            except (json.JSONDecodeError, OSError, ValueError):
+                pass
+
         environment = {
             "BROWSER_AUTH_TOKEN": self.browser_auth_token,
             "MESH_URL": f"http://{mesh_host}:{self.mesh_host_port}",
             "MAX_BROWSERS": str(max_browsers),
-            "IDLE_TIMEOUT_MINUTES": "30",
+            "IDLE_TIMEOUT_MINUTES": str(idle_timeout_minutes),
         }
 
         for var in ("BROWSER_PROXY_URL", "BROWSER_PROXY_USER", "BROWSER_PROXY_PASS"):

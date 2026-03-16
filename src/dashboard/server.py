@@ -2140,6 +2140,114 @@ def create_dashboard_router(
 
         return {"speed": speed}
 
+    # ── System settings (consolidated) ────────────────────────
+
+    _SYSTEM_SETTINGS_VALIDATORS: dict[str, tuple[type, float, float]] = {
+        "default_daily_budget": (float, 0.01, 10000),
+        "default_monthly_budget": (float, 0.01, 100000),
+        "max_iterations": (int, 1, 100),
+        "chat_max_tool_rounds": (int, 1, 200),
+        "chat_max_total_rounds": (int, 10, 1000),
+        "tool_timeout": (int, 10, 3600),
+        "browser_idle_timeout": (int, 5, 120),
+        "browser_max_concurrent": (int, 1, 20),
+        "health_poll_interval": (int, 5, 300),
+        "health_max_failures": (int, 1, 20),
+        "health_restart_limit": (int, 0, 20),
+        "health_restart_window": (int, 60, 86400),
+    }
+
+    _SYSTEM_SETTINGS_DEFAULTS: dict[str, float | int] = {
+        "default_daily_budget": 10.0,
+        "default_monthly_budget": 200.0,
+        "max_iterations": 20,
+        "chat_max_tool_rounds": 30,
+        "chat_max_total_rounds": 200,
+        "tool_timeout": 300,
+        "browser_idle_timeout": 30,
+        "browser_max_concurrent": 5,
+        "health_poll_interval": 30,
+        "health_max_failures": 3,
+        "health_restart_limit": 3,
+        "health_restart_window": 3600,
+    }
+
+    @api_router.get("/api/system-settings")
+    async def api_get_system_settings() -> dict:
+        """Return all system settings with defaults."""
+        from src.cli.config import _load_config
+        settings = _load_settings()
+        result = {}
+        for key, default in _SYSTEM_SETTINGS_DEFAULTS.items():
+            result[key] = settings.get(key, default)
+        # Include default_model from mesh.yaml
+        cfg = _load_config()
+        result["default_model"] = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        return result
+
+    @api_router.post("/api/system-settings")
+    async def api_set_system_settings(request: Request) -> dict:
+        """Update system settings. Accepts a partial dict of settings."""
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Request body must be a JSON object")
+
+        settings = _load_settings()
+        updated = []
+
+        for key, value in body.items():
+            if key not in _SYSTEM_SETTINGS_VALIDATORS:
+                continue
+            typ, min_val, max_val = _SYSTEM_SETTINGS_VALIDATORS[key]
+            try:
+                coerced = typ(value)
+            except (ValueError, TypeError):
+                raise HTTPException(400, f"{key} must be a {typ.__name__}")
+            if coerced < min_val or coerced > max_val:
+                raise HTTPException(400, f"{key} must be between {min_val} and {max_val}")
+            settings[key] = coerced
+            updated.append(key)
+
+        if updated:
+            _save_settings(settings)
+
+        # Apply health settings at runtime
+        if health_monitor:
+            _health_keys = {
+                "health_poll_interval": "POLL_INTERVAL",
+                "health_max_failures": "MAX_FAILURES",
+                "health_restart_limit": "RESTART_LIMIT",
+                "health_restart_window": "RESTART_WINDOW",
+            }
+            for cfg_key, attr in _health_keys.items():
+                if cfg_key in updated:
+                    setattr(health_monitor, attr, settings[cfg_key])
+
+        return {"updated": updated}
+
+    @api_router.post("/api/default-model")
+    async def api_set_default_model(request: Request) -> dict:
+        """Update the default LLM model in mesh.yaml."""
+        import yaml
+        body = await request.json()
+        model = body.get("model", "").strip()
+        if not model:
+            raise HTTPException(400, "model is required")
+        if not _is_valid_model(model):
+            raise HTTPException(400, f"Unknown model: {model}")
+
+        config_path = Path("config/mesh.yaml")
+        mesh_cfg: dict = {}
+        if config_path.exists():
+            with open(config_path) as f:
+                mesh_cfg = yaml.safe_load(f) or {}
+        mesh_cfg.setdefault("llm", {})["default_model"] = model
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_path, "w") as f:
+            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+
+        return {"model": model}
+
     # ── Storage ────────────────────────────────────────────────
 
     _STORAGE_SKIP_DIRS = {"src", ".git", ".venv", "venv", "node_modules", ".claude"}
