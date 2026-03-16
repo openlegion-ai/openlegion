@@ -1093,14 +1093,9 @@
                   <div class="flex flex-wrap gap-2">
                     <select x-model="onboardProvider" :disabled="onboardSaving" class="dash-select text-xs w-40" @change="onboardAuthType = 'api_key'">
                       <option value="">Provider...</option>
-                      <option value="anthropic">Anthropic</option>
-                      <option value="openai">OpenAI</option>
-                      <option value="gemini">Google Gemini</option>
-                      <option value="deepseek">DeepSeek</option>
-                      <option value="moonshot">Moonshot / Kimi</option>
-                      <option value="xai">xAI (Grok)</option>
-                      <option value="groq">Groq</option>
-                      <option value="minimax">MiniMax</option>
+                      {% for p in providers %}
+                      <option value="{{ p.name }}">{{ p.label }}</option>
+                      {% endfor %}
                     </select>
                     <template x-if="onboardProvider === 'anthropic'">
                       <select x-model="onboardAuthType" :disabled="onboardSaving" class="dash-select text-xs w-48">
@@ -2517,15 +2512,9 @@
                   <select x-model="credService" :disabled="credSaving" class="dash-select text-xs w-40" @change="credAuthType = 'api_key'">
                     <option value="">Service...</option>
                     <optgroup label="LLM Providers (system tier)">
-                      <option value="anthropic">Anthropic</option>
-                      <option value="openai">OpenAI</option>
-                      <option value="gemini">Google Gemini</option>
-                      <option value="deepseek">DeepSeek</option>
-                      <option value="moonshot">Moonshot / Kimi</option>
-                      <option value="xai">xAI (Grok)</option>
-                      <option value="groq">Groq</option>
-                      <option value="minimax">MiniMax</option>
-                      <option value="zai">ZAI</option>
+                      {% for p in all_providers %}
+                      <option value="{{ p.name }}">{{ p.label }}</option>
+                      {% endfor %}
                     </optgroup>
                     <optgroup label="Agent tools">
                       <option value="brave_search_api_key">Brave Search</option>

@@ -5,15 +5,43 @@ litellm.model_cost (~2,600 models).  All litellm imports are lazy so this
 module works in agent containers where litellm isn't installed.
 
 Public API:
-    get_model_cost(model)        -> (input_per_1k, output_per_1k)
-    get_context_window(model)    -> int
+    get_model_cost(model)         -> (input_per_1k, output_per_1k)
+    get_context_window(model)     -> int
     get_provider_models(provider) -> list[str]
-    get_all_model_costs()        -> dict[str, tuple[float, float]]
+    get_all_model_costs()         -> dict[str, tuple[float, float]]
+    get_all_providers()           -> list[dict[str, str]]
+    get_known_provider_names()    -> frozenset[str]
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
+
+# ── Provider registry ─────────────────────────────────────
+# Single source of truth for LLM providers.  Human-readable labels
+# and display ordering are defined here; everything else (CLI lists,
+# dashboard dropdowns, credential detection) is derived from this.
+
+_PROVIDER_LABELS: dict[str, str] = {
+    "anthropic": "Anthropic",
+    "openrouter": "OpenRouter",
+    "openai": "OpenAI",
+    "gemini": "Google Gemini",
+    "mistral": "Mistral",
+    "deepseek": "DeepSeek",
+    "moonshot": "Moonshot / Kimi",
+    "xai": "xAI (Grok)",
+    "groq": "Groq",
+    "together_ai": "Together AI",
+    "fireworks_ai": "Fireworks AI",
+    "perplexity": "Perplexity",
+    "minimax": "MiniMax",
+    "zai": "Z.AI (GLM)",
+    "ollama": "Ollama (Local)",
+}
+
+# Providers that don't require API keys (local inference).
+KEYLESS_PROVIDERS = frozenset({"ollama"})
 
 # ── Fallback data (used when litellm is unavailable) ─────────
 
@@ -112,6 +140,48 @@ _FEATURED_MODELS: dict[str, list[str]] = {
     ],
     "zai": [
         "zai/glm-5",
+    ],
+    "openrouter": [
+        "openrouter/anthropic/claude-sonnet-4-6",
+        "openrouter/anthropic/claude-haiku-4-5-20251001",
+        "openrouter/openai/gpt-4.1",
+        "openrouter/openai/gpt-4.1-mini",
+        "openrouter/google/gemini-2.5-pro",
+        "openrouter/google/gemini-2.5-flash",
+        "openrouter/deepseek/deepseek-chat-v3",
+        "openrouter/meta-llama/llama-3.1-405b-instruct",
+        "openrouter/meta-llama/llama-3.1-70b-instruct",
+        "openrouter/meta-llama/llama-3.1-8b-instruct",
+        "openrouter/mistralai/mistral-large",
+    ],
+    "mistral": [
+        "mistral/mistral-large-latest",
+        "mistral/mistral-medium-latest",
+        "mistral/mistral-small-latest",
+        "mistral/codestral-latest",
+        "mistral/open-mistral-nemo",
+    ],
+    "together_ai": [
+        "together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "together_ai/meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo",
+        "together_ai/meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+        "together_ai/meta-llama/Llama-3-8b-chat-hf",
+        "together_ai/Qwen/Qwen2.5-72B-Instruct-Turbo",
+        "together_ai/deepseek-ai/DeepSeek-V3",
+        "together_ai/deepseek-ai/DeepSeek-R1",
+    ],
+    "fireworks_ai": [
+        "fireworks_ai/accounts/fireworks/models/llama-v3p3-70b-instruct",
+        "fireworks_ai/accounts/fireworks/models/llama-v3p1-405b-instruct",
+        "fireworks_ai/accounts/fireworks/models/llama-v3p1-8b-instruct",
+        "fireworks_ai/accounts/fireworks/models/qwen2p5-72b-instruct",
+        "fireworks_ai/accounts/fireworks/models/deepseek-v3",
+    ],
+    "perplexity": [
+        "perplexity/sonar-pro",
+        "perplexity/sonar",
+        "perplexity/llama-3.1-sonar-large-128k-online",
+        "perplexity/llama-3.1-sonar-small-128k-online",
     ],
     "ollama": [
         "ollama/llama3.3",
@@ -281,3 +351,54 @@ def get_all_model_costs() -> dict[str, tuple[float, float]]:
         for model in get_provider_models(provider):
             result[model] = get_model_cost(model)
     return result
+
+
+@lru_cache(maxsize=1)
+def get_all_providers() -> list[dict[str, str]]:
+    """Return all LLM providers with human-readable labels.
+
+    Curated providers (from ``_PROVIDER_LABELS``) appear first in display
+    order.  Additional providers discovered from LiteLLM's model registry
+    are appended alphabetically.  Cached for process lifetime.
+
+    Returns list of ``{"name": str, "label": str}`` dicts.
+    """
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    # Curated list in display order
+    for name, label in _PROVIDER_LABELS.items():
+        result.append({"name": name, "label": label})
+        seen.add(name)
+
+    # Auto-discover additional providers from LiteLLM
+    try:
+        from litellm import model_cost
+        extra: set[str] = set()
+        for key in model_cost:
+            if "/" not in key:
+                continue
+            provider = key.split("/", 1)[0]
+            if provider in seen or provider in extra:
+                continue
+            # Skip sub-paths and non-standard names
+            if len(provider) < 2 or not provider.replace("_", "").isalnum():
+                continue
+            extra.add(provider)
+        for name in sorted(extra):
+            label = name.replace("_", " ").title()
+            result.append({"name": name, "label": label})
+    except ImportError:
+        pass
+
+    return result
+
+
+@lru_cache(maxsize=1)
+def get_known_provider_names() -> frozenset[str]:
+    """Return all known provider names as a frozenset.
+
+    Includes curated providers and any discovered from LiteLLM.
+    Used by credential resolution to identify system-tier credentials.
+    """
+    return frozenset(p["name"] for p in get_all_providers())

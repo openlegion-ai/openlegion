@@ -17,6 +17,7 @@ import click
 import yaml
 
 from src.host.credentials import _OAUTH_TOKEN_PREFIX
+from src.shared.models import KEYLESS_PROVIDERS as _KEYLESS_PROVIDERS
 from src.shared.utils import setup_logging
 
 logger = setup_logging("setup_wizard")
@@ -26,9 +27,6 @@ if TYPE_CHECKING:
 
 # Minimum expected length for a valid OAuth setup-token
 _OAUTH_MIN_LENGTH = 90
-
-# Providers that don't need API keys (local inference).
-_KEYLESS_PROVIDERS = frozenset({"ollama"})
 
 _OLLAMA_DEFAULT_BASE = "http://localhost:11434"
 
@@ -43,6 +41,11 @@ _VALIDATION_MODELS = {
     "groq": "groq/llama-3.1-8b-instant",
     "minimax": "minimax/MiniMax-M2.5-Lightning",
     "zai": "zai/glm-5",
+    "openrouter": "openrouter/meta-llama/llama-3.1-8b-instruct",
+    "mistral": "mistral/mistral-small-latest",
+    "together_ai": "together_ai/meta-llama/Llama-3-8b-chat-hf",
+    "fireworks_ai": "fireworks_ai/accounts/fireworks/models/llama-v3p1-8b-instruct",
+    "perplexity": "perplexity/llama-3.1-sonar-small-128k-online",
 }
 
 
@@ -554,11 +557,15 @@ class SetupWizard:
             )
             if resp.status_code == 200:
                 return True
-            # Rate limit / transient — assume valid
-            if resp.status_code in (429, 500, 502, 503, 529):
-                logger.debug("OAuth validation skipped due to status %d", resp.status_code)
-                return True
-            return False
+            # 401 is a definitive auth failure — token is invalid
+            if resp.status_code == 401:
+                logger.debug("OAuth validation failed: 401 Unauthorized")
+                return False
+            # Everything else (400 bad model, 403 beta header change,
+            # 429 rate limit, 5xx transient) is NOT a token auth issue
+            # — assume valid since we can't distinguish.
+            logger.debug("OAuth validation skipped due to status %d", resp.status_code)
+            return True
         except (_httpx.TimeoutException, _httpx.ConnectError):
             logger.debug("OAuth validation skipped due to connection error")
             return True

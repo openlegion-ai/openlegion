@@ -54,18 +54,37 @@ MARKETPLACE_DIR = PROJECT_ROOT / "skills" / "_marketplace"
 
 # ── Provider data ───────────────────────────────────────────
 
-_PROVIDERS = [
-    {"name": "anthropic", "label": "Anthropic (recommended)"},
-    {"name": "moonshot", "label": "Moonshot / Kimi (recommended)"},
-    {"name": "deepseek", "label": "DeepSeek"},
-    {"name": "openai", "label": "OpenAI"},
-    {"name": "gemini", "label": "Google Gemini"},
-    {"name": "xai", "label": "xAI (Grok)"},
-    {"name": "groq", "label": "Groq"},
-    {"name": "minimax", "label": "MiniMax"},
-    {"name": "zai", "label": "Z.AI (GLM)"},
-    {"name": "ollama", "label": "Ollama (Local)"},
-]
+def _get_providers() -> list[dict[str, str]]:
+    """Load provider list from the model registry (single source of truth)."""
+    from src.shared.models import get_all_providers
+    return get_all_providers()
+
+
+# Lazy-evaluated: built on first access so litellm discovery works.
+class _LazyProviders:
+    """List-like wrapper that loads providers on first access."""
+
+    def __init__(self) -> None:
+        self._data: list[dict[str, str]] | None = None
+
+    def _ensure(self) -> None:
+        if self._data is None:
+            self._data = _get_providers()
+
+    def __getitem__(self, key):
+        self._ensure()
+        return self._data[key]
+
+    def __iter__(self):
+        self._ensure()
+        return iter(self._data)
+
+    def __len__(self):
+        self._ensure()
+        return len(self._data)
+
+
+_PROVIDERS = _LazyProviders()
 
 
 class _LazyProviderModels:

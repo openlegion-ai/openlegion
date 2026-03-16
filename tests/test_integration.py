@@ -427,6 +427,18 @@ def test_vault_store_blocks_system_credential(vault_components):
     assert "system credential" in response.json()["detail"].lower()
 
 
+def test_vault_store_strips_whitespace(vault_components):
+    """Credential values with leading/trailing whitespace are stripped."""
+    client = vault_components["client"]
+    vault = vault_components["vault"]
+    response = client.post(
+        "/mesh/vault/store",
+        json={"agent_id": "trusted", "name": "notion", "value": "  ntn_secret_abc  "},
+    )
+    assert response.status_code == 200
+    assert vault.credentials["notion"] == "ntn_secret_abc"
+
+
 def test_vault_list_endpoint(vault_components):
     client = vault_components["client"]
     vault = vault_components["vault"]

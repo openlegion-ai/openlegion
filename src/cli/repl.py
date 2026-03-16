@@ -1037,11 +1037,12 @@ class REPLSession:
         if service.lower() in SYSTEM_CREDENTIAL_PROVIDERS and not service.lower().endswith("_api_key"):
             service = f"{service}_api_key"
         key_value = click.prompt(f"  {service} key", hide_input=True)
-        if not key_value:
+        if not key_value or not key_value.strip():
             click.echo("No key provided.")
             return
+        key_value = key_value.strip()
         # Auto-detect OAuth setup-token pasted as an Anthropic key
-        if is_oauth_token(key_value.strip()) and "anthropic" in service.lower():
+        if is_oauth_token(key_value) and "anthropic" in service.lower():
             click.echo("  Detected OAuth setup-token (experimental subscription auth).")
         # Detect known LLM providers → store as system tier
         is_llm_provider = is_system_credential(service)
@@ -1056,7 +1057,7 @@ class REPLSession:
         click.echo(f"Credential '{service}' stored ({tier_label} tier).")
         # Prompt for optional base URL when the key is for a known LLM provider
         # (not applicable for OAuth tokens — they always use api.anthropic.com)
-        if is_llm_provider and not is_oauth_token(key_value.strip()):
+        if is_llm_provider and not is_oauth_token(key_value):
             provider = service.lower().replace("_api_key", "")
             base_url = click.prompt(
                 "  Custom API base URL (leave blank for default)", default="", show_default=False,

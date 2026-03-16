@@ -170,11 +170,15 @@ def create_dashboard_router(
 
     @api_router.get("/", response_class=HTMLResponse)
     async def dashboard_index() -> HTMLResponse:
+        from src.shared.models import KEYLESS_PROVIDERS, get_all_providers
+        all_providers = get_all_providers()
         template = jinja_env.get_template("index.html")
         html = template.render(
             ws_path="/ws/events",
             api_base="/dashboard/api",
             v=ASSET_VERSION,
+            providers=[p for p in all_providers if p["name"] not in KEYLESS_PROVIDERS],
+            all_providers=all_providers,
         )
         return HTMLResponse(html, headers={
             "Cache-Control": "no-store",
@@ -2415,8 +2419,14 @@ def create_spa_catchall_router() -> APIRouter:
     async def spa_catchall(path: str) -> HTMLResponse:
         if path.startswith(("mesh/", "dashboard/", "ws/")):
             raise HTTPException(status_code=404, detail="Not found")
+        from src.shared.models import KEYLESS_PROVIDERS, get_all_providers
+        all_providers = get_all_providers()
         template = env.get_template("index.html")
-        html = template.render(ws_path="/ws/events", api_base="/dashboard/api", v=ASSET_VERSION)
+        html = template.render(
+            ws_path="/ws/events", api_base="/dashboard/api", v=ASSET_VERSION,
+            providers=[p for p in all_providers if p["name"] not in KEYLESS_PROVIDERS],
+            all_providers=all_providers,
+        )
         return HTMLResponse(html, headers={
             "Cache-Control": "no-store",
             "Content-Security-Policy": (

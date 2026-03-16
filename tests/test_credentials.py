@@ -318,6 +318,26 @@ def test_add_credential_stores_in_memory(monkeypatch):
         cred_mod._persist_to_env = original
 
 
+def test_add_credential_strips_whitespace(monkeypatch):
+    """add_credential() strips leading/trailing whitespace from values.
+
+    Trailing spaces from terminal paste corrupt tokens and cause auth
+    failures (e.g. Notion 401 when the stored value has a trailing space).
+    """
+    v = CredentialVault()
+    import src.host.credentials as cred_mod
+    original = cred_mod._persist_to_env
+    persisted = {}
+    cred_mod._persist_to_env = lambda k, val, **kw: persisted.update({k: val})
+    try:
+        v.add_credential("notion", "  ntn_secret_abc123  ")
+        assert v.credentials["notion"] == "ntn_secret_abc123"
+        # Persisted value should also be stripped
+        assert persisted[f"{AGENT_PREFIX}NOTION"] == "ntn_secret_abc123"
+    finally:
+        cred_mod._persist_to_env = original
+
+
 def test_add_credential_routes_api_base_to_api_bases(monkeypatch):
     """add_credential() with _api_base suffix stores in api_bases, not credentials."""
     v = CredentialVault()
@@ -1070,18 +1090,28 @@ def test_list_agent_credential_names_empty():
         cred_mod._persist_to_env = original
 
 
-def test_system_credential_providers_matches_provider_key_map():
-    """SYSTEM_CREDENTIAL_PROVIDERS must stay in sync with _PROVIDER_KEY_MAP values.
+def test_system_credential_providers_includes_override_providers():
+    """SYSTEM_CREDENTIAL_PROVIDERS must include all providers from prefix overrides.
 
-    If a new provider is added to _PROVIDER_KEY_MAP but not to
-    SYSTEM_CREDENTIAL_PROVIDERS, that provider's API key would become
-    agent-accessible — a silent security regression.
+    Any provider in _PROVIDER_PREFIX_OVERRIDES must also be in
+    SYSTEM_CREDENTIAL_PROVIDERS so that its API key is correctly
+    classified as system-tier (not agent-accessible).
     """
-    map_providers = frozenset(CredentialVault._PROVIDER_KEY_MAP.values())
-    assert SYSTEM_CREDENTIAL_PROVIDERS == map_providers, (
-        f"SYSTEM_CREDENTIAL_PROVIDERS is out of sync with _PROVIDER_KEY_MAP. "
-        f"Missing from SYSTEM_CREDENTIAL_PROVIDERS: {map_providers - SYSTEM_CREDENTIAL_PROVIDERS}. "
-        f"Extra in SYSTEM_CREDENTIAL_PROVIDERS: {SYSTEM_CREDENTIAL_PROVIDERS - map_providers}."
+    override_providers = frozenset(CredentialVault._PROVIDER_PREFIX_OVERRIDES.values())
+    missing = override_providers - SYSTEM_CREDENTIAL_PROVIDERS
+    assert not missing, (
+        f"Providers from _PROVIDER_PREFIX_OVERRIDES missing from "
+        f"SYSTEM_CREDENTIAL_PROVIDERS: {missing}"
+    )
+
+
+def test_system_credential_providers_includes_curated():
+    """SYSTEM_CREDENTIAL_PROVIDERS must include all curated providers."""
+    from src.shared.models import _PROVIDER_LABELS
+    curated = frozenset(_PROVIDER_LABELS.keys())
+    missing = curated - SYSTEM_CREDENTIAL_PROVIDERS
+    assert not missing, (
+        f"Curated providers missing from SYSTEM_CREDENTIAL_PROVIDERS: {missing}"
     )
 
 
