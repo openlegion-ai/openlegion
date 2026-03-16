@@ -56,7 +56,7 @@ Every agent automatically has access to built-in tools defined in
 - `update_workspace` — Persist learnings to workspace files
 - `spawn_subagent`, `list_subagents`, `wait_for_subagent` — In-process subagents
 - `set_cron`, `list_cron`, `remove_cron` — Scheduled jobs
-- `vault_generate_secret`, `vault_capture_from_page`, `vault_list` — Credential vault
+- `vault_generate_secret`, `vault_list` — Credential vault
 - `get_system_status` — Runtime state queries (permissions, budget, fleet, cron, health)
 - `read_agent_history` — Read another agent's conversation logs
 - `create_skill`, `reload_skills` — Self-extension

@@ -184,6 +184,12 @@ Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
 | `can_use_browser` | boolean | Whether this agent can use the shared browser service. Default: `false`. |
 | `can_spawn` | boolean | Whether this agent can spawn ephemeral fleet agents via `spawn_fleet_agent`. Default: `false`. |
 | `can_manage_cron` | boolean | Whether this agent can create, update, and delete cron jobs. Default: `false`. |
+| `can_use_wallet` | boolean | Whether this agent can access the wallet signing service. Default: `false`. |
+| `wallet_allowed_chains` | list[string] | Chains this agent can transact on (e.g., `["ethereum", "base"]`). `["*"]` allows all chains. Default: `[]`. |
+| `wallet_spend_limit_per_tx_usd` | float | Max USD value per transaction. `0` uses the global default. |
+| `wallet_spend_limit_daily_usd` | float | Daily aggregate transaction limit in USD. `0` uses the global default. |
+| `wallet_rate_limit_per_hour` | integer | Max transactions per hour. `0` uses the global default. |
+| `wallet_allowed_contracts` | list[string] | Contract addresses this agent can interact with. Empty list allows all. |
 
 ### Glob Patterns
 
@@ -270,5 +276,6 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `OPENLEGION_MAX_AGENTS` | `0` | Plan limit: maximum agents to start. `0` means unlimited. If set to N > 0, only the first N agents are started. |
 | `OPENLEGION_MAX_PROJECTS` | `0` | Plan limit: maximum projects allowed. `0` means unlimited. |
 | `OPENLEGION_HOST_NETWORK` | `0` | Use Docker host networking for agent containers instead of bridge network. Set to `1` to enable. Not recommended — disables network isolation. |
+| `OPENLEGION_SYSTEM_WALLET_MASTER_SEED` | -- | BIP-39 mnemonic (24 words) for HD wallet key derivation. Required to enable wallet features. Generate with `openlegion wallet init`. |
 
 The mesh port is configured in `config/mesh.yaml` (`mesh.port`), not via environment variable.

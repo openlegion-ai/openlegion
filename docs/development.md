@@ -169,14 +169,12 @@ Cross-component messages use Pydantic models from `src/shared/types.py`. Interna
 # In src/shared/types.py
 class TaskAssignment(BaseModel):
     task_id: str
-    workflow_id: str
-    step_id: str
     task_type: str
     input_data: dict
     timeout: int = 120
 
-# Used at component boundaries — dispatching tasks to agents and subagents
-assignment = TaskAssignment(workflow_id="subagent_parent", step_id="s1", task_type="research", input_data={})
+# Used at component boundaries — dispatching tasks to agents
+assignment = TaskAssignment(task_type="research", input_data={"company": "Acme Corp"})
 ```
 
 ### SQLite for All State
@@ -294,8 +292,7 @@ openlegion/
 │   │   ├── telegram.py          # Telegram bot
 │   │   ├── discord.py           # Discord bot
 │   │   ├── slack.py             # Slack (Socket Mode)
-│   │   ├── whatsapp.py          # WhatsApp (Cloud API)
-│   │   └── webhook.py           # HTTP webhooks
+│   │   └── whatsapp.py          # WhatsApp (Cloud API)
 │   ├── shared/                  # Shared between host and agent
 │   │   ├── types.py             # Pydantic contracts
 │   │   ├── utils.py             # Logging, ID generation
@@ -320,7 +317,7 @@ openlegion/
 │   ├── mesh.yaml
 │   ├── permissions.json
 │   └── cron.json
-├── tests/                       # Test suite (1826 tests)
+├── tests/                       # Test suite (2240 tests)
 │   └── fixtures/                # Test fixtures (echo MCP server, etc.)
 ├── Dockerfile.agent             # Agent container image
 └── pyproject.toml               # Project metadata
