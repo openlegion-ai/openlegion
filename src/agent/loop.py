@@ -57,6 +57,29 @@ def _strip_think_tags(text: str) -> str:
     return stripped if stripped else text
 
 
+def _extract_json_response(text: str) -> str:
+    """Extract ``response`` value from JSON chain-of-thought output.
+
+    Some local models (Qwen3) emit their full reasoning as a JSON object::
+
+        {"thought": {...}, "response": "The actual answer"}
+
+    When the entire content is a JSON object with a ``response`` key,
+    return just the response value.  Otherwise return the text unchanged.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        return text
+    try:
+        obj = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return text
+    if isinstance(obj, dict) and "response" in obj:
+        resp = obj["response"]
+        return str(resp) if resp is not None else text
+    return text
+
+
 # Files already injected via bootstrap — skip in first-message auto-search
 # to avoid duplicate content.  Matches WorkspaceManager._BOOTSTRAP_FILES.
 _BOOTSTRAP_SEARCH_EXCLUDE = frozenset({
@@ -1548,7 +1571,8 @@ class AgentLoop:
 
         Falls back to ``thinking_content`` for models that return only
         reasoning tokens (Qwen3, DeepSeek-R1).  Strips ``<think>`` tags
-        so that chat history and displayed bubbles contain the answer only.
+        and JSON chain-of-thought wrappers so that chat history and
+        displayed bubbles contain the answer only.
         """
         content = llm_response.content or ""
         if content and content.strip() == SILENT_REPLY_TOKEN:
@@ -1560,6 +1584,9 @@ class AgentLoop:
         # Strip <think>…</think> blocks so conversation history stays
         # lean and the chat bubble shows the answer, not internal reasoning.
         content = _strip_think_tags(content)
+        # Some models (Qwen3) wrap their answer in a JSON object with a
+        # "response" key.  Extract just the response value.
+        content = _extract_json_response(content)
         return content
 
     # ── Non-streaming chat ────────────────────────────────────

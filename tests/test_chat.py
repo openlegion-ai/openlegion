@@ -637,7 +637,53 @@ class TestCompactionSystemMessage:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-# ── _strip_think_tags & _resolve_content tests ───────────────
+# ── _strip_think_tags, _extract_json_response & _resolve_content tests ──
+
+
+class TestExtractJsonResponse:
+    """Verify JSON chain-of-thought extraction."""
+
+    def test_extracts_response_field(self):
+        import json
+        from src.agent.loop import _extract_json_response
+        text = json.dumps({"thought": {"x": 1}, "response": "The answer"})
+        assert _extract_json_response(text) == "The answer"
+
+    def test_plain_text_unchanged(self):
+        from src.agent.loop import _extract_json_response
+        assert _extract_json_response("Hello world") == "Hello world"
+
+    def test_json_without_response_key(self):
+        import json
+        from src.agent.loop import _extract_json_response
+        text = json.dumps({"data": 123})
+        assert _extract_json_response(text) == text
+
+    def test_invalid_json_unchanged(self):
+        from src.agent.loop import _extract_json_response
+        text = '{"broken json'
+        assert _extract_json_response(text) == text
+
+    def test_json_array_unchanged(self):
+        from src.agent.loop import _extract_json_response
+        text = '[1, 2, 3]'
+        assert _extract_json_response(text) == text
+
+    def test_empty_string(self):
+        from src.agent.loop import _extract_json_response
+        assert _extract_json_response("") == ""
+
+    def test_response_with_whitespace(self):
+        import json
+        from src.agent.loop import _extract_json_response
+        text = "  " + json.dumps({"response": "padded"}) + "  "
+        assert _extract_json_response(text) == "padded"
+
+    def test_numeric_response(self):
+        import json
+        from src.agent.loop import _extract_json_response
+        text = json.dumps({"response": 42})
+        assert _extract_json_response(text) == "42"
 
 
 class TestStripThinkTags:
@@ -721,3 +767,32 @@ class TestResolveContentThinkingFallback:
             tokens_used=10,
         )
         assert AgentLoop._resolve_content(resp) == "Fallback answer"
+
+    def test_json_cot_response_extracted(self):
+        """JSON chain-of-thought wrapper is unwrapped to just the response."""
+        import json
+        cot = json.dumps({
+            "thought": {"intent": "greeting"},
+            "response": "Hi there! How can I help?",
+        })
+        resp = LLMResponse(content=cot, tokens_used=10)
+        assert AgentLoop._resolve_content(resp) == "Hi there! How can I help?"
+
+    def test_json_without_response_key_unchanged(self):
+        """JSON that doesn't have a 'response' key is left as-is."""
+        import json
+        data = json.dumps({"result": "some data", "status": "ok"})
+        resp = LLMResponse(content=data, tokens_used=10)
+        assert AgentLoop._resolve_content(resp) == data
+
+    def test_plain_text_not_parsed_as_json(self):
+        resp = LLMResponse(content="Just a normal answer", tokens_used=10)
+        assert AgentLoop._resolve_content(resp) == "Just a normal answer"
+
+    def test_json_response_null_unchanged(self):
+        """JSON with response: null should not return 'None'."""
+        import json
+        data = json.dumps({"thought": "hmm", "response": None})
+        resp = LLMResponse(content=data, tokens_used=10)
+        # null response — return original since we'd lose content
+        assert AgentLoop._resolve_content(resp) == data
