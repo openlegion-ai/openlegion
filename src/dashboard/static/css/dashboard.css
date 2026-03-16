@@ -640,7 +640,7 @@ select:focus-visible,
 
 .messenger-half {
   width: 50vw;
-  min-width: 480px;
+  min-width: 400px;
   max-width: 100vw;
 }
 
@@ -648,10 +648,35 @@ select:focus-visible,
   width: 100vw;
 }
 
+/* Sidebar: compact (avatar-only) by default, expanded on wide screens.
+   The sidebar has `hidden sm:flex` in HTML so it's invisible below 640px. */
 .messenger-sidebar {
-  width: 220px;
-  min-width: 220px;
+  width: 56px;
+  min-width: 56px;
   background: rgba(14, 14, 20, 0.6);
+}
+
+/* Hide text in compact mode — show only avatars */
+.messenger-sidebar .messenger-contact > div.flex-1 {
+  display: none;
+}
+
+.messenger-sidebar > div:first-child span {
+  display: none;
+}
+
+/* Wide screens: expand sidebar to show names + previews */
+@media (min-width: 1280px) {
+  .messenger-sidebar {
+    width: 180px;
+    min-width: 180px;
+  }
+  .messenger-sidebar .messenger-contact > div.flex-1 {
+    display: block;
+  }
+  .messenger-sidebar > div:first-child span {
+    display: inline;
+  }
 }
 
 .messenger-contact {
@@ -662,25 +687,27 @@ select:focus-visible,
   opacity: 1;
 }
 
+/* Main-content margin to avoid content hiding behind the chat panel.
+   Must stay in sync with .messenger-half widths at each breakpoint. */
+.messenger-margin {
+  margin-right: min(50vw, 400px);
+}
+
+@media (min-width: 1024px) {
+  .messenger-margin {
+    margin-right: 50vw;
+  }
+}
+
 @media (max-width: 640px) {
   .messenger-half {
     width: 100vw;
     min-width: 0;
   }
-  .messenger-sidebar {
-    width: 56px;
-    min-width: 56px;
-  }
-  .messenger-sidebar .messenger-contact > div.flex-1 {
-    display: none;
-  }
-  .messenger-sidebar > div:first-child span {
-    display: none;
+  .messenger-margin {
+    margin-right: 0;
   }
 }
-
-/* ── Messenger sidebar responsive ────────────────── */
-/* On mobile the sidebar is hidden; horizontal tabs handle agent switching. */
 
 /* ── Chat slide-over panel ────────────────────────── */
 
