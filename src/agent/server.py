@@ -199,10 +199,35 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         """Streaming chat. Returns SSE events for tool use and text deltas."""
         _trace_id = request.headers.get("x-trace-id")
         async def event_generator():
-            async for event in loop.chat_stream(
+            stream = loop.chat_stream(
                 sanitize_for_prompt(msg.message), trace_id=_trace_id,
-            ):
-                yield f"data: {json_module.dumps(event, default=str)}\n\n"
+            )
+            stream_iter = stream.__aiter__()
+            # Use asyncio.wait (not wait_for) so the pending __anext__
+            # is never cancelled — cancellation would close the async
+            # generator and silently drop the response.
+            next_event = asyncio.ensure_future(stream_iter.__anext__())
+            try:
+                while True:
+                    done, _ = await asyncio.wait(
+                        {next_event}, timeout=15,
+                    )
+                    if not done:
+                        yield ": keepalive\n\n"
+                        continue
+                    try:
+                        event = next_event.result()
+                    except StopAsyncIteration:
+                        break
+                    yield f"data: {json_module.dumps(event, default=str)}\n\n"
+                    next_event = asyncio.ensure_future(stream_iter.__anext__())
+            finally:
+                if not next_event.done():
+                    next_event.cancel()
+                    try:
+                        await next_event
+                    except (asyncio.CancelledError, Exception):
+                        pass
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @app.post("/chat/reset")

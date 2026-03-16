@@ -167,7 +167,7 @@ class HttpTransport(Transport):
         """Streaming HTTP request. Yields parsed SSE data lines."""
         url = self._urls.get(agent_id)
         if not url:
-            yield {"error": f"Agent '{agent_id}' not registered in transport"}
+            yield {"type": "error", "message": f"Agent '{agent_id}' not registered in transport"}
             return
         try:
             client = await self._get_client()
@@ -184,10 +184,10 @@ class HttpTransport(Transport):
                             yield {"raw": line[6:]}
         except httpx.HTTPStatusError as e:
             logger.warning("Stream HTTP %d from agent '%s' %s", e.response.status_code, agent_id, path)
-            yield {"error": f"HTTP {e.response.status_code}"}
+            yield {"type": "error", "message": f"HTTP {e.response.status_code}"}
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
             logger.warning("Stream connection failed for agent '%s' %s: %s", agent_id, path, e)
-            yield {"error": str(e)}
+            yield {"type": "error", "message": str(e)}
 
     def request_sync(
         self,
