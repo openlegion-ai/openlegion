@@ -191,7 +191,7 @@ echo -e "  ${YELLOW}First install takes 2-3 minutes (downloads ~70 packages).${N
 echo -e "  ${YELLOW}Subsequent installs are fast (cached).${NC}"
 echo ""
 
-"$VENV_BIN_DIR/pip" install -e ".[dev,channels]" 2>&1 | while IFS= read -r line; do
+"$VENV_BIN_DIR/pip" install -e ".[dev,channels,wallet]" 2>&1 | while IFS= read -r line; do
     # Show download/install progress, skip noise
     case "$line" in
         *Collecting*|*Downloading*|*Installing*|*Building*|*Successfully*)
@@ -206,7 +206,7 @@ if [ ! -x "$VENV_BIN_DIR/openlegion" ] && [ ! -x "$VENV_BIN_DIR/openlegion.exe" 
     echo ""
     warn "Install may have failed. Retrying with full output..."
     echo ""
-    "$VENV_BIN_DIR/pip" install -e ".[dev,channels]"
+    "$VENV_BIN_DIR/pip" install -e ".[dev,channels,wallet]"
 fi
 
 echo ""
