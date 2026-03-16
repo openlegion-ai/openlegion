@@ -1444,7 +1444,12 @@ def create_dashboard_router(
         agent_perms = perms_data.get("permissions", {}).get(agent_id, {})
         agent_perms["can_use_wallet"] = True
         if not agent_perms.get("wallet_allowed_chains"):
-            agent_perms["wallet_allowed_chains"] = ["*"]
+            # Default to all known chains (not wildcard "*")
+            _ws_local = (wallet_service_ref or [None])[0]
+            if _ws_local:
+                agent_perms["wallet_allowed_chains"] = list(_ws_local.chains.keys())
+            else:
+                agent_perms["wallet_allowed_chains"] = ["*"]
         perms_data.setdefault("permissions", {})[agent_id] = agent_perms
         _save_permissions(perms_data)
         permissions.reload()

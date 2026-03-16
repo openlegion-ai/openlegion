@@ -1968,9 +1968,12 @@ function dashboard() {
         can_manage_cron: cfg.can_manage_cron ?? false,
         can_use_wallet: cfg.can_use_wallet ?? false,
         _walletChains: Object.fromEntries(
-          (cfg.wallet_available_chains || []).map(
-            ch => [ch.id, (cfg.wallet_allowed_chains || []).includes(ch.id)]
-          )
+          (cfg.wallet_available_chains || []).map(ch => {
+            const allowed = cfg.wallet_allowed_chains || [];
+            // Default all chains to selected when none were previously configured
+            const checked = allowed.length === 0 ? true : allowed.includes(ch.id) || allowed.includes('*');
+            return [ch.id, checked];
+          })
         ),
         allowed_credentials: credsStr,
         _credMode: credMode,
