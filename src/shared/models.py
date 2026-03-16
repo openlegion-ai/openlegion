@@ -266,11 +266,9 @@ def get_context_window(model: str) -> int:
     """Return the max input tokens for a model.
 
     Uses litellm's ``max_input_tokens``, falling back to hardcoded data.
-    Ollama models default to 4096 (Ollama's default ``num_ctx``).
+    Ollama models fall back to 4096 (Ollama's default ``num_ctx``) when
+    not found in litellm's registry.
     """
-    if model.startswith("ollama/") or model.startswith("ollama_chat/"):
-        return _OLLAMA_DEFAULT_CONTEXT
-
     key = _resolve_litellm_key(model)
     if key is not None:
         try:
@@ -281,6 +279,9 @@ def get_context_window(model: str) -> int:
                 return max_input
         except (ImportError, KeyError):
             pass
+
+    if model.startswith("ollama/") or model.startswith("ollama_chat/"):
+        return _OLLAMA_DEFAULT_CONTEXT
 
     return _FALLBACK_CONTEXT.get(model, _DEFAULT_CONTEXT_WINDOW)
 
