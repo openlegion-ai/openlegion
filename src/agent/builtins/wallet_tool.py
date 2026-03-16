@@ -13,16 +13,23 @@ from src.shared.utils import sanitize_for_prompt, setup_logging
 logger = setup_logging("agent.wallet")
 
 
+_CHAIN_DESC = (
+    "One of: 'evm:ethereum', 'evm:base', 'evm:arbitrum', "
+    "'evm:polygon', 'evm:sepolia', 'solana:mainnet', 'solana:devnet'"
+)
+
+
 @skill(
     name="wallet_get_address",
-    description="Get your wallet address for a blockchain.",
+    description=(
+        "Returns your wallet address on a specific chain. "
+        "Use this to share your address, verify which wallet you control, "
+        "or pass your address to protocol APIs."
+    ),
     parameters={
         "chain": {
             "type": "string",
-            "description": (
-                "Chain ID (e.g. 'evm:ethereum', 'evm:base', 'evm:arbitrum', "
-                "'evm:polygon', 'solana:mainnet', 'solana:devnet')"
-            ),
+            "description": _CHAIN_DESC,
         },
     },
 )
@@ -41,19 +48,20 @@ async def wallet_get_address(chain: str, *, mesh_client=None) -> dict:
 @skill(
     name="wallet_get_balance",
     description=(
-        "Check wallet balance for native tokens (ETH, SOL, POL) "
-        "or fungible tokens (ERC-20, SPL)."
+        "Check your wallet balance. Returns the amount in human-readable form. "
+        "Use token='native' for ETH/SOL, or pass a token contract address "
+        "for tokens like USDC, WETH, etc."
     ),
     parameters={
         "chain": {
             "type": "string",
-            "description": "Chain ID (e.g. 'evm:base', 'solana:mainnet')",
+            "description": _CHAIN_DESC,
         },
         "token": {
             "type": "string",
             "description": (
-                "'native' for ETH/SOL/POL, or token address "
-                "(ERC-20 contract / SPL mint)"
+                "'native' for the chain's currency (ETH, SOL, POL), "
+                "or a token contract address (e.g. USDC address)"
             ),
             "default": "native",
         },
@@ -76,31 +84,32 @@ async def wallet_get_balance(
 @skill(
     name="wallet_read_contract",
     description=(
-        "Read data from a smart contract or account (no transaction, no gas). "
-        "EVM: call a view/pure function — provide contract, function signature, and args. "
-        "Solana: read account data — provide the account address as 'contract'."
+        "Read onchain data without sending a transaction. "
+        "EVM: call a contract read function (e.g. check prices, allowances, pool reserves). "
+        "Solana: read account data (lamports, owner, raw data)."
     ),
     parameters={
         "chain": {
             "type": "string",
-            "description": "Chain ID (e.g. 'evm:base', 'solana:mainnet')",
+            "description": _CHAIN_DESC,
         },
         "contract": {
             "type": "string",
-            "description": "EVM: contract address. Solana: account address to read.",
+            "description": "EVM: contract address. Solana: account address.",
         },
         "function": {
             "type": "string",
             "description": (
-                "EVM: function signature (e.g. 'balanceOf(address)'). "
-                "Solana: not required."
+                "EVM only. Solidity function signature, "
+                "e.g. 'balanceOf(address)', 'getReserves()', 'allowance(address,address)'. "
+                "Leave empty for Solana."
             ),
             "default": "",
         },
         "args": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "EVM: function arguments in order (as strings). Solana: not required.",
+            "description": "EVM only. Arguments matching the function signature, in order. Leave empty for Solana.",
             "default": [],
         },
     },
@@ -131,33 +140,28 @@ async def wallet_read_contract(
 @skill(
     name="wallet_transfer",
     description=(
-        "Send native tokens or fungible tokens to an address. "
-        "Works on both EVM (ETH/ERC-20) and Solana (SOL/SPL). "
-        "The transaction is signed by the mesh wallet service — "
-        "your private key never leaves the vault. "
-        "Subject to spend limits and rate limits."
+        "Send tokens to an address. Use this for simple sends — "
+        "ETH, SOL, USDC, or any token. For complex operations like "
+        "swaps or contract calls, use wallet_execute instead."
     ),
     parameters={
         "chain": {
             "type": "string",
-            "description": "Chain ID (e.g. 'evm:base', 'solana:mainnet')",
+            "description": _CHAIN_DESC,
         },
         "to": {
             "type": "string",
-            "description": "Recipient address",
+            "description": "Recipient wallet address (0x... for EVM, base58 for Solana)",
         },
         "amount": {
             "type": "string",
-            "description": (
-                "Amount in human-readable form "
-                "(e.g. '0.1' for 0.1 ETH, '1.5' for 1.5 SOL)"
-            ),
+            "description": "Amount as a decimal string (e.g. '0.1' for 0.1 ETH, '100' for 100 USDC)",
         },
         "token": {
             "type": "string",
             "description": (
-                "'native' for ETH/SOL/POL, or token address "
-                "(ERC-20 contract / SPL mint)"
+                "'native' for chain currency (ETH, SOL, POL), "
+                "or token contract address for other tokens"
             ),
             "default": "native",
         },
@@ -185,47 +189,44 @@ async def wallet_transfer(
 @skill(
     name="wallet_execute",
     description=(
-        "Execute an onchain transaction. The mesh signs and broadcasts it. "
-        "EVM: provide contract, function signature, and args. "
-        "Solana: provide a base64-encoded unsigned transaction "
-        "(from protocol APIs like Jupiter). "
-        "Use this for swaps, mints, approvals, staking, lending, "
-        "or any onchain interaction."
+        "Call a smart contract or sign a protocol transaction. "
+        "Use this for swaps, approvals, mints, staking, lending — "
+        "anything beyond a simple token transfer. "
+        "EVM: provide the contract address and Solidity function signature. "
+        "Solana: provide the base64 unsigned transaction from a protocol API (e.g. Jupiter swap API)."
     ),
     parameters={
         "chain": {
             "type": "string",
-            "description": "Chain ID (e.g. 'evm:base', 'solana:mainnet')",
+            "description": _CHAIN_DESC,
         },
         "contract": {
             "type": "string",
-            "description": "EVM: contract address. Not used for Solana.",
+            "description": "EVM only. Target contract address.",
             "default": "",
         },
         "function": {
             "type": "string",
             "description": (
-                "EVM: Solidity function signature "
-                "(e.g. 'approve(address,uint256)'). Not used for Solana."
+                "EVM only. Solidity function signature, "
+                "e.g. 'approve(address,uint256)', 'swap(address,uint256,uint256,address,uint256)'"
             ),
             "default": "",
         },
         "args": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "EVM: function arguments in order (as strings). Not used for Solana.",
+            "description": "EVM only. Arguments matching the function signature, in order.",
             "default": [],
         },
         "value": {
             "type": "string",
-            "description": "EVM: native token to send with call. Not used for Solana.",
+            "description": "EVM only. Native token (ETH) to send with the call, as a decimal string. Default '0'.",
             "default": "0",
         },
         "transaction": {
             "type": "string",
-            "description": (
-                "Solana: base64-encoded unsigned transaction. Not used for EVM."
-            ),
+            "description": "Solana only. Base64-encoded unsigned transaction from a protocol API.",
             "default": "",
         },
     },
