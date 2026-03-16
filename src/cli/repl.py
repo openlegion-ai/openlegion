@@ -1683,6 +1683,9 @@ def _send_message_streaming(
                                           "tool_count": tool_count,
                                           "source": "repl"})
                             return
+                        elif etype == "error":
+                            click.echo(f"Error: {event.get('message', 'Unknown error')}")
+                            return
                         elif "error" in event:
                             click.echo(f"Error: {event['error']}")
                             return

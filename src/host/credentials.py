@@ -1113,6 +1113,8 @@ class CredentialVault:
         """
         import litellm
 
+        litellm.drop_params = True
+
         requested_model = request.params.get("model", "")
 
         # OAuth fast-path: bypass LiteLLM for Anthropic OAuth tokens.
@@ -1177,29 +1179,56 @@ class CredentialVault:
             collected_thinking = ""
             collected_tool_calls: list[dict] = []
 
-            async for chunk in response:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if delta is None:
-                    continue
+            # Iterate with keepalive: send SSE comments every 15s so
+            # downstream read timeouts (agent → mesh, dashboard → agent)
+            # don't fire while waiting for slow providers like Ollama.
+            # Uses asyncio.wait (not wait_for) to avoid cancelling the
+            # pending __anext__ — cancellation would corrupt the iterator.
+            _KEEPALIVE_INTERVAL = 15
+            chunk_iter = response.__aiter__()
+            next_chunk = asyncio.ensure_future(chunk_iter.__anext__())
+            try:
+                while True:
+                    done, _ = await asyncio.wait(
+                        {next_chunk}, timeout=_KEEPALIVE_INTERVAL,
+                    )
+                    if not done:
+                        yield ": keepalive\n\n"
+                        continue
+                    try:
+                        chunk = next_chunk.result()
+                    except StopAsyncIteration:
+                        break
 
-                if delta.content:
-                    collected_content += delta.content
-                    yield f"data: {json.dumps({'type': 'text_delta', 'content': delta.content})}\n\n"
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    if delta is not None:
+                        if delta.content:
+                            collected_content += delta.content
+                            yield f"data: {json.dumps({'type': 'text_delta', 'content': delta.content})}\n\n"
 
-                # Collect thinking/reasoning tokens but don't stream them to client
-                reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning and isinstance(reasoning, str):
-                    collected_thinking += reasoning
+                        # Collect thinking/reasoning tokens but don't stream them
+                        reasoning = getattr(delta, "reasoning_content", None)
+                        if reasoning and isinstance(reasoning, str):
+                            collected_thinking += reasoning
 
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        idx = tc.index if hasattr(tc, 'index') else 0
-                        while len(collected_tool_calls) <= idx:
-                            collected_tool_calls.append({"name": "", "arguments": ""})
-                        if tc.function and tc.function.name:
-                            collected_tool_calls[idx]["name"] = tc.function.name
-                        if tc.function and tc.function.arguments:
-                            collected_tool_calls[idx]["arguments"] += tc.function.arguments
+                        if delta.tool_calls:
+                            for tc in delta.tool_calls:
+                                idx = tc.index if hasattr(tc, 'index') else 0
+                                while len(collected_tool_calls) <= idx:
+                                    collected_tool_calls.append({"name": "", "arguments": ""})
+                                if tc.function and tc.function.name:
+                                    collected_tool_calls[idx]["name"] = tc.function.name
+                                if tc.function and tc.function.arguments:
+                                    collected_tool_calls[idx]["arguments"] += tc.function.arguments
+
+                    next_chunk = asyncio.ensure_future(chunk_iter.__anext__())
+            finally:
+                if not next_chunk.done():
+                    next_chunk.cancel()
+                    try:
+                        await next_chunk
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
             # Emit final summary
             tokens_used = 0
