@@ -58,6 +58,12 @@ class PermissionMatrix:
                 can_use_browser=default.can_use_browser,
                 can_spawn=default.can_spawn,
                 can_manage_cron=default.can_manage_cron,
+                can_use_wallet=default.can_use_wallet,
+                wallet_allowed_chains=default.wallet_allowed_chains,
+                wallet_spend_limit_per_tx_usd=default.wallet_spend_limit_per_tx_usd,
+                wallet_spend_limit_daily_usd=default.wallet_spend_limit_daily_usd,
+                wallet_rate_limit_per_hour=default.wallet_rate_limit_per_hour,
+                wallet_allowed_contracts=default.wallet_allowed_contracts,
             )
         return AgentPermissions(agent_id=agent_id)
 
@@ -160,3 +166,38 @@ class PermissionMatrix:
         """Return the allowed_credentials patterns for an agent."""
         perms = self.get_permissions(agent_id)
         return perms.allowed_credentials
+
+    # === Wallet permissions ===
+
+    def can_use_wallet(self, agent_id: str) -> bool:
+        """Check if agent has wallet access."""
+        if self._is_trusted(agent_id):
+            return True
+        return self.get_permissions(agent_id).can_use_wallet
+
+    def can_use_wallet_chain(self, agent_id: str, chain: str) -> bool:
+        """Check if agent can transact on a specific chain."""
+        if self._is_trusted(agent_id):
+            return True
+        perms = self.get_permissions(agent_id)
+        if not perms.can_use_wallet:
+            return False
+        return "*" in perms.wallet_allowed_chains or chain in perms.wallet_allowed_chains
+
+    def get_wallet_limits(self, agent_id: str) -> tuple[float, float, int]:
+        """Return (per_tx_usd, daily_usd, rate_per_hour). 0 = use global default."""
+        perms = self.get_permissions(agent_id)
+        return (
+            perms.wallet_spend_limit_per_tx_usd,
+            perms.wallet_spend_limit_daily_usd,
+            perms.wallet_rate_limit_per_hour,
+        )
+
+    def can_access_wallet_contract(self, agent_id: str, contract: str) -> bool:
+        """Check if agent can interact with a specific contract address."""
+        if self._is_trusted(agent_id):
+            return True
+        contracts = self.get_permissions(agent_id).wallet_allowed_contracts
+        if not contracts:
+            return True  # Empty = allow all
+        return "*" in contracts or contract.lower() in [c.lower() for c in contracts]

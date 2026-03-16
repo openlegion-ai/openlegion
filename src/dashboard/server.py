@@ -132,6 +132,7 @@ def create_dashboard_router(
     router: Any = None,
     webhook_manager: Any = None,
     channel_manager: Any = None,
+    wallet_service: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     # Plan limits — read once at startup; provisioner restarts engine after updating .env
@@ -1255,6 +1256,118 @@ def create_dashboard_router(
         if not existed:
             raise HTTPException(status_code=404, detail=f"Credential '{name}' not found")
         return {"removed": True, "service": name}
+
+    @api_router.get("/api/credentials/{name}/value")
+    async def api_credential_value(name: str, request: Request) -> dict:
+        """Reveal a credential's value. Dashboard-auth gated."""
+        _verify_dashboard_auth(request)
+        if credential_vault is None:
+            raise HTTPException(status_code=503, detail="Credential vault not available")
+        # Check both tiers
+        value = credential_vault.resolve_credential(name)
+        if value is None:
+            # Try system tier
+            value = credential_vault.system_credentials.get(name.lower())
+        if value is None:
+            raise HTTPException(status_code=404, detail=f"Credential '{name}' not found")
+        return {"name": name, "value": value}
+
+    # ── Wallet management ────────────────────────────────────
+
+    @api_router.post("/api/wallet/init")
+    async def api_wallet_init(request: Request) -> dict:
+        """Generate a master wallet seed and store it in .env."""
+        _verify_dashboard_auth(request)
+        if os.environ.get("OPENLEGION_SYSTEM_WALLET_MASTER_SEED"):
+            raise HTTPException(
+                status_code=409,
+                detail="Master seed already configured. Remove "
+                "OPENLEGION_SYSTEM_WALLET_MASTER_SEED from .env to reset.",
+            )
+        try:
+            from mnemonic import Mnemonic
+        except ImportError:
+            raise HTTPException(
+                status_code=503,
+                detail="mnemonic package not installed. Run: pip install mnemonic",
+            )
+        from src.host.credentials import _persist_to_env
+
+        mnemo = Mnemonic("english")
+        words = mnemo.generate(strength=256)
+        _persist_to_env("OPENLEGION_SYSTEM_WALLET_MASTER_SEED", words)
+        os.environ["OPENLEGION_SYSTEM_WALLET_MASTER_SEED"] = words
+
+        # Derive sample addresses WITHOUT touching the DB (don't assign
+        # index 0 to a fake "agent-0" — just show what index 0 would produce).
+        addresses = {}
+        try:
+            from src.host.wallet import WalletService
+
+            ws = WalletService()
+            try:
+                addresses["evm"] = ws._derive_evm_account(0).address
+                addresses["solana"] = str(ws._derive_solana_keypair(0).pubkey())
+            finally:
+                ws.close()
+        except Exception:
+            pass
+
+        return {"initialized": True, "seed": words, "sample_addresses": addresses}
+
+    @api_router.get("/api/wallet/seed")
+    async def api_wallet_seed(request: Request) -> dict:
+        """Reveal the master wallet seed. Dashboard-auth gated."""
+        _verify_dashboard_auth(request)
+        seed = os.environ.get("OPENLEGION_SYSTEM_WALLET_MASTER_SEED")
+        if not seed:
+            raise HTTPException(status_code=404, detail="No master seed configured")
+        return {"seed": seed}
+
+    @api_router.get("/api/wallet/addresses")
+    async def api_wallet_addresses(request: Request) -> dict:
+        """List all agent wallet addresses."""
+        _verify_dashboard_auth(request)
+        seed = os.environ.get("OPENLEGION_SYSTEM_WALLET_MASTER_SEED")
+        if not seed:
+            return {"configured": False, "agents": []}
+
+        # Use injected wallet_service if available (runtime started with seed),
+        # otherwise create a temporary instance (seed was added after startup).
+        ws = wallet_service
+        temp_ws = None
+        if ws is None:
+            try:
+                from src.host.wallet import WalletService
+                temp_ws = WalletService()
+                ws = temp_ws
+            except Exception as e:
+                return {"configured": True, "agents": [], "error": str(e)}
+
+        try:
+            rows = ws.db.execute(
+                "SELECT agent_id, idx FROM agent_index ORDER BY idx",
+            ).fetchall()
+            agents = []
+            for aid, idx in rows:
+                try:
+                    evm = await ws.get_address(aid, "evm:ethereum")
+                    sol = await ws.get_address(aid, "solana:mainnet")
+                    agents.append({
+                        "agent_id": aid, "index": idx,
+                        "evm_address": evm, "solana_address": sol,
+                    })
+                except Exception:
+                    agents.append({"agent_id": aid, "index": idx, "error": "derivation failed"})
+            # If the injected wallet_service is None (seed added after startup),
+            # agents can't use wallets yet — flag it so the UI can inform the user.
+            needs_restart = wallet_service is None
+            return {"configured": True, "agents": agents, "needs_restart": needs_restart}
+        except Exception as e:
+            return {"configured": True, "agents": [], "error": str(e)}
+        finally:
+            if temp_ws is not None:
+                temp_ws.close()
 
     # ── Cost detail per agent ────────────────────────────────
 

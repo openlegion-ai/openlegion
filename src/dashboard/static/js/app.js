@@ -233,6 +233,7 @@ function dashboard() {
       { id: 'activity', label: 'Activity' },
       { id: 'schedules', label: 'Schedules' },
       { id: 'connections', label: 'Connections' },
+      { id: 'wallet', label: 'Wallet' },
       { id: 'storage', label: 'Storage' },
       { id: 'settings', label: 'Settings' },
     ],
@@ -276,10 +277,19 @@ function dashboard() {
     cronFormMessage: '',
     cronCreating: false,
 
-    // Credential update
+    // Credential update / reveal
     editingCredential: null,
     editCredKey: '',
     credentialSaving: false,
+    revealedCredentials: {},  // { name: value } for temporarily revealed credentials
+    revealingCredential: null,  // name currently being fetched
+
+    // Wallet
+    walletData: null,  // { configured, agents, seed? }
+    walletLoading: false,
+    walletSeedVisible: false,
+    walletSeed: '',
+    walletInitializing: false,
 
     // Workflow cancel tracking
     _cancellingWorkflows: {},
@@ -3575,6 +3585,98 @@ function dashboard() {
           }
         } catch (e) { this.showToast(`Error: ${e.message}`); }
       }, true);
+    },
+
+    // ── Credential reveal ──
+
+    async revealCredential(name) {
+      if (this.revealedCredentials[name]) {
+        // Toggle off
+        delete this.revealedCredentials[name];
+        this.revealedCredentials = { ...this.revealedCredentials };
+        return;
+      }
+      this.revealingCredential = name;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/credentials/${encodeURIComponent(name)}/value`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.revealedCredentials = { ...this.revealedCredentials, [name]: data.value };
+          // Auto-hide after 30 seconds
+          setTimeout(() => {
+            delete this.revealedCredentials[name];
+            this.revealedCredentials = { ...this.revealedCredentials };
+          }, 30000);
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Could not reveal credential'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+      finally { this.revealingCredential = null; }
+    },
+
+    // ── Wallet management ──
+
+    async fetchWallet() {
+      this.walletLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/wallet/addresses`);
+        if (resp.ok) {
+          this.walletData = await resp.json();
+        }
+      } catch (e) { console.warn('fetchWallet failed:', e); }
+      finally { this.walletLoading = false; }
+    },
+
+    async initWallet() {
+      if (this.walletInitializing) return;
+      this.showConfirm(
+        'Initialize Wallet',
+        'This will generate a master seed for all agent wallets. The seed will be displayed once — make sure to save it securely.',
+        async () => {
+          this.walletInitializing = true;
+          try {
+            const resp = await fetch(`${window.__config.apiBase}/wallet/init`, { method: 'POST' });
+            if (resp.ok) {
+              const data = await resp.json();
+              this.walletSeed = data.seed;
+              this.walletSeedVisible = true;
+              this.showToast('Wallet initialized. Save your seed phrase!');
+              await this.fetchWallet();
+            } else {
+              const err = await resp.json().catch(() => ({}));
+              this.showToast(`Error: ${err.detail || 'Initialization failed'}`);
+            }
+          } catch (e) { this.showToast(`Error: ${e.message}`); }
+          finally { this.walletInitializing = false; }
+        }
+      );
+    },
+
+    async revealWalletSeed() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/wallet/seed`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.walletSeed = data.seed;
+          this.walletSeedVisible = true;
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Could not retrieve seed'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
+    hideWalletSeed() {
+      this.walletSeed = '';
+      this.walletSeedVisible = false;
+    },
+
+    copyToClipboard(text) {
+      navigator.clipboard.writeText(text).then(
+        () => this.showToast('Copied to clipboard'),
+        () => this.showToast('Copy failed — select and copy manually'),
+      );
     },
 
     async submitOnboardCredential() {
