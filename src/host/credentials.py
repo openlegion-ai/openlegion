@@ -679,6 +679,17 @@ class CredentialVault:
                 **extra.get("extra_headers", {}),
                 **auth_headers,
             }
+
+        # Ollama thinking mode + tool calling is broken (empty/malformed
+        # output).  Disable thinking for Ollama when tools are present.
+        # See: https://github.com/ollama/ollama/issues/10976
+        if (
+            self._is_keyless_provider(model)
+            and request.params.get("tools")
+            and "think" not in extra
+        ):
+            extra["think"] = False
+
         return sanitized, extra
 
     # ── OAuth direct-call helpers ────────────────────────────
