@@ -291,6 +291,10 @@ function dashboard() {
     walletSeedVisible: false,
     walletSeed: '',
     walletInitializing: false,
+    walletRpcChains: [],  // [{chain_id, label, rpc_current, rpc_default, is_custom}]
+    walletRpcEditing: null,  // chain_id being edited
+    walletRpcValue: '',  // input value for editing
+    walletRpcSaving: false,
 
     // Workflow cancel tracking
     _cancellingWorkflows: {},
@@ -3707,6 +3711,48 @@ function dashboard() {
           this.showToast(`Error: ${err.detail || 'Failed'}`);
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
+    },
+
+    async fetchWalletRpc() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/wallet/rpc`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.walletRpcChains = data.chains || [];
+        }
+      } catch (e) { console.warn('fetchWalletRpc failed:', e); }
+    },
+
+    startRpcEdit(chain) {
+      this.walletRpcEditing = chain.chain_id;
+      this.walletRpcValue = chain.is_custom ? chain.rpc_current : '';
+    },
+
+    cancelRpcEdit() {
+      this.walletRpcEditing = null;
+      this.walletRpcValue = '';
+    },
+
+    async saveRpcUrl(chainId) {
+      if (this.walletRpcSaving) return;
+      this.walletRpcSaving = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/wallet/rpc`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chain_id: chainId, rpc_url: this.walletRpcValue.trim() }),
+        });
+        if (resp.ok) {
+          this.showToast(this.walletRpcValue.trim() ? 'RPC updated' : 'Reset to default');
+          this.walletRpcEditing = null;
+          this.walletRpcValue = '';
+          await this.fetchWalletRpc();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+      finally { this.walletRpcSaving = false; }
     },
 
     copyToClipboard(text) {

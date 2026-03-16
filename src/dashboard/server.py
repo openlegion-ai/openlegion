@@ -1455,6 +1455,65 @@ def create_dashboard_router(
         permissions.reload()
         return {"enabled": True, "agent_id": agent_id}
 
+    @api_router.get("/api/wallet/rpc")
+    async def api_wallet_rpc(request: Request) -> dict:
+        """List RPC URLs for all chains (current + default)."""
+        _verify_dashboard_auth(request)
+        from src.host.wallet import _CHAINS
+
+        chains = []
+        for chain_id, cfg in _CHAINS.items():
+            env_key = cfg["rpc_env"]
+            custom = os.environ.get(env_key, "")
+            chains.append({
+                "chain_id": chain_id,
+                "label": _wallet_chain_label(chain_id, cfg),
+                "rpc_env": env_key,
+                "rpc_default": cfg["rpc_default"],
+                "rpc_current": custom or cfg["rpc_default"],
+                "is_custom": bool(custom),
+            })
+        return {"chains": chains}
+
+    @api_router.put("/api/wallet/rpc")
+    async def api_wallet_rpc_update(request: Request) -> dict:
+        """Set or clear a custom RPC URL for a chain."""
+        _verify_dashboard_auth(request)
+        body = await request.json()
+        chain_id = body.get("chain_id", "")
+        rpc_url = body.get("rpc_url", "").strip()
+
+        from src.host.wallet import _CHAINS
+
+        if chain_id not in _CHAINS:
+            raise HTTPException(status_code=400, detail=f"Unknown chain: {chain_id}")
+
+        env_key = _CHAINS[chain_id]["rpc_env"]
+        from src.host.credentials import _persist_to_env, _remove_from_env
+
+        if rpc_url:
+            # Validate URL format
+            if not rpc_url.startswith(("http://", "https://")):
+                raise HTTPException(
+                    status_code=400, detail="RPC URL must start with http:// or https://",
+                )
+            _persist_to_env(env_key, rpc_url)
+            os.environ[env_key] = rpc_url
+        else:
+            # Clear custom → revert to default
+            _remove_from_env(env_key)
+            os.environ.pop(env_key, None)
+
+        # Hot-reload chains in the wallet service
+        _ws_local = (wallet_service_ref or [None])[0]
+        if _ws_local is not None:
+            _ws_local._chains = _ws_local._load_chains()
+            # Clear cached providers so they reconnect with new URLs
+            _ws_local._evm_providers.pop(chain_id, None)
+            _ws_local._solana_clients.pop(chain_id, None)
+
+        return {"updated": True, "chain_id": chain_id}
+
     # ── Cost detail per agent ────────────────────────────────
 
     @api_router.get("/api/costs/{agent_id}")
