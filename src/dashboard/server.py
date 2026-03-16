@@ -1388,33 +1388,39 @@ def create_dashboard_router(
                 return {"configured": True, "agents": [], "error": str(e)}
 
         try:
-            rows = ws.db.execute(
-                "SELECT agent_id, idx FROM agent_index ORDER BY idx",
-            ).fetchall()
+            # Build agent list from the live registry (not stale DB entries).
+            # Derive addresses for agents that have wallet enabled.
+            live_agents = set(agent_registry.keys())
             agents = []
-            for aid, idx in rows:
-                try:
-                    evm = await ws.get_address(aid, "evm:ethereum")
-                    sol = await ws.get_address(aid, "solana:mainnet")
-                    agents.append({
-                        "agent_id": aid, "index": idx,
-                        "evm_address": evm, "solana_address": sol,
-                    })
-                except Exception:
-                    agents.append({"agent_id": aid, "index": idx, "error": "derivation failed"})
-            # Include all registered agents with their wallet status
-            # so the UI can show quick-enable for agents without wallets
             all_agent_wallet_status = []
-            wallet_agent_ids = {a["agent_id"] for a in agents}
-            for aid in sorted(agent_registry.keys()):
-                enabled = (
-                    permissions.can_use_wallet(aid) if permissions else False
+
+            for aid in sorted(live_agents):
+                enabled = permissions.can_use_wallet(aid) if permissions else False
+                chains = (
+                    permissions.get_permissions(aid).wallet_allowed_chains
+                    if permissions else []
                 )
-                all_agent_wallet_status.append({
+                status_entry: dict = {
                     "agent_id": aid,
                     "wallet_enabled": enabled,
-                    "has_addresses": aid in wallet_agent_ids,
-                })
+                    "wallet_chains": chains,
+                }
+                if enabled:
+                    try:
+                        evm = await ws.get_address(aid, "evm:ethereum")
+                        sol = await ws.get_address(aid, "solana:mainnet")
+                        agents.append({
+                            "agent_id": aid,
+                            "evm_address": evm,
+                            "solana_address": sol,
+                        })
+                        status_entry["has_addresses"] = True
+                    except Exception:
+                        status_entry["has_addresses"] = False
+                else:
+                    status_entry["has_addresses"] = False
+                all_agent_wallet_status.append(status_entry)
+
             return {
                 "configured": True,
                 "agents": agents,

@@ -2679,7 +2679,7 @@
         </div><!-- /connections sub-tab -->
 
         <!-- ═══ WALLET SUB-TAB ═══ -->
-        <div x-show="systemTab === 'wallet'" x-effect="if (systemTab === 'wallet' && !walletData) fetchWallet()">
+        <div x-show="systemTab === 'wallet'" x-effect="if (systemTab === 'wallet') fetchWallet()">
 
           <!-- Not configured state -->
           <template x-if="walletData && !walletData.configured">
@@ -2755,7 +2755,6 @@
                       <tr class="hover:bg-gray-800/30">
                         <td class="px-4 py-2.5">
                           <span class="text-gray-300 font-medium" x-text="agent.agent_id"></span>
-                          <span class="text-gray-600 ml-1" x-text="'#' + agent.index"></span>
                         </td>
                         <td class="px-4 py-2.5">
                           <div class="flex items-center gap-1.5" x-show="agent.evm_address">
@@ -2790,8 +2789,15 @@
                         <span class="w-1.5 h-1.5 rounded-full" :class="a.wallet_enabled ? 'bg-green-500' : 'bg-gray-600'"></span>
                         <span class="text-gray-300" x-text="a.agent_id"></span>
                       </div>
-                      <div>
-                        <span x-show="a.wallet_enabled" class="text-green-500/70 text-[10px]">Enabled</span>
+                      <div class="flex items-center gap-2">
+                        <template x-if="a.wallet_enabled">
+                          <div class="flex items-center gap-1.5">
+                            <template x-for="ch in a.wallet_chains || []" :key="ch">
+                              <span class="text-[9px] px-1.5 py-0.5 rounded bg-indigo-900/20 text-indigo-400/70 border border-indigo-800/30" x-text="ch"></span>
+                            </template>
+                            <span x-show="!a.wallet_chains?.length" class="text-[10px] text-gray-600">no chains</span>
+                          </div>
+                        </template>
                         <button x-show="!a.wallet_enabled" @click="enableWalletForAgent(a.agent_id)"
                           class="text-[10px] px-2 py-0.5 rounded bg-indigo-600/80 hover:bg-indigo-500 text-white transition-colors">
                           Enable
