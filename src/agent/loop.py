@@ -35,7 +35,7 @@ logger = setup_logging("agent.loop")
 _RETRYABLE_STATUS_CODES = {429, 502, 503}
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1  # seconds: 1, 2, 4
-_TOOL_TIMEOUT = int(os.environ.get("OPENLEGION_TOOL_TIMEOUT", "300"))  # seconds — hard ceiling for a single tool execution
+_TOOL_TIMEOUT = int(os.environ.get("OPENLEGION_TOOL_TIMEOUT", "300"))  # seconds — hard ceiling per tool
 _FLEET_ROSTER_TTL = 600  # seconds — cache TTL for fleet roster
 _GOALS_TTL = 300  # seconds — cache TTL for goals fetch
 _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
@@ -1533,6 +1533,10 @@ class AgentLoop:
         content = llm_response.content or ""
         if content and content.strip() == SILENT_REPLY_TOKEN:
             content = ""
+        # Fall back to thinking content when the model produced only
+        # reasoning tokens (common with Ollama thinking models).
+        if not content and llm_response.thinking_content:
+            content = llm_response.thinking_content
         return content
 
     # ── Non-streaming chat ────────────────────────────────────
