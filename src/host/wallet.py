@@ -482,7 +482,13 @@ class WalletService:
                 "token": token,
             }
         else:
-            # Native token transfer (ETH/SOL/POL) or Solana SPL
+            # Native token transfer (ETH/SOL/POL)
+            if eco == "solana" and token != "native":
+                raise ValueError(
+                    "SPL token transfers via wallet_transfer are not yet supported. "
+                    "Use wallet_execute with a base64 unsigned transaction from "
+                    "Jupiter or another DEX API instead."
+                )
             native_value = int(parsed_amount * 10 ** cfg["decimals"]) if token == "native" else 0
             tx_params = {
                 "to": to,
