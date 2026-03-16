@@ -545,7 +545,7 @@ class CredentialVault:
                         name = name[: -len(":latest")]
                     models.append(f"ollama/{name}")
                 return sorted(set(models))
-        except Exception:
+        except (httpx.HTTPError, OSError, KeyError, ValueError):
             pass
         return []
 
@@ -682,13 +682,16 @@ class CredentialVault:
 
         # Ollama thinking mode + tool calling is broken (empty/malformed
         # output).  Disable thinking for Ollama when tools are present.
+        # Uses reasoning_effort (OpenAI-standard param that LiteLLM maps
+        # to Ollama's think=false) rather than the provider-specific
+        # think param which LiteLLM silently drops.
         # See: https://github.com/ollama/ollama/issues/10976
         if (
             self._is_keyless_provider(model)
             and request.params.get("tools")
-            and "think" not in extra
+            and "reasoning_effort" not in extra
         ):
-            extra["think"] = False
+            extra["reasoning_effort"] = "none"
 
         return sanitized, extra
 
