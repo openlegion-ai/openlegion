@@ -239,8 +239,6 @@ class RuntimeContext:
             from src.cli.config import _set_collaborative_permissions
             _set_collaborative_permissions()
 
-        mesh_port = self.cfg["mesh"]["port"]
-
         self.event_bus = EventBus()
         self.trace_store = TraceStore()
         self.blackboard = Blackboard(event_bus=self.event_bus)

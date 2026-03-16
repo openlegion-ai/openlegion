@@ -12,7 +12,7 @@ from typing import Optional
 
 import httpx
 
-from src.shared.types import AgentMessage, APIProxyRequest, APIProxyResponse, MeshEvent
+from src.shared.types import APIProxyRequest, APIProxyResponse, MeshEvent
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.mesh_client")
