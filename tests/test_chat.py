@@ -645,6 +645,7 @@ class TestExtractJsonResponse:
 
     def test_extracts_response_field(self):
         import json
+
         from src.agent.loop import _extract_json_response
         text = json.dumps({"thought": {"x": 1}, "response": "The answer"})
         assert _extract_json_response(text) == "The answer"
@@ -655,6 +656,7 @@ class TestExtractJsonResponse:
 
     def test_json_without_response_key(self):
         import json
+
         from src.agent.loop import _extract_json_response
         text = json.dumps({"data": 123})
         assert _extract_json_response(text) == text
@@ -675,12 +677,14 @@ class TestExtractJsonResponse:
 
     def test_response_with_whitespace(self):
         import json
+
         from src.agent.loop import _extract_json_response
         text = "  " + json.dumps({"response": "padded"}) + "  "
         assert _extract_json_response(text) == "padded"
 
     def test_numeric_response(self):
         import json
+
         from src.agent.loop import _extract_json_response
         text = json.dumps({"response": 42})
         assert _extract_json_response(text) == "42"

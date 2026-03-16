@@ -1500,20 +1500,6 @@ class AgentLoop:
 
         return results  # type: ignore[return-value]
 
-    async def _execute_chat_tool_call(
-        self, tool_call, tool_call_id: str, tool_outputs: list[dict],
-    ) -> dict:
-        """Execute a single tool call, append result to chat messages, return output."""
-        result_str, result = await self._run_tool(tool_call)
-        self._chat_messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call_id,
-            "content": result_str,
-        })
-        output = {"tool": tool_call.name, "input": tool_call.arguments, "output": result}
-        tool_outputs.append(output)
-        return output
-
     async def _execute_chat_tools_parallel(
         self,
         tool_calls: list,
