@@ -75,7 +75,7 @@ _CHAINS: dict[str, dict[str, Any]] = {
         "explorer_tx_fmt": "https://polygonscan.com/tx/{tx_hash}",
         "symbol": "POL",
         "decimals": 18,
-        "coingecko_id": "matic-network",
+        "coingecko_id": "polygon-ecosystem-token",
     },
     "evm:sepolia": {
         "ecosystem": "evm",
@@ -90,7 +90,7 @@ _CHAINS: dict[str, dict[str, Any]] = {
     # ── Solana ──
     "solana:mainnet": {
         "ecosystem": "solana",
-        "rpc_default": "https://api.mainnet-beta.solana.com",
+        "rpc_default": "https://api.mainnet.solana.com",
         "rpc_env": "OPENLEGION_SYSTEM_WALLET_RPC_SOLANA",
         "explorer_tx_fmt": "https://solscan.io/tx/{tx_hash}",
         "symbol": "SOL",
@@ -110,7 +110,7 @@ _CHAINS: dict[str, dict[str, Any]] = {
 
 # ── Price fallbacks ───────────────────────────────────────────
 
-_FALLBACK_PRICES: dict[str, float] = {"ETH": 3000.0, "POL": 0.50, "SOL": 150.0}
+_FALLBACK_PRICES: dict[str, float] = {"ETH": 3000.0, "POL": 0.10, "SOL": 150.0}
 _PRICE_CACHE_TTL = 300  # 5 minutes
 
 
