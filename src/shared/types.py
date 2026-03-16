@@ -177,6 +177,12 @@ class AgentPermissions(BaseModel):
     can_use_browser: bool = False
     can_spawn: bool = False
     can_manage_cron: bool = False
+    can_use_wallet: bool = False
+    wallet_allowed_chains: list[str] = []
+    wallet_spend_limit_per_tx_usd: float = 0.0
+    wallet_spend_limit_daily_usd: float = 0.0
+    wallet_rate_limit_per_hour: int = 0
+    wallet_allowed_contracts: list[str] = []
 
 
 # === Projects ===

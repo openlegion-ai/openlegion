@@ -661,5 +661,130 @@ def version_cmd(verbose: bool):
         click.echo(f"Agents: {n_agents} configured")
 
 
+# ── wallet ───────────────────────────────────────────────────
+
+
+@cli.group()
+def wallet():
+    """Manage agent wallets."""
+
+
+@wallet.command("init")
+def wallet_init():
+    """Generate a master wallet seed and store it in .env.
+
+    Displays the BIP-39 mnemonic ONCE for backup — write it down.
+    """
+    from src.host.credentials import _persist_to_env
+
+    if os.environ.get("OPENLEGION_SYSTEM_WALLET_MASTER_SEED"):
+        click.echo("Master seed already configured. To reset, remove "
+                    "OPENLEGION_SYSTEM_WALLET_MASTER_SEED from .env first.")
+        return
+
+    try:
+        from mnemonic import Mnemonic
+    except ImportError:
+        click.echo("Error: 'mnemonic' package not installed. Run: pip install mnemonic")
+        return
+
+    mnemo = Mnemonic("english")
+    words = mnemo.generate(strength=256)  # 24 words
+
+    _persist_to_env("OPENLEGION_SYSTEM_WALLET_MASTER_SEED", words)
+    os.environ["OPENLEGION_SYSTEM_WALLET_MASTER_SEED"] = words
+
+    click.echo()
+    click.echo("=== WALLET MASTER SEED ===")
+    click.echo()
+    click.echo(words)
+    click.echo()
+    click.echo("IMPORTANT: Write this down and store it securely.")
+    click.echo("This is the ONLY time it will be displayed.")
+    click.echo("It protects ALL agent wallets on ALL chains.")
+    click.echo()
+
+    # Show first agent's addresses as confirmation
+    try:
+        from src.host.wallet import WalletService
+
+        ws = WalletService()
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        try:
+            evm_addr = loop.run_until_complete(
+                ws.get_address("agent-0", "evm:ethereum"),
+            )
+            sol_addr = loop.run_until_complete(
+                ws.get_address("agent-0", "solana:mainnet"),
+            )
+            click.echo(f"First agent EVM address:    {evm_addr}")
+            click.echo(f"First agent Solana address: {sol_addr}")
+        finally:
+            loop.close()
+            ws.close()
+    except Exception as e:
+        logger.debug("Could not derive sample addresses: %s", e)
+
+    click.echo()
+    click.echo("Seed stored in .env. Restart the runtime to activate wallets.")
+
+
+@wallet.command("show")
+@click.argument("agent_id", required=False)
+def wallet_show(agent_id):
+    """Show wallet addresses for agents.
+
+    If AGENT_ID provided, shows that agent's addresses on all chains.
+    Otherwise lists all agents with their addresses.
+    """
+    seed = os.environ.get("OPENLEGION_SYSTEM_WALLET_MASTER_SEED")
+    if not seed:
+        click.echo("No master seed configured. Run: openlegion wallet init")
+        return
+
+    try:
+        from src.host.wallet import WalletService
+
+        ws = WalletService()
+    except Exception as e:
+        click.echo(f"Error initializing wallet service: {e}")
+        return
+
+    import asyncio
+
+    try:
+        loop = asyncio.new_event_loop()
+        if agent_id:
+            click.echo(f"Wallet addresses for {agent_id}:")
+            for chain_name, cfg in ws.chains.items():
+                try:
+                    addr = loop.run_until_complete(ws.get_address(agent_id, chain_name))
+                    click.echo(f"  {chain_name:20s} {addr}")
+                except Exception as e:
+                    click.echo(f"  {chain_name:20s} error: {e}")
+        else:
+            # List all agents from wallet.db
+            rows = ws.db.execute(
+                "SELECT agent_id, idx FROM agent_index ORDER BY idx",
+            ).fetchall()
+            if not rows:
+                click.echo("No agents have been assigned wallet addresses yet.")
+                return
+            for aid, idx in rows:
+                try:
+                    evm = loop.run_until_complete(ws.get_address(aid, "evm:ethereum"))
+                    sol = loop.run_until_complete(ws.get_address(aid, "solana:mainnet"))
+                    click.echo(f"{aid} (index {idx})")
+                    click.echo(f"  EVM:    {evm}")
+                    click.echo(f"  Solana: {sol}")
+                except Exception as e:
+                    click.echo(f"{aid} (index {idx}): error: {e}")
+    finally:
+        ws.close()
+        loop.close()
+
+
 if __name__ == "__main__":
     cli()

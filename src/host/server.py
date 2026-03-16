@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from src.host.runtime import RuntimeBackend
     from src.host.traces import TraceStore
     from src.host.transport import Transport
+    from src.host.wallet import WalletService
 
 
 def create_mesh_app(
@@ -87,6 +88,7 @@ def create_mesh_app(
     agent_projects: dict[str, str] | None = None,
     lane_manager: LaneManager | None = None,
     dispatch_loop: asyncio.AbstractEventLoop | None = None,
+    wallet_service: WalletService | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
@@ -127,6 +129,8 @@ def create_mesh_app(
         "blackboard_write": (100, 60),
         "publish": (200, 60),
         "cron_create": (10, 3600),
+        "wallet_transfer": (10, 3600),
+        "wallet_execute": (10, 3600),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
@@ -632,6 +636,124 @@ def create_mesh_app(
         if value is None:
             raise HTTPException(404, f"Credential not found: {name}")
         return {"name": name, "value": value}
+
+    # === Wallet Signing Service ===
+
+    @app.get("/mesh/wallet/address")
+    async def wallet_address(chain: str, agent_id: str, request: Request) -> dict:
+        """Get agent's wallet address for a chain."""
+        agent_id = _resolve_agent_id(agent_id, request)
+        if not permissions.can_use_wallet(agent_id):
+            raise HTTPException(403, "Wallet access denied")
+        if not permissions.can_use_wallet_chain(agent_id, chain):
+            raise HTTPException(403, f"Chain not allowed: {chain}")
+        if wallet_service is None:
+            raise HTTPException(503, "Wallet service not configured")
+        try:
+            address = await wallet_service.get_address(agent_id, chain)
+            return {"address": address, "chain": chain}
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/mesh/wallet/balance")
+    async def wallet_balance(
+        chain: str, agent_id: str, request: Request, token: str = "native",
+    ) -> dict:
+        """Get wallet balance.  Read-only, no signing."""
+        agent_id = _resolve_agent_id(agent_id, request)
+        if not permissions.can_use_wallet(agent_id):
+            raise HTTPException(403, "Wallet access denied")
+        if not permissions.can_use_wallet_chain(agent_id, chain):
+            raise HTTPException(403, f"Chain not allowed: {chain}")
+        if wallet_service is None:
+            raise HTTPException(503, "Wallet service not configured")
+        try:
+            return await wallet_service.get_balance(agent_id, chain, token)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/mesh/wallet/read")
+    async def wallet_read(data: dict, request: Request) -> dict:
+        """Read-only contract call / account read."""
+        agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        chain = data.get("chain", "")
+        if not permissions.can_use_wallet(agent_id):
+            raise HTTPException(403, "Wallet access denied")
+        if not permissions.can_use_wallet_chain(agent_id, chain):
+            raise HTTPException(403, f"Chain not allowed: {chain}")
+        if wallet_service is None:
+            raise HTTPException(503, "Wallet service not configured")
+        try:
+            return await wallet_service.read_contract(
+                agent_id, chain, data.get("contract", ""),
+                data.get("function", ""), data.get("args", []),
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/mesh/wallet/transfer")
+    async def wallet_transfer_endpoint(data: dict, request: Request) -> dict:
+        """Sign and broadcast a token transfer."""
+        agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        chain = data.get("chain", "")
+        if not permissions.can_use_wallet(agent_id):
+            raise HTTPException(403, "Wallet access denied")
+        if not permissions.can_use_wallet_chain(agent_id, chain):
+            raise HTTPException(403, f"Chain not allowed: {chain}")
+        if wallet_service is None:
+            raise HTTPException(503, "Wallet service not configured")
+        await _check_rate_limit("wallet_transfer", agent_id)
+        _server_logger.info(
+            "Wallet transfer",
+            extra={"extra_data": {
+                "agent_id": agent_id, "chain": chain,
+                "to": data.get("to", ""), "amount": data.get("amount", ""),
+            }},
+        )
+        try:
+            return await wallet_service.transfer(
+                agent_id, chain,
+                data.get("to", ""), data.get("amount", ""),
+                data.get("token", "native"), permissions,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except PermissionError as e:
+            raise HTTPException(403, str(e))
+
+    @app.post("/mesh/wallet/execute")
+    async def wallet_execute_endpoint(data: dict, request: Request) -> dict:
+        """Sign and broadcast a contract call or Solana transaction."""
+        agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        chain = data.get("chain", "")
+        contract = data.get("contract", "")
+        if not permissions.can_use_wallet(agent_id):
+            raise HTTPException(403, "Wallet access denied")
+        if not permissions.can_use_wallet_chain(agent_id, chain):
+            raise HTTPException(403, f"Chain not allowed: {chain}")
+        if contract and not permissions.can_access_wallet_contract(agent_id, contract):
+            raise HTTPException(403, f"Contract not allowed: {contract}")
+        if wallet_service is None:
+            raise HTTPException(503, "Wallet service not configured")
+        await _check_rate_limit("wallet_execute", agent_id)
+        _server_logger.info(
+            "Wallet execute",
+            extra={"extra_data": {
+                "agent_id": agent_id, "chain": chain,
+                "contract": contract, "function": data.get("function", ""),
+            }},
+        )
+        try:
+            return await wallet_service.execute_contract(
+                agent_id, chain, contract,
+                data.get("function", ""), data.get("args", []),
+                data.get("value", "0"), data.get("transaction", ""),
+                permissions,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except PermissionError as e:
+            raise HTTPException(403, str(e))
 
     # === Agent Registry ===
 

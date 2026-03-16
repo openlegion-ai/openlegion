@@ -415,6 +415,88 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    # === Wallet (blockchain transactions via mesh signing service) ===
+
+    async def wallet_get_address(self, chain: str) -> dict:
+        """Get this agent's wallet address for a chain."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/wallet/address",
+            params={"agent_id": self.agent_id, "chain": chain},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def wallet_get_balance(self, chain: str, token: str = "native") -> dict:
+        """Get wallet balance for a token on a chain."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/wallet/balance",
+            params={"agent_id": self.agent_id, "chain": chain, "token": token},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def wallet_read_contract(
+        self, chain: str, contract: str, function: str, args: list,
+    ) -> dict:
+        """Read-only contract call (EVM: eth_call, Solana: getAccountInfo)."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/wallet/read",
+            json={
+                "agent_id": self.agent_id, "chain": chain,
+                "contract": contract, "function": function, "args": args,
+            },
+            timeout=30,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def wallet_transfer(
+        self, chain: str, to: str, amount: str, token: str = "native",
+    ) -> dict:
+        """Request a token transfer.  Signed and broadcast by the mesh."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/wallet/transfer",
+            json={
+                "agent_id": self.agent_id, "chain": chain,
+                "to": to, "amount": amount, "token": token,
+            },
+            timeout=60,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def wallet_execute(
+        self,
+        chain: str,
+        contract: str = "",
+        function: str = "",
+        args: list | None = None,
+        value: str = "0",
+        transaction: str = "",
+    ) -> dict:
+        """EVM: contract + function + args.  Solana: base64 unsigned tx."""
+        client = await self._get_client()
+        body: dict = {"agent_id": self.agent_id, "chain": chain}
+        if transaction:
+            body["transaction"] = transaction
+        else:
+            body.update({
+                "contract": contract, "function": function,
+                "args": args or [], "value": value,
+            })
+        response = await client.post(
+            f"{self.mesh_url}/mesh/wallet/execute",
+            json=body,
+            timeout=60,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     # === Browser (shared browser service via mesh proxy) ===
 
     async def browser_command(self, action: str, params: dict | None = None) -> dict:
