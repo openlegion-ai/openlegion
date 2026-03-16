@@ -28,7 +28,6 @@ OpenLegion uses a **fleet model, not hierarchy**. There is no CEO agent that rou
 
 - **Blackboard** -- shared key-value state store (SQLite WAL)
 - **PubSub** -- event-driven notifications between agents
-- **Workflows** -- deterministic YAML-defined DAG execution
 
 ## Component Map
 
@@ -40,7 +39,6 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 |--------|---------------|
 | `mesh.py` | Blackboard (shared state), PubSub, MessageRouter |
 | `server.py` | FastAPI app factory with all mesh HTTP endpoints |
-| `orchestrator.py` | DAG workflow executor with safe condition evaluation |
 | `runtime.py` | RuntimeBackend ABC with Docker and Sandbox implementations |
 | `transport.py` | Transport ABC with HTTP and Sandbox implementations |
 | `credentials.py` | Credential vault and LLM API proxy |
@@ -107,7 +105,6 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `discord.py` | Discord Bot adapter |
 | `slack.py` | Slack adapter (Socket Mode via slack-bolt) |
 | `whatsapp.py` | WhatsApp Cloud API adapter |
-| `webhook.py` | Generic webhook-to-workflow adapter |
 
 ### Dashboard (`src/dashboard/`)
 
@@ -169,15 +166,6 @@ User -> CLI/Channel -> Mesh Router -> Agent /chat/stream endpoint
   Agent -> token-level SSE stream (text_delta, tool_start, tool_result, done) -> User
 ```
 
-### Workflow Execution
-
-```
-PubSub event / Cron trigger -> Orchestrator
-  Orchestrator: parse DAG -> topological sort -> execute steps
-  Each step: assign task to agent via /task -> wait for result
-  Step result feeds into next step's input
-```
-
 ## Runtime Backends
 
 | Backend | Isolation Level | Requirements |
@@ -190,7 +178,7 @@ Both implement `RuntimeBackend` ABC so the rest of the system is isolation-agnos
 ## Key Invariants
 
 1. **Agents never hold API keys** -- all calls route through the mesh credential vault
-2. **No `eval()` on untrusted input** -- workflow conditions use a regex-based safe parser
+2. **No `eval()` on untrusted input** -- default deny for unsafe operations
 3. **Permission checks before every cross-boundary operation** -- default deny
 4. **Path traversal protection** -- agent file operations confined to `/data`
 5. **Bounded execution** -- 20 iterations for tasks, 30 tool rounds per chat turn, auto-compaction every 200 rounds with seamless continuation

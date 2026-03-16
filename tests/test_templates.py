@@ -1,4 +1,4 @@
-"""Tests for extended template system — template application, permissions, workflows."""
+"""Tests for extended template system — template application and permissions."""
 
 from __future__ import annotations
 
@@ -201,7 +201,7 @@ class TestAddAgentPermissions(_TempConfigMixin):
             perms = json.load(f)
         dave = perms["permissions"]["dave"]
         # Non-collab default is restrictive
-        assert dave["can_message"] == ["orchestrator"]
+        assert dave["can_message"] == []
         # Template permissions ARE the only blackboard patterns
         assert "data/*" in dave["blackboard_read"]
         assert "results/*" in dave["blackboard_write"]
@@ -320,62 +320,6 @@ class TestApplyTemplate(_TempConfigMixin):
         assert "analysis_ready" in analyst["can_publish"]
         assert "data_ready" in analyst["can_subscribe"]
 
-    def test_creates_workflow_file(self):
-        tpl = {
-            "agents": {
-                "worker": {
-                    "role": "worker",
-                    "model": "{default_model}",
-                },
-            },
-            "workflow": {
-                "name": "test-pipeline",
-                "trigger": "manual",
-                "timeout": 300,
-                "steps": [
-                    {"id": "step1", "agent": "worker", "task_type": "work", "timeout": 120},
-                ],
-            },
-        }
-        with self._mock_config():
-            _apply_template("test-tpl", tpl)
-
-        wf_path = Path(self._tmpdir) / "config" / "workflows" / "test-pipeline.yaml"
-        assert wf_path.exists()
-        with open(wf_path) as f:
-            wf = yaml.safe_load(f)
-        assert wf["name"] == "test-pipeline"
-        assert wf["steps"][0]["agent"] == "worker"
-
-    def test_workflow_parses_as_valid_definition(self):
-        """Written workflow YAML roundtrips through WorkflowDefinition."""
-        from src.shared.types import WorkflowDefinition
-        tpl = {
-            "agents": {
-                "a": {"role": "a", "model": "{default_model}"},
-                "b": {"role": "b", "model": "{default_model}"},
-            },
-            "workflow": {
-                "name": "roundtrip-test",
-                "trigger": "manual",
-                "timeout": 600,
-                "steps": [
-                    {"id": "s1", "agent": "a", "task_type": "work", "timeout": 120},
-                    {"id": "s2", "agent": "b", "task_type": "review", "timeout": 60, "depends_on": ["s1"]},
-                ],
-            },
-        }
-        with self._mock_config():
-            _apply_template("roundtrip", tpl)
-
-        wf_path = Path(self._tmpdir) / "config" / "workflows" / "roundtrip-test.yaml"
-        with open(wf_path) as f:
-            data = yaml.safe_load(f)
-        wf = WorkflowDefinition(**data)
-        assert wf.name == "roundtrip-test"
-        assert len(wf.steps) == 2
-        assert wf.steps[1].depends_on == ["s1"]
-
     def test_no_workflow_when_not_defined(self):
         tpl = {
             "agents": {
@@ -440,42 +384,6 @@ class TestApplyTemplate(_TempConfigMixin):
         with self._mock_config():
             with pytest.raises(ValueError, match="Invalid agent name"):
                 _apply_template("test-tpl", tpl)
-
-    def test_rejects_invalid_workflow_name(self):
-        """Workflow names with path traversal are rejected."""
-        tpl = {
-            "agents": {
-                "worker": {
-                    "role": "worker",
-                    "model": "{default_model}",
-                },
-            },
-            "workflow": {
-                "name": "../../etc/evil",
-                "trigger": "manual",
-                "steps": [{"id": "s1", "agent": "worker", "task_type": "work"}],
-            },
-        }
-        with self._mock_config():
-            with pytest.raises(ValueError, match="Invalid agent name"):
-                _apply_template("test-tpl", tpl)
-
-    def test_workflow_name_falls_back_to_template_name(self):
-        """When workflow has no name, template_name is used (and validated)."""
-        tpl = {
-            "agents": {
-                "worker": {"role": "worker", "model": "{default_model}"},
-            },
-            "workflow": {
-                "trigger": "manual",
-                "steps": [{"id": "s1", "agent": "worker", "task_type": "work"}],
-            },
-        }
-        with self._mock_config():
-            _apply_template("my-workflow", tpl)
-
-        wf_path = Path(self._tmpdir) / "config" / "workflows" / "my-workflow.yaml"
-        assert wf_path.exists()
 
     def test_system_prompt_fallback_key(self):
         """The legacy 'system_prompt' key is used if 'instructions' is absent."""
@@ -542,46 +450,6 @@ class TestLoadTemplates:
         for tpl_name, tpl in templates.items():
             for agent_name in tpl.get("agents", {}):
                 _validate_agent_name(agent_name)  # raises on invalid
-
-    def test_all_workflow_names_are_valid(self):
-        """Every workflow name in templates passes validation."""
-        from src.cli.config import _load_templates
-        templates = _load_templates()
-        for tpl_name, tpl in templates.items():
-            wf = tpl.get("workflow")
-            if wf:
-                wf_name = wf.get("name", tpl_name)
-                _validate_agent_name(wf_name)
-
-    def test_workflow_templates_parse_as_definitions(self):
-        """All template workflows parse as valid WorkflowDefinition."""
-        from src.cli.config import _load_templates
-        from src.shared.types import WorkflowDefinition
-        templates = _load_templates()
-        for tpl_name, tpl in templates.items():
-            wf = tpl.get("workflow")
-            if wf:
-                wd = WorkflowDefinition(**wf)
-                assert wd.name, f"{tpl_name} workflow has no name"
-                assert len(wd.steps) > 0, f"{tpl_name} workflow has no steps"
-
-    def test_workflow_agents_exist_in_template(self):
-        """All agents referenced in workflow steps are defined in the template."""
-        from src.cli.config import _load_templates
-        templates = _load_templates()
-        for tpl_name, tpl in templates.items():
-            wf = tpl.get("workflow")
-            if not wf:
-                continue
-            agent_names = set(tpl.get("agents", {}).keys())
-            for step in wf.get("steps", []):
-                step_agent = step.get("agent")
-                if step_agent:
-                    assert step_agent in agent_names, (
-                        f"{tpl_name} workflow step '{step.get('id')}' references "
-                        f"agent '{step_agent}' which is not defined in the template"
-                    )
-
 
 class TestLoadSkillTemplates:
     def test_returns_flat_list(self):

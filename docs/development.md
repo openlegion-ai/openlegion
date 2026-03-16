@@ -60,7 +60,6 @@ pytest tests/ -x
 | `src/agent/builtins/subagent_tool.py` | `tests/test_subagent.py` |
 | `src/agent/mcp_client.py` | `tests/test_mcp_client.py`, `tests/test_mcp_e2e.py` |
 | `src/host/mesh.py` | `tests/test_mesh.py` |
-| `src/host/orchestrator.py` | `tests/test_orchestrator.py` |
 | `src/host/credentials.py` | `tests/test_credentials.py` |
 | `src/host/runtime.py` | `tests/test_runtime.py` |
 | `src/host/transport.py` | `tests/test_transport.py` |
@@ -176,8 +175,8 @@ class TaskAssignment(BaseModel):
     input_data: dict
     timeout: int = 120
 
-# Used at component boundaries
-assignment = TaskAssignment(workflow_id="wf1", step_id="s1", task_type="research", input_data={})
+# Used at component boundaries — dispatching tasks to agents and subagents
+assignment = TaskAssignment(workflow_id="subagent_parent", step_id="s1", task_type="research", input_data={})
 ```
 
 ### SQLite for All State
@@ -244,29 +243,6 @@ async def your_endpoint(request: YourRequest):
 4. Add startup logic in `src/cli/channels.py`
 5. Add tests in `tests/test_channels.py`
 
-### Adding a Workflow
-
-Create a YAML file in `config/workflows/`:
-
-```yaml
-name: my_workflow
-trigger: my_event_topic
-timeout: 300
-steps:
-  - id: step1
-    agent: researcher
-    task_type: research
-    input_from: trigger.payload
-
-  - id: step2
-    agent: writer
-    task_type: write_report
-    depends_on: [step1]
-    input_from: step1.result
-```
-
-The workflow starts when any agent publishes to the `my_event_topic` pub/sub topic.
-
 ## Project Structure
 
 ```
@@ -299,7 +275,6 @@ openlegion/
 │   ├── host/                    # Runs on the host machine
 │   │   ├── server.py            # Mesh FastAPI app
 │   │   ├── mesh.py              # Blackboard, PubSub, routing
-│   │   ├── orchestrator.py      # DAG workflow executor
 │   │   ├── runtime.py           # Docker/Sandbox container management
 │   │   ├── transport.py         # HTTP/Sandbox transport layer
 │   │   ├── credentials.py       # Credential vault + API proxy
@@ -344,8 +319,7 @@ openlegion/
 │   ├── agents.yaml
 │   ├── mesh.yaml
 │   ├── permissions.json
-│   ├── cron.json
-│   └── workflows/
+│   └── cron.json
 ├── tests/                       # Test suite (1826 tests)
 │   └── fixtures/                # Test fixtures (echo MCP server, etc.)
 ├── Dockerfile.agent             # Agent container image

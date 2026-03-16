@@ -104,23 +104,3 @@ agents:
     budget:
       daily_usd: 5.0
       monthly_usd: 100.0
-
-workflow:
-  name: dev-pipeline
-  trigger: manual
-  timeout: 600
-  steps:
-    - id: plan
-      agent: pm
-      task_type: planning
-      timeout: 120
-    - id: implement
-      agent: engineer
-      task_type: engineering
-      timeout: 300
-      depends_on: [plan]
-    - id: review
-      agent: reviewer
-      task_type: review
-      timeout: 120
-      depends_on: [implement]

@@ -428,7 +428,7 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
     """Add default permissions for a new agent.
 
     If collaboration mode is enabled in mesh.yaml, agents can message
-    all other agents. Otherwise they can only message the orchestrator.
+    all other agents. Otherwise they can only message mesh.
 
     If *permissions* is provided (from a template), its ``blackboard_read``,
     ``blackboard_write``, ``can_publish``, and ``can_subscribe`` entries
@@ -440,9 +440,9 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
     perms = _load_permissions()
     if collab:
         other_agents = [a for a in cfg.get("agents", {}) if a != name]
-        can_message = ["orchestrator", "*"] if other_agents else ["orchestrator"]
+        can_message = ["*"] if other_agents else []
     else:
-        can_message = ["orchestrator"]
+        can_message = []
 
     agent_perms: dict = {
         "can_message": can_message,
@@ -547,7 +547,7 @@ def _create_agent(
 def _suppress_host_logs() -> None:
     """Set host-side loggers to WARNING for clean CLI output."""
     for name in [
-        "host", "host.containers", "host.credentials", "host.orchestrator",
+        "host", "host.containers", "host.credentials",
         "host.mesh", "host.costs", "host.permissions", "host.cron", "host.webhooks",
         "host.health", "host.lanes", "host.runtime", "host.watchers",
         "channels", "channels.base", "channels.telegram", "channels.discord",
@@ -911,18 +911,6 @@ def _apply_template(template_name: str, tpl: dict) -> list[str]:
         skills_dir = PROJECT_ROOT / "skills" / agent_name
         skills_dir.mkdir(parents=True, exist_ok=True)
         created.append(agent_name)
-
-    # Write workflow YAML if template defines one
-    workflow_def = tpl.get("workflow")
-    if workflow_def:
-        wf_dir = PROJECT_ROOT / "config" / "workflows"
-        wf_dir.mkdir(parents=True, exist_ok=True)
-        wf_name = workflow_def.get("name", template_name)
-        # Validate workflow name — prevent path traversal
-        _validate_agent_name(wf_name)
-        wf_path = wf_dir / f"{wf_name}.yaml"
-        with open(wf_path, "w") as f:
-            yaml.dump(workflow_def, f, default_flow_style=False, sort_keys=False)
 
     return created
 

@@ -8,7 +8,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.host.mesh import Blackboard, MessageRouter, PubSub
-from src.host.orchestrator import Orchestrator
 from src.host.permissions import PermissionMatrix
 from src.host.server import create_mesh_app
 from src.shared.types import AgentPermissions
@@ -25,7 +24,7 @@ def mesh_components(tmp_path):
     perms.permissions = {
         "research": AgentPermissions(
             agent_id="research",
-            can_message=["orchestrator"],
+            can_message=["mesh"],
             can_publish=["research_complete"],
             can_subscribe=["new_lead"],
             blackboard_read=["context/*", "tasks/*"],
@@ -34,7 +33,7 @@ def mesh_components(tmp_path):
         ),
         "qualify": AgentPermissions(
             agent_id="qualify",
-            can_message=["orchestrator"],
+            can_message=["mesh"],
             blackboard_read=["context/*"],
             blackboard_write=["context/qualify_*"],
             allowed_apis=["anthropic"],
@@ -284,63 +283,6 @@ def test_list_agents_unknown_agent_id(mesh_components):
     assert resp.json() == {}
 
 
-def test_webhook_integration(tmp_path, monkeypatch):
-    """Test webhook endpoint triggers orchestrator (without actual agents)."""
-    monkeypatch.setenv("WEBHOOK_SECRET", "test-secret")
-    from src.channels.webhook import create_webhook_router
-
-    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
-    pubsub = PubSub()
-
-    wf_dir = tmp_path / "workflows"
-    wf_dir.mkdir()
-    (wf_dir / "test_wf.yaml").write_text(
-        "name: test_wf\ntrigger: test\nsteps:\n  - id: s1\n    task_type: t1\n    agent: test_agent\n"
-    )
-
-    orch = Orchestrator(
-        mesh_url="http://localhost:8420",
-        workflows_dir=str(wf_dir),
-        blackboard=bb,
-        pubsub=pubsub,
-    )
-
-    from fastapi import FastAPI
-
-    app = FastAPI()
-    app.include_router(create_webhook_router(orch))
-    client = TestClient(app)
-    auth_headers = {"Authorization": "Bearer test-secret"}
-
-    response = client.post("/webhook/trigger/test_wf", json={"company": "Acme"}, headers=auth_headers)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "started"
-    assert "execution_id" in data
-
-    response = client.get(f"/webhook/status/{data['execution_id']}", headers=auth_headers)
-    assert response.status_code == 200
-    status = response.json()
-    assert status["workflow"] == "test_wf"
-
-
-def test_webhook_unknown_workflow(tmp_path, monkeypatch):
-    """Test triggering an unknown workflow returns 404."""
-    monkeypatch.setenv("WEBHOOK_SECRET", "test-secret")
-    from src.channels.webhook import create_webhook_router
-
-    orch = Orchestrator(mesh_url="http://localhost:8420", workflows_dir="/nonexistent")
-
-    from fastapi import FastAPI
-
-    app = FastAPI()
-    app.include_router(create_webhook_router(orch))
-    client = TestClient(app)
-
-    response = client.post("/webhook/trigger/nonexistent", json={}, headers={"Authorization": "Bearer test-secret"})
-    assert response.status_code == 404
-
-
 # ── Vault endpoint tests ──────────────────────────────────────
 
 
@@ -356,7 +298,7 @@ def vault_components(tmp_path):
     perms.permissions = {
         "trusted": AgentPermissions(
             agent_id="trusted",
-            can_message=["orchestrator"],
+            can_message=["mesh"],
             blackboard_read=["context/*"],
             blackboard_write=[],
             allowed_apis=["llm"],
@@ -364,7 +306,7 @@ def vault_components(tmp_path):
         ),
         "untrusted": AgentPermissions(
             agent_id="untrusted",
-            can_message=["orchestrator"],
+            can_message=["mesh"],
             blackboard_read=[],
             blackboard_write=[],
             allowed_apis=[],
@@ -372,7 +314,7 @@ def vault_components(tmp_path):
         ),
         "scoped": AgentPermissions(
             agent_id="scoped",
-            can_message=["orchestrator"],
+            can_message=["mesh"],
             blackboard_read=[],
             blackboard_write=[],
             allowed_apis=[],
@@ -486,7 +428,7 @@ def authed_components(tmp_path):
     perms.permissions = {
         "research": AgentPermissions(
             agent_id="research",
-            can_message=["orchestrator"],
+            can_message=["mesh"],
             can_publish=["research_complete"],
             can_subscribe=["new_lead"],
             blackboard_read=["context/*"],
@@ -548,7 +490,7 @@ def test_auth_not_required_without_config(mesh_components):
 
 
 def test_auth_mesh_agent_id_bypasses(authed_components):
-    """The 'mesh' and 'orchestrator' agent IDs bypass auth."""
+    """The 'mesh' agent ID bypasses auth."""
     client = authed_components["client"]
     response = client.post(
         "/mesh/message",
@@ -660,47 +602,6 @@ def test_vault_resolve_rate_limited(vault_components):
         json={"agent_id": "trusted", "name": "rate_test"},
     )
     assert resp.status_code == 429
-
-
-def test_mesh_message_to_orchestrator(tmp_path):
-    """Messages to 'orchestrator' with type 'task_result' resolve pending futures."""
-    import asyncio
-
-    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
-    pubsub = PubSub()
-    perms = PermissionMatrix.__new__(PermissionMatrix)
-    perms.permissions = {
-        "research": AgentPermissions(
-            agent_id="research",
-            can_message=["orchestrator"],
-            blackboard_read=["context/*"],
-            blackboard_write=[],
-            allowed_apis=[],
-        ),
-    }
-    router = MessageRouter(permissions=perms, agent_registry={})
-    orch = Orchestrator(mesh_url="http://localhost:8420", workflows_dir="/nonexistent")
-
-    # Create a pending future
-    loop = asyncio.new_event_loop()
-    future = loop.create_future()
-    orch._pending_results["task_123"] = future
-
-    app = create_mesh_app(bb, pubsub, router, perms, orchestrator=orch)
-    client = TestClient(app)
-
-    response = client.post("/mesh/message", json={
-        "from_agent": "research",
-        "to": "orchestrator",
-        "type": "task_result",
-        "payload": {"task_id": "task_123", "status": "complete", "result": {"data": "ok"}},
-    })
-    assert response.status_code == 200
-    data = response.json()
-    assert data["delivered"] is True
-    assert future.done()
-
-    loop.close()
 
 
 # === Notify Endpoint Tests ===

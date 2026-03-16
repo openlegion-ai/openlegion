@@ -1,7 +1,7 @@
 """End-to-end test: mesh server + Docker agent container + real LLM.
 
 Tests the full data path:
-  webhook trigger -> orchestrator -> agent container -> LLM proxy -> skills -> result
+  mesh server -> agent container -> LLM proxy -> skills -> result
 
 Requires:
   - Docker running and accessible
@@ -60,11 +60,9 @@ def e2e_stack(tmp_path_factory):
         if openai_key:
             os.environ["OPENLEGION_CRED_OPENAI_API_KEY"] = openai_key
 
-    from src.channels.webhook import create_webhook_router
     from src.host.containers import ContainerManager
     from src.host.credentials import CredentialVault
     from src.host.mesh import Blackboard, MessageRouter, PubSub
-    from src.host.orchestrator import Orchestrator
     from src.host.permissions import PermissionMatrix
     from src.host.server import create_mesh_app
 
@@ -76,17 +74,9 @@ def e2e_stack(tmp_path_factory):
     cm = ContainerManager(mesh_host_port=MESH_PORT, use_host_network=False)
     router = MessageRouter(perms, {})
 
-    orch = Orchestrator(
-        mesh_url=f"http://localhost:{MESH_PORT}",
-        blackboard=bb,
-        pubsub=pubsub,
-        container_manager=cm,
-    )
-
     # Create mesh app and start it BEFORE the agent container,
     # because the agent registers with the mesh during its startup.
     app = create_mesh_app(bb, pubsub, router, perms, vault)
-    app.include_router(create_webhook_router(orch))
 
     config = uvicorn.Config(app, host="0.0.0.0", port=MESH_PORT, log_level="info")
     server = uvicorn.Server(config)
@@ -155,7 +145,6 @@ def e2e_stack(tmp_path_factory):
         "agent_url": url,
         "blackboard": bb,
         "container_manager": cm,
-        "orchestrator": orch,
     }
 
     # Cleanup
@@ -202,80 +191,3 @@ def test_agent_has_capabilities(e2e_stack):
     assert "http_request" in caps["skills"]
 
 
-@skip_no_docker
-@skip_no_key
-def test_research_workflow_e2e(e2e_stack):
-    """Full E2E: trigger research_only workflow with real LLM, verify completion."""
-    mesh_url = e2e_stack["mesh_url"]
-
-    # Trigger the workflow
-    r = httpx.post(
-        f"{mesh_url}/webhook/trigger/research_only",
-        json={"company": "Stripe", "lead_id": "test_001"},
-        timeout=10,
-    )
-    assert r.status_code == 200
-    data = r.json()
-    assert "execution_id" in data
-    exec_id = data["execution_id"]
-
-    # Poll until complete or timeout (300s -- agent with builtins does real work)
-    final_status = None
-    for _ in range(300):
-        try:
-            r = httpx.get(f"{mesh_url}/webhook/status/{exec_id}", timeout=10)
-            if r.status_code == 200:
-                final_status = r.json()
-                if final_status.get("status") in ("complete", "failed"):
-                    break
-        except (httpx.TimeoutException, httpx.ConnectError):
-            pass
-        time.sleep(1)
-
-    assert final_status is not None, "Never got a status response"
-
-    # Dump agent logs if workflow didn't complete for debugging
-    if final_status.get("status") != "complete":
-        try:
-            container = e2e_stack["container_manager"].containers["research"]["container"]
-            container.reload()
-            logs = container.logs(tail=80).decode()
-            print(f"\n=== Agent container logs ===\n{logs}\n===")
-        except Exception:
-            pass
-
-    assert final_status["status"] == "complete", (
-        f"Workflow did not complete successfully: {final_status}"
-    )
-    assert final_status["steps_completed"] >= 1
-
-    # Verify agent went back to idle (retry a few times, agent may still be finishing)
-    agent_url = e2e_stack["agent_url"]
-    status = None
-    for _ in range(10):
-        try:
-            r = httpx.get(f"{agent_url}/status", timeout=5)
-            status = r.json()
-            if status["state"] == "idle":
-                break
-        except Exception:
-            pass
-        time.sleep(1)
-    assert status is not None
-    assert status["state"] == "idle"
-    assert status["tasks_completed"] >= 1
-
-    # Verify agent has a result
-    r = httpx.get(f"{agent_url}/result", timeout=5)
-    assert r.status_code == 200
-    result = r.json()
-    assert result["status"] == "complete"
-    assert result["result"] is not None
-    assert result["tokens_used"] > 0
-
-    print("\n=== Workflow completed ===")
-    print(f"  Execution ID: {exec_id}")
-    print(f"  Steps completed: {final_status['steps_completed']}")
-    print(f"  Tokens used: {result['tokens_used']}")
-    print(f"  Result keys: {list(result['result'].keys()) if isinstance(result['result'], dict) else 'raw'}")
-    print(f"  Duration: {result.get('duration_ms', 0)}ms")

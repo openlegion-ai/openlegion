@@ -1,6 +1,6 @@
 """FastAPI server for agent containers.
 
-Exposes endpoints for the mesh/orchestrator to interact with:
+Exposes endpoints for the mesh to interact with:
   POST /task     - accept a task assignment
   POST /cancel   - cancel current task
   GET  /status   - agent health check
@@ -61,27 +61,18 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             if loop.state != "idle":
                 return {"accepted": False, "status": "busy", "error": "Agent is working"}
 
-            # Transition to "working" immediately so the orchestrator never
-            # sees a stale "idle" state between accept and task start.
+            # Transition to "working" immediately so callers never
+            # see a stale "idle" state between accept and task start.
             loop.state = "working"
             loop.current_task = assignment.task_id
         _trace_id = request.headers.get("x-trace-id")
 
         async def run() -> None:
             try:
-                result = await loop.execute_task(assignment, trace_id=_trace_id)
+                await loop.execute_task(assignment, trace_id=_trace_id)
             except asyncio.CancelledError:
                 loop.state = "idle"
                 loop.current_task = None
-                return
-            try:
-                await loop.mesh_client.send_system_message(
-                    to="orchestrator",
-                    msg_type="task_result",
-                    payload=result.model_dump(mode="json"),
-                )
-            except Exception as e:
-                logger.error(f"Failed to send task result to orchestrator: {e}")
 
         task = asyncio.create_task(run())
         task.add_done_callback(_log_task_exception)
@@ -199,10 +190,35 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         """Streaming chat. Returns SSE events for tool use and text deltas."""
         _trace_id = request.headers.get("x-trace-id")
         async def event_generator():
-            async for event in loop.chat_stream(
+            stream = loop.chat_stream(
                 sanitize_for_prompt(msg.message), trace_id=_trace_id,
-            ):
-                yield f"data: {json_module.dumps(event, default=str)}\n\n"
+            )
+            stream_iter = stream.__aiter__()
+            # Use asyncio.wait (not wait_for) so the pending __anext__
+            # is never cancelled — cancellation would close the async
+            # generator and silently drop the response.
+            next_event = asyncio.ensure_future(stream_iter.__anext__())
+            try:
+                while True:
+                    done, _ = await asyncio.wait(
+                        {next_event}, timeout=15,
+                    )
+                    if not done:
+                        yield ": keepalive\n\n"
+                        continue
+                    try:
+                        event = next_event.result()
+                    except StopAsyncIteration:
+                        break
+                    yield f"data: {json_module.dumps(event, default=str)}\n\n"
+                    next_event = asyncio.ensure_future(stream_iter.__anext__())
+            finally:
+                if not next_event.done():
+                    next_event.cancel()
+                    try:
+                        await next_event
+                    except (asyncio.CancelledError, Exception):
+                        pass
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @app.post("/chat/reset")

@@ -44,7 +44,6 @@ These commands require interactive prompts or local system access and are only a
 | `/history [agent]` | Show recent conversation messages |
 | `/blackboard [list\|get\|set\|del]` | View/edit shared blackboard entries |
 | `/queue` | Show agent task queue status |
-| `/workflow [list\|run]` | List or trigger workflows |
 | `/cron [list\|del\|pause\|resume\|run]` | Manage cron jobs |
 | `/project [list\|use\|info]` | Manage multi-project namespaces |
 | `/credential [add\|list\|remove]` | Manage API credentials |
@@ -276,24 +275,24 @@ After pairing, the bot sends a help summary with all available commands. Unautho
 
 ## Webhooks
 
-HTTP webhooks for programmatic integration and workflow triggering.
+HTTP webhooks for programmatic integration. Incoming payloads are dispatched to agents as tasks.
 
 ### Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/webhook/hook/<hook_id>` | Trigger a workflow with JSON payload |
+| `POST` | `/webhook/hook/<hook_id>` | Dispatch a JSON payload to the configured agent |
 
 ### Usage
 
 ```bash
-# Trigger a workflow
+# Send a payload to a webhook
 curl -X POST http://localhost:8420/webhook/hook/<hook_id> \
   -H "Content-Type: application/json" \
   -d '{"company": "Acme Corp", "source": "website"}'
 ```
 
-Webhooks connect to the workflow engine. Each webhook maps to a workflow trigger topic. See [Workflows](workflows.md) for details.
+Each webhook is configured with a target agent. When a payload arrives, it is dispatched to that agent as a task.
 
 ## Writing a Custom Channel
 
@@ -343,5 +342,4 @@ The channel receives these callbacks at construction:
 | `src/channels/discord.py` | Discord bot adapter |
 | `src/channels/slack.py` | Slack adapter (Socket Mode via slack-bolt) |
 | `src/channels/whatsapp.py` | WhatsApp Cloud API adapter |
-| `src/channels/webhook.py` | HTTP webhook adapter |
 | `src/cli/` | CLI package (uses same dispatch pattern) |

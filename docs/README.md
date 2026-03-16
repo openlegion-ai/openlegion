@@ -11,7 +11,6 @@ Comprehensive documentation for the OpenLegion multi-agent runtime.
 | [Agent Tools](agent-tools.md) | Complete reference for all built-in agent tools |
 | [MCP Integration](mcp.md) | Model Context Protocol support for external tool servers |
 | [Memory System](memory.md) | Five-layer memory architecture, write-then-compact pattern |
-| [Workflows](workflows.md) | DAG-based orchestration, step dependencies, conditions |
 | [Configuration](configuration.md) | All config files, environment variables, agent definitions |
 | [Channels](channels.md) | Telegram, Discord, Slack, WhatsApp, and webhook channel setup |
 | [Dashboard](dashboard.md) | Real-time web dashboard for fleet observability and management |

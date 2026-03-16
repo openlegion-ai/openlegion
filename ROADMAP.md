@@ -314,16 +314,7 @@ The actual UI. Single-page app served at `/dashboard` by the mesh FastAPI server
 - Jinja2 template for `index.html` (injects mesh URL for WebSocket connection)
 - Included in `create_mesh_app()` from `src/host/server.py`
 
-### 5.4 Orchestrator Polling Elimination
-
-**Problem:** `_wait_for_task_result` in `orchestrator.py` polls for task completion. Session 2 added push-based `asyncio.Future` for the main dispatch path, but the orchestrator's DAG step completion still polls.
-
-**Fix:**
-- Wire DAG step completion through `asyncio.Future` or `asyncio.Event`
-- Agent posts result → mesh resolves the future → orchestrator proceeds immediately
-- Pairs well with event bus — step completion emits a trace event
-
-### 5.5 Cron-Triggered Subagents
+### 5.4 Cron-Triggered Subagents
 
 Cron jobs spawn subagents instead of blocking main agent:
 - `spawn: true` flag in cron config
@@ -331,7 +322,7 @@ Cron jobs spawn subagents instead of blocking main agent:
 - Results announced when done
 - Dashboard shows subagent activity in parent's detail view
 
-### ~~5.6 Dashboard Workspace Editing~~ ✅ Done
+### ~~5.5 Dashboard Workspace Editing~~ ✅ Done
 
 Dashboard can now view and edit agent workspace files (SOUL.md, HEARTBEAT.md, USER.md, INSTRUCTIONS.md, MEMORY.md) directly from the agent detail panel. Three proxy endpoints in `src/dashboard/server.py` forward requests to agent containers via transport. Alpine.js UI shows file list with sizes, inline editor with syntax-friendly monospace textarea, and Save/Cancel controls. Content sanitized at both dashboard and agent levels.
 
@@ -751,7 +742,7 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 
 ### Session 2 (Runtime Hardening)
 - [x] httpx client lifecycle (per-loop client pooling)
-- [x] Push-based orchestrator (asyncio.Future, no polling)
+- [x] ~~Push-based orchestrator~~ (removed)
 - [x] LLM retry with exponential backoff
 - [x] Skill registry isolation fix
 - [x] PubSub SQLite persistence
@@ -782,7 +773,7 @@ Lower priority items grouped by theme. Implement when convenient or when a speci
 - [x] CLI REPL with multi-agent support
 - [x] Telegram channel with pairing
 - [x] Cron scheduler with heartbeat support
-- [x] DAG workflow orchestrator
+- [x] ~~DAG workflow orchestrator~~ (removed)
 - [x] Health monitor with auto-restart
 - [x] Cost tracking + budget enforcement
 

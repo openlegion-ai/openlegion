@@ -24,13 +24,12 @@ class _MockCtx:
     """Lightweight mock of RuntimeContext for REPL tests."""
 
     def __init__(self, agent_urls=None, *, blackboard=None, lane_manager=None,
-                 cron_scheduler=None, orchestrator=None):
+                 cron_scheduler=None):
         self.agent_urls = agent_urls or {}
         self.cfg = {"mesh": {"port": 8420}, "agents": {}, "llm": {"default_model": "openai/gpt-4o-mini"}}
         self.blackboard = blackboard
         self.lane_manager = lane_manager
         self.cron_scheduler = cron_scheduler
-        self.orchestrator = orchestrator
         self.cost_tracker = None
         self.credential_vault = None
         self.runtime = None
@@ -335,59 +334,6 @@ class TestREPLQueue:
         assert "not available" in out
 
 
-class TestREPLWorkflow:
-    def test_list_no_workflows(self, capsys):
-        from unittest.mock import MagicMock
-
-        from src.cli.repl import REPLSession
-        orch = MagicMock()
-        orch.workflows = {}
-        orch.active_executions = {}
-        ctx = _MockCtx(orchestrator=orch)
-        repl = REPLSession(ctx)
-
-        repl._cmd_workflow("")
-        out = capsys.readouterr().out
-        assert "No workflows" in out
-
-    def test_list_with_workflows(self, capsys):
-        from unittest.mock import MagicMock
-
-        from src.cli.repl import REPLSession
-        wf = MagicMock()
-        wf.steps = [1, 2, 3]
-        orch = MagicMock()
-        orch.workflows = {"deploy": wf}
-        orch.active_executions = {}
-        ctx = _MockCtx(orchestrator=orch)
-        repl = REPLSession(ctx)
-
-        repl._cmd_workflow("")
-        out = capsys.readouterr().out
-        assert "deploy" in out
-        assert "3 steps" in out
-
-    def test_run_missing_name(self, capsys):
-        from unittest.mock import MagicMock
-
-        from src.cli.repl import REPLSession
-        orch = MagicMock()
-        ctx = _MockCtx(orchestrator=orch)
-        repl = REPLSession(ctx)
-
-        repl._cmd_workflow("run")
-        out = capsys.readouterr().out
-        assert "Usage:" in out
-
-    def test_not_available(self, capsys):
-        from src.cli.repl import REPLSession
-        ctx = _MockCtx()
-        repl = REPLSession(ctx)
-        repl._cmd_workflow("")
-        out = capsys.readouterr().out
-        assert "not available" in out
-
-
 class TestREPLCronExtended:
     def test_pause_job(self, tmp_path, capsys):
         from src.cli.repl import REPLSession
@@ -525,33 +471,6 @@ class TestREPLUseNoAgents:
         assert "No agents available" in out
 
 
-class TestREPLWorkflowActive:
-    """Workflow list with active executions."""
-
-    def test_list_with_active_executions(self, capsys):
-        from unittest.mock import MagicMock
-
-        from src.cli.repl import REPLSession
-        wf = MagicMock()
-        wf.steps = [1, 2]
-        ex = MagicMock()
-        ex.status = "running"
-        ex.workflow.name = "deploy"
-        orch = MagicMock()
-        orch.workflows = {"deploy": wf}
-        orch.active_executions = {"exec-001": ex}
-        ctx = _MockCtx(orchestrator=orch)
-        repl = REPLSession(ctx)
-
-        repl._cmd_workflow("")
-        out = capsys.readouterr().out
-        assert "deploy" in out
-        assert "2 steps" in out
-        assert "Active executions" in out
-        assert "exec-001" in out
-        assert "running" in out
-
-
 class TestREPLBlackboardSetMissingArgs:
     """Blackboard set with insufficient arguments."""
 
@@ -675,7 +594,7 @@ class TestPermissionsDefault:
             json.dump({
                 "permissions": {
                     "default": {
-                        "can_message": ["orchestrator"],
+                        "can_message": ["mesh"],
                         "allowed_apis": ["llm"],
                         "blackboard_read": ["context/*"],
                     }
@@ -686,7 +605,7 @@ class TestPermissionsDefault:
 
         perms = pm.get_permissions("some_unknown_agent")
         assert perms.agent_id == "some_unknown_agent"
-        assert "orchestrator" in perms.can_message
+        assert "mesh" in perms.can_message
         assert "llm" in perms.allowed_apis
         assert pm.can_use_api("some_unknown_agent", "llm")
         os.unlink(f.name)
@@ -704,7 +623,7 @@ class TestEnsureAllAgentPermissions:
         agents_yaml.write_text("agents:\n  alice:\n    role: helper\n  bob:\n    role: coder\n")
         perms_file = tmp_path / "permissions.json"
         # alice exists but predates can_manage_cron; bob is absent entirely.
-        perms_file.write_text(json.dumps({"permissions": {"alice": {"can_message": ["orchestrator"]}}}))
+        perms_file.write_text(json.dumps({"permissions": {"alice": {"can_message": ["mesh"]}}}))
 
         with patch("src.cli.config.AGENTS_FILE", agents_yaml), \
              patch("src.cli.config.CONFIG_FILE", tmp_path / "mesh.yaml"), \
@@ -732,7 +651,7 @@ class TestEnsureAllAgentPermissions:
         perms_file = tmp_path / "permissions.json"
         # charlie exists with full-looking perms but no can_manage_cron (legacy entry)
         legacy = {
-            "can_message": ["orchestrator"],
+            "can_message": ["mesh"],
             "allowed_credentials": ["*"],
             "allowed_apis": ["llm"],
         }
@@ -759,7 +678,7 @@ class TestEnsureAllAgentPermissions:
         agents_yaml.write_text("agents:\n  dave:\n    role: helper\n")
         perms_file = tmp_path / "permissions.json"
         already_migrated = {
-            "can_message": ["orchestrator"],
+            "can_message": ["mesh"],
             "can_manage_cron": True,
         }
         perms_file.write_text(json.dumps({"permissions": {"dave": already_migrated}}))
@@ -949,45 +868,6 @@ class TestREPLBlackboardProjectScoping:
         assert "projects/alpha/ctx" in out
         assert "global/other" in out
         bb.close()
-
-
-class TestREPLWorkflowProjectScoping:
-    """Workflow commands filter by active project."""
-
-    def _make_repl_with_orch(self):
-        from unittest.mock import MagicMock
-
-        from src.cli.repl import REPLSession
-        from src.shared.types import WorkflowDefinition
-
-        orch = MagicMock()
-        orch.workflows = {
-            "alpha/build": WorkflowDefinition(name="alpha/build", trigger="webhook", steps=[]),
-            "alpha/deploy": WorkflowDefinition(name="alpha/deploy", trigger="webhook", steps=[]),
-            "global-wf": WorkflowDefinition(name="global-wf", trigger="webhook", steps=[]),
-        }
-        orch.active_executions = {}
-
-        ctx = _MockCtx(agent_urls={"bot1": "http://bot1:8400"}, orchestrator=orch)
-        ctx.cfg["_agent_projects"] = {"bot1": "alpha"}
-        repl = REPLSession(ctx)
-        return repl
-
-    def test_workflow_list_filtered(self, capsys):
-        repl = self._make_repl_with_orch()
-        repl._active_project = "alpha"
-        repl._cmd_workflow("list")
-        out = capsys.readouterr().out
-        assert "alpha/build" in out
-        assert "alpha/deploy" in out
-        assert "global-wf" not in out
-
-    def test_workflow_list_unfiltered(self, capsys):
-        repl = self._make_repl_with_orch()
-        repl._cmd_workflow("list")
-        out = capsys.readouterr().out
-        assert "alpha/build" in out
-        assert "global-wf" in out
 
 
 class TestJsonOutput:

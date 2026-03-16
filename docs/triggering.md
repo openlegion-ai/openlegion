@@ -192,9 +192,7 @@ This makes always-on heartbeats economically viable even at high frequencies.
 
 ## Webhooks
 
-External systems can trigger workflows via HTTP webhooks.
-
-### Triggering a Workflow
+External systems can dispatch messages to agents via named webhooks.
 
 ```bash
 curl -X POST http://localhost:8420/webhook/hook/<hook_id> \
@@ -202,28 +200,11 @@ curl -X POST http://localhost:8420/webhook/hook/<hook_id> \
   -d '{"company": "Acme Corp", "source": "website"}'
 ```
 
-The webhook payload is passed as `trigger.payload` to the workflow's first step.
-
-### Workflow Cron Integration
-
-Cron jobs can trigger workflows directly instead of messaging agents:
-
-```json
-{
-  "id": "cron_abc123",
-  "agent": "orchestrator",
-  "schedule": "0 9 * * 1-5",
-  "message": "",
-  "workflow": "daily_pipeline",
-  "workflow_payload": "{\"date\": \"today\"}"
-}
-```
-
-When `workflow` is set, the cron job calls `workflow_trigger_fn` instead of dispatching to an agent.
+The webhook payload is included in the message dispatched to the configured agent.
 
 ## Pub/Sub Events
 
-Agents can publish events that trigger workflows or notify other agents.
+Agents can publish events to notify other agents.
 
 ### Publishing Events
 
@@ -232,23 +213,6 @@ Agents can publish events that trigger workflows or notify other agents.
 Agent: Research is done, notifying the team.
 → publish_event(topic="research_complete", data={"prospect": "Acme Corp", "score": 8})
 ```
-
-### Subscribing to Events
-
-Workflows subscribe automatically via their `trigger` field:
-
-```yaml
-# config/workflows/prospect_pipeline.yaml
-name: prospect_pipeline
-trigger: new_prospect   # Listens for "new_prospect" events
-steps:
-  - id: research
-    agent: researcher
-    task_type: research_prospect
-    input_from: trigger.payload
-```
-
-When any agent publishes to `new_prospect`, this workflow starts automatically.
 
 ### Permission Requirements
 
@@ -281,7 +245,7 @@ This sends the notification to:
 4. **Slack** -- sent to configured channels
 5. **WhatsApp** -- sent to paired users
 
-Agents can use `notify_user` at any time -- during cron jobs, heartbeats, workflows, or regular tasks.
+Agents can use `notify_user` at any time -- during cron jobs, heartbeats, or regular tasks.
 
 ## File Watchers
 
@@ -306,7 +270,6 @@ The watcher polls at a configurable interval, tracks file modification times, an
 |------|------|
 | `src/host/cron.py` | Cron scheduler, heartbeat probes, interval/cron parsing |
 | `src/host/server.py` | Webhook endpoints, cron management API |
-| `src/host/orchestrator.py` | Workflow executor (triggered by pub/sub and webhooks) |
 | `src/host/mesh.py` | PubSub system for event-driven triggering |
 | `src/agent/builtins/mesh_tool.py` | Agent-side `set_cron`, `list_cron`, `remove_cron` tools |
 | `src/host/watchers.py` | Polling-based file watchers for Docker volume compatibility |

@@ -536,7 +536,7 @@ class MessageRouter:
         if self._agent_projects:
             from_project = self._agent_projects.get(message.from_agent)
             to_project = self._agent_projects.get(message.to)
-            system_agents = {"mesh", "orchestrator"}
+            system_agents = {"mesh"}
             if (
                 from_project and to_project
                 and from_project != to_project

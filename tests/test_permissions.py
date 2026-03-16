@@ -50,7 +50,6 @@ class TestCanUseWallet:
 
     def test_trusted_always_allowed(self, matrix):
         assert matrix.can_use_wallet("mesh") is True
-        assert matrix.can_use_wallet("orchestrator") is True
 
 
 class TestCanUseWalletChain:

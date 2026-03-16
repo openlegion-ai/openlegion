@@ -1,6 +1,6 @@
 """Request tracing: trace-ID generation, contextvar propagation, header helpers.
 
-Every user message, cron tick, channel dispatch, and orchestrator step
+Every user message, cron tick, and channel dispatch
 gets a unique trace ID (``tr_<hex12>``) that propagates through all hops
 via the ``X-Trace-Id`` HTTP header and a ``contextvars.ContextVar``.
 
