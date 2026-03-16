@@ -3554,14 +3554,21 @@ function dashboard() {
     async addCredential() {
       if (this.credSaving) return;
       const service = this.credService === '__custom__' ? this.credCustomService.trim() : this.credService.trim();
-      if (!service || !this.credKey.trim()) return;
+      const isKeyless = this.credService === 'ollama';
+      if (!service || (!isKeyless && !this.credKey.trim())) return;
+      if (isKeyless && !this.credBaseUrl.trim()) return;
       this.credSaving = true;
       const isOAuth = this.credAuthType === 'oauth' && this.credService === 'anthropic';
-      this.showToast(isOAuth ? 'Validating token...' : 'Validating API key...');
+      if (isKeyless) {
+        this.showToast('Saving Ollama configuration...');
+      } else {
+        this.showToast(isOAuth ? 'Validating token...' : 'Validating API key...');
+      }
       try {
         const baseUrl = isOAuth ? '' : this.credBaseUrl.trim();
-        if (!await this._validateCredential(service, this.credKey.trim(), baseUrl)) return;
-        const body = { service, key: this.credKey.trim() };
+        const key = isKeyless ? 'ollama' : this.credKey.trim();
+        if (!isKeyless && !await this._validateCredential(service, key, baseUrl)) return;
+        const body = { service, key };
         if (this.credService === '__custom__' && this.credTier === 'system') body.tier = 'system';
         if (baseUrl) body.base_url = baseUrl;
         const resp = await fetch(`${window.__config.apiBase}/credentials`, {

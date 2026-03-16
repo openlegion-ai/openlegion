@@ -2576,7 +2576,7 @@
               <div x-show="showCredForm" x-transition>
                 <div class="text-xs text-gray-500 mb-2">New credential</div>
                 <div class="flex gap-2 mb-2">
-                  <select x-model="credService" :disabled="credSaving" class="dash-select text-xs w-40" @change="credAuthType = 'api_key'">
+                  <select x-model="credService" :disabled="credSaving" class="dash-select text-xs w-40" @change="credAuthType = 'api_key'; if ($event.target.value === 'ollama') credBaseUrl = credBaseUrl || 'http://localhost:11434'">
                     <option value="">Service...</option>
                     <optgroup label="LLM Providers (system tier)">
                       {% for p in all_providers %}
@@ -2601,7 +2601,7 @@
                     <option value="agent">Agent tier</option>
                     <option value="system">System tier</option>
                   </select>
-                  <input type="password" x-model="credKey" :disabled="credSaving" class="dash-input flex-1"
+                  <input x-show="credService !== 'ollama'" type="password" x-model="credKey" :disabled="credSaving" class="dash-input flex-1"
                     :placeholder="credAuthType === 'oauth' && credService === 'anthropic' ? 'sk-ant-oat01-...' : 'API key or value'">
                 </div>
                 <template x-if="credAuthType === 'oauth' && credService === 'anthropic'">
@@ -2609,7 +2609,13 @@
                     Experimental — uses unofficial OAuth that may break without notice. Generate with: <code class="font-mono bg-gray-800 px-1 rounded">claude setup-token</code>
                   </div>
                 </template>
-                <input x-show="!(credAuthType === 'oauth' && credService === 'anthropic')" type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
+                <template x-if="credService === 'ollama'">
+                  <div>
+                    <input type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-1" placeholder="http://localhost:11434">
+                    <div class="text-[10px] text-gray-500 mb-3">Ollama URL — no API key needed. Make sure Ollama is running.</div>
+                  </div>
+                </template>
+                <input x-show="credService !== 'ollama' && !(credAuthType === 'oauth' && credService === 'anthropic')" type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
                 <div class="flex justify-between">
                   <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'; credAuthType = 'api_key'" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
                   <button @click="addCredential()" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
