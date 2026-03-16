@@ -8,6 +8,7 @@ Storage: SQLite (lightweight, no external services).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +19,21 @@ from src.shared.utils import setup_logging
 logger = setup_logging("host.costs")
 
 _DEFAULT_COST = (0.003, 0.015)  # Conservative fallback
+
+
+def _default_budget() -> dict:
+    """Read default budget from dashboard system settings, falling back to hardcoded defaults."""
+    try:
+        p = Path("config/settings.json")
+        if p.exists():
+            data = json.loads(p.read_text())
+            return {
+                "daily_usd": data.get("default_daily_budget", 10.0),
+                "monthly_usd": data.get("default_monthly_budget", 200.0),
+            }
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {"daily_usd": 10.0, "monthly_usd": 200.0}
 
 
 def estimate_cost(
@@ -68,7 +84,13 @@ class CostTracker:
     def close(self) -> None:
         self.db.close()
 
-    def set_budget(self, agent: str, daily_usd: float = 10.0, monthly_usd: float = 200.0) -> None:
+    def set_budget(self, agent: str, daily_usd: float | None = None, monthly_usd: float | None = None) -> None:
+        if daily_usd is None or monthly_usd is None:
+            defaults = _default_budget()
+            if daily_usd is None:
+                daily_usd = defaults["daily_usd"]
+            if monthly_usd is None:
+                monthly_usd = defaults["monthly_usd"]
         self.budgets[agent] = {"daily_usd": daily_usd, "monthly_usd": monthly_usd}
 
     def track(
@@ -111,7 +133,7 @@ class CostTracker:
 
         Returns {"allowed": bool, "daily_used": float, "daily_limit": float, ...}.
         """
-        budget = self.budgets.get(agent, {"daily_usd": 10.0, "monthly_usd": 200.0})
+        budget = self.budgets.get(agent) or _default_budget()
         daily_used = self.get_spend(agent, "today").get("total_cost", 0)
         monthly_used = self.get_spend(agent, "month").get("total_cost", 0)
 
@@ -132,7 +154,7 @@ class CostTracker:
         afford it. Returns {"allowed": bool, "estimated_cost": float, ...}.
         """
         estimated_cost = estimate_cost(model, total_tokens=estimated_tokens)
-        budget = self.budgets.get(agent, {"daily_usd": 10.0, "monthly_usd": 200.0})
+        budget = self.budgets.get(agent) or _default_budget()
         daily_used = self.get_spend(agent, "today").get("total_cost", 0)
         monthly_used = self.get_spend(agent, "month").get("total_cost", 0)
 

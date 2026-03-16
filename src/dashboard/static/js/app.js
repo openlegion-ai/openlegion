@@ -154,6 +154,11 @@ function dashboard() {
     browserSettingsLoading: false,
     _browserSettingsDebounce: null,
 
+    // System settings
+    systemSettings: null,
+    systemSettingsLoading: false,
+    _systemSettingsDebounce: null,
+
     // Storage
     storageData: null,
 
@@ -933,6 +938,7 @@ function dashboard() {
         }
         if (this.systemTab === 'settings') {
           this.fetchBrowserSettings();
+          this.fetchSystemSettings();
         }
         if (this.systemTab === 'activity') {
           if (this.activityView === 'traces') {
@@ -2719,6 +2725,60 @@ function dashboard() {
       return 'Stealth';
     },
 
+    // ── System settings ─────────────────────────────────
+
+    async fetchSystemSettings() {
+      this.systemSettingsLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/system-settings`);
+        if (resp.ok) {
+          this.systemSettings = await resp.json();
+        }
+      } catch (e) { console.warn('fetchSystemSettings failed:', e); }
+      this.systemSettingsLoading = false;
+    },
+
+    saveSystemSetting(key, value) {
+      if (!this.systemSettings) return;
+      const typ = ['default_daily_budget', 'default_monthly_budget'].includes(key) ? parseFloat : parseInt;
+      this.systemSettings[key] = typ(value);
+      if (this._systemSettingsDebounce) clearTimeout(this._systemSettingsDebounce);
+      this._systemSettingsDebounce = setTimeout(async () => {
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/system-settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ [key]: this.systemSettings[key] }),
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data.updated?.length) this.showToast(`Updated ${data.updated.join(', ')}`);
+          } else {
+            const err = await resp.json().catch(() => ({}));
+            this.showToast(`Error: ${err.detail || 'Update failed'}`);
+          }
+        } catch (e) { console.warn('saveSystemSetting failed:', e); }
+      }, 500);
+    },
+
+    async saveDefaultModel(model) {
+      if (!model) return;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/default-model`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model }),
+        });
+        if (resp.ok) {
+          if (this.systemSettings) this.systemSettings.default_model = model;
+          this.showToast(`Default model set to ${model}`);
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+        }
+      } catch (e) { console.warn('saveDefaultModel failed:', e); }
+    },
+
     async fetchStorage() {
       try {
         const resp = await fetch(`${window.__config.apiBase}/storage`);
@@ -3459,6 +3519,10 @@ function dashboard() {
         { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchChannels(); } },
         { label: 'Model Pricing', desc: 'Token costs by model', keywords: ['model', 'pricing', 'tokens'], action: () => { this.systemTab = 'costs'; this.switchTab('system'); } },
         { label: 'Browser Settings', desc: 'Browser speed and timing', keywords: ['browser', 'speed', 'settings', 'timing', 'stealth'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchBrowserSettings(); } },
+        { label: 'Default Model', desc: 'Change the default LLM model', keywords: ['model', 'llm', 'default', 'openai', 'anthropic', 'ollama'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
+        { label: 'Budget Settings', desc: 'Default daily and monthly budgets', keywords: ['budget', 'cost', 'daily', 'monthly', 'limit', 'spend'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
+        { label: 'Agent Limits', desc: 'Max iterations, tool rounds, timeouts', keywords: ['iterations', 'rounds', 'timeout', 'limit', 'agent', 'execution'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
+        { label: 'Health Settings', desc: 'Poll interval, failure thresholds, restart limits', keywords: ['health', 'poll', 'restart', 'failure', 'recovery', 'monitor'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
       ];
       for (const act of sysActions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {

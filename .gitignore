@@ -25,6 +25,7 @@ data/
 config/mesh.yaml
 config/agents.yaml
 config/permissions.json
+config/settings.json
 config/team.yaml
 config/cron.json
 config/webhooks.json

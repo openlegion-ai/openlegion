@@ -297,6 +297,23 @@ class RuntimeContext:
 
         self.runtime.extra_env["EMBEDDING_MODEL"] = embedding_model
 
+        # Inject dashboard system settings as env vars for agent containers
+        settings_path = Path("config/settings.json")
+        if settings_path.exists():
+            try:
+                import json
+                sys_settings = json.loads(settings_path.read_text())
+                for env_key, cfg_key in {
+                    "OPENLEGION_MAX_ITERATIONS": "max_iterations",
+                    "OPENLEGION_CHAT_MAX_TOOL_ROUNDS": "chat_max_tool_rounds",
+                    "OPENLEGION_CHAT_MAX_TOTAL_ROUNDS": "chat_max_total_rounds",
+                    "OPENLEGION_TOOL_TIMEOUT": "tool_timeout",
+                }.items():
+                    if cfg_key in sys_settings:
+                        self.runtime.extra_env[env_key] = str(sys_settings[cfg_key])
+            except (ValueError, OSError):
+                pass
+
         for agent_id, agent_cfg in agents_cfg.items():
             if agent_id in RESERVED_AGENT_IDS:
                 raise click.ClickException(

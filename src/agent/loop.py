@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Optional
@@ -34,7 +35,7 @@ logger = setup_logging("agent.loop")
 _RETRYABLE_STATUS_CODES = {429, 502, 503}
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1  # seconds: 1, 2, 4
-_TOOL_TIMEOUT = 300  # seconds — hard ceiling for a single tool execution
+_TOOL_TIMEOUT = int(os.environ.get("OPENLEGION_TOOL_TIMEOUT", "300"))  # seconds — hard ceiling for a single tool execution
 _FLEET_ROSTER_TTL = 600  # seconds — cache TTL for fleet roster
 _GOALS_TTL = 300  # seconds — cache TTL for goals fetch
 _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
@@ -133,6 +134,10 @@ class AgentLoop:
         workspace: Optional[WorkspaceManager] = None,
         context_manager: Optional[ContextManager] = None,
     ):
+        # Override class defaults from env vars (set by dashboard system settings)
+        self.MAX_ITERATIONS = int(os.environ.get("OPENLEGION_MAX_ITERATIONS", "20"))
+        self.CHAT_MAX_TOOL_ROUNDS = int(os.environ.get("OPENLEGION_CHAT_MAX_TOOL_ROUNDS", "30"))
+        self.CHAT_MAX_TOTAL_ROUNDS = int(os.environ.get("OPENLEGION_CHAT_MAX_TOTAL_ROUNDS", "200"))
         self.agent_id = agent_id
         self.role = role
         self.memory = memory

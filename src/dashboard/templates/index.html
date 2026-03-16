@@ -3166,16 +3166,106 @@
         </div><!-- /activity sub-tab -->
 
         <!-- ═══ SETTINGS SUB-TAB ═══ -->
-        <div x-show="systemTab === 'settings'">
+        <div x-show="systemTab === 'settings'" class="space-y-4">
 
-          <!-- Browser section -->
+          <!-- ── 1. LLM ── -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex items-center gap-2 mb-4">
+              <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+              <h3 class="text-sm font-medium text-gray-200">LLM</h3>
+            </div>
+            <div class="space-y-3">
+              <div class="flex items-center justify-between">
+                <div>
+                  <div class="text-xs text-gray-400">Default Model</div>
+                  <div class="text-[10px] text-gray-600 mt-0.5">New agents will use this model</div>
+                </div>
+              </div>
+              <select class="dash-select w-full"
+                x-effect="if (systemSettings?.default_model) $el.value = systemSettings.default_model"
+                @change="saveDefaultModel($event.target.value)">
+                <option value="" disabled>Select a model...</option>
+                <template x-for="m in availableModels" :key="m">
+                  <option :value="m" x-text="m"></option>
+                </template>
+              </select>
+            </div>
+          </div>
+
+          <!-- ── 2. Budgets ── -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex items-center gap-2 mb-4">
+              <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <h3 class="text-sm font-medium text-gray-200">Budgets</h3>
+            </div>
+            <div class="grid grid-cols-2 gap-4" x-show="systemSettings">
+              <div>
+                <label class="text-xs text-gray-400 block mb-1">Default Daily Budget (USD)</label>
+                <input type="number" step="0.01" min="0.01" max="10000"
+                  class="dash-input w-full"
+                  :value="systemSettings?.default_daily_budget"
+                  @change="saveSystemSetting('default_daily_budget', $event.target.value)">
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 block mb-1">Default Monthly Budget (USD)</label>
+                <input type="number" step="0.01" min="0.01" max="100000"
+                  class="dash-input w-full"
+                  :value="systemSettings?.default_monthly_budget"
+                  @change="saveSystemSetting('default_monthly_budget', $event.target.value)">
+              </div>
+            </div>
+            <p class="text-[10px] text-gray-600 leading-relaxed pt-2">
+              Applied to new agents that don't have explicit budgets. Per-agent overrides in mesh.yaml take priority.
+            </p>
+          </div>
+
+          <!-- ── 3. Agents ── -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex items-center gap-2 mb-4">
+              <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+              <h3 class="text-sm font-medium text-gray-200">Agent Execution</h3>
+              <span class="text-[10px] text-amber-500/70 ml-auto">restart required</span>
+            </div>
+            <div class="grid grid-cols-2 gap-4" x-show="systemSettings">
+              <div>
+                <label class="text-xs text-gray-400 block mb-1">Max Iterations (task mode)</label>
+                <input type="number" step="1" min="1" max="100"
+                  class="dash-input w-full"
+                  :value="systemSettings?.max_iterations"
+                  @change="saveSystemSetting('max_iterations', $event.target.value)">
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 block mb-1">Max Tool Rounds (chat)</label>
+                <input type="number" step="1" min="1" max="200"
+                  class="dash-input w-full"
+                  :value="systemSettings?.chat_max_tool_rounds"
+                  @change="saveSystemSetting('chat_max_tool_rounds', $event.target.value)">
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 block mb-1">Max Total Rounds (chat)</label>
+                <input type="number" step="1" min="10" max="1000"
+                  class="dash-input w-full"
+                  :value="systemSettings?.chat_max_total_rounds"
+                  @change="saveSystemSetting('chat_max_total_rounds', $event.target.value)">
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 block mb-1">Tool Timeout (seconds)</label>
+                <input type="number" step="1" min="10" max="3600"
+                  class="dash-input w-full"
+                  :value="systemSettings?.tool_timeout"
+                  @change="saveSystemSetting('tool_timeout', $event.target.value)">
+              </div>
+            </div>
+          </div>
+
+          <!-- ── 4. Browser ── -->
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
             <div class="flex items-center gap-2 mb-4">
               <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/></svg>
               <h3 class="text-sm font-medium text-gray-200">Browser</h3>
             </div>
 
-            <!-- Speed control -->
+            <!-- Speed control (existing) -->
             <div class="space-y-3">
               <div class="flex items-center justify-between">
                 <div>
@@ -3231,6 +3321,71 @@
                 to typing rhythm, click delays, and scroll pauses for better stealth on sites with bot detection.
               </p>
             </div>
+
+            <!-- New browser settings -->
+            <div class="grid grid-cols-2 gap-4 mt-4 pt-4 border-t border-gray-800" x-show="systemSettings">
+              <div>
+                <div class="flex items-center gap-1 mb-1">
+                  <label class="text-xs text-gray-400">Idle Timeout (minutes)</label>
+                  <span class="text-[10px] text-amber-500/70">restart required</span>
+                </div>
+                <input type="number" step="1" min="5" max="120"
+                  class="dash-input w-full"
+                  :value="systemSettings?.browser_idle_timeout"
+                  @change="saveSystemSetting('browser_idle_timeout', $event.target.value)">
+              </div>
+              <div>
+                <div class="flex items-center gap-1 mb-1">
+                  <label class="text-xs text-gray-400">Max Concurrent Browsers</label>
+                  <span class="text-[10px] text-amber-500/70">restart required</span>
+                </div>
+                <input type="number" step="1" min="1" max="20"
+                  class="dash-input w-full"
+                  :value="systemSettings?.browser_max_concurrent"
+                  @change="saveSystemSetting('browser_max_concurrent', $event.target.value)">
+              </div>
+            </div>
+          </div>
+
+          <!-- ── 5. Health & Recovery ── -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex items-center gap-2 mb-4">
+              <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
+              <h3 class="text-sm font-medium text-gray-200">Health &amp; Recovery</h3>
+            </div>
+            <div class="grid grid-cols-2 gap-4" x-show="systemSettings">
+              <div>
+                <label class="text-xs text-gray-400 block mb-1">Poll Interval (seconds)</label>
+                <input type="number" step="1" min="5" max="300"
+                  class="dash-input w-full"
+                  :value="systemSettings?.health_poll_interval"
+                  @change="saveSystemSetting('health_poll_interval', $event.target.value)">
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 block mb-1">Max Failures Before Restart</label>
+                <input type="number" step="1" min="1" max="20"
+                  class="dash-input w-full"
+                  :value="systemSettings?.health_max_failures"
+                  @change="saveSystemSetting('health_max_failures', $event.target.value)">
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 block mb-1">Restart Limit</label>
+                <input type="number" step="1" min="0" max="20"
+                  class="dash-input w-full"
+                  :value="systemSettings?.health_restart_limit"
+                  @change="saveSystemSetting('health_restart_limit', $event.target.value)">
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 block mb-1">Restart Window (seconds)</label>
+                <input type="number" step="1" min="60" max="86400"
+                  class="dash-input w-full"
+                  :value="systemSettings?.health_restart_window"
+                  @change="saveSystemSetting('health_restart_window', $event.target.value)">
+              </div>
+            </div>
+            <p class="text-[10px] text-gray-600 leading-relaxed pt-2">
+              Health settings are applied immediately without restart. Agents are restarted after consecutive failures exceed the threshold.
+            </p>
           </div>
 
         </div><!-- /settings sub-tab -->
