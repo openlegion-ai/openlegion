@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Optional
@@ -41,6 +42,20 @@ _GOALS_TTL = 300  # seconds — cache TTL for goals fetch
 _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
 _TOOL_HISTORY_LIMIT = 10  # recent tool outcomes in system prompt
 HEARTBEAT_MAX_ITERATIONS = 10  # tighter bound for heartbeat (cheaper than task/chat)
+
+# Strip leading <think>…</think> blocks emitted by reasoning models
+# (Qwen3, DeepSeek-R1 etc.) so chat bubbles and conversation history
+# contain only the actual answer.
+_THINK_TAG_RE = re.compile(r"^(?:<think>[\s\S]*?</think>\s*)+")
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove leading ``<think>…</think>`` blocks from model output."""
+    if not text.startswith("<think>"):
+        return text
+    stripped = _THINK_TAG_RE.sub("", text).strip()
+    return stripped if stripped else text
+
 
 # Files already injected via bootstrap — skip in first-message auto-search
 # to avoid duplicate content.  Matches WorkspaceManager._BOOTSTRAP_FILES.
@@ -1529,7 +1544,12 @@ class AgentLoop:
 
     @staticmethod
     def _resolve_content(llm_response) -> str:
-        """Extract text content, suppressing silent acknowledgments."""
+        """Extract text content, suppressing silent acknowledgments.
+
+        Falls back to ``thinking_content`` for models that return only
+        reasoning tokens (Qwen3, DeepSeek-R1).  Strips ``<think>`` tags
+        so that chat history and displayed bubbles contain the answer only.
+        """
         content = llm_response.content or ""
         if content and content.strip() == SILENT_REPLY_TOKEN:
             content = ""
@@ -1537,6 +1557,9 @@ class AgentLoop:
         # reasoning tokens (common with Ollama thinking models).
         if not content and llm_response.thinking_content:
             content = llm_response.thinking_content
+        # Strip <think>…</think> blocks so conversation history stays
+        # lean and the chat bubble shows the answer, not internal reasoning.
+        content = _strip_think_tags(content)
         return content
 
     # ── Non-streaming chat ────────────────────────────────────

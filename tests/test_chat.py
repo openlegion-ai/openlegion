@@ -519,6 +519,50 @@ class TestToolLimitReached:
         assert done_events[0].get("tool_limit_reached") is True
 
 
+class TestStreamingThinkingContent:
+    """Verify chat_stream handles thinking-only LLM responses."""
+
+    @pytest.mark.asyncio
+    async def test_thinking_only_response_via_streaming(self):
+        """When LLM returns only thinking_content, it becomes the response."""
+        thinking = "<think>Let me reason about this</think>\nThe answer is 42."
+        llm_resp = LLMResponse(
+            content="", thinking_content=thinking, tokens_used=50,
+        )
+
+        loop = _make_loop()
+
+        async def _stream_with_thinking(**kwargs):
+            yield {"type": "done", "response": llm_resp}
+
+        loop.llm.chat_stream = _stream_with_thinking
+
+        events = []
+        async for event in loop.chat_stream("What is the answer?"):
+            events.append(event)
+
+        done_events = [e for e in events if e.get("type") == "done"]
+        assert len(done_events) == 1
+        # <think> tags should be stripped; answer extracted
+        assert done_events[0]["response"] == "The answer is 42."
+        # Conversation history should also have clean content
+        assistant_msgs = [
+            m for m in loop._chat_messages if m.get("role") == "assistant"
+        ]
+        assert assistant_msgs[-1]["content"] == "The answer is 42."
+
+    @pytest.mark.asyncio
+    async def test_thinking_only_nonstreaming_fallback(self):
+        """Non-streaming fallback also handles thinking-only responses."""
+        thinking = "<think>reasoning</think>\nClean answer."
+        loop = _make_loop([
+            LLMResponse(content="", thinking_content=thinking, tokens_used=50),
+        ])
+
+        result = await loop.chat("Question?")
+        assert result["response"] == "Clean answer."
+
+
 class TestCompactionSystemMessage:
     @pytest.mark.asyncio
     async def test_compaction_writes_system_message(self):
@@ -591,3 +635,89 @@ class TestCompactionSystemMessage:
             assert len(system_msgs) == 0
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ── _strip_think_tags & _resolve_content tests ───────────────
+
+
+class TestStripThinkTags:
+    """Verify <think> tag stripping for reasoning models."""
+
+    def test_no_tags(self):
+        from src.agent.loop import _strip_think_tags
+        assert _strip_think_tags("Hello world") == "Hello world"
+
+    def test_strips_leading_think_block(self):
+        from src.agent.loop import _strip_think_tags
+        text = "<think>internal reasoning</think>\n\nThe answer is 42."
+        assert _strip_think_tags(text) == "The answer is 42."
+
+    def test_preserves_content_when_no_answer_after_tag(self):
+        from src.agent.loop import _strip_think_tags
+        text = "<think>only thinking, no answer</think>"
+        # No content after tag — return original to avoid empty response
+        assert _strip_think_tags(text) == text
+
+    def test_unclosed_tag_returns_original(self):
+        from src.agent.loop import _strip_think_tags
+        text = "<think>still thinking, model interrupted..."
+        assert _strip_think_tags(text) == text
+
+    def test_multiple_think_blocks(self):
+        from src.agent.loop import _strip_think_tags
+        text = "<think>first</think>\n<think>second</think>\nFinal answer."
+        assert _strip_think_tags(text) == "Final answer."
+
+    def test_think_in_middle_preserved(self):
+        from src.agent.loop import _strip_think_tags
+        text = "Prefix text <think>should stay</think> suffix"
+        assert _strip_think_tags(text) == text
+
+    def test_empty_string(self):
+        from src.agent.loop import _strip_think_tags
+        assert _strip_think_tags("") == ""
+
+
+class TestResolveContentThinkingFallback:
+    """Verify _resolve_content falls back to thinking_content and strips tags."""
+
+    def test_content_only(self):
+        resp = LLMResponse(content="Normal answer", tokens_used=10)
+        assert AgentLoop._resolve_content(resp) == "Normal answer"
+
+    def test_thinking_only_with_tags(self):
+        resp = LLMResponse(
+            content="",
+            thinking_content="<think>reasoning</think>\nThe answer.",
+            tokens_used=10,
+        )
+        assert AgentLoop._resolve_content(resp) == "The answer."
+
+    def test_thinking_only_without_tags(self):
+        resp = LLMResponse(
+            content="", thinking_content="Plain thinking text", tokens_used=10,
+        )
+        assert AgentLoop._resolve_content(resp) == "Plain thinking text"
+
+    def test_content_with_think_tags_stripped(self):
+        resp = LLMResponse(
+            content="<think>reasoning</think>\nClean answer", tokens_used=10,
+        )
+        assert AgentLoop._resolve_content(resp) == "Clean answer"
+
+    def test_both_content_and_thinking_uses_content(self):
+        resp = LLMResponse(
+            content="Real answer",
+            thinking_content="<think>internal</think>",
+            tokens_used=10,
+        )
+        assert AgentLoop._resolve_content(resp) == "Real answer"
+
+    def test_silent_token_falls_back_to_thinking(self):
+        from src.shared.types import SILENT_REPLY_TOKEN
+        resp = LLMResponse(
+            content=SILENT_REPLY_TOKEN,
+            thinking_content="<think>r</think>\nFallback answer",
+            tokens_used=10,
+        )
+        assert AgentLoop._resolve_content(resp) == "Fallback answer"

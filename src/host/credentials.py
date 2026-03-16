@@ -1061,12 +1061,6 @@ class CredentialVault:
             # Fallback: some litellm versions put thinking in a separate attribute
             if thinking_content is None:
                 thinking_content = getattr(msg, "reasoning_content", None) or None
-            # Also check alternative attribute names (Ollama thinking field)
-            if thinking_content is None:
-                for attr in ("thinking", "reasoning", "thought"):
-                    thinking_content = getattr(msg, attr, None) or None
-                    if thinking_content:
-                        break
             # Use thinking as content when model produced only reasoning
             if not content and thinking_content:
                 content = thinking_content
@@ -1188,6 +1182,8 @@ class CredentialVault:
             collected_thinking = ""
             collected_tool_calls: list[dict] = []
             chunk_count = 0
+            # Cache once — avoids repeated string-prefix checks per chunk.
+            is_local = self._is_keyless_provider(used_model)
 
             # Iterate with keepalive: send SSE comments every 15s so
             # downstream read timeouts (agent → mesh, dashboard → agent)
@@ -1214,9 +1210,13 @@ class CredentialVault:
                     delta = chunk.choices[0].delta if chunk.choices else None
                     # Log the first chunk from local models to aid debugging
                     # empty-response issues.
-                    if chunk_count == 1 and self._is_keyless_provider(used_model):
+                    if chunk_count == 1 and is_local:
                         try:
-                            delta_dict = delta.model_dump() if delta and hasattr(delta, "model_dump") else repr(delta)
+                            delta_dict = (
+                                delta.model_dump()
+                                if delta and hasattr(delta, "model_dump")
+                                else repr(delta)
+                            )
                         except Exception:
                             delta_dict = repr(delta)
                         logger.debug(
@@ -1231,26 +1231,17 @@ class CredentialVault:
                             yield f"data: {json.dumps({'type': 'text_delta', 'content': delta.content})}\n\n"
 
                         # Collect thinking/reasoning tokens.  For local
-                        # providers (Ollama) we also stream them so the user
-                        # sees progress — they are the only output for many
-                        # reasoning models (e.g. deepseek-r1, qwen3).
+                        # providers (Ollama) we also stream them so the
+                        # user sees progress — they are often the only
+                        # output for reasoning models (qwen3, deepseek-r1).
+                        # Only stream reasoning when no real content has
+                        # arrived yet; once content flows the reasoning is
+                        # internal and the done event will carry the answer.
                         reasoning = getattr(delta, "reasoning_content", None)
                         if reasoning and isinstance(reasoning, str):
                             collected_thinking += reasoning
-                            if self._is_keyless_provider(used_model):
+                            if is_local and not collected_content:
                                 yield f"data: {json.dumps({'type': 'text_delta', 'content': reasoning})}\n\n"
-
-                        # Some Ollama versions return thinking in a 'thinking'
-                        # attribute that LiteLLM doesn't always map.  Check
-                        # common alternative attribute names as fallback.
-                        if not delta.content and not reasoning:
-                            for attr in ("thinking", "reasoning", "thought"):
-                                alt = getattr(delta, attr, None)
-                                if alt and isinstance(alt, str):
-                                    collected_thinking += alt
-                                    if self._is_keyless_provider(used_model):
-                                        yield f"data: {json.dumps({'type': 'text_delta', 'content': alt})}\n\n"
-                                    break
 
                         if delta.tool_calls:
                             for tc in delta.tool_calls:
