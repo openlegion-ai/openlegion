@@ -35,8 +35,8 @@ WORKDIR /app
 
 # Python dependencies — upgrade pip first to avoid resolver bugs with stale base images
 COPY pyproject.toml .
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir \
+RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip \
+    && pip install --no-cache-dir --root-user-action=ignore \
     "camoufox[geoip]" fastapi uvicorn pydantic
 
 # Application code
