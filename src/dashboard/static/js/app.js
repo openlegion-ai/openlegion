@@ -265,7 +265,8 @@ function dashboard() {
     showWebhookForm: false,
     webhookFormName: '',
     webhookFormAgent: '',
-    webhookFormSecret: '',
+    webhookFormInstructions: '',
+    webhookFormRequireSig: false,
 
     // Model health
     modelHealth: [],
@@ -953,12 +954,12 @@ function dashboard() {
 
     _toastId: 0,
 
-    showToast(msg) {
+    showToast(msg, duration) {
       const id = ++this._toastId;
       this.toastQueue.push({ id, msg });
       setTimeout(() => {
         this.toastQueue = this.toastQueue.filter(t => t.id !== id);
-      }, 4000);
+      }, duration || 4000);
     },
 
     dismissToast(id) {
@@ -3818,17 +3819,30 @@ function dashboard() {
       this.webhookCreating = true;
       try {
         const body = { name, agent };
-        if (this.webhookFormSecret.trim()) body.secret = this.webhookFormSecret.trim();
+        if (this.webhookFormInstructions.trim()) body.instructions = this.webhookFormInstructions.trim();
+        if (this.webhookFormRequireSig) body.secret = true;
         const resp = await fetch(`${window.__config.apiBase}/webhooks`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
         if (resp.ok) {
           const data = await resp.json();
-          this.showToast(`Webhook "${name}" created`);
+          const hook = data.hook || {};
+          const canCopy = navigator.clipboard && navigator.clipboard.writeText;
+          if (hook.secret) {
+            // Secret is one-time — prioritize copying it; URL is always available via list
+            if (canCopy) navigator.clipboard.writeText(hook.secret).catch(() => {});
+            this.showToast(`Webhook "${name}" created — HMAC secret copied`, 8000);
+          } else if (hook.url && canCopy) {
+            navigator.clipboard.writeText(hook.url).catch(() => {});
+            this.showToast(`Webhook "${name}" created — URL copied`);
+          } else {
+            this.showToast(`Webhook "${name}" created`);
+          }
           this.webhookFormName = '';
           this.webhookFormAgent = '';
-          this.webhookFormSecret = '';
+          this.webhookFormInstructions = '';
+          this.webhookFormRequireSig = false;
           this.showWebhookForm = false;
           this.fetchWebhooks();
         } else {
@@ -3839,10 +3853,10 @@ function dashboard() {
       finally { this.webhookCreating = false; }
     },
 
-    async deleteWebhook(name) {
+    async deleteWebhook(hookId, name) {
       this.showConfirm('Delete Webhook', `Delete webhook "${name}"?`, async () => {
         try {
-          const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(name)}`, { method: 'DELETE' });
+          const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(hookId)}`, { method: 'DELETE' });
           if (resp.ok) {
             this.showToast(`Webhook "${name}" deleted`);
             this.fetchWebhooks();
@@ -3854,19 +3868,19 @@ function dashboard() {
       }, true);
     },
 
-    async testWebhook(name) {
-      if (this.webhookTesting[name]) return;
-      this.webhookTesting = { ...this.webhookTesting, [name]: true };
+    async testWebhook(hookId) {
+      if (this.webhookTesting[hookId]) return;
+      this.webhookTesting = { ...this.webhookTesting, [hookId]: true };
       try {
-        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(name)}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(hookId)}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         if (resp.ok) {
-          this.showToast(`Webhook "${name}" test sent`);
+          this.showToast('Webhook test sent');
         } else {
           const err = await resp.json().catch(() => ({}));
           this.showToast(`Test failed: ${err.detail || 'Unknown error'}`);
         }
       } catch (e) { this.showToast(`Test failed: ${e.message}`); }
-      finally { this.webhookTesting = { ...this.webhookTesting, [name]: false }; }
+      finally { this.webhookTesting = { ...this.webhookTesting, [hookId]: false }; }
     },
 
     // ── Agent drill-down ──────────────────────────────────

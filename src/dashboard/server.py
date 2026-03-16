@@ -2161,11 +2161,17 @@ def create_dashboard_router(
     # ── Webhooks ──────────────────────────────────────────────
 
     @api_router.get("/api/webhooks")
-    async def api_webhooks_list() -> dict:
+    async def api_webhooks_list(request: Request) -> dict:
         if webhook_manager is None:
             return {"webhooks": []}
         hooks = webhook_manager.list_hooks() if hasattr(webhook_manager, "list_hooks") else []
-        return {"webhooks": hooks}
+        base = str(request.base_url).rstrip("/")
+        result = []
+        for h in hooks:
+            entry = {k: v for k, v in h.items() if k != "secret"}
+            entry["url"] = f"{base}/webhook/hook/{h['id']}"
+            result.append(entry)
+        return {"webhooks": result}
 
     @api_router.post("/api/webhooks")
     async def api_webhooks_create(request: Request) -> dict:
@@ -2176,27 +2182,39 @@ def create_dashboard_router(
         agent = body.get("agent", "")
         if not name or not agent:
             raise HTTPException(status_code=400, detail="name and agent are required")
-        secret = body.get("secret")
-        hook = webhook_manager.add_hook(name=name, agent=agent, secret=secret)
-        return {"created": True, "name": name, "url": hook.get("url", "") if isinstance(hook, dict) else ""}
+        require_signature = bool(body.get("secret"))
+        instructions = body.get("instructions", "")
+        hook = webhook_manager.add_hook(
+            agent=agent,
+            name=name,
+            require_signature=require_signature,
+            instructions=instructions,
+        )
+        base = str(request.base_url).rstrip("/")
+        # Return a copy so we don't mutate the stored dict; include
+        # secret once so the user can copy it at creation time.
+        result = dict(hook)
+        result["url"] = f"{base}/webhook/hook/{hook['id']}"
+        return {"created": True, "hook": result}
 
-    @api_router.delete("/api/webhooks/{name}")
-    async def api_webhooks_delete(name: str) -> dict:
+    @api_router.delete("/api/webhooks/{hook_id}")
+    async def api_webhooks_delete(hook_id: str) -> dict:
         if webhook_manager is None:
             raise HTTPException(status_code=503, detail="Webhook manager not available")
-        if hasattr(webhook_manager, "remove_hook"):
-            webhook_manager.remove_hook(name)
-        return {"removed": True, "name": name}
+        removed = webhook_manager.remove_hook(hook_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail=f"Webhook '{hook_id}' not found")
+        return {"removed": True, "id": hook_id}
 
-    @api_router.post("/api/webhooks/{name}/test")
-    async def api_webhooks_test(name: str, request: Request) -> dict:
+    @api_router.post("/api/webhooks/{hook_id}/test")
+    async def api_webhooks_test(hook_id: str, request: Request) -> dict:
         if webhook_manager is None:
             raise HTTPException(status_code=503, detail="Webhook manager not available")
         body = await request.json()
-        if hasattr(webhook_manager, "test_hook"):
-            result = await webhook_manager.test_hook(name, payload=body)
-            return {"tested": True, "name": name, "result": result}
-        raise HTTPException(status_code=404, detail=f"Webhook '{name}' not found")
+        result = await webhook_manager.test_hook(hook_id, payload=body)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"Webhook '{hook_id}' not found")
+        return {"tested": True, "id": hook_id, "result": result}
 
     # ── Channels ──────────────────────────────────────────────
 
