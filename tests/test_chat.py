@@ -800,3 +800,21 @@ class TestResolveContentThinkingFallback:
         resp = LLMResponse(content=data, tokens_used=10)
         # null response — return original since we'd lose content
         assert AgentLoop._resolve_content(resp) == data
+
+    def test_think_tags_wrapping_json_cot(self):
+        """Think tags are stripped before JSON extraction (ordering test)."""
+        import json
+        cot = json.dumps({"thought": "x", "response": "The answer"})
+        text = f"<think>reasoning here</think>\n{cot}"
+        resp = LLMResponse(content=text, tokens_used=10)
+        assert AgentLoop._resolve_content(resp) == "The answer"
+
+    def test_thinking_fallback_with_think_tags_and_json(self):
+        """Full pipeline: thinking fallback → strip tags → extract JSON."""
+        import json
+        cot = json.dumps({"thought": "x", "response": "extracted"})
+        thinking = f"<think>reasoning</think>\n{cot}"
+        resp = LLMResponse(
+            content="", thinking_content=thinking, tokens_used=10,
+        )
+        assert AgentLoop._resolve_content(resp) == "extracted"

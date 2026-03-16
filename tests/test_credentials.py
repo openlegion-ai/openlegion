@@ -1811,6 +1811,61 @@ class TestVisionStripping:
         assert len(tool_msg["content"]) == 2
 
 
+# ── Ollama thinking disable tests ─────────────────────────────
+
+
+class TestOllamaThinkingDisable:
+    """Verify reasoning_effort='none' is injected for Ollama + tools."""
+
+    def test_ollama_with_tools_gets_reasoning_effort_none(self, vault):
+        request = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "ollama/qwen3",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "exec"}}],
+            },
+        )
+        _, extra = vault._prepare_llm_params(request, "ollama/qwen3")
+        assert extra["reasoning_effort"] == "none"
+
+    def test_ollama_without_tools_no_reasoning_effort(self, vault):
+        request = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "ollama/qwen3",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        _, extra = vault._prepare_llm_params(request, "ollama/qwen3")
+        assert "reasoning_effort" not in extra
+
+    def test_non_ollama_with_tools_no_reasoning_effort(self, vault):
+        request = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "openai/gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "exec"}}],
+            },
+        )
+        _, extra = vault._prepare_llm_params(request, "openai/gpt-4o")
+        assert "reasoning_effort" not in extra
+
+    def test_ollama_explicit_reasoning_effort_not_overridden(self, vault):
+        request = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "ollama/qwen3",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "exec"}}],
+                "reasoning_effort": "high",
+            },
+        )
+        _, extra = vault._prepare_llm_params(request, "ollama/qwen3")
+        assert extra["reasoning_effort"] == "high"
+
+
 # ── OAuth async integration tests ─────────────────────────────
 
 
