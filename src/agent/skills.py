@@ -321,6 +321,8 @@ class SkillRegistry:
                 }
                 if "enum" in param_info:
                     prop["enum"] = param_info["enum"]
+                if "items" in param_info:
+                    prop["items"] = param_info["items"]
                 properties[param_name] = prop
                 if "default" not in param_info:
                     required.append(param_name)

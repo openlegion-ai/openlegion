@@ -99,7 +99,8 @@ async def wallet_get_balance(
         },
         "args": {
             "type": "array",
-            "description": "EVM: function arguments in order. Solana: not required.",
+            "items": {"type": "string"},
+            "description": "EVM: function arguments in order (as strings). Solana: not required.",
             "default": [],
         },
     },
@@ -211,7 +212,8 @@ async def wallet_transfer(
         },
         "args": {
             "type": "array",
-            "description": "EVM: function arguments in order. Not used for Solana.",
+            "items": {"type": "string"},
+            "description": "EVM: function arguments in order (as strings). Not used for Solana.",
             "default": [],
         },
         "value": {
