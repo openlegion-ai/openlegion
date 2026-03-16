@@ -16,7 +16,8 @@ WORKDIR /app
 # sqlite-vec --pre: v0.1.7-alpha fixes broken ARM64 wheels
 # No browser deps — browsing is handled by the shared browser service
 COPY pyproject.toml .
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir \
     fastapi uvicorn httpx pydantic mcp pypdf \
     && pip install --no-cache-dir --pre sqlite-vec
 

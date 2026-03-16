@@ -33,9 +33,10 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash browser
 
 WORKDIR /app
 
-# Python dependencies
+# Python dependencies — upgrade pip first to avoid resolver bugs with stale base images
 COPY pyproject.toml .
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir \
     "camoufox[geoip]" fastapi uvicorn pydantic
 
 # Application code
