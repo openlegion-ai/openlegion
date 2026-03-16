@@ -1281,7 +1281,8 @@ def create_dashboard_router(
         if os.environ.get("OPENLEGION_SYSTEM_WALLET_MASTER_SEED"):
             raise HTTPException(
                 status_code=409,
-                detail="Master seed already configured. Remove OPENLEGION_SYSTEM_WALLET_MASTER_SEED from .env to reset.",
+                detail="Master seed already configured. Remove "
+                "OPENLEGION_SYSTEM_WALLET_MASTER_SEED from .env to reset.",
             )
         try:
             from mnemonic import Mnemonic

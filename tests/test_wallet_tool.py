@@ -19,7 +19,9 @@ from src.agent.builtins.wallet_tool import (
 def mock_mesh():
     m = AsyncMock()
     m.wallet_get_address.return_value = {"address": "0xABC", "chain": "evm:base"}
-    m.wallet_get_balance.return_value = {"balance": "1.5", "symbol": "ETH", "decimals": 18, "raw": "1500000000000000000"}
+    m.wallet_get_balance.return_value = {
+        "balance": "1.5", "symbol": "ETH", "decimals": 18, "raw": "1500000000000000000",
+    }
     m.wallet_read_contract.return_value = {"result": "0x01", "chain": "evm:base"}
     m.wallet_transfer.return_value = {"tx_hash": "0xDEAD", "chain": "evm:base", "status": "broadcast"}
     m.wallet_execute.return_value = {"tx_hash": "0xBEEF", "chain": "evm:base", "status": "broadcast"}

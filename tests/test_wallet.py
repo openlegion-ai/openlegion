@@ -1,4 +1,8 @@
-"""Tests for WalletService (src/host/wallet.py)."""
+"""Tests for WalletService (src/host/wallet.py).
+
+Tests that call key derivation or EVM/Solana libraries directly are skipped
+when those packages are not installed (CI runs without blockchain deps).
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,26 @@ from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
+
+# Optional deps — tests that need them are marked to skip gracefully in CI.
+try:
+    import eth_account  # noqa: F401
+    import web3  # noqa: F401
+    _has_web3 = True
+except ImportError:
+    _has_web3 = False
+
+try:
+    import solders  # noqa: F401
+    _has_solders = True
+except ImportError:
+    _has_solders = False
+
+requires_web3 = pytest.mark.skipif(not _has_web3, reason="web3/eth_account not installed")
+requires_solders = pytest.mark.skipif(not _has_solders, reason="solders not installed")
+requires_blockchain = pytest.mark.skipif(
+    not (_has_web3 and _has_solders), reason="blockchain deps not installed",
+)
 
 # Set a test mnemonic before importing WalletService
 _TEST_MNEMONIC = (
@@ -96,6 +120,7 @@ class TestChainValidation:
 # ── Key derivation ────────────────────────────────────────────
 
 
+@requires_blockchain
 class TestKeyDerivation:
     def test_evm_deterministic(self, wallet_service):
         a1 = wallet_service._derive_evm_account(0)
@@ -157,6 +182,7 @@ class TestIndexAssignment:
 # ── Address derivation ────────────────────────────────────────
 
 
+@requires_blockchain
 class TestGetAddress:
     @pytest.mark.asyncio
     async def test_evm_address(self, wallet_service):
@@ -186,16 +212,19 @@ class TestGetAddress:
 
 
 class TestValidation:
+    @requires_web3
     def test_validate_evm_address_valid(self, wallet_service):
         result = wallet_service._validate_evm_address(
             "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
         )
         assert result.startswith("0x")
 
+    @requires_web3
     def test_validate_evm_address_invalid(self, wallet_service):
         with pytest.raises(ValueError, match="Invalid EVM address"):
             wallet_service._validate_evm_address("not-an-address")
 
+    @requires_web3
     def test_validate_evm_address_short(self, wallet_service):
         with pytest.raises(ValueError, match="Invalid EVM address"):
             wallet_service._validate_evm_address("0x123")
@@ -243,6 +272,7 @@ class TestValidation:
 # ── ABI encoding ──────────────────────────────────────────────
 
 
+@requires_web3
 class TestAbiEncoding:
     def test_split_simple(self, wallet_service):
         result = wallet_service._split_abi_params("address,uint256")
