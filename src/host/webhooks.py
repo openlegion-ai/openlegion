@@ -23,6 +23,15 @@ from src.shared.utils import generate_id, sanitize_for_prompt, setup_logging
 logger = setup_logging("host.webhooks")
 
 
+def _build_message(hook: dict, body_json: str, *, test: bool = False) -> str:
+    """Build the dispatch message from hook config and payload."""
+    label = f"Webhook '{hook['name']}'" + (" (test)" if test else "") + " received:"
+    instructions = hook.get("instructions", "").strip()
+    suffix = instructions if instructions else "Process this webhook payload."
+    message = f"{label}\n```json\n{body_json[:3000]}\n```\n{suffix}"
+    return sanitize_for_prompt(message)
+
+
 class WebhookManager:
     """Manages named webhook endpoints that trigger agent actions."""
 
@@ -48,7 +57,14 @@ class WebhookManager:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(json.dumps({"hooks": self.hooks}, indent=2) + "\n")
 
-    def add_hook(self, agent: str, name: str, *, require_signature: bool = False) -> dict:
+    def add_hook(
+        self,
+        agent: str,
+        name: str,
+        *,
+        require_signature: bool = False,
+        instructions: str = "",
+    ) -> dict:
         hook_id = generate_id("hook")[:16]
         hook: dict = {
             "id": hook_id,
@@ -59,6 +75,8 @@ class WebhookManager:
         }
         if require_signature:
             hook["secret"] = secrets.token_hex(32)
+        if instructions.strip():
+            hook["instructions"] = instructions.strip()
         self.hooks[hook_id] = hook
         self._save()
         logger.info(f"Added webhook {hook_id}: agent={agent} name={name}")
@@ -72,7 +90,7 @@ class WebhookManager:
         return True
 
     def list_hooks(self) -> list[dict]:
-        return list(self.hooks.values())
+        return [dict(h) for h in self.hooks.values()]
 
     def create_router(self) -> APIRouter:
         """Create a FastAPI router for webhook endpoints."""
@@ -106,12 +124,7 @@ class WebhookManager:
             hook["call_count"] = hook.get("call_count", 0) + 1
             manager._save()
 
-            message = (
-                f"Webhook '{hook['name']}' received:\n"
-                f"```json\n{json.dumps(body, indent=2, default=str)[:3000]}\n```\n"
-                "Process this webhook payload."
-            )
-            message = sanitize_for_prompt(message)
+            message = _build_message(hook, json.dumps(body, indent=2, default=str))
 
             response = None
             if manager.dispatch_fn:
@@ -127,10 +140,8 @@ class WebhookManager:
         if not hook:
             return None
 
-        message = (
-            f"Webhook '{hook['name']}' (test):\n"
-            f"```json\n{json.dumps(payload, indent=2, default=str)[:3000]}\n```\n"
-            "Process this webhook payload."
+        message = _build_message(
+            hook, json.dumps(payload, indent=2, default=str), test=True,
         )
 
         if self.dispatch_fn:

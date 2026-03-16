@@ -2614,7 +2614,7 @@
         <div class="mb-6">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
             <div class="space-y-2 mb-3">
-              <template x-for="wh in webhooks" :key="wh.name">
+              <template x-for="wh in webhooks" :key="wh.id">
                 <div class="flex items-center gap-3 text-xs group py-1.5 border-b border-gray-800/40 last:border-0">
                   <span class="w-2 h-2 rounded-full bg-green-500/50 shrink-0"></span>
                   <span class="text-gray-300 font-mono font-medium" x-text="wh.name"></span>
@@ -2625,9 +2625,9 @@
                     class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all" title="Copy URL" aria-label="Copy webhook URL">
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                   </button>
-                  <button @click="testWebhook(wh.name)" :disabled="webhookTesting[wh.name] === true"
-                    class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-all disabled:opacity-50" x-text="webhookTesting[wh.name] === true ? '...' : 'Test'"></button>
-                  <button @click="deleteWebhook(wh.name)"
+                  <button @click="testWebhook(wh.id)" :disabled="webhookTesting[wh.id] === true"
+                    class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-all disabled:opacity-50" x-text="webhookTesting[wh.id] === true ? '...' : 'Test'"></button>
+                  <button @click="deleteWebhook(wh.id, wh.name)"
                     class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all">Delete</button>
                 </div>
               </template>
@@ -2646,9 +2646,13 @@
                     </template>
                   </select>
                 </div>
-                <input type="text" x-model="webhookFormSecret" :disabled="webhookCreating" class="dash-input w-full text-xs mb-3" placeholder="Secret (optional)">
+                <textarea x-model="webhookFormInstructions" :disabled="webhookCreating" class="dash-input w-full text-xs mb-2" rows="2" placeholder="Instructions for the agent (optional) — e.g. 'Extract the event type and update the CRM'"></textarea>
+                <label class="flex items-center gap-2 text-xs text-gray-400 mb-3 cursor-pointer select-none">
+                  <input type="checkbox" x-model="webhookFormRequireSig" :disabled="webhookCreating" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
+                  Require HMAC signature
+                </label>
                 <div class="flex justify-between">
-                  <button @click="showWebhookForm = false; webhookFormName = ''; webhookFormAgent = ''; webhookFormSecret = ''" :disabled="webhookCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="showWebhookForm = false; webhookFormName = ''; webhookFormAgent = ''; webhookFormInstructions = ''; webhookFormRequireSig = false" :disabled="webhookCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
                   <button @click="createWebhook()" :disabled="webhookCreating" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
                     <svg x-show="webhookCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                     <span x-text="webhookCreating ? 'Creating...' : 'Create Webhook'"></span>
