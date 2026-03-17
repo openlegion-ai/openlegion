@@ -2552,6 +2552,110 @@
         </div>
         <div x-show="channels.length === 0" class="text-sm text-gray-500 py-4 mb-6">No channel data available</div>
 
+        <!-- Credentials -->
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Credentials</div>
+        <div class="mb-6" x-show="settingsData">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="text-sm text-gray-400 mb-2">
+              <span x-text="settingsData?.credentials?.count || 0"></span> credential(s) configured
+            </div>
+            <div class="space-y-1 mb-3">
+              <template x-for="name in settingsData?.credentials?.names || []" :key="name">
+                <div>
+                  <div class="flex items-center gap-2 text-xs group">
+                    <span class="w-2 h-2 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-500/50' : 'bg-amber-500/50'"></span>
+                    <span class="text-gray-300 font-mono flex-1" x-text="name"></span>
+                    <span class="text-[10px] px-1.5 py-0.5 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-900/40 text-green-400' : 'bg-amber-900/40 text-amber-400'" x-text="(settingsData.agent_credentials || []).includes(name) ? 'agent' : 'system'"></span>
+                    <button @click="revealCredential(name)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-gray-400 hover:text-gray-300 transition-opacity px-1" :title="revealedCredentials[name] ? 'Hide value' : 'Reveal value'">
+                      <svg x-show="!revealedCredentials[name]" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+                      <svg x-show="revealedCredentials[name]" x-cloak class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/></svg>
+                    </button>
+                    <button @click="editingCredential = editingCredential === name ? null : name; editCredKey = ''" :aria-expanded="editingCredential === name" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-gray-400 hover:text-indigo-300 transition-opacity text-[10px] px-1" title="Update credential">Update</button>
+                    <button @click="deleteCredential(name)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-red-400 hover:text-red-300 transition-opacity text-base leading-none px-1" title="Remove credential" aria-label="Remove credential">&times;</button>
+                  </div>
+                  <!-- Revealed credential value -->
+                  <div x-show="revealedCredentials[name]" x-cloak x-transition class="ml-4 mt-1 mb-1 flex items-center gap-2">
+                    <code class="text-[11px] text-green-400/80 bg-gray-800 px-2 py-1 rounded font-mono flex-1 break-all select-all" x-text="revealedCredentials[name]"></code>
+                    <button @click="copyToClipboard(revealedCredentials[name])" class="text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 shrink-0" title="Copy value">Copy</button>
+                  </div>
+                  <!-- Inline credential update form -->
+                  <div x-show="editingCredential === name" x-cloak x-transition class="ml-4 mt-1 mb-1 flex items-center gap-2">
+                    <input type="password" x-model="editCredKey" class="dash-input text-xs flex-1" placeholder="New key value">
+                    <button @click="updateCredential(name)" :disabled="credentialSaving" class="text-[10px] px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 disabled:cursor-not-allowed" x-text="credentialSaving ? 'Saving...' : 'Save'"></button>
+                    <button @click="editingCredential = null; editCredKey = ''" class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400">Cancel</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+            <!-- Credential tier legend -->
+            <div class="flex flex-wrap gap-x-5 gap-y-1 mb-3 text-[10px] text-gray-500 leading-relaxed">
+              <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-green-500/50 shrink-0"></span><strong class="text-gray-400">Agent key</strong> &mdash; agents can request by name, granted per-agent via Credential Access permissions. The vault returns an opaque handle; the raw value is never exposed.</span>
+              <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-amber-500/50 shrink-0"></span><strong class="text-gray-400">System key</strong> &mdash; held exclusively by the mesh host. Agents cannot access it at all. LLM provider API keys (Anthropic, OpenAI, etc.) are always stored here.</span>
+            </div>
+            <div class="border-t border-gray-800 pt-3">
+              <button x-show="!showCredForm" @click="showCredForm = true" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Credential</button>
+              <div x-show="showCredForm" x-transition>
+                <div class="text-xs text-gray-500 mb-2">New credential</div>
+                <div class="flex gap-2 mb-2">
+                  <select x-model="credService" :disabled="credSaving" class="dash-select text-xs w-40" @change="credAuthType = 'api_key'; if ($event.target.value === 'ollama') credBaseUrl = credBaseUrl || 'http://localhost:11434'">
+                    <option value="">Service...</option>
+                    <optgroup label="LLM Providers (system tier)">
+                      {% for p in all_providers %}
+                      <option value="{{ p.name }}">{{ p.label }}</option>
+                      {% endfor %}
+                    </optgroup>
+                    <optgroup label="Agent tools">
+                      <option value="brave_search_api_key">Brave Search</option>
+                      <option value="apollo_api_key">Apollo</option>
+                      <option value="hunter_api_key">Hunter</option>
+                    </optgroup>
+                    <option value="__custom__">Custom...</option>
+                  </select>
+                  <template x-if="credService === 'anthropic'">
+                    <select x-model="credAuthType" :disabled="credSaving" class="dash-select text-xs w-48">
+                      <option value="api_key">API Key (recommended)</option>
+                      <option value="oauth">Subscription Token</option>
+                    </select>
+                  </template>
+                  <input x-show="credService === '__custom__'" type="text" x-model="credCustomService" :disabled="credSaving" class="dash-input text-xs w-40" placeholder="credential_name">
+                  <select x-show="credService === '__custom__'" x-model="credTier" :disabled="credSaving" class="dash-select text-xs w-28">
+                    <option value="agent">Agent tier</option>
+                    <option value="system">System tier</option>
+                  </select>
+                  <input x-show="credService !== 'ollama'" type="password" x-model="credKey" :disabled="credSaving" class="dash-input flex-1"
+                    :placeholder="credAuthType === 'oauth' && credService === 'anthropic' ? 'sk-ant-oat01-...' : 'API key or value'">
+                </div>
+                <template x-if="credService === '__custom__'">
+                  <div class="text-[10px] text-gray-500 leading-snug mb-2 p-2 rounded bg-gray-800/60 border border-gray-700/40">
+                    <strong class="text-gray-400">Agent tier</strong>: agents can request this credential by name. Access is controlled per-agent via the Credential Access permission pattern. The agent receives an opaque handle &mdash; the raw value is never returned.
+                    <span class="mx-1">&middot;</span>
+                    <strong class="text-gray-400">System tier</strong>: held only by the mesh host. No agent can read or reference it. Use this for infrastructure tokens or secrets that agents should never touch.
+                  </div>
+                </template>
+                <template x-if="credAuthType === 'oauth' && credService === 'anthropic'">
+                  <div class="text-[10px] text-amber-400/80 leading-snug mb-2">
+                    Experimental — uses unofficial OAuth that may break without notice. Generate with: <code class="font-mono bg-gray-800 px-1 rounded">claude setup-token</code>
+                  </div>
+                </template>
+                <template x-if="credService === 'ollama'">
+                  <div>
+                    <input type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-1" placeholder="http://localhost:11434">
+                    <div class="text-[10px] text-gray-500 mb-3">Ollama URL — no API key needed. Make sure Ollama is running.</div>
+                  </div>
+                </template>
+                <input x-show="credService !== 'ollama' && !(credAuthType === 'oauth' && credService === 'anthropic')" type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
+                <div class="flex justify-between">
+                  <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'; credAuthType = 'api_key'" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="addCredential()" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                    <svg x-show="credSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                    <span x-text="credSaving ? 'Saving...' : 'Save Credential'"></span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Webhooks -->
         <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Webhooks<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Named HTTP endpoints that accept POST requests and route them to agents. Use these to integrate external services, CI/CD pipelines, or custom apps.</span></span></div>
         <div class="mb-6">
