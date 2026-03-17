@@ -2149,7 +2149,6 @@ def create_dashboard_router(
         "chat_max_total_rounds": (int, 10, 1000),
         "tool_timeout": (int, 10, 3600),
         "browser_idle_timeout": (int, 5, 120),
-        "browser_max_concurrent": (int, 1, 20),
         "health_poll_interval": (int, 5, 300),
         "health_max_failures": (int, 1, 20),
         "health_restart_limit": (int, 0, 20),
@@ -2164,7 +2163,6 @@ def create_dashboard_router(
         "chat_max_total_rounds": 200,
         "tool_timeout": 300,
         "browser_idle_timeout": 30,
-        "browser_max_concurrent": 5,
         "health_poll_interval": 30,
         "health_max_failures": 3,
         "health_restart_limit": 3,
@@ -2246,6 +2244,87 @@ def create_dashboard_router(
             yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
 
         return {"model": model}
+
+    # ── Restart agents ────────────────────────────────────────
+
+    @api_router.post("/api/restart-agents")
+    async def api_restart_agents() -> dict:
+        """Restart all agent containers and the browser service.
+
+        Re-reads config/settings.json and mesh.yaml so env-var-based
+        settings (execution limits, browser idle timeout) take effect.
+        """
+        import asyncio as _asyncio
+
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="Runtime not available")
+        from src.cli.config import _load_config
+        from src.host.runtime import DockerBackend
+
+        # Refresh env vars from settings
+        settings_path = Path("config/settings.json")
+        if settings_path.exists():
+            try:
+                sys_settings = json.loads(settings_path.read_text())
+                for env_key, cfg_key in {
+                    "OPENLEGION_MAX_ITERATIONS": "max_iterations",
+                    "OPENLEGION_CHAT_MAX_TOOL_ROUNDS": "chat_max_tool_rounds",
+                    "OPENLEGION_CHAT_MAX_TOTAL_ROUNDS": "chat_max_total_rounds",
+                    "OPENLEGION_TOOL_TIMEOUT": "tool_timeout",
+                }.items():
+                    if cfg_key in sys_settings:
+                        runtime.extra_env[env_key] = str(sys_settings[cfg_key])
+            except (ValueError, OSError):
+                pass
+
+        cfg = _load_config()
+        agents_cfg = cfg.get("agents", {})
+        default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        loop = _asyncio.get_running_loop()
+        results = {}
+
+        # Restart browser service first (picks up idle timeout from settings)
+        if isinstance(runtime, DockerBackend) and hasattr(runtime, "stop_browser_service"):
+            try:
+                await loop.run_in_executor(None, runtime.stop_browser_service)
+                await loop.run_in_executor(None, runtime.start_browser_service)
+            except Exception as e:
+                logger.warning("Browser service restart failed: %s", e)
+
+        # Restart each agent
+        for agent_id in list(agent_registry.keys()):
+            agent_cfg = agents_cfg.get(agent_id, {})
+            try:
+                await loop.run_in_executor(None, runtime.stop_agent, agent_id)
+                skills_dir = agent_cfg.get("skills_dir", "")
+                if skills_dir:
+                    skills_dir = str(Path(skills_dir).resolve())
+                url = await loop.run_in_executor(
+                    None,
+                    lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir: runtime.start_agent(
+                        agent_id=aid,
+                        role=acfg.get("role", "assistant"),
+                        skills_dir=sd,
+                        model=acfg.get("model", default_model),
+                        mcp_servers=acfg.get("mcp_servers") or None,
+                        thinking=acfg.get("thinking", ""),
+                    ),
+                )
+                if router is not None:
+                    router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
+                else:
+                    agent_registry[agent_id] = url
+                if transport is not None:
+                    from src.host.transport import HttpTransport
+                    if isinstance(transport, HttpTransport):
+                        transport.register(agent_id, url)
+                ready = await runtime.wait_for_agent(agent_id, timeout=60)
+                results[agent_id] = "ready" if ready else "started"
+            except Exception as e:
+                logger.error("Failed to restart agent '%s': %s", agent_id, e)
+                results[agent_id] = f"error: {e}"
+
+        return {"restarted": results}
 
     # ── Storage ────────────────────────────────────────────────
 

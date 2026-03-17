@@ -354,7 +354,7 @@ class DockerBackend(RuntimeBackend):
         else:
             max_browsers, browser_mem = min(max_agents, 10), "8g"
 
-        # Override browser settings from dashboard config
+        # Override browser idle timeout from dashboard config
         idle_timeout_minutes = 30
         settings_path = self.project_root / "config" / "settings.json"
         if settings_path.exists():
@@ -362,8 +362,6 @@ class DockerBackend(RuntimeBackend):
                 bsettings = json.loads(settings_path.read_text())
                 if "browser_idle_timeout" in bsettings:
                     idle_timeout_minutes = int(bsettings["browser_idle_timeout"])
-                if "browser_max_concurrent" in bsettings:
-                    max_browsers = min(int(bsettings["browser_max_concurrent"]), max_browsers)
             except (json.JSONDecodeError, OSError, ValueError):
                 pass
 

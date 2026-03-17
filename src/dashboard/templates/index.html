@@ -3322,9 +3322,9 @@
               </p>
             </div>
 
-            <!-- New browser settings -->
-            <div class="grid grid-cols-2 gap-4 mt-4 pt-4 border-t border-gray-800" x-show="systemSettings">
-              <div>
+            <!-- Idle timeout -->
+            <div class="mt-4 pt-4 border-t border-gray-800" x-show="systemSettings">
+              <div class="max-w-xs">
                 <div class="flex items-center gap-1 mb-1">
                   <label class="text-xs text-gray-400">Idle Timeout (minutes)</label>
                   <span class="text-[10px] text-amber-500/70">restart required</span>
@@ -3333,16 +3333,6 @@
                   class="dash-input w-full"
                   :value="systemSettings?.browser_idle_timeout"
                   @change="saveSystemSetting('browser_idle_timeout', $event.target.value)">
-              </div>
-              <div>
-                <div class="flex items-center gap-1 mb-1">
-                  <label class="text-xs text-gray-400">Max Concurrent Browsers</label>
-                  <span class="text-[10px] text-amber-500/70">restart required</span>
-                </div>
-                <input type="number" step="1" min="1" max="20"
-                  class="dash-input w-full"
-                  :value="systemSettings?.browser_max_concurrent"
-                  @change="saveSystemSetting('browser_max_concurrent', $event.target.value)">
               </div>
             </div>
           </div>
@@ -3386,6 +3376,24 @@
             <p class="text-[10px] text-gray-600 leading-relaxed pt-2">
               Health settings are applied immediately without restart. Agents are restarted after consecutive failures exceed the threshold.
             </p>
+          </div>
+
+          <!-- ── Restart button ── -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5 flex items-center justify-between">
+            <div>
+              <h3 class="text-sm font-medium text-gray-200">Apply Changes</h3>
+              <p class="text-[10px] text-gray-500 mt-0.5">Restart all agents and the browser service to apply settings marked <span class="text-amber-500/70">restart required</span></p>
+            </div>
+            <button @click="restartAllAgents()"
+              :disabled="_restartingAll"
+              class="px-4 py-2 text-xs font-medium rounded-lg transition-colors flex items-center gap-2"
+              :class="_restartingAll
+                ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                : 'bg-amber-600/20 text-amber-400 hover:bg-amber-600/30 border border-amber-600/30'">
+              <svg x-show="_restartingAll" class="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+              <svg x-show="!_restartingAll" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              <span x-text="_restartingAll ? 'Restarting...' : 'Restart Agents'"></span>
+            </button>
           </div>
 
         </div><!-- /settings sub-tab -->
