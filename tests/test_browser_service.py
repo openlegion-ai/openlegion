@@ -472,6 +472,130 @@ class TestStealthConfig:
                 assert "proxy.example.com" in log_msg
 
 
+class TestUAOverride:
+    """Tests for BROWSER_UA_VERSION user-agent override."""
+
+    def test_no_override_by_default(self):
+        """Without BROWSER_UA_VERSION, no config or UA pref should be set."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert "config" not in opts
+        assert "i_know_what_im_doing" not in opts
+        assert "general.useragent.override" not in opts["firefox_user_prefs"]
+
+    def test_override_sets_camoufox_config(self):
+        """BROWSER_UA_VERSION should set Camoufox's config dict (primary mechanism)."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {"BROWSER_UA_VERSION": "138.0"}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert opts["config"] == {
+            "navigator.userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0",
+        }
+        assert opts["i_know_what_im_doing"] is True
+
+    def test_override_sets_firefox_pref_fallback(self):
+        """BROWSER_UA_VERSION should also set general.useragent.override as fallback."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {"BROWSER_UA_VERSION": "138.0"}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        ua = opts["firefox_user_prefs"]["general.useragent.override"]
+        assert "Firefox/138.0" in ua
+        # Config and pref must have the same value
+        assert ua == opts["config"]["navigator.userAgent"]
+
+    def test_override_respects_os_windows(self):
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {"BROWSER_UA_VERSION": "139.0"}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        ua = opts["config"]["navigator.userAgent"]
+        assert "Windows NT 10.0" in ua
+        assert "rv:139.0" in ua
+        assert ua.endswith("Firefox/139.0")
+
+    def test_override_respects_os_macos(self):
+        from src.browser.stealth import build_launch_options
+        env = {"BROWSER_UA_VERSION": "138.0", "BROWSER_OS": "macos"}
+        with patch.dict("os.environ", env, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        ua = opts["config"]["navigator.userAgent"]
+        assert "Macintosh; Intel Mac OS X 10.15" in ua
+        assert "Firefox/138.0" in ua
+
+    def test_override_respects_os_linux(self):
+        from src.browser.stealth import build_launch_options
+        env = {"BROWSER_UA_VERSION": "138.0", "BROWSER_OS": "linux"}
+        with patch.dict("os.environ", env, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        ua = opts["config"]["navigator.userAgent"]
+        assert "X11; Linux x86_64" in ua
+        assert "Firefox/138.0" in ua
+
+    def test_override_accepts_three_part_version(self):
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {"BROWSER_UA_VERSION": "138.0.1"}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert "Firefox/138.0.1" in opts["config"]["navigator.userAgent"]
+
+    def test_override_rejects_non_numeric(self):
+        """Non-numeric version should be ignored with a warning."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {"BROWSER_UA_VERSION": "abc"}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert "config" not in opts
+        assert "general.useragent.override" not in opts["firefox_user_prefs"]
+
+    def test_override_rejects_single_number(self):
+        """Version without minor component (e.g. '138') should be rejected."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {"BROWSER_UA_VERSION": "138"}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert "config" not in opts
+
+    def test_override_rejects_empty_parts(self):
+        """Malformed versions like '138.' or '.0' should be rejected."""
+        from src.browser.stealth import build_launch_options
+        for bad in ("138.", ".0", ".", ".."):
+            with patch.dict("os.environ", {"BROWSER_UA_VERSION": bad}, clear=True):
+                opts = build_launch_options("agent1", "/tmp/profile")
+            assert "config" not in opts, f"Expected rejection for {bad!r}"
+
+    def test_override_strips_whitespace(self):
+        """Leading/trailing whitespace should be stripped."""
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {"BROWSER_UA_VERSION": "  138.0  "}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert "Firefox/138.0" in opts["config"]["navigator.userAgent"]
+
+    def test_empty_string_means_no_override(self):
+        from src.browser.stealth import build_launch_options
+        with patch.dict("os.environ", {"BROWSER_UA_VERSION": ""}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile")
+        assert "config" not in opts
+
+    def test_build_ua_string_directly(self):
+        """Unit test the helper function."""
+        from src.browser.stealth import _build_ua_string
+        assert _build_ua_string("windows", "138.0") == (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) "
+            "Gecko/20100101 Firefox/138.0"
+        )
+        assert _build_ua_string("macos", "140.0.2") == (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:140.0.2) "
+            "Gecko/20100101 Firefox/140.0.2"
+        )
+        assert _build_ua_string("linux", "138.0") == (
+            "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) "
+            "Gecko/20100101 Firefox/138.0"
+        )
+        # Unknown OS falls back to windows
+        assert "Windows NT" in _build_ua_string("freebsd", "138.0")
+        # Invalid versions return None
+        assert _build_ua_string("windows", "abc") is None
+        assert _build_ua_string("windows", "138") is None
+        assert _build_ua_string("windows", "") is None
+
+
 class TestNavigate:
     """Tests for BrowserManager.navigate()."""
 
