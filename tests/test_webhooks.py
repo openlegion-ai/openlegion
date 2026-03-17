@@ -237,7 +237,7 @@ class TestWebhookRouter:
         resp = client.post(f"/webhook/hook/{hook['id']}", json={"x": 1})
         assert resp.status_code == 200
         data = resp.json()
-        assert data["response"] is None
+        assert "response" not in data  # response redacted for security (U14-4)
         assert mgr.hooks[hook["id"]]["call_count"] == 1
 
     def test_hmac_missing_header_when_required(self):

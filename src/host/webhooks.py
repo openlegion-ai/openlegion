@@ -97,13 +97,24 @@ class WebhookManager:
         router = APIRouter(prefix="/webhook")
         manager = self
 
+        _MAX_WEBHOOK_BODY = 1_048_576  # 1 MB
+
         @router.post("/hook/{hook_id}")
         async def receive_webhook(hook_id: str, request: Request) -> dict:
             hook = manager.hooks.get(hook_id)
             if not hook:
                 raise HTTPException(status_code=404, detail="Unknown webhook")
 
+            content_length = request.headers.get("content-length")
+            if content_length:
+                try:
+                    if int(content_length) > _MAX_WEBHOOK_BODY:
+                        raise HTTPException(status_code=413, detail="Payload too large")
+                except ValueError:
+                    pass  # Malformed header; body-length check below is authoritative
             raw_body = await request.body()
+            if len(raw_body) > _MAX_WEBHOOK_BODY:
+                raise HTTPException(status_code=413, detail="Payload too large")
 
             # HMAC-SHA256 signature verification (when hook has a secret)
             hook_secret = hook.get("secret")
@@ -126,11 +137,10 @@ class WebhookManager:
 
             message = _build_message(hook, json.dumps(body, indent=2, default=str))
 
-            response = None
             if manager.dispatch_fn:
-                response = await manager.dispatch_fn(hook["agent"], message)
+                await manager.dispatch_fn(hook["agent"], message)
 
-            return {"status": "processed", "hook": hook["name"], "response": response}
+            return {"status": "processed", "hook": hook["name"]}
 
         return router
 

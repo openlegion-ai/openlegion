@@ -127,8 +127,15 @@ class WhatsAppChannel(Channel):
         @router.post("/webhook")
         async def receive_webhook(request: Request) -> dict:
             """Receive incoming WhatsApp messages."""
-            # Verify X-Hub-Signature-256 if app secret is configured
+            # Verify X-Hub-Signature-256 -- required for production security
             app_secret = os.environ.get("WHATSAPP_APP_SECRET", "")
+            if not app_secret:
+                if not getattr(receive_webhook, "_no_secret_warned", False):
+                    logger.warning(
+                        "WHATSAPP_APP_SECRET not set — webhook signature verification DISABLED. "
+                        "Any HTTP client can inject messages. Set the app secret from Meta dashboard."
+                    )
+                    receive_webhook._no_secret_warned = True  # type: ignore[attr-defined]
             if app_secret:
                 raw_body = await request.body()
                 signature = request.headers.get("X-Hub-Signature-256", "")

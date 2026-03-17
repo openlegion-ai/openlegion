@@ -25,6 +25,9 @@ SILENT_REPLY_TOKEN = "__SILENT__"
 RESERVED_AGENT_IDS = frozenset({"mesh"})
 """Internal component names that must not be used as agent IDs."""
 
+AGENT_ID_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+"""Canonical agent ID regex — 1-64 chars, alphanumeric start, then alphanumeric/hyphen/underscore."""
+
 # === Inter-Component Messages ===
 
 

@@ -4,6 +4,21 @@
  * Two panels: Agents, System (Activity / Costs / Automation / Integrations / API Keys / Wallet / Storage / Settings).
  * Real-time updates via WebSocket + periodic REST polling.
  */
+
+// CSRF protection: inject X-Requested-With on all non-GET fetch calls
+// so the server can reject cross-origin state-changing requests.
+const _origFetch = window.fetch;
+window.fetch = function(input, init) {
+  init = init || {};
+  const method = (init.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') {
+    init.headers = new Headers(init.headers || {});
+    if (!init.headers.has('X-Requested-With')) {
+      init.headers.set('X-Requested-With', 'XMLHttpRequest');
+    }
+  }
+  return _origFetch.call(this, input, init);
+};
 const _IDENTITY_TABS = [
   { id: 'config', label: 'Config', file: null, access: 'user' },
   { id: 'identity', label: 'Identity', file: null, access: 'user' },

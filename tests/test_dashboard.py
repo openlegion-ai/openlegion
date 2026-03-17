@@ -100,6 +100,18 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
     return result
 
 
+class _CSRFTestClient(TestClient):
+    """TestClient that auto-injects the X-Requested-With CSRF header."""
+
+    def request(self, method, url, **kwargs):
+        if method.upper() not in ("GET", "HEAD", "OPTIONS"):
+            headers = kwargs.get("headers") or {}
+            if "X-Requested-With" not in headers:
+                headers["X-Requested-With"] = "XMLHttpRequest"
+                kwargs["headers"] = headers
+        return super().request(method, url, **kwargs)
+
+
 def _make_client(components: dict) -> TestClient:
     """Build a TestClient with the dashboard router mounted."""
     from src.dashboard.server import create_dashboard_router
@@ -107,7 +119,7 @@ def _make_client(components: dict) -> TestClient:
     router = create_dashboard_router(**components, mesh_port=8420)
     app = FastAPI()
     app.include_router(router)
-    return TestClient(app)
+    return _CSRFTestClient(app)
 
 
 def _teardown(components: dict) -> None:

@@ -381,6 +381,9 @@ class ContextManager:
                     temperature=0.3,
                 )
                 summary = response.content.strip()
+                if not summary:
+                    logger.warning("Summarization returned empty response, falling back to hard prune")
+                    return self._hard_prune(messages)
                 break
             except Exception as e:
                 last_err = e
