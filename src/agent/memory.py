@@ -22,7 +22,7 @@ import sqlite3
 import struct
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Coroutine, Optional, TypeVar
+from typing import Any, Callable, Coroutine, TypeVar
 
 import sqlite_vec
 from sqlite_vec import serialize_float32
@@ -55,8 +55,8 @@ class MemoryStore:
     def __init__(
         self,
         db_path: str,
-        embed_fn: Optional[EmbedFn] = None,
-        categorize_fn: Optional[CategorizeFn] = None,
+        embed_fn: EmbedFn | None = None,
+        categorize_fn: CategorizeFn | None = None,
     ):
         self._close_lock = threading.Lock()
         self.db = sqlite3.connect(db_path, check_same_thread=False)
@@ -321,7 +321,7 @@ class MemoryStore:
             logger.warning(f"Keyword search failed: {e}")
             return []
 
-    def _get_fact(self, fact_id: str) -> Optional[MemoryFact]:
+    def _get_fact(self, fact_id: str) -> MemoryFact | None:
         row = self.db.execute(
             "SELECT f.id, f.key, f.value, f.category, f.source, f.confidence, "
             "f.access_count, f.last_accessed, f.created_at, f.decay_score, "
@@ -370,7 +370,7 @@ class MemoryStore:
             )
         return result
 
-    def _get_fact_by_key(self, key: str) -> Optional[MemoryFact]:
+    def _get_fact_by_key(self, key: str) -> MemoryFact | None:
         """Look up a fact by key (used in tests)."""
         row = self.db.execute("SELECT id FROM facts WHERE key = ?", (key,)).fetchone()
         if not row:

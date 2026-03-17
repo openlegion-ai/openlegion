@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -188,7 +188,7 @@ class Blackboard:
             version=new_version,
         )
 
-    def read(self, key: str) -> Optional[BlackboardEntry]:
+    def read(self, key: str) -> BlackboardEntry | None:
         """Read a single entry by exact key."""
         row = self.db.execute(
             "SELECT key, value, written_by, workflow_id, "
@@ -338,10 +338,7 @@ class Blackboard:
 
     def remove_agent_watches(self, agent_id: str) -> None:
         """Remove all watches for an agent (cleanup on deregister)."""
-        with self._write_lock:
-            self._watchers.pop(agent_id, None)
-            self.db.execute("DELETE FROM watchers WHERE agent_id = ?", (agent_id,))
-            self.db.commit()
+        self.remove_watch(agent_id)
 
     def get_watchers_for_key(self, key: str, exclude: str | None = None) -> list[str]:
         """Return agent IDs watching a key, excluding the writer to prevent self-notify."""
@@ -608,7 +605,7 @@ class MessageRouter:
         logger.error(f"Failed to route message to {message.to} after retry: {last_err}")
         return {"error": f"Delivery failed after retry: {last_err}"}
 
-    def _resolve_target(self, target: str) -> Optional[str]:
+    def _resolve_target(self, target: str) -> str | None:
         """Resolve agent ID or capability to a container URL."""
         with self._registry_lock:
             if target in self.agent_registry:

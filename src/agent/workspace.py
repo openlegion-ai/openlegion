@@ -93,7 +93,6 @@ _MAX_LEARNINGS_SIZE = 50_000
 class WorkspaceManager:
     """Reads and writes the agent's persistent workspace files."""
 
-    PROMPT_FILES = ("PROJECT.md", "INSTRUCTIONS.md", "SOUL.md", "USER.md")
     MEMORY_FILE = "MEMORY.md"
     HEARTBEAT_FILE = "HEARTBEAT.md"
     DAILY_DIR = "memory"

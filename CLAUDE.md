@@ -346,3 +346,101 @@ pytest tests/test_loop.py -x -v
 | P1 | Performance | workspace.py, loop.py | Mtime-cached + pre-sanitized bootstrap and learnings; callers skip redundant sanitize_for_prompt() |
 | P2 | Performance | skills.py | Cache inspect.signature() at decoration time; memoize get_tool_definitions() and get_descriptions() |
 | P5 | Performance | loop.py, cron.py | TTL-cached goals fetch (300s); cached heartbeat probe entries to eliminate duplicate blackboard queries |
+
+## Cleanup Inventory (Phase 1 — Read-Only Findings)
+
+**Test Baseline:** 2240 collected, 2212 passed, 0 failed, 28 skipped, 0 errors (105s)
+- Skips: 15 Telegram (optional dep), 6 Discord (optional dep), 7 MCP E2E (optional dep)
+- Zero test failures. Zero lint errors (ruff clean).
+
+### Category A — Dead Weight
+
+| ID | File & Location | What's Wrong | Proposed Action | Risk |
+|---|---|---|---|---|
+| A1 | `src/host/containers.py` (entire file, 16 lines) | Backward-compat alias `ContainerManager = DockerBackend`. Only referenced in 4 E2E test files. | Update E2E tests to import `DockerBackend` directly, remove file | Low |
+| A2 | `src/agent/loop.py:1480` | `_execute_chat_tool_call()` method defined but never called. Superseded by `_execute_chat_tools_parallel()` (line 1440). | Remove dead method | None |
+| A3 | `src/agent/workspace.py:96` | `PROMPT_FILES` class attribute never referenced anywhere. Actual bootstrap uses `_BOOTSTRAP_FILES` (line 186). | Remove dead attribute | None |
+| A4 | `src/agent/mesh_client.py:506` | `api_call()` method defined but never called from anywhere (not even tests). Leftover from earlier design. | Remove dead method | None |
+| A5 | `src/agent/builtins/http_tool.py:47` | `close_client()` defined but never called — the shared httpx client is never cleaned up on shutdown. | Wire into agent lifespan in `__main__.py`, or remove if not needed | Low |
+| A6 | `src/host/costs.py:21` | `_DEFAULT_COST = (0.003, 0.015)` defined but never referenced. The actual fallback is `_DEFAULT_COST` in `shared/models.py:69`. | Remove dead constant | None |
+| A7 | `src/host/costs.py:63` | `self._event_bus = event_bus` stored but never read by any method. The constructor accepts `event_bus` param that is never consumed. | Remove parameter and attribute | None |
+| A8 | `src/host/transport.py:332` | `resolve_url()` function only used in tests, never in production code. | Remove function, update test | Low |
+| A9 | `src/cli/formatting.py:106` | `echo_json()` function defined but never called from anywhere. | Remove dead function | None |
+
+**Notes:** No unused imports found (AST analysis of all 78 files). No commented-out code blocks. No orphan files. No TODO/FIXME/HACK/XXX comments.
+
+### Category B — Redundancy
+
+| ID | File & Location | What's Wrong | Proposed Action | Risk |
+|---|---|---|---|---|
+| B1 | `src/agent/builtins/browser_tool.py:20-30` + `src/browser/redaction.py:12-22` | `_REDACT_PATTERNS` list (9 compiled regexes) duplicated identically in both files | Move patterns to `src/shared/`, import from both | Low |
+| B2 | `src/agent/context.py:196-230` + `:232-276` | `maybe_compact()` and `force_compact()` share identical flush→summarize→log pattern (~30 lines duplicated) | Extract shared `_do_compact()` helper | Low |
+| B3 | `src/dashboard/server.py:1755-1820` | Event preview parsing logic (JSON→preview→error handling) duplicated for blackboard and pubsub events | Extract `_parse_event_preview(data)` helper | None |
+| B4 | `src/dashboard/server.py:2450-2465` | Credential rollback loop duplicated between `ValueError` and `Exception` handlers | Use `finally` or extract helper | None |
+| B5 | `src/host/credentials.py:437` + `src/host/transcript.py:37` | Duplicate provider-detection logic: both map model prefixes to provider names with overlapping tables. transcript.py comment says "mirrors credentials.py" | Extract shared `resolve_provider()` into `src/shared/models.py` | Low |
+| B6 | `src/host/mesh.py:339` | `remove_agent_watches()` duplicates the `pattern=None` branch of `remove_watch()` (same 3 lines) | Have `remove_agent_watches` delegate to `remove_watch(agent_id, None)` | None |
+| B7 | `src/channels/base.py:203` | Inline `re.match(r"^@(\w+)\s+(.+)$", text, re.DOTALL)` when the same pattern is already compiled as `AT_MENTION_RE` in `channels/__init__.py` | Import and use `AT_MENTION_RE` | None |
+| B8 | `src/shared/utils.py:15` + `src/shared/types.py:16` | Near-duplicate ID generators: `generate_id()` and `_generate_id()` with trivially different interfaces | Have `_generate_id` delegate to `generate_id`, or unify | Low |
+| B9 | `src/setup_wizard.py:576` + `src/dashboard/server.py:1193` | Near-identical API key validation logic (same litellm call, same error classification, same auth keyword list) | Extract shared `validate_api_key()` function | Low |
+
+### Category C — AI Slop
+
+**Overview:** 113 broad `except Exception` handlers found. 24 silent `pass`, 89 log-only. Most are intentional infrastructure resilience.
+
+| ID | File & Location | What's Wrong | Proposed Action | Risk |
+|---|---|---|---|---|
+| C1 | `src/dashboard/server.py:1356` | WalletService init failure silently swallowed — error info lost | Log at warning level before `pass` | None |
+| C2 | `src/host/credentials.py:548` | `discover_ollama_models()` catches all exceptions silently | Catch `(httpx.HTTPError, OSError, KeyError, ValueError)` specifically | Low |
+| C3 | `src/host/wallet.py:894` | CoinGecko price fetch catches all exceptions silently | Catch `(httpx.HTTPError, OSError, KeyError, ValueError)` specifically | Low |
+| C4 | `src/agent/skills.py:130,166` | Defensive `getattr(self, "_mcp_client", None)` on attribute that is always set in `__init__` | Replace with `self._mcp_client` | None |
+| C5 | `src/agent/skills.py:260,287` | Defensive `getattr(self, "_descriptions_cache", None)` on caches initialized in `__init__` | Replace with direct attribute access | None |
+
+**Not flagged (acceptable patterns):** Cleanup/teardown `pass` handlers, keepalive `pass`, subagent `task.result()` fallback, browser xdotool, health/cron/channel log-only handlers.
+
+### Category D — Inconsistency
+
+| ID | File & Location | What's Wrong | Proposed Action | Risk |
+|---|---|---|---|---|
+| D1 | 19 files across codebase | Mixed f-string and %-style logger formatting. 130 f-string vs 162 %-style. 19 files use both. | Standardize to %-style (idiomatic, deferred evaluation) | Low |
+| D2 | 8 files: `types.py`, `loop.py`, `memory.py`, `mesh_client.py`, `cron.py`, `mesh.py`, `watchers.py`, `webhooks.py` | 42 `Optional[X]` usages where `X \| None` is dominant (278 usages). All have `from __future__ import annotations`. | Replace with `X \| None`, remove `Optional` import | None |
+| D3 | `src/agent/attachments.py:26` | Uses `logging.getLogger(__name__)` while every other `src/agent/` file uses `setup_logging("agent.module")`. Won't get JSON formatting in production. | Replace with `setup_logging("agent.attachments")` | None |
+| D4 | `src/host/runtime.py:466` | `import json as _json` inside function body when `json` is already imported at module level (line 15) | Remove redundant import, use `json.loads` | None |
+| D5 | `src/channels/telegram.py:520,526,552,558` | Uses literal `4096` (API limit) while `MAX_TG_LEN = 4000` constant exists. Two different limits for same platform. | Unify to single constant | None |
+| D6 | `src/channels/slack.py:91,121-131` | Logs successful auth/connection at WARNING level while other channels use INFO | Change to `logger.info` | None |
+
+### Category E — Code Quality
+
+| ID | File & Location | What's Wrong | Proposed Action | Risk |
+|---|---|---|---|---|
+| E1 | `src/dashboard/server.py` (2785 lines) + `src/host/server.py` (1405 lines) | Two monolithic function-scoped API definitions. Dashboard router is ~2300 lines, mesh app is ~1335 lines. | **Deferred** — too large/risky for cleanup scope | Medium |
+| E2 | `src/agent/builtins/file_tool.py:205`, `src/agent/server.py:254,393,404,428` | Magic numbers (500, 5000, 8000, 16000) for truncation limits without named constants | Extract to named constants | None |
+| E3 | `src/host/cron.py:167` | Magic number 43200 (30 days in minutes) for cron scan range | Define `_MAX_CRON_SCAN_MINUTES = 43200` | None |
+| E4 | `src/host/server.py:100-103` | `_MAX_SYSTEM_PROMPT`, `_MAX_BB_KEY_LEN`, `_MAX_BB_VALUE_BYTES` defined inside function body instead of module level | Move to module-level constants | None |
+
+### Summary Statistics
+
+- **78 Python source files**, ~32K lines of code (src/ only)
+- **Zero unused imports**, zero orphan files, zero commented-out code
+- **Ruff clean** (rules E, F, W, I all passing)
+- **33 actionable findings** (9 dead weight, 9 redundancy, 5 AI slop, 6 inconsistency, 4 code quality)
+- **1 deferred finding** (E1 — monolithic server functions)
+
+### Cleanup Status
+
+**Applied (30 files modified, ~230 lines removed):**
+- **Batch 1 — Dead Weight:** A2-A9 applied. A1 (containers.py) skipped — only used in E2E tests we can't run to verify.
+- **Batch 2 — Standardization:** D2-D6 applied. D1 (logger f-string→%-style) skipped — 130 calls across 26 files, high risk of typos for minimal functional benefit.
+- **Batch 3 — Consolidation:** B2 (compact helper), B3 (event preview), B4 (rollback), B6 (mesh watch), B7 (AT_MENTION_RE) applied. B1 (redact patterns), B5 (provider detection), B8 (ID generators), B9 (API validation) deferred — cross-module shared code extraction, moderate risk.
+- **Batch 4 — AI Slop:** C1-C5 all applied.
+- **Batch 5 — Code Quality:** E2-E4 all applied.
+
+**Final test results:** 2236 passed, 28 skipped, 0 failures. Ruff clean.
+
+**Deferred / Needs Human Review:**
+- **A1** — `containers.py` alias removal requires E2E test updates we can't verify
+- **D1** — Logger f-string→%-style (130 calls, 26 files) — large mechanical change, low value
+- **B1** — `_REDACT_PATTERNS` duplication across trust zones (agent vs browser container) — may be intentional defense-in-depth
+- **B5** — Provider detection duplication (credentials.py vs transcript.py) — needs shared module extraction
+- **B8** — `generate_id()` vs `_generate_id()` — trivially different interfaces, used in Pydantic defaults
+- **B9** — API key validation duplication (setup_wizard vs dashboard) — moderate refactor
+- **E1** — Monolithic server functions (2785 + 1405 lines) — architectural refactor, out of scope

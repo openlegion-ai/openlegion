@@ -12,6 +12,7 @@ from src.agent.skills import skill
 
 _ALLOWED_ROOT = "/data"
 _MAX_READ = 500_000
+_MAX_LIST_ENTRIES = 500
 
 # Workspace identity files that must not be written via write_file.
 # Agents should use the update_workspace tool for these instead.
@@ -202,7 +203,7 @@ def list_files(path: str = ".", pattern: str = "*", recursive: bool = False) -> 
 
     glob_fn = safe.rglob if recursive else safe.glob
     entries = []
-    for item in sorted(glob_fn(pattern))[:500]:
+    for item in sorted(glob_fn(pattern))[:_MAX_LIST_ENTRIES]:
         rel = item.relative_to(Path(_ALLOWED_ROOT).resolve())
         entries.append({
             "path": str(rel),

@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Optional
 
 import httpx
 
-from src.shared.types import APIProxyRequest, APIProxyResponse, MeshEvent
+from src.shared.types import MeshEvent
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.mesh_client")
@@ -133,7 +132,7 @@ class MeshClient:
         )
         response.raise_for_status()
 
-    async def read_blackboard(self, key: str) -> Optional[dict]:
+    async def read_blackboard(self, key: str) -> dict | None:
         """Read a value from the shared blackboard."""
         scoped = self._scope_key(key)
         response = await self._get_with_retry(
@@ -503,18 +502,3 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    async def api_call(
-        self, service: str, action: str, params: dict | None = None, timeout: int = 30
-    ) -> APIProxyResponse:
-        """Request an external API call through the mesh proxy."""
-        request = APIProxyRequest(service=service, action=action, params=params or {}, timeout=timeout)
-        client = await self._get_client()
-        response = await client.post(
-            f"{self.mesh_url}/mesh/api",
-            json=request.model_dump(mode="json"),
-            params={"agent_id": self.agent_id},
-            timeout=timeout + 5,
-            headers=self._trace_headers(),
-        )
-        response.raise_for_status()
-        return APIProxyResponse(**response.json())

@@ -87,7 +87,7 @@ class SlackChannel(Channel):
                     f"Slack bot token rejected: {auth.get('error', 'unknown')}. "
                     "Check OAuth & Permissions in your Slack app settings."
                 )
-            logger.warning(
+            logger.info(
                 "Slack auth OK (team=%s, bot=%s)",
                 auth.get("team"), auth.get("bot_id"),
             )
@@ -118,17 +118,17 @@ class SlackChannel(Channel):
         # Verify Socket Mode is actually connected
         sm_client = getattr(self._handler, "client", None)
         if sm_client and getattr(sm_client, "is_connected", lambda: False)():
-            logger.warning("Slack Socket Mode connected")
+            logger.info("Slack Socket Mode connected")
         else:
             logger.warning("Slack Socket Mode handler started (connection state unknown)")
 
         owner = self._pairing.owner
         if owner:
-            logger.warning(f"Slack channel started (owner: {owner})")
+            logger.info(f"Slack channel started (owner: {owner})")
         elif self._pairing.pairing_code:
-            logger.warning("Slack channel started (awaiting pairing)")
+            logger.info("Slack channel started (awaiting pairing)")
         else:
-            logger.warning("Slack channel started (no pairing code -- run setup again)")
+            logger.info("Slack channel started (no pairing code -- run setup again)")
 
     async def stop(self) -> None:
         if self._handler:

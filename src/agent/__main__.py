@@ -16,6 +16,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 
+from src.agent.builtins.http_tool import close_client
 from src.agent.context import ContextManager
 from src.agent.llm import LLMClient
 from src.agent.loop import AgentLoop
@@ -175,6 +176,7 @@ def main() -> None:
                             await asyncio.wait_for(handle, timeout=2.0)
                         except (asyncio.TimeoutError, asyncio.CancelledError):
                             pass
+        await close_client()
         if mcp_client:
             await mcp_client.stop()
         await mesh_client.close()

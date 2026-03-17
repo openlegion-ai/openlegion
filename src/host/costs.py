@@ -18,9 +18,6 @@ from src.shared.utils import setup_logging
 
 logger = setup_logging("host.costs")
 
-_DEFAULT_COST = (0.003, 0.015)  # Conservative fallback
-
-
 def _default_budget() -> dict:
     """Read default budget from dashboard system settings, falling back to hardcoded defaults."""
     try:
@@ -55,12 +52,11 @@ def estimate_cost(
 class CostTracker:
     """Tracks token usage and cost per agent, enforces budgets."""
 
-    def __init__(self, db_path: str = "data/costs.db", event_bus=None):
+    def __init__(self, db_path: str = "data/costs.db"):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=30000")
-        self._event_bus = event_bus
         self._init_schema()
         self.budgets: dict[str, dict[str, float]] = {}
         self._project_budgets: dict[str, dict] = {}

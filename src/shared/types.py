@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -36,8 +36,8 @@ class AgentMessage(BaseModel):
     to: str
     type: Literal["task_request", "task_result", "event", "query", "cancel"]
     payload: dict[str, Any]
-    workflow_id: Optional[str] = None
-    reply_to: Optional[str] = None
+    workflow_id: str | None = None
+    reply_to: str | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     ttl: int = 300
     priority: Literal["low", "normal", "high", "urgent"] = "normal"
@@ -72,7 +72,7 @@ class TaskAssignment(BaseModel):
     context: dict[str, Any] = {}
     timeout: int = 120
     max_retries: int = 0
-    token_budget: Optional[TokenBudget] = None
+    token_budget: TokenBudget | None = None
 
 
 class TaskResult(BaseModel):
@@ -80,8 +80,8 @@ class TaskResult(BaseModel):
 
     task_id: str
     status: Literal["complete", "failed", "cancelled", "timeout", "skipped", "pending"]
-    result: Optional[dict[str, Any]] = None
-    error: Optional[str] = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
     promote_to_blackboard: dict[str, Any] = {}
     tokens_used: int = 0
     duration_ms: int = 0
@@ -93,7 +93,7 @@ class AgentStatus(BaseModel):
     agent_id: str
     role: str
     state: Literal["idle", "working", "blocked", "failed", "starting"]
-    current_task: Optional[str] = None
+    current_task: str | None = None
     capabilities: list[str] = []
     uptime_seconds: float = 0
     tasks_completed: int = 0
@@ -112,10 +112,10 @@ class BlackboardEntry(BaseModel):
     key: str
     value: dict[str, Any]
     written_by: str
-    workflow_id: Optional[str] = None
+    workflow_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    ttl: Optional[int] = None
+    ttl: int | None = None
     version: int = 1
 
 
@@ -163,7 +163,7 @@ class ProjectMetadata(BaseModel):
     name: str
     description: str = ""
     members: list[str] = []
-    created_at: Optional[str] = None
+    created_at: str | None = None
     settings: dict[str, Any] = {}
 
 
@@ -198,9 +198,9 @@ class MemoryFact(BaseModel):
     category: str = "general"
     source: str = "agent"
     confidence: float = 1.0
-    embedding: Optional[list[float]] = None
+    embedding: list[float] | None = None
     access_count: int = 0
-    last_accessed: Optional[datetime] = None
+    last_accessed: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     decay_score: float = 1.0
 
@@ -212,7 +212,7 @@ class MemoryLog(BaseModel):
     action: str
     input_summary: str
     output_summary: str
-    task_id: Optional[str] = None
+    task_id: str | None = None
     tokens_used: int = 0
     duration_ms: int = 0
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -234,9 +234,9 @@ class APIProxyResponse(BaseModel):
     """Mesh returns external API result to agent."""
 
     success: bool
-    data: Optional[dict[str, Any]] = None
-    error: Optional[str] = None
-    status_code: Optional[int] = None
+    data: dict[str, Any] | None = None
+    error: str | None = None
+    status_code: int | None = None
 
 
 # === LLM Response (standardized across providers) ===
@@ -253,11 +253,11 @@ class LLMResponse(BaseModel):
     """Standardized response from any LLM provider via mesh proxy."""
 
     content: str = ""
-    thinking_content: Optional[str] = None
-    tool_calls: Optional[list[ToolCallInfo]] = None
+    thinking_content: str | None = None
+    tool_calls: list[ToolCallInfo] | None = None
     tokens_used: int = 0
     model: str = ""
-    stop_reason: Optional[str] = None
+    stop_reason: str | None = None
 
 
 # === Chat Mode ===

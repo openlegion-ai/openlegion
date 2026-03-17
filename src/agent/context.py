@@ -195,38 +195,7 @@ class ContextManager:
         if not self.should_compact(messages):
             return messages, False
 
-        usage_pct = int(usage * 100)
-        tokens_before = self.token_count(messages)
-        msg_count_before = len(messages)
-        t0 = time.monotonic()
-        logger.info(f"Context at {usage_pct}% ({tokens_before:,} tokens, {msg_count_before} msgs) — compacting")
-
-        # Reset so proactive flush can fire again after compaction
-        self._flush_triggered = False
-
-        # Step 1: Extract important facts and flush to MEMORY.md + DB
-        if self.workspace and self.llm:
-            try:
-                await self._flush_to_memory(system_prompt, messages)
-            except Exception as e:
-                logger.warning("Flush to memory failed during compaction, proceeding with summarization: %s", e)
-
-        # Step 2: Summarize and compress
-        if self.llm:
-            result = await self._summarize_compact(system_prompt, messages)
-        else:
-            result = self._hard_prune(messages)
-
-        tokens_after = self.token_count(result)
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        ratio = round(tokens_after / tokens_before, 2) if tokens_before else 0
-        method = "summarize" if self.llm else "hard_prune"
-        logger.info(
-            "Compaction complete: %s, %d->%d msgs, %s->%s tokens (%.0f%% reduction), %dms",
-            method, msg_count_before, len(result),
-            f"{tokens_before:,}", f"{tokens_after:,}",
-            (1 - ratio) * 100, elapsed_ms,
-        )
+        result = await self._do_compact(system_prompt, messages, label="Compaction")
         return result, True
 
     async def force_compact(
@@ -241,22 +210,39 @@ class ContextManager:
         if not messages:
             return messages
 
+        return await self._do_compact(system_prompt, messages, label="Force-compaction")
+
+    async def _do_compact(
+        self, system_prompt: str, messages: list[dict], *, label: str,
+    ) -> list[dict]:
+        """Shared compaction logic used by both maybe_compact and force_compact.
+
+        Flushes facts to memory, summarises (or hard-prunes), and logs stats.
+        Returns the compacted message list.
+        """
         tokens_before = self.token_count(messages)
         msg_count_before = len(messages)
         t0 = time.monotonic()
+        usage_pct = int(self.usage(messages) * 100)
         logger.info(
-            "Force-compacting session (%d msgs, %s tokens)",
-            msg_count_before, f"{tokens_before:,}",
+            "%s: context at %d%% (%s tokens, %d msgs)",
+            label, usage_pct, f"{tokens_before:,}", msg_count_before,
         )
 
+        # Reset so proactive flush can fire again after compaction
         self._flush_triggered = False
 
+        # Step 1: Extract important facts and flush to MEMORY.md + DB
         if self.workspace and self.llm:
             try:
                 await self._flush_to_memory(system_prompt, messages)
             except Exception as e:
-                logger.warning("Flush to memory failed during force-compact, proceeding: %s", e)
+                logger.warning(
+                    "Flush to memory failed during %s, proceeding: %s",
+                    label.lower(), e,
+                )
 
+        # Step 2: Summarize and compress
         if self.llm:
             result = await self._summarize_compact(system_prompt, messages)
         else:
@@ -267,9 +253,8 @@ class ContextManager:
         ratio = round(tokens_after / tokens_before, 2) if tokens_before else 0
         method = "summarize" if self.llm else "hard_prune"
         logger.info(
-            "Force-compaction complete: %s, %d->%d msgs, %s->%s tokens "
-            "(%.0f%% reduction), %dms",
-            method, msg_count_before, len(result),
+            "%s complete: %s, %d->%d msgs, %s->%s tokens (%.0f%% reduction), %dms",
+            label, method, msg_count_before, len(result),
             f"{tokens_before:,}", f"{tokens_after:,}",
             (1 - ratio) * 100, elapsed_ms,
         )

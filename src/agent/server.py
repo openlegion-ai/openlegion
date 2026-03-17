@@ -48,6 +48,10 @@ if TYPE_CHECKING:
 
 logger = setup_logging("agent.server")
 
+_MAX_HISTORY_MEMORY_CHARS = 5000
+_MAX_HISTORY_LOGS_CHARS = 16000
+_MAX_HISTORY_LEARNINGS_CHARS = 8000
+
 
 def create_agent_app(loop: AgentLoop) -> FastAPI:
     """Create the FastAPI application for an agent container."""
@@ -251,7 +255,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             "agent_id": loop.agent_id,
             "role": loop.role,
             "logs": daily,
-            "memory": memory[:5000] if memory else "",
+            "memory": memory[:_MAX_HISTORY_MEMORY_CHARS] if memory else "",
         }
 
     @app.post("/message")
@@ -390,8 +394,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             return {"logs": ""}
         days = max(1, min(days, 14))
         content = loop.workspace.load_daily_logs(days=days)
-        if len(content) > 16000:
-            content = content[:16000] + "\n\n... (truncated)"
+        if len(content) > _MAX_HISTORY_LOGS_CHARS:
+            content = content[:_MAX_HISTORY_LOGS_CHARS] + "\n\n... (truncated)"
         return {"logs": content}
 
     @app.get("/workspace-learnings")
@@ -401,10 +405,10 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             return {"errors": "", "corrections": ""}
         errors = loop.workspace._read_file("learnings/errors.md") or ""
         corrections = loop.workspace._read_file("learnings/corrections.md") or ""
-        if len(errors) > 8000:
-            errors = errors[-8000:]
-        if len(corrections) > 8000:
-            corrections = corrections[-8000:]
+        if len(errors) > _MAX_HISTORY_LEARNINGS_CHARS:
+            errors = errors[-_MAX_HISTORY_LEARNINGS_CHARS:]
+        if len(corrections) > _MAX_HISTORY_LEARNINGS_CHARS:
+            corrections = corrections[-_MAX_HISTORY_LEARNINGS_CHARS:]
         return {"errors": errors, "corrections": corrections}
 
     @app.get("/heartbeat-context")
@@ -424,9 +428,9 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             not rules.strip()
             or rules.strip() == _DEFAULT_HEARTBEAT_HEADING
         )
-        # Cap daily logs at 8000 chars for transport
-        if len(daily) > 8000:
-            daily = daily[:8000] + "\n\n... (truncated)"
+        # Cap daily logs at _MAX_HISTORY_LEARNINGS_CHARS chars for transport
+        if len(daily) > _MAX_HISTORY_LEARNINGS_CHARS:
+            daily = daily[:_MAX_HISTORY_LEARNINGS_CHARS] + "\n\n... (truncated)"
         return {
             "heartbeat_rules": rules,
             "daily_logs": daily,

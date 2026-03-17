@@ -12,7 +12,7 @@ import os
 import re
 import time
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -169,8 +169,8 @@ class AgentLoop:
         skills: SkillRegistry,
         llm: LLMClient,
         mesh_client: MeshClient,
-        workspace: Optional[WorkspaceManager] = None,
-        context_manager: Optional[ContextManager] = None,
+        workspace: WorkspaceManager | None = None,
+        context_manager: ContextManager | None = None,
     ):
         # Override class defaults from env vars (set by dashboard system settings)
         self.MAX_ITERATIONS = int(os.environ.get("OPENLEGION_MAX_ITERATIONS", "20"))
@@ -185,13 +185,13 @@ class AgentLoop:
         self.workspace = workspace
         self.context_manager = context_manager
         self.state: str = "idle"
-        self.current_task: Optional[str] = None
+        self.current_task: str | None = None
         self.tasks_completed: int = 0
         self.tasks_failed: int = 0
         self._start_time = time.time()
         self._cancel_requested: bool = False
-        self._current_task_handle: Optional[asyncio.Task] = None
-        self._last_result: Optional[TaskResult] = None
+        self._current_task_handle: asyncio.Task | None = None
+        self._last_result: TaskResult | None = None
         self._chat_messages: list[dict] = []
         self._chat_lock = asyncio.Lock()
         self._chat_total_rounds: int = 0

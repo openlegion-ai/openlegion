@@ -26,6 +26,7 @@ from src.shared.utils import sanitize_for_prompt, setup_logging
 logger = setup_logging("channels.telegram")
 
 MAX_TG_LEN = 4000
+_TG_MSG_LIMIT = 4096
 
 
 def _md_to_html(text: str) -> str:
@@ -517,13 +518,13 @@ class TelegramChannel(Channel):
                         try:
                             if streaming_msg is None:
                                 streaming_msg = await self._app.bot.send_message(
-                                    chat_id=chat_id, text=display[:4096],
+                                    chat_id=chat_id, text=display[:_TG_MSG_LIMIT],
                                 )
                             else:
                                 await self._app.bot.edit_message_text(
                                     chat_id=chat_id,
                                     message_id=streaming_msg.message_id,
-                                    text=display[:4096],
+                                    text=display[:_TG_MSG_LIMIT],
                                 )
                         except Exception as e:
                             logger.debug("Streaming text edit failed: %s", e)
@@ -552,11 +553,11 @@ class TelegramChannel(Channel):
                     await self._app.bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=streaming_msg.message_id,
-                        text=final_text[:4096],
+                        text=final_text[:_TG_MSG_LIMIT],
                     )
                     # Send overflow as separate messages
-                    if len(final_text) > 4096:
-                        for chunk in chunk_text(final_text[4096:], MAX_TG_LEN):
+                    if len(final_text) > _TG_MSG_LIMIT:
+                        for chunk in chunk_text(final_text[_TG_MSG_LIMIT:], MAX_TG_LEN):
                             await self._app.bot.send_message(
                                 chat_id=chat_id, text=chunk,
                             )

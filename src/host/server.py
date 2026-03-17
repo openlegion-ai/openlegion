@@ -37,6 +37,10 @@ from src.shared.utils import setup_logging
 
 _server_logger = setup_logging("host.server")
 
+_MAX_SYSTEM_PROMPT = 10_000
+_MAX_BB_KEY_LEN = 512
+_MAX_BB_VALUE_BYTES = 262_144  # 256 KB
+
 
 def _extract_prompt_preview(params: dict, max_len: int = 500) -> str:
     """Extract the last user message content as a short preview string."""
@@ -98,9 +102,6 @@ def create_mesh_app(
 
     # -- Input validation helpers ------------------------------------------------
     _AGENT_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
-    _MAX_SYSTEM_PROMPT = 10_000
-    _MAX_BB_KEY_LEN = 512
-    _MAX_BB_VALUE_BYTES = 262_144  # 256 KB
 
     def _validate_agent_id(agent_id: str) -> str:
         if not agent_id or not _AGENT_ID_RE.match(agent_id):
