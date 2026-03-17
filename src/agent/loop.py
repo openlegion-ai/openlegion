@@ -43,10 +43,27 @@ _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
 _TOOL_HISTORY_LIMIT = 10  # recent tool outcomes in system prompt
 HEARTBEAT_MAX_ITERATIONS = 10  # tighter bound for heartbeat (cheaper than task/chat)
 
+# Markdown heading pattern for detecting effectively-empty heartbeat files
+_HEADING_OR_EMPTY_RE = re.compile(r"^(#+\s.*|\s*)$")
+
 # Strip leading <think>…</think> blocks emitted by reasoning models
 # (Qwen3, DeepSeek-R1 etc.) so chat bubbles and conversation history
 # contain only the actual answer.
 _THINK_TAG_RE = re.compile(r"^(?:<think>[\s\S]*?</think>\s*)+")
+
+
+def _is_heartbeat_empty(content: str | None) -> bool:
+    """Check if HEARTBEAT.md has no actionable content (only headings/blanks).
+
+    Returns True when the file is missing, empty, or contains only markdown
+    headings and whitespace — meaning there are no heartbeat rules to execute.
+    """
+    if not content:
+        return True
+    for line in content.splitlines():
+        if not _HEADING_OR_EMPTY_RE.match(line):
+            return False
+    return True
 
 
 def _strip_think_tags(text: str) -> str:
@@ -526,6 +543,25 @@ class AgentLoop:
                         messages = self._trim_context(messages, max_tokens=_FALLBACK_MAX_TOKENS)
 
                 else:
+                    # LLM returned text with no tool calls.
+                    # If this is iteration 0, the agent hasn't used any tools,
+                    # AND tools are actually available, nudge it to take action.
+                    has_tools = bool(
+                        self.skills.get_tool_definitions(exclude=self._excluded_tools)
+                    )
+                    if iteration == 0 and has_tools:
+                        messages.append({"role": "assistant", "content": llm_response.content or ""})
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "You responded without using any tools. "
+                                "You have tools available — use them to make progress on this task. "
+                                "If you've genuinely completed the task or it's impossible, "
+                                "respond with your final JSON result."
+                            ),
+                        })
+                        continue
+
                     # LLM returned final answer -- task is done
                     result_data, promotions = self._parse_final_output(llm_response.content)
 
@@ -811,8 +847,11 @@ class AgentLoop:
             f"Your current task: {assignment.task_type}\n\n"
             f"## Available Tools\n\n{tools_desc}\n\n"
             f"## Operating Rules\n"
-            f"- Act first — call tools immediately, explain results after.\n"
-            f"- Never refuse without trying. Attempt the task, report blockers after.\n"
+            f"- Default: call tools without narration. Only narrate multi-step plans or risky actions.\n"
+            f"- Be resourceful — read files, search memory, check context. "
+            f"Come back with answers, not questions.\n"
+            f"- If your first approach fails, try at least one alternative before reporting a blocker.\n"
+            f"- Never respond with just text when a tool could make progress.\n"
             f"- Before acting on past context, run memory_search first.\n"
             f"- When done, respond with JSON: "
         )
@@ -870,6 +909,14 @@ class AgentLoop:
         if self.state != "idle" or self._chat_lock.locked():
             return {"skipped": True, "reason": "agent_busy"}
 
+        # Skip the LLM call entirely when HEARTBEAT.md has no actionable
+        # content and no goals are set — saves tokens on empty heartbeats.
+        if self.workspace and _is_heartbeat_empty(self.workspace.load_heartbeat_rules()):
+            # Still need to check goals before skipping
+            goals = await self._fetch_goals()
+            if not goals:
+                return {"skipped": True, "reason": "no_heartbeat_rules"}
+
         token = _heartbeat_mode.set(True)
         start = time.time()
         total_tokens = 0
@@ -910,8 +957,10 @@ class AgentLoop:
                 f"You are the '{self.role}' agent.\n\n"
                 f"## Available Tools\n\n{tools_desc}\n\n"
                 f"## Operating Rules\n"
-                f"- This is a HEARTBEAT wakeup, not a user conversation.\n"
-                f"- Be economical. Only call tools if there is actual work to do.\n"
+                f"- This is a HEARTBEAT wakeup. Check your HEARTBEAT.md rules and "
+                f"goals, then act on anything that needs attention.\n"
+                f"- Follow HEARTBEAT.md strictly. Do not infer tasks from prior sessions.\n"
+                f"- If nothing in HEARTBEAT.md or goals needs attention, reply HEARTBEAT_OK immediately.\n"
                 f"- You have max {HEARTBEAT_MAX_ITERATIONS} iterations.\n"
                 f"- Use notify_user to report results to the user.\n"
             )
@@ -1854,9 +1903,12 @@ class AgentLoop:
             f"You are the '{self.role}' agent in the OpenLegion fleet.\n\n"
             f"## Available Tools\n\n{tools_desc}\n\n"
             f"## Operating Rules\n"
-            f"- Act first — call tools immediately. Report results, not intentions.\n"
-            f"- Never refuse without trying. Attempt the task, report blockers after.\n"
+            f"- Default: call tools without narration. Only narrate multi-step plans or risky actions.\n"
+            f"- Be resourceful — read files, search memory, check context. "
+            f"Come back with answers, not questions.\n"
+            f"- If your first approach fails, try at least one alternative before reporting a blocker.\n"
             f"- Make decisions with reasonable defaults. Ask only when truly ambiguous.\n"
+            f"- Never respond with just text when a tool could make progress.\n"
         )
         if is_standalone:
             rules += "- Use notify_user to report results to the user.\n"
@@ -1882,6 +1934,8 @@ class AgentLoop:
                 "actions succeeded, reading visual content, or diagnosing failures.\n"
                 "- Use browser_wait_for before interacting with elements on SPAs "
                 "that animate content in after page load.\n"
+                "- For routine navigation (clicking, typing, scrolling), just call "
+                "the tool — do not narrate each step.\n"
             )
 
         rules += (

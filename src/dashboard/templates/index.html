@@ -370,19 +370,19 @@
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
                   :class="projectHubExpanded && projectHubTab === 'docs' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
                   role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'docs'">
-                  Context
+                  <span>Context</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">The shared PROJECT.md file visible to all agents. Use it for project-wide instructions, goals, and context.</span></span>
                 </button>
                 <button @click="projectHubExpanded = true; projectHubTab = 'activity'; if (commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
                   :class="projectHubExpanded && projectHubTab === 'activity' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
                   role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'activity'">
-                  Activity<span x-show="commsActivity.length > 0" class="ml-1 opacity-50 font-mono text-[10px]" x-text="'(' + commsActivity.length + ')'"></span>
+                  <span>Activity</span><span x-show="commsActivity.length > 0" class="ml-1 opacity-50 font-mono text-[10px]" x-text="'(' + commsActivity.length + ')'"></span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Real-time feed of blackboard writes and pub/sub events between agents. Shows how agents are coordinating.</span></span>
                 </button>
                 <button @click="projectHubExpanded = true; projectHubTab = 'state'; fetchBlackboard(); if (Object.keys(commsSubs).length === 0) fetchCommsActivity()"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
                   :class="projectHubExpanded && projectHubTab === 'state' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
                   role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'state'">
-                  State
+                  <span>State</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">The shared blackboard — a key-value store where agents read and write data to coordinate. Browse, edit, or delete entries.</span></span>
                 </button>
                 <button @click="projectHubExpanded = true; projectHubTab = 'artifacts'; fetchArtifacts()"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
@@ -394,7 +394,7 @@
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
                   :class="projectHubExpanded && projectHubTab === 'broadcast' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
                   role="tab" :aria-selected="projectHubExpanded && projectHubTab === 'broadcast'">
-                  Broadcast
+                  <span>Broadcast</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Send a message to all agents at once. Useful for fleet-wide instructions or status requests.</span></span>
                 </button>
                 <button @click="projectHubExpanded = true; projectHubTab = 'members'"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
@@ -976,7 +976,7 @@
                 <div class="stat-row" x-show="agent.heartbeat_schedule">
                   <span class="stat-label">
                     <svg fill="currentColor" viewBox="0 0 24 24" stroke="none" class="w-3 h-3"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
-                    Heartbeat
+                    <span>Heartbeat</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Periodic autonomous wakeup. The agent checks its HEARTBEAT.md rules on this schedule and acts on anything that needs attention — no user message required.</span></span>
                   </span>
                   <span class="text-[11px] font-medium"
                     :class="agent.heartbeat_enabled ? 'text-pink-400' : 'text-gray-600'">
@@ -1527,29 +1527,37 @@
                           </div>
                         </div>
                         <div class="bg-gray-800/50 rounded p-3">
-                          <div class="text-xs text-gray-500 mb-1">Thinking</div>
+                          <div class="text-xs text-gray-500 mb-1 flex items-center gap-1">Thinking
+                            <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Extended reasoning mode. When enabled, the model thinks step-by-step before responding. Levels: off, low, medium, high. Higher levels use more tokens but improve complex reasoning.</span></span>
+                          </div>
                           <div class="text-sm font-mono" :class="(agentConfigs[selectedAgent]?.thinking || 'off') !== 'off' ? 'text-indigo-400' : 'text-gray-500'" x-text="(agentConfigs[selectedAgent]?.thinking || 'off').charAt(0).toUpperCase() + (agentConfigs[selectedAgent]?.thinking || 'off').slice(1)"></div>
                         </div>
                         <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
-                          <div class="text-xs text-gray-500 mb-1">Capabilities</div>
+                          <div class="text-xs text-gray-500 mb-1 flex items-center gap-1">Capabilities
+                            <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Permissions controlling what this agent can do. Enabled capabilities appear highlighted. Configure in mesh.yaml.</span></span>
+                          </div>
                           <div class="flex flex-wrap gap-2">
                             <span class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded"
-                              :class="agentConfigs[selectedAgent]?.can_use_browser ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'">
+                              :class="agentConfigs[selectedAgent]?.can_use_browser ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'"
+                              title="Control the shared Camoufox browser for web automation">
                               <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_use_browser ? 'bg-indigo-400' : 'bg-gray-600'"></span>
                               Browser
                             </span>
                             <span class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded"
-                              :class="agentConfigs[selectedAgent]?.can_spawn ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'">
+                              :class="agentConfigs[selectedAgent]?.can_spawn ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'"
+                              title="Create sub-agents for parallel work">
                               <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_spawn ? 'bg-indigo-400' : 'bg-gray-600'"></span>
                               Spawn Agents
                             </span>
                             <span class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded"
-                              :class="agentConfigs[selectedAgent]?.can_manage_cron ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'">
+                              :class="agentConfigs[selectedAgent]?.can_manage_cron ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'"
+                              title="Create and manage scheduled jobs (recurring tasks)">
                               <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_manage_cron ? 'bg-indigo-400' : 'bg-gray-600'"></span>
                               Cron Jobs
                             </span>
                             <span class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded"
-                              :class="agentConfigs[selectedAgent]?.can_use_wallet ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'">
+                              :class="agentConfigs[selectedAgent]?.can_use_wallet ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-600 border border-gray-700'"
+                              title="Send and receive tokens on Ethereum and Solana">
                               <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_use_wallet ? 'bg-indigo-400' : 'bg-gray-600'"></span>
                               Wallet
                             </span>
@@ -2220,7 +2228,9 @@
         <!-- Automation sub-tab -->
         <div x-show="systemTab === 'automation'">
         <div class="flex items-center justify-between mb-3">
-          <div class="text-xs text-gray-500 uppercase tracking-wider">Cron Jobs</div>
+          <div class="text-xs text-gray-500 uppercase tracking-wider flex items-center gap-1.5">Cron Jobs
+            <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Scheduled tasks that run automatically on a recurring interval. Each job sends a message to an agent on its schedule (e.g. "every 15m"). Heartbeat jobs are created automatically from agent config.</span></span>
+          </div>
           <button x-show="!showCronForm" @click="showCronForm = true" class="text-xs px-2.5 py-1 rounded border border-gray-700 hover:border-indigo-500/50 text-gray-400 hover:text-indigo-300 transition-colors">+ Cron Job</button>
         </div>
         <!-- Cron creation form -->
@@ -2597,7 +2607,9 @@
 
         <!-- ═══ API KEYS SUB-TAB ═══ -->
         <div x-show="systemTab === 'apikeys'" x-effect="if (systemTab === 'apikeys') fetchSettings()">
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">API Keys</div>
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">API Keys
+          <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Credentials stored in the mesh vault. "system" keys (OPENLEGION_SYSTEM_*) are used by the mesh for LLM routing and never exposed to agents. "agent" keys (OPENLEGION_CRED_*) are available to agents as opaque handles for HTTP requests.</span></span>
+        </div>
         <div class="mb-6" x-show="settingsData">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
             <div class="text-sm text-gray-400 mb-2">
@@ -3176,9 +3188,9 @@
             </div>
             <div class="space-y-3">
               <div class="flex items-center justify-between">
-                <div>
+                <div class="flex items-center gap-1.5">
                   <div class="text-xs text-gray-400">Default Model</div>
-                  <div class="text-[10px] text-gray-600 mt-0.5">New agents will use this model</div>
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">The LLM model used by newly created agents. Existing agents keep their current model. You can override per-agent in mesh.yaml.</span></span>
                 </div>
               </div>
               <select class="dash-select w-full"
@@ -3200,23 +3212,24 @@
             </div>
             <div class="grid grid-cols-2 gap-4" x-show="systemSettings">
               <div>
-                <label class="text-xs text-gray-400 block mb-1">Default Daily Budget (USD)</label>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Default Daily Budget (USD)
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Maximum USD an agent can spend on LLM calls per day. When exceeded, the agent stops accepting new tasks until the next day. Per-agent overrides in mesh.yaml take priority.</span></span>
+                </label>
                 <input type="number" step="0.01" min="0.01" max="10000"
                   class="dash-input w-full"
                   :value="systemSettings?.default_daily_budget"
                   @change="saveSystemSetting('default_daily_budget', $event.target.value)">
               </div>
               <div>
-                <label class="text-xs text-gray-400 block mb-1">Default Monthly Budget (USD)</label>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Default Monthly Budget (USD)
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Maximum USD an agent can spend on LLM calls per calendar month. Acts as a safety cap to prevent runaway costs. Per-agent overrides in mesh.yaml take priority.</span></span>
+                </label>
                 <input type="number" step="0.01" min="0.01" max="100000"
                   class="dash-input w-full"
                   :value="systemSettings?.default_monthly_budget"
                   @change="saveSystemSetting('default_monthly_budget', $event.target.value)">
               </div>
             </div>
-            <p class="text-[10px] text-gray-600 leading-relaxed pt-2">
-              Applied to new agents that don't have explicit budgets. Per-agent overrides in mesh.yaml take priority.
-            </p>
           </div>
 
           <!-- ── 3. Agents ── -->
@@ -3228,28 +3241,36 @@
             </div>
             <div class="grid grid-cols-2 gap-4" x-show="systemSettings">
               <div>
-                <label class="text-xs text-gray-400 block mb-1">Max Iterations (task mode)</label>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Max Iterations (task mode)
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">How many LLM calls an agent gets to complete a single task. Each iteration can use tools or return a final answer. If the agent hasn't finished after this many iterations, the task fails. Default: 20.</span></span>
+                </label>
                 <input type="number" step="1" min="1" max="100"
                   class="dash-input w-full"
                   :value="systemSettings?.max_iterations"
                   @change="saveSystemSetting('max_iterations', $event.target.value)">
               </div>
               <div>
-                <label class="text-xs text-gray-400 block mb-1">Max Tool Rounds (chat)</label>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Max Tool Rounds (chat)
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Per user message, how many consecutive tool calls the agent can chain before being forced to respond with text. Prevents runaway tool loops in a single turn. Default: 30.</span></span>
+                </label>
                 <input type="number" step="1" min="1" max="200"
                   class="dash-input w-full"
                   :value="systemSettings?.chat_max_tool_rounds"
                   @change="saveSystemSetting('chat_max_tool_rounds', $event.target.value)">
               </div>
               <div>
-                <label class="text-xs text-gray-400 block mb-1">Max Total Rounds (chat)</label>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Max Total Rounds (chat)
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Total tool rounds across an entire chat session before auto-compaction resets the counter. Limits how long a single conversation can run. The session auto-continues up to 5 times. Default: 200.</span></span>
+                </label>
                 <input type="number" step="1" min="10" max="1000"
                   class="dash-input w-full"
                   :value="systemSettings?.chat_max_total_rounds"
                   @change="saveSystemSetting('chat_max_total_rounds', $event.target.value)">
               </div>
               <div>
-                <label class="text-xs text-gray-400 block mb-1">Tool Timeout (seconds)</label>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Tool Timeout (seconds)
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Hard ceiling for any single tool execution (shell command, browser action, HTTP request). If a tool exceeds this, it's killed and the agent gets an error result. Default: 300s (5 min).</span></span>
+                </label>
                 <input type="number" step="1" min="10" max="3600"
                   class="dash-input w-full"
                   :value="systemSettings?.tool_timeout"
@@ -3327,6 +3348,7 @@
               <div class="max-w-xs">
                 <div class="flex items-center gap-1 mb-1">
                   <label class="text-xs text-gray-400">Idle Timeout (minutes)</label>
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">How long the browser container stays alive after the last agent interaction. Lower values save resources; higher values avoid cold-start delays. Default: 30 min.</span></span>
                   <span class="text-[10px] text-amber-500/70">restart required</span>
                 </div>
                 <input type="number" step="1" min="5" max="120"
@@ -3345,37 +3367,42 @@
             </div>
             <div class="grid grid-cols-2 gap-4" x-show="systemSettings">
               <div>
-                <label class="text-xs text-gray-400 block mb-1">Poll Interval (seconds)</label>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Poll Interval (seconds)
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">How often the mesh checks each agent's health endpoint. Lower values detect failures faster but add more network overhead. Default: 30s.</span></span>
+                </label>
                 <input type="number" step="1" min="5" max="300"
                   class="dash-input w-full"
                   :value="systemSettings?.health_poll_interval"
                   @change="saveSystemSetting('health_poll_interval', $event.target.value)">
               </div>
               <div>
-                <label class="text-xs text-gray-400 block mb-1">Max Failures Before Restart</label>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Max Failures Before Restart
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">How many consecutive health check failures before the agent container is automatically restarted. Default: 3.</span></span>
+                </label>
                 <input type="number" step="1" min="1" max="20"
                   class="dash-input w-full"
                   :value="systemSettings?.health_max_failures"
                   @change="saveSystemSetting('health_max_failures', $event.target.value)">
               </div>
               <div>
-                <label class="text-xs text-gray-400 block mb-1">Restart Limit</label>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Restart Limit
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Maximum number of automatic restarts allowed within the restart window. Prevents restart loops if an agent keeps crashing. Set to 0 to disable auto-restart. Default: 3.</span></span>
+                </label>
                 <input type="number" step="1" min="0" max="20"
                   class="dash-input w-full"
                   :value="systemSettings?.health_restart_limit"
                   @change="saveSystemSetting('health_restart_limit', $event.target.value)">
               </div>
               <div>
-                <label class="text-xs text-gray-400 block mb-1">Restart Window (seconds)</label>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Restart Window (seconds)
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Time window for counting restarts against the restart limit. If the limit is reached within this window, auto-restart stops. Default: 3600s (1 hour).</span></span>
+                </label>
                 <input type="number" step="1" min="60" max="86400"
                   class="dash-input w-full"
                   :value="systemSettings?.health_restart_window"
                   @change="saveSystemSetting('health_restart_window', $event.target.value)">
               </div>
             </div>
-            <p class="text-[10px] text-gray-600 leading-relaxed pt-2">
-              Health settings are applied immediately without restart. Agents are restarted after consecutive failures exceed the threshold.
-            </p>
           </div>
 
           <!-- ── Restart button ── -->

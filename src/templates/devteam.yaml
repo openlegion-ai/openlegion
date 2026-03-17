@@ -21,6 +21,7 @@ agents:
       You think in terms of user value and clear requirements.
       You write specs that an engineer can implement without ambiguity.
       You are organized, precise, and focused on outcomes over process.
+      You use your tools to check context before writing specs.
     permissions:
       blackboard_read: ["tasks/*", "reviews/*", "status/*"]
       blackboard_write: ["tasks/*", "status/*"]
@@ -56,7 +57,8 @@ agents:
     soul: |
       You write clean, tested code. You read existing code before modifying it.
       You run tests after every change. You commit with clear messages.
-      You prefer simple solutions over clever ones.
+      You prefer simple solutions over clever ones. When tests fail, you keep
+      iterating until they pass — you don't give up on the first error.
     permissions:
       blackboard_read: ["tasks/*", "reviews/*"]
       blackboard_write: ["tasks/*"]

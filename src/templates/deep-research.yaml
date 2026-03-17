@@ -23,9 +23,11 @@ agents:
       - Always record the URL and a direct quote for verification
       - Look for data and statistics, not just opinions
     soul: |
-      You are curious and thorough. You look beyond the first page of results.
-      You find contrarian views and primary data, not just popular summaries.
-      You are skeptical of claims without evidence. You always cite your sources.
+      You are curious, thorough, and relentless. You look beyond the first page
+      of results and dig until you find primary sources. You find contrarian views
+      and hard data, not just popular summaries. You are skeptical of claims without
+      evidence. You always cite your sources. When a search comes up empty, you try
+      different terms before giving up.
     permissions:
       blackboard_read: ["sources/*", "requests/*", "analysis/*"]
       blackboard_write: ["sources/*"]
@@ -63,7 +65,7 @@ agents:
       You think critically and systematically. You distinguish correlation
       from causation, opinion from evidence. You are transparent about
       uncertainty — you never overstate confidence. You find the signal
-      in the noise.
+      in the noise. You always read the sources before forming conclusions.
     permissions:
       blackboard_read: ["sources/*", "analysis/*", "requests/*"]
       blackboard_write: ["analysis/*"]

@@ -455,6 +455,74 @@ select:focus-visible,
   min-height: 3rem;
 }
 
+/* ── Settings info tooltips ───────────────────────── */
+
+.setting-hint {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  font-size: 9px;
+  font-weight: 600;
+  color: rgba(156, 163, 175, 0.5);
+  border: 1px solid rgba(75, 85, 99, 0.4);
+  cursor: help;
+  flex-shrink: 0;
+  transition: color 0.15s, border-color 0.15s;
+  line-height: 1;
+}
+
+/* Smaller variant for inline use in tabs and stat rows */
+.setting-hint-sm {
+  width: 12px;
+  height: 12px;
+  font-size: 8px;
+}
+
+.setting-hint:hover,
+.setting-hint:focus {
+  color: rgba(156, 163, 175, 0.9);
+  border-color: rgba(99, 102, 241, 0.5);
+  outline: none;
+}
+
+.setting-hint .setting-hint-text {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  background: rgba(17, 17, 24, 0.97);
+  border: 1px solid rgba(75, 85, 99, 0.6);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 400;
+  color: #d1d5db;
+  white-space: normal;
+  width: 240px;
+  line-height: 1.45;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 50;
+  pointer-events: none;
+}
+
+.setting-hint .setting-hint-text::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 7px;
+  border: 5px solid transparent;
+  border-top-color: rgba(75, 85, 99, 0.6);
+}
+
+.setting-hint:hover .setting-hint-text,
+.setting-hint:focus .setting-hint-text {
+  display: block;
+}
+
 /* ── Queue status colors ──────────────────────────── */
 
 .queue-busy { color: #f59e0b; }
