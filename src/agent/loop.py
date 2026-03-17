@@ -461,11 +461,12 @@ class AgentLoop:
                     if warning:
                         effective_system = system_prompt + f"\n\n## {warning}"
 
+                available_tools = self.skills.get_tool_definitions(exclude=self._excluded_tools) or None
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat,
                     system=effective_system,
                     messages=messages,
-                    tools=self.skills.get_tool_definitions(exclude=self._excluded_tools) or None,
+                    tools=available_tools,
                 )
                 total_tokens += llm_response.tokens_used
                 if assignment.token_budget:
@@ -546,10 +547,7 @@ class AgentLoop:
                     # LLM returned text with no tool calls.
                     # If this is iteration 0, the agent hasn't used any tools,
                     # AND tools are actually available, nudge it to take action.
-                    has_tools = bool(
-                        self.skills.get_tool_definitions(exclude=self._excluded_tools)
-                    )
-                    if iteration == 0 and has_tools:
+                    if iteration == 0 and available_tools:
                         messages.append({"role": "assistant", "content": llm_response.content or ""})
                         messages.append({
                             "role": "user",
