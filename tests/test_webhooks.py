@@ -128,6 +128,76 @@ class TestWebhookManager:
         assert result is None
 
 
+class TestWebhookManagerUpdate:
+    """Tests for WebhookManager.update_hook()."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/webhooks.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_update_name(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="a", name="old-name")
+        result = mgr.update_hook(hook["id"], name="new-name")
+        assert result["name"] == "new-name"
+        assert mgr.hooks[hook["id"]]["name"] == "new-name"
+
+    def test_update_agent(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="old-agent", name="test")
+        result = mgr.update_hook(hook["id"], agent="new-agent")
+        assert result["agent"] == "new-agent"
+        assert mgr.hooks[hook["id"]]["agent"] == "new-agent"
+
+    def test_set_instructions(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="a", name="test")
+        assert "instructions" not in mgr.hooks[hook["id"]]
+        result = mgr.update_hook(hook["id"], instructions="Do something.")
+        assert result["instructions"] == "Do something."
+        assert mgr.hooks[hook["id"]]["instructions"] == "Do something."
+
+    def test_clear_instructions(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="a", name="test", instructions="Keep this.")
+        assert mgr.hooks[hook["id"]]["instructions"] == "Keep this."
+        result = mgr.update_hook(hook["id"], instructions="")
+        assert "instructions" not in result
+        assert "instructions" not in mgr.hooks[hook["id"]]
+
+    def test_nonexistent_hook(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        assert mgr.update_hook("nonexistent", name="x") is None
+
+    def test_persistence(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="a", name="original")
+        mgr.update_hook(hook["id"], name="updated")
+
+        mgr2 = WebhookManager(config_path=self.config_path)
+        assert mgr2.hooks[hook["id"]]["name"] == "updated"
+
+    def test_return_is_copy(self):
+        """Mutating the returned dict must not affect stored state."""
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="a", name="test")
+        result = mgr.update_hook(hook["id"], name="updated")
+        result["name"] = "tampered"
+        assert mgr.hooks[hook["id"]]["name"] == "updated"
+
+    def test_partial_update_preserves_other_fields(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="a", name="test", instructions="Keep me.")
+        mgr.update_hook(hook["id"], name="renamed")
+        stored = mgr.hooks[hook["id"]]
+        assert stored["name"] == "renamed"
+        assert stored["agent"] == "a"
+        assert stored["instructions"] == "Keep me."
+
+
 class TestWebhookRouter:
     """Test the FastAPI router created by WebhookManager."""
 

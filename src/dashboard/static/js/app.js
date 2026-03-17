@@ -295,6 +295,12 @@ function dashboard() {
     webhookEditInstructions: '',
     webhookEditRequireSig: false,
 
+    // Webhook inline edit
+    editingWebhookId: null,
+    webhookEditName: '',
+    webhookEditAgent: '',
+    webhookEditInstructions: '',
+
     // Model health
     modelHealth: [],
 
