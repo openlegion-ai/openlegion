@@ -1,4 +1,4 @@
-"""Tests for WebhookManager: add, remove, dispatch, persistence, instructions."""
+"""Tests for WebhookManager: add, remove, update, dispatch, persistence, instructions."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import tempfile
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import APIRouter, HTTPException, Request
 from starlette.testclient import TestClient
 
 from src.host.webhooks import WebhookManager, _build_message
@@ -261,3 +262,228 @@ class TestWebhookRouter:
         # The stored hook should NOT have the url field
         stored = list(mgr.hooks.values())[0]
         assert "url" not in stored
+
+
+class TestUpdateHook:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/webhooks.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_update_name(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="test", name="old-name")
+        updated = mgr.update_hook(hook["id"], name="new-name")
+        assert updated["name"] == "new-name"
+        assert mgr.hooks[hook["id"]]["name"] == "new-name"
+
+    def test_update_agent(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="old-agent", name="test")
+        updated = mgr.update_hook(hook["id"], agent="new-agent")
+        assert updated["agent"] == "new-agent"
+
+    def test_update_instructions_set_change_clear(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="test", name="test")
+        # Set
+        updated = mgr.update_hook(hook["id"], instructions="Do X.")
+        assert updated["instructions"] == "Do X."
+        # Change
+        updated = mgr.update_hook(hook["id"], instructions="Do Y.")
+        assert updated["instructions"] == "Do Y."
+        # Clear
+        updated = mgr.update_hook(hook["id"], instructions="")
+        assert "instructions" not in updated
+
+    def test_enable_signature(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="test", name="test")
+        assert "secret" not in hook
+        updated = mgr.update_hook(hook["id"], require_signature=True)
+        assert "secret" in updated
+        assert len(updated["secret"]) == 64
+
+    def test_disable_signature(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="test", name="test", require_signature=True)
+        assert "secret" in hook
+        updated = mgr.update_hook(hook["id"], require_signature=False)
+        assert "secret" not in updated
+        assert "secret" not in mgr.hooks[hook["id"]]
+
+    def test_regenerate_secret(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="test", name="test", require_signature=True)
+        old_secret = hook["secret"]
+        updated = mgr.update_hook(hook["id"], regenerate_secret=True)
+        assert "secret" in updated
+        assert updated["secret"] != old_secret
+
+    def test_regenerate_secret_ignored_when_unsigned(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="test", name="test")
+        updated = mgr.update_hook(hook["id"], regenerate_secret=True)
+        assert "secret" not in updated
+        assert "secret" not in mgr.hooks[hook["id"]]
+
+    def test_update_preserves_call_count(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="test", name="test")
+        mgr.hooks[hook["id"]]["call_count"] = 42
+        updated = mgr.update_hook(hook["id"], name="renamed")
+        assert updated["call_count"] == 42
+
+    def test_update_nonexistent(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        assert mgr.update_hook("nonexistent", name="x") is None
+
+    def test_update_persists(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="test", name="test")
+        mgr.update_hook(hook["id"], name="persisted", agent="new-agent")
+        mgr2 = WebhookManager(config_path=self.config_path)
+        assert mgr2.hooks[hook["id"]]["name"] == "persisted"
+        assert mgr2.hooks[hook["id"]]["agent"] == "new-agent"
+
+    def test_update_empty_name_rejected(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="test", name="test")
+        with pytest.raises(ValueError):
+            mgr.update_hook(hook["id"], name="")
+
+    def test_update_empty_agent_rejected(self):
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="test", name="test")
+        with pytest.raises(ValueError):
+            mgr.update_hook(hook["id"], agent="")
+
+
+class TestWebhookUpdateRouter:
+    """Test the PATCH /api/webhooks/{hook_id} endpoint."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/webhooks.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _make_app(self):
+        """Build a minimal FastAPI app with webhook update endpoints."""
+        from fastapi import FastAPI
+
+        mgr = WebhookManager(config_path=self.config_path)
+
+        app = FastAPI()
+        api = APIRouter()
+
+        @api.get("/api/webhooks")
+        async def api_webhooks_list(request: Request) -> dict:
+            hooks = mgr.list_hooks()
+            base = str(request.base_url).rstrip("/")
+            result = []
+            for h in hooks:
+                entry = {k: v for k, v in h.items() if k != "secret"}
+                entry["url"] = f"{base}/webhook/hook/{h['id']}"
+                entry["has_secret"] = "secret" in h
+                result.append(entry)
+            return {"webhooks": result}
+
+        @api.patch("/api/webhooks/{hook_id}")
+        async def api_webhooks_update(hook_id: str, request: Request) -> dict:
+            body = await request.json()
+            fields = {}
+            for key in ("name", "agent", "instructions"):
+                if key in body:
+                    fields[key] = body[key]
+            if "require_signature" in body:
+                fields["require_signature"] = bool(body["require_signature"])
+            if body.get("regenerate_secret"):
+                fields["regenerate_secret"] = True
+            if not fields:
+                raise HTTPException(status_code=400, detail="No valid fields provided")
+            try:
+                updated = mgr.update_hook(hook_id, **fields)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            if updated is None:
+                raise HTTPException(status_code=404, detail=f"Webhook '{hook_id}' not found")
+            base = str(request.base_url).rstrip("/")
+            updated["url"] = f"{base}/webhook/hook/{updated['id']}"
+            return {"updated": True, "hook": updated}
+
+        app.include_router(api)
+        return app, mgr
+
+    def test_patch_webhook_success(self):
+        app, mgr = self._make_app()
+        hook = mgr.add_hook(agent="a", name="original")
+        client = TestClient(app)
+
+        resp = client.patch(
+            f"/api/webhooks/{hook['id']}",
+            json={"name": "renamed", "agent": "b"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["updated"] is True
+        assert data["hook"]["name"] == "renamed"
+        assert data["hook"]["agent"] == "b"
+        assert "url" in data["hook"]
+
+    def test_patch_webhook_not_found(self):
+        app, _ = self._make_app()
+        client = TestClient(app)
+        resp = client.patch("/api/webhooks/nonexistent", json={"name": "x"})
+        assert resp.status_code == 404
+
+    def test_patch_webhook_new_secret_in_response(self):
+        app, mgr = self._make_app()
+        hook = mgr.add_hook(agent="a", name="test")
+        client = TestClient(app)
+
+        resp = client.patch(
+            f"/api/webhooks/{hook['id']}",
+            json={"require_signature": True},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "secret" in data["hook"]
+        assert len(data["hook"]["secret"]) == 64
+
+    def test_patch_webhook_no_secret_when_unchanged(self):
+        app, mgr = self._make_app()
+        hook = mgr.add_hook(agent="a", name="test", require_signature=True)
+        client = TestClient(app)
+
+        resp = client.patch(
+            f"/api/webhooks/{hook['id']}",
+            json={"name": "renamed"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "secret" not in data["hook"]
+
+    def test_patch_webhook_empty_body(self):
+        app, mgr = self._make_app()
+        hook = mgr.add_hook(agent="a", name="test")
+        client = TestClient(app)
+        resp = client.patch(f"/api/webhooks/{hook['id']}", json={})
+        assert resp.status_code == 400
+
+    def test_list_includes_has_secret(self):
+        app, mgr = self._make_app()
+        mgr.add_hook(agent="a", name="unsigned")
+        mgr.add_hook(agent="b", name="signed", require_signature=True)
+        client = TestClient(app)
+
+        resp = client.get("/api/webhooks")
+        hooks = resp.json()["webhooks"]
+        unsigned = next(h for h in hooks if h["name"] == "unsigned")
+        signed = next(h for h in hooks if h["name"] == "signed")
+        assert unsigned["has_secret"] is False
+        assert signed["has_secret"] is True
+        assert "secret" not in signed  # value still stripped

@@ -289,6 +289,11 @@ function dashboard() {
     webhookFormAgent: '',
     webhookFormInstructions: '',
     webhookFormRequireSig: false,
+    editingWebhookId: null,
+    webhookEditName: '',
+    webhookEditAgent: '',
+    webhookEditInstructions: '',
+    webhookEditRequireSig: false,
 
     // Model health
     modelHealth: [],
@@ -335,6 +340,7 @@ function dashboard() {
     channelConnecting: false,
     webhookCreating: false,
     webhookTesting: {},
+    webhookSaving: false,
     broadcastSending: false,
     confirmLoading: false,
 
@@ -4069,6 +4075,96 @@ function dashboard() {
         }
       } catch (e) { this.showToast(`Test failed: ${e.message}`); }
       finally { this.webhookTesting = { ...this.webhookTesting, [hookId]: false }; }
+    },
+
+    editWebhook(wh) {
+      this.showWebhookForm = false;
+      this.editingWebhookId = wh.id;
+      this.webhookEditName = wh.name;
+      this.webhookEditAgent = wh.agent;
+      this.webhookEditInstructions = wh.instructions || '';
+      this.webhookEditRequireSig = !!wh.has_secret;
+    },
+
+    cancelWebhookEdit() {
+      this.editingWebhookId = null;
+      this.webhookEditName = '';
+      this.webhookEditAgent = '';
+      this.webhookEditInstructions = '';
+      this.webhookEditRequireSig = false;
+    },
+
+    async saveWebhookEdit() {
+      if (this.webhookSaving) return;
+      const id = this.editingWebhookId;
+      if (!id) return;
+      const wh = this.webhooks.find(w => w.id === id);
+      if (!wh) return;
+      const name = this.webhookEditName.trim();
+      const agent = this.webhookEditAgent;
+      if (!name || !agent) { this.showToast('Name and agent are required'); return; }
+
+      const body = {};
+      if (name !== wh.name) body.name = name;
+      if (agent !== wh.agent) body.agent = agent;
+      const newInstr = this.webhookEditInstructions.trim();
+      const oldInstr = (wh.instructions || '').trim();
+      if (newInstr !== oldInstr) body.instructions = newInstr;
+      const hadSecret = !!wh.has_secret;
+      if (this.webhookEditRequireSig !== hadSecret) body.require_signature = this.webhookEditRequireSig;
+
+      if (Object.keys(body).length === 0) { this.showToast('No changes to save'); return; }
+
+      this.webhookSaving = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(id)}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          const hook = data.hook || {};
+          const canCopy = navigator.clipboard && navigator.clipboard.writeText;
+          if (hook.secret) {
+            if (canCopy) navigator.clipboard.writeText(hook.secret).catch(() => {});
+            this.showToast(`Webhook updated — new HMAC secret copied`, 8000);
+          } else {
+            this.showToast(`Webhook "${name}" updated`);
+          }
+          this.cancelWebhookEdit();
+          this.fetchWebhooks();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+      finally { this.webhookSaving = false; }
+    },
+
+    regenerateWebhookSecret(hookId, name) {
+      this.showConfirm('Regenerate Secret', `Regenerate HMAC secret for "${name}"? The old secret will stop working immediately.`, async () => {
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(hookId)}`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ regenerate_secret: true }),
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            const hook = data.hook || {};
+            const canCopy = navigator.clipboard && navigator.clipboard.writeText;
+            if (hook.secret && canCopy) {
+              navigator.clipboard.writeText(hook.secret).catch(() => {});
+              this.showToast('New HMAC secret copied to clipboard', 8000);
+            } else {
+              this.showToast('Secret regenerated');
+            }
+            this.fetchWebhooks();
+          } else {
+            const err = await resp.json().catch(() => ({}));
+            this.showToast(`Error: ${err.detail || 'Regeneration failed'}`);
+          }
+        } catch (e) { this.showToast(`Error: ${e.message}`); }
+      }, true);
     },
 
     // ── Agent drill-down ──────────────────────────────────

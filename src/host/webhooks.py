@@ -89,6 +89,59 @@ class WebhookManager:
         self._save()
         return True
 
+    def update_hook(
+        self,
+        hook_id: str,
+        *,
+        name: str | None = None,
+        agent: str | None = None,
+        instructions: str | None = None,
+        require_signature: bool | None = None,
+        regenerate_secret: bool = False,
+    ) -> dict | None:
+        """Update an existing webhook's configuration.
+
+        Only provided fields are changed. Returns updated hook dict with
+        secret included only when a new secret was generated, or None if
+        hook_id not found.
+        """
+        hook = self.hooks.get(hook_id)
+        if hook is None:
+            return None
+
+        if name is not None:
+            if not name.strip():
+                raise ValueError("name must not be empty")
+            hook["name"] = name.strip()
+        if agent is not None:
+            if not agent.strip():
+                raise ValueError("agent must not be empty")
+            hook["agent"] = agent.strip()
+        if instructions is not None:
+            if instructions.strip():
+                hook["instructions"] = instructions.strip()
+            else:
+                hook.pop("instructions", None)
+
+        new_secret = False
+        if require_signature is True and "secret" not in hook:
+            hook["secret"] = secrets.token_hex(32)
+            new_secret = True
+        elif require_signature is False:
+            hook.pop("secret", None)
+
+        if regenerate_secret and "secret" in hook:
+            hook["secret"] = secrets.token_hex(32)
+            new_secret = True
+
+        self._save()
+        logger.info("Updated webhook %s", hook_id)
+
+        result = dict(hook)
+        if not new_secret:
+            result.pop("secret", None)
+        return result
+
     def list_hooks(self) -> list[dict]:
         return [dict(h) for h in self.hooks.values()]
 
