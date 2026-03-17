@@ -3046,6 +3046,15 @@ function dashboard() {
       return this._truncateText(text, 140);
     },
 
+    chatToolHasDetail(tool) {
+      return !!(tool.input || tool.inputPreview || tool.output || tool.outputPreview || tool.status === 'running');
+    },
+
+    chatToolDetailText(value, preview) {
+      const full = this._chatToolValueToText(value);
+      return this._truncateText(full || preview || '', 4000);
+    },
+
     chatToolCount(msg) {
       if (!msg) return 0;
       if (Array.isArray(msg.tools)) return msg.tools.length;
