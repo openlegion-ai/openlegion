@@ -360,6 +360,15 @@ class TestUpdateHook:
         with pytest.raises(ValueError):
             mgr.update_hook(hook["id"], agent="")
 
+    def test_validation_error_does_not_partially_mutate(self):
+        """If agent validation fails, name should not be changed."""
+        mgr = WebhookManager(config_path=self.config_path)
+        hook = mgr.add_hook(agent="original-agent", name="original-name")
+        with pytest.raises(ValueError):
+            mgr.update_hook(hook["id"], name="new-name", agent="")
+        # Name must remain unchanged
+        assert mgr.hooks[hook["id"]]["name"] == "original-name"
+
 
 class TestWebhookUpdateRouter:
     """Test the PATCH /api/webhooks/{hook_id} endpoint."""

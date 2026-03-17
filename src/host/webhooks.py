@@ -109,13 +109,16 @@ class WebhookManager:
         if hook is None:
             return None
 
+        # Validate before mutating to avoid partial updates on error
+        if name is not None and not name.strip():
+            raise ValueError("name must not be empty")
+        if agent is not None and not agent.strip():
+            raise ValueError("agent must not be empty")
+
+        # Apply mutations (safe — validation already passed)
         if name is not None:
-            if not name.strip():
-                raise ValueError("name must not be empty")
             hook["name"] = name.strip()
         if agent is not None:
-            if not agent.strip():
-                raise ValueError("agent must not be empty")
             hook["agent"] = agent.strip()
         if instructions is not None:
             if instructions.strip():
@@ -130,7 +133,7 @@ class WebhookManager:
         elif require_signature is False:
             hook.pop("secret", None)
 
-        if regenerate_secret and "secret" in hook:
+        if regenerate_secret and "secret" in hook and not new_secret:
             hook["secret"] = secrets.token_hex(32)
             new_secret = True
 

@@ -2454,6 +2454,7 @@ def create_dashboard_router(
         for h in hooks:
             entry = {k: v for k, v in h.items() if k != "secret"}
             entry["url"] = f"{base}/webhook/hook/{h['id']}"
+            entry["has_secret"] = "secret" in h
             result.append(entry)
         return {"webhooks": result}
 
@@ -2489,6 +2490,31 @@ def create_dashboard_router(
         if not removed:
             raise HTTPException(status_code=404, detail=f"Webhook '{hook_id}' not found")
         return {"removed": True, "id": hook_id}
+
+    @api_router.patch("/api/webhooks/{hook_id}")
+    async def api_webhooks_update(hook_id: str, request: Request) -> dict:
+        if webhook_manager is None:
+            raise HTTPException(status_code=503, detail="Webhook manager not available")
+        body = await request.json()
+        fields: dict = {}
+        for key in ("name", "agent", "instructions"):
+            if key in body:
+                fields[key] = body[key]
+        if "require_signature" in body:
+            fields["require_signature"] = bool(body["require_signature"])
+        if body.get("regenerate_secret"):
+            fields["regenerate_secret"] = True
+        if not fields:
+            raise HTTPException(status_code=400, detail="No valid fields provided")
+        try:
+            updated = webhook_manager.update_hook(hook_id, **fields)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"Webhook '{hook_id}' not found")
+        base = str(request.base_url).rstrip("/")
+        updated["url"] = f"{base}/webhook/hook/{updated['id']}"
+        return {"updated": True, "hook": updated}
 
     @api_router.post("/api/webhooks/{hook_id}/test")
     async def api_webhooks_test(hook_id: str, request: Request) -> dict:
