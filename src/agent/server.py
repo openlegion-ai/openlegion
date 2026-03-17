@@ -265,7 +265,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         Stores the message in the agent's memory so it has context on
         the next task, chat, or heartbeat activation.
         """
-        content = (
+        content = sanitize_for_prompt(
             f"Message from {msg.from_agent} ({msg.type}): "
             f"{_summarize_payload(msg.payload)}"
         )
@@ -359,6 +359,9 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         if not isinstance(content, str):
             raise HTTPException(400, "content must be a string")
         content = sanitize_for_prompt(content)
+        cap = _FILE_CAPS.get(filename)
+        if cap is not None and len(content) > cap:
+            raise HTTPException(413, f"{filename} exceeds cap ({len(content)} > {cap} chars)")
         path = loop.workspace.root / filename
         path.write_text(content)
         return {"filename": filename, "size": path.stat().st_size}

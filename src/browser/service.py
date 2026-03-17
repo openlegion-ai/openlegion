@@ -26,6 +26,7 @@ from src.browser.timing import (
     scroll_pause,
     think_pause,
 )
+from src.shared.types import AGENT_ID_RE_PATTERN
 from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.service")
@@ -54,7 +55,7 @@ _MAX_WAIT_MS = 10000  # 10 seconds max wait after navigation
 _MAX_SCROLL_PX = 10000  # 10000 pixels max per scroll call
 _CLICK_TIMEOUT_MS = 10000  # 10 seconds — SPAs like X need time for animations/overlays
 _WAIT_FOR_TIMEOUT_MS = 30000  # 30 seconds max for wait_for_element
-_AGENT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
+_AGENT_ID_RE = re.compile(AGENT_ID_RE_PATTERN)
 _VALID_WAIT_UNTIL = frozenset({"domcontentloaded", "load", "networkidle", "commit"})
 # Characters that mark a natural word/clause boundary in typed text.
 # After one of these, the next character gets a higher think-pause probability

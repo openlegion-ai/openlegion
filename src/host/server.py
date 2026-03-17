@@ -24,6 +24,7 @@ from fastapi.responses import StreamingResponse
 
 from src.host.credentials import is_system_credential
 from src.shared.types import (
+    AGENT_ID_RE_PATTERN,
     RESERVED_AGENT_IDS,
     AgentMessage,
     APIProxyRequest,
@@ -101,7 +102,7 @@ def create_mesh_app(
     _agent_projects = agent_projects if agent_projects is not None else {}
 
     # -- Input validation helpers ------------------------------------------------
-    _AGENT_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+    _AGENT_ID_RE = re.compile(AGENT_ID_RE_PATTERN)
 
     def _validate_agent_id(agent_id: str) -> str:
         if not agent_id or not _AGENT_ID_RE.match(agent_id):
@@ -122,11 +123,15 @@ def create_mesh_app(
 
     _RATE_LIMITS: dict[str, tuple[int, int]] = {
         # (max_requests, window_seconds)
+        "api_proxy": (30, 60),
         "vault_resolve": (5, 60),
+        "vault_store": (10, 3600),
         "blackboard_read": (200, 60),
         "blackboard_write": (100, 60),
         "publish": (200, 60),
+        "notify": (10, 60),
         "cron_create": (10, 3600),
+        "spawn": (5, 3600),
         "wallet_read": (120, 60),
         "wallet_transfer": (10, 3600),
         "wallet_execute": (10, 3600),
@@ -422,6 +427,7 @@ def create_mesh_app(
     async def proxy_api_call(request: Request, api_request: APIProxyRequest, agent_id: str) -> APIProxyResponse:
         """Proxy external API calls. Agent never sees credentials."""
         agent_id = _resolve_agent_id(agent_id, request)
+        await _check_rate_limit("api_proxy", agent_id)
         if not permissions.can_use_api(agent_id, api_request.service):
             raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
         if credential_vault is None:
@@ -500,6 +506,7 @@ def create_mesh_app(
     async def proxy_api_stream(request: Request, api_request: APIProxyRequest, agent_id: str) -> StreamingResponse:
         """Streaming API proxy. Returns SSE stream for LLM completions."""
         agent_id = _resolve_agent_id(agent_id, request)
+        await _check_rate_limit("api_proxy", agent_id)
         if not permissions.can_use_api(agent_id, api_request.service):
             raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
         if credential_vault is None:
@@ -543,6 +550,7 @@ def create_mesh_app(
     async def vault_store(data: dict, request: Request) -> dict:
         """Store a credential and return an opaque $CRED{name} handle."""
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        await _check_rate_limit("vault_store", agent_id)
         if not permissions.can_manage_vault(agent_id):
             raise HTTPException(403, f"Agent {agent_id} cannot manage vault")
         if credential_vault is None:
@@ -772,6 +780,7 @@ def create_mesh_app(
     async def notify_user(body: NotifyRequest, request: Request) -> dict:
         """Push a notification from an agent to the user across all channels."""
         body.agent_id = _resolve_agent_id(body.agent_id, request)
+        await _check_rate_limit("notify", body.agent_id)
         if notify_fn is None:
             raise HTTPException(503, "Notifications not available")
         message = body.message[:_NOTIFY_MAX_LEN]
@@ -1012,6 +1021,7 @@ def create_mesh_app(
         if not isinstance(role, str) or len(role) > 64:
             raise HTTPException(400, "role must be a string of at most 64 chars")
         spawned_by = _resolve_agent_id(data.get("spawned_by", "unknown"), request)
+        await _check_rate_limit("spawn", spawned_by)
         if not permissions.can_spawn(spawned_by):
             raise HTTPException(403, f"Agent {spawned_by} is not allowed to spawn agents")
         model = data.get("model", "")

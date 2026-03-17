@@ -17,6 +17,7 @@ import re
 
 import httpx
 
+from src.shared.types import AGENT_ID_RE_PATTERN
 from src.shared.utils import setup_logging
 
 logger = setup_logging("host.transport")
@@ -224,7 +225,7 @@ class SandboxTransport(Transport):
     """
 
     AGENT_PORT = 8400
-    _AGENT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+    _AGENT_ID_RE = re.compile(AGENT_ID_RE_PATTERN)
 
     @classmethod
     def _validate_agent_id(cls, agent_id: str) -> None:

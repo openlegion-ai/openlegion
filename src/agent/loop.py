@@ -173,9 +173,20 @@ class AgentLoop:
         context_manager: ContextManager | None = None,
     ):
         # Override class defaults from env vars (set by dashboard system settings)
-        self.MAX_ITERATIONS = int(os.environ.get("OPENLEGION_MAX_ITERATIONS", "20"))
-        self.CHAT_MAX_TOOL_ROUNDS = int(os.environ.get("OPENLEGION_CHAT_MAX_TOOL_ROUNDS", "30"))
-        self.CHAT_MAX_TOTAL_ROUNDS = int(os.environ.get("OPENLEGION_CHAT_MAX_TOTAL_ROUNDS", "200"))
+        def _clamp_env(name: str, default: int, lo: int, hi: int) -> int:
+            try:
+                val = int(os.environ.get(name, str(default)))
+            except ValueError:
+                logger.warning("Invalid %s value, using default %d", name, default)
+                return default
+            clamped = max(lo, min(val, hi))
+            if clamped != val:
+                logger.info("%s=%d clamped to %d (range %d-%d)", name, val, clamped, lo, hi)
+            return clamped
+
+        self.MAX_ITERATIONS = _clamp_env("OPENLEGION_MAX_ITERATIONS", 20, 1, 100)
+        self.CHAT_MAX_TOOL_ROUNDS = _clamp_env("OPENLEGION_CHAT_MAX_TOOL_ROUNDS", 30, 1, 200)
+        self.CHAT_MAX_TOTAL_ROUNDS = _clamp_env("OPENLEGION_CHAT_MAX_TOTAL_ROUNDS", 200, 1, 1000)
         self.agent_id = agent_id
         self.role = role
         self.memory = memory
@@ -705,11 +716,16 @@ class AgentLoop:
                     names = [tc["function"]["name"] for tc in msg["tool_calls"]]
                     summary_parts.append(f"Called: {', '.join(names)}")
 
-        summary_msg = {
-            "role": "user",
-            "content": "## Previous Actions (summarized)\n" + "\n".join(summary_parts),
-        }
-        result = first_group + [summary_msg]
+        summary_text = "\n\n## Previous Actions (summarized)\n" + "\n".join(summary_parts)
+        # Merge summary into the first user message to avoid consecutive
+        # same-role messages, which violates the LLM role-alternation invariant.
+        if not first_group:
+            result = [{"role": "user", "content": summary_text.strip()}]
+        elif first_group[0].get("role") == "user" and isinstance(first_group[0].get("content"), str):
+            first_msg = {**first_group[0], "content": first_group[0]["content"] + summary_text}
+            result = [first_msg] + first_group[1:]
+        else:
+            result = first_group + [{"role": "user", "content": summary_text.strip()}]
         for group in recent_groups:
             result.extend(group)
         return result

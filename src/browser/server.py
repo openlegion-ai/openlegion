@@ -25,6 +25,12 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     app = FastAPI(**kwargs)
     auth_token = os.environ.get("BROWSER_AUTH_TOKEN", "")
     if not auth_token:
+        if os.environ.get("MESH_AUTH_TOKEN"):
+            raise RuntimeError(
+                "BROWSER_AUTH_TOKEN not set but MESH_AUTH_TOKEN is configured. "
+                "Browser auth cannot be disabled in production. "
+                "Set BROWSER_AUTH_TOKEN or BROWSER_AUTH_INSECURE=1 to override."
+            )
         logger.warning("BROWSER_AUTH_TOKEN not set — browser service auth is DISABLED")
 
     def _verify_auth(request: Request) -> None:

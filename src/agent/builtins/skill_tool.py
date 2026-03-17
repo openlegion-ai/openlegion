@@ -16,11 +16,19 @@ _FORBIDDEN_IMPORTS = frozenset({
     "os", "subprocess", "shutil", "ctypes",
     "importlib", "socket", "sys", "signal",
     "multiprocessing", "threading",
+    # I/O and shell access outside the sandbox
+    "pathlib", "io", "tempfile", "pty", "code",
+    # Introspection and deserialization
+    "gc", "inspect", "pickle", "shelve",
+    # Network and server
+    "http", "asyncio", "resource",
 })
 _FORBIDDEN_CALLS = frozenset({
     "eval", "exec", "__import__", "compile",
     "globals", "locals", "getattr", "setattr", "delattr",
     "breakpoint", "open",
+    # Dynamic class/object creation
+    "type", "vars", "dir", "memoryview", "super",
 })
 _FORBIDDEN_ATTRS = frozenset({
     "__builtins__", "__import__", "__subclasses__", "__class__",

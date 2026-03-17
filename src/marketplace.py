@@ -83,7 +83,9 @@ def _validate_all_skills(directory: Path) -> list[str]:
 
     errors: list[str] = []
     for py_file in directory.glob("**/*.py"):
-        if py_file.name.startswith("_"):
+        # Validate ALL Python files including __init__.py — malicious code
+        # could hide in any file that Python imports automatically.
+        if py_file.name.startswith("_") and py_file.name != "__init__.py":
             continue
         code = py_file.read_text()
         error = _validate_skill_code(code)
@@ -116,7 +118,12 @@ def install_skill(
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
 
-    clone_cmd = ["git", "clone", "--depth", "1", "-c", "protocol.ext.allow=never"]
+    clone_cmd = [
+        "git", "clone", "--depth", "1",
+        "-c", "protocol.ext.allow=never",
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "core.symlinks=false",
+    ]
     if ref:
         clone_cmd += ["--branch", ref]
     clone_cmd += ["--", repo_url, str(tmp_dir)]

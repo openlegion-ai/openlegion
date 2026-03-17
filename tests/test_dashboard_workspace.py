@@ -12,6 +12,8 @@ from httpx import ASGITransport, AsyncClient
 
 from src.dashboard.server import create_dashboard_router
 
+_CSRF_HEADERS = {"X-Requested-With": "XMLHttpRequest"}
+
 
 def _make_dashboard_app(transport=None, agent_registry=None, runtime=None):
     """Create a FastAPI app with dashboard router for testing."""
@@ -94,6 +96,7 @@ class TestWorkspaceProxy:
             resp = await client.put(
                 "/dashboard/api/agents/test_agent/workspace/SOUL.md",
                 json={"content": "# Updated Soul"},
+                headers=_CSRF_HEADERS,
             )
             assert resp.status_code == 200
             # Verify transport was called with correct args
@@ -118,6 +121,7 @@ class TestWorkspaceProxy:
             resp = await client.put(
                 "/dashboard/api/agents/test_agent/workspace/PROJECT.md",
                 json={"content": "hacked"},
+                headers=_CSRF_HEADERS,
             )
             assert resp.status_code == 400
 
@@ -160,6 +164,7 @@ class TestWorkspaceProxy:
             resp = await client.put(
                 "/dashboard/api/agents/test_agent/workspace/USER.md",
                 json={"content": "clean\u200Bvalue\u202Ehere"},
+                headers=_CSRF_HEADERS,
             )
             assert resp.status_code == 200
             # Check sanitized content was forwarded
@@ -333,6 +338,7 @@ class TestProjectProxy:
             resp = await client.put(
                 "/dashboard/api/project",
                 json={"content": "anything"},
+                headers=_CSRF_HEADERS,
             )
             assert resp.status_code == 400
 
@@ -356,6 +362,7 @@ class TestProjectProxy:
                     "/dashboard/api/project",
                     params={"project": "testproj"},
                     json={"content": "# Updated Project"},
+                    headers=_CSRF_HEADERS,
                 )
             assert resp.status_code == 200
             data = resp.json()
@@ -385,6 +392,7 @@ class TestProjectProxy:
                 "/dashboard/api/project",
                 params={"project": "testproj"},
                 json={"content": "anything"},
+                headers=_CSRF_HEADERS,
             )
             assert resp.status_code == 503
 
@@ -404,6 +412,7 @@ class TestProjectProxy:
                     "/dashboard/api/project",
                     params={"project": "testproj"},
                     json={"content": "clean\u200Btext\u202Ehere"},
+                    headers=_CSRF_HEADERS,
                 )
             assert resp.status_code == 200
             proj_dir = projects_dir / "testproj"

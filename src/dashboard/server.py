@@ -150,9 +150,21 @@ def create_dashboard_router(
     _max_projects = int(os.environ.get("OPENLEGION_MAX_PROJECTS", "0"))
     _projects_disabled = _max_projects == 0 and "OPENLEGION_MAX_PROJECTS" in os.environ
 
+    async def _csrf_check(request: Request) -> None:
+        """Require X-Requested-With header on state-changing requests.
+
+        Browsers block custom headers on cross-origin requests (CORS preflight),
+        so this prevents CSRF attacks on cookie-authenticated endpoints.
+        GET/HEAD/OPTIONS are exempt (safe methods).
+        """
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return
+        if not request.headers.get("X-Requested-With"):
+            raise HTTPException(403, "Missing X-Requested-With header")
+
     api_router = APIRouter(
         prefix="/dashboard",
-        dependencies=[Depends(_verify_dashboard_auth)],
+        dependencies=[Depends(_verify_dashboard_auth), Depends(_csrf_check)],
     )
 
     jinja_env = Environment(
@@ -1360,12 +1372,17 @@ def create_dashboard_router(
 
     @api_router.get("/api/wallet/seed")
     async def api_wallet_seed(request: Request) -> dict:
-        """Reveal the master wallet seed. Dashboard-auth gated."""
-        _verify_dashboard_auth(request)
-        seed = os.environ.get("OPENLEGION_SYSTEM_WALLET_MASTER_SEED")
-        if not seed:
-            raise HTTPException(status_code=404, detail="No master seed configured")
-        return {"seed": seed}
+        """Seed reveal removed for security.
+
+        The seed is shown once at /api/wallet/init time. After that,
+        revealing it requires re-provisioning the wallet. This prevents
+        exfiltration via XSS or CSRF on the dashboard.
+        """
+        raise HTTPException(
+            status_code=410,
+            detail="Seed reveal disabled. The seed was shown at wallet init time. "
+            "Re-initialize the wallet to generate a new seed.",
+        )
 
     @api_router.get("/api/wallet/addresses")
     async def api_wallet_addresses(request: Request) -> dict:

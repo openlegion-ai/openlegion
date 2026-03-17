@@ -1723,10 +1723,11 @@ async def test_trim_context_handles_multimodal_tool_content():
     # Force trimming with a very low max_tokens
     trimmed = loop._trim_context(messages, max_tokens=1)
 
-    # Should not crash and should contain a summary
-    summary_msg = trimmed[1]
-    assert summary_msg["role"] == "user"
-    assert "screenshot captured" in summary_msg["content"]
+    # Summary is merged into the first user message (no consecutive user messages)
+    first_msg = trimmed[0]
+    assert first_msg["role"] == "user"
+    assert "Previous Actions" in first_msg["content"]
+    assert "screenshot captured" in first_msg["content"]
 
 
 # ── Heartbeat mode ─────────────────────────────────────────────

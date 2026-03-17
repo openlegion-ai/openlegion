@@ -38,12 +38,12 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `models.py` | Model cost/context window registry backed by LiteLLM |
 | **`src/agent/`** | |
 | `loop.py` | Agent execution loop (task mode + chat mode). `MAX_ITERATIONS=20`, `CHAT_MAX_TOOL_ROUNDS=30`, `CHAT_MAX_TOTAL_ROUNDS=200`, `_MAX_SESSION_CONTINUES=5`, `HEARTBEAT_MAX_ITERATIONS=10`. |
-| `server.py` | Agent FastAPI server (25+ endpoints: `/task`, `/cancel`, `/status`, `/result`, `/capabilities`, `/invoke`, `/chat`, `/chat/steer`, `/chat/stream`, `/chat/reset`, `/chat/history`, `/history`, `/message`, `/workspace`, `/workspace/{filename}`, `/project`, `/workspace-logs`, `/workspace-learnings`, `/heartbeat-context`, `/artifacts`, `/files`, etc.) |
+| `server.py` | Agent FastAPI server (27 endpoints: `/task`, `/cancel`, `/status`, `/result`, `/capabilities`, `/invoke`, `/chat`, `/chat/steer`, `/chat/stream`, `/chat/reset`, `/chat/history`, `/history`, `/message`, `/workspace`, `/workspace/{filename}`, `/project`, `/workspace-logs`, `/workspace-learnings`, `/heartbeat-context`, `/artifacts`, `/files`, etc.) |
 | `llm.py` | LLM client — routes through mesh proxy, never holds keys |
 | `context.py` | Context window management (write-then-compact, `_SUMMARIZATION_INPUT_LIMIT=20_000`) |
 | `skills.py` | Skill registry and tool discovery |
 | `memory.py` | Per-agent SQLite + sqlite-vec + FTS5 memory store |
-| `workspace.py` | Persistent markdown workspace (SOUL.md, INSTRUCTIONS.md, USER.md, MEMORY.md, SYSTEM.md, HEARTBEAT.md, daily logs, learnings) |
+| `workspace.py` | Persistent markdown workspace. Bootstrap files: PROJECT.md, SYSTEM.md, INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md. Also manages HEARTBEAT.md (loaded separately), daily logs, learnings. |
 | `mesh_client.py` | Agent-side HTTP client for mesh communication |
 | `loop_detector.py` | Tool loop detection with escalating responses |
 | `mcp_client.py` | MCP tool server client and lifecycle |
@@ -62,9 +62,9 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `introspect_tool.py` | Runtime state query (permissions, budget, fleet, cron, health) |
 | `wallet_tool.py` | Wallet operations — get address, get balance, read contract, transfer, execute (Ethereum + Solana) |
 | **`src/host/`** | |
-| `server.py` | Mesh FastAPI app factory — 31+ endpoints, all permission-checked. VNC reverse proxy with agent token rejection. Localhost validation for `x-mesh-internal`. |
+| `server.py` | Mesh FastAPI app factory — 37 endpoints, all permission-checked. VNC reverse proxy with agent token rejection. Localhost validation for `x-mesh-internal`. |
 | `mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter |
-| `runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. Agent network, browser container, VNC URL tracking. `_quote_env_value()` for .env escaping. |
+| `runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. Agent network, browser container, VNC URL tracking. |
 | `transport.py` | Transport ABC → HttpTransport / SandboxTransport. `_AGENT_ID_RE` validation. |
 | `credentials.py` | Two-tier credential vault (SYSTEM_*/CRED_*) + LLM API proxy. `_convert_messages_to_anthropic()` for OAuth path. |
 | `permissions.py` | Per-agent ACL enforcement (glob patterns, deny-all default). `can_spawn`, `can_manage_cron`. |
@@ -335,7 +335,38 @@ pytest tests/test_loop.py -x -v
 3. Optionally include `heartbeat_rules`, `permissions`, `budget`
 4. Templates auto-discovered by `_load_templates()` in `src/cli/config.py`
 
+## Target State (Production Readiness Gaps)
+
+### Architecture Decisions Needed
+
+1. **Monolithic server functions (E1).** `dashboard/server.py` (2862 lines) and `host/server.py` (1406 lines) are single function-scoped definitions. Splitting into sub-routers by domain (agents, credentials, wallet, browser, cron) would improve maintainability. This is the highest-impact structural change remaining.
+2. **containers.py (A1).** Backward-compat alias for DockerBackend — only consumed by E2E tests. Needs E2E test update to remove.
+
+### Pattern Standards
+
+- **Logger formatting (D1).** 130 f-string logger calls across 26 files mixed with 162 %-style calls. %-style is idiomatic (deferred evaluation), but mechanical migration is high-risk for low value. Decision: standardize in new code, migrate opportunistically.
+- **Cross-module shared code.** Several deferred consolidations (B1 redact patterns, B5 provider detection, B8 ID generators, B9 API key validation) require extracting shared code into `src/shared/`. Each is low-risk individually but touching import graphs across trust zones.
+
+### Security Requirements for Production
+
+- **Formal security audit.** SSRF protection, path traversal, credential isolation, and AST validation are implemented but have not been externally audited.
+- **Rate limiting completeness.** Mesh endpoints have rate limits but coverage should be verified against all state-mutating endpoints.
+- **Dependency pinning.** `pyproject.toml` uses minimum version bounds (`>=`). Production should pin exact versions or use lock file.
+
+### Current → Target Gaps
+
+| Gap | Priority | Effort |
+|---|---|---|
+| E1 — Split monolithic servers into sub-routers | High | Large |
+| Dependency version pinning / lock file | High | Small |
+| Deferred consolidations (B1, B5, B8, B9) | Medium | Medium |
+| A1 — Remove containers.py alias (needs E2E verification) | Low | Small |
+| D1 — Logger format standardization | Low | Medium |
+| External security audit | High | External |
+
 ## Review State
+
+### Review 1 — Cleanup (completed 2025)
 
 ### Phase 1 Fixes (applied)
 
@@ -412,7 +443,7 @@ pytest tests/test_loop.py -x -v
 
 | ID | File & Location | What's Wrong | Proposed Action | Risk |
 |---|---|---|---|---|
-| E1 | `src/dashboard/server.py` (2785 lines) + `src/host/server.py` (1405 lines) | Two monolithic function-scoped API definitions. Dashboard router is ~2300 lines, mesh app is ~1335 lines. | **Deferred** — too large/risky for cleanup scope | Medium |
+| E1 | `src/dashboard/server.py` (2862 lines) + `src/host/server.py` (1406 lines) | Two monolithic function-scoped API definitions. Dashboard router is ~2400 lines, mesh app is ~1340 lines. | **Deferred** — too large/risky for cleanup scope | Medium |
 | E2 | `src/agent/builtins/file_tool.py:205`, `src/agent/server.py:254,393,404,428` | Magic numbers (500, 5000, 8000, 16000) for truncation limits without named constants | Extract to named constants | None |
 | E3 | `src/host/cron.py:167` | Magic number 43200 (30 days in minutes) for cron scan range | Define `_MAX_CRON_SCAN_MINUTES = 43200` | None |
 | E4 | `src/host/server.py:100-103` | `_MAX_SYSTEM_PROMPT`, `_MAX_BB_KEY_LEN`, `_MAX_BB_VALUE_BYTES` defined inside function body instead of module level | Move to module-level constants | None |
@@ -443,4 +474,39 @@ pytest tests/test_loop.py -x -v
 - **B5** — Provider detection duplication (credentials.py vs transcript.py) — needs shared module extraction
 - **B8** — `generate_id()` vs `_generate_id()` — trivially different interfaces, used in Pydantic defaults
 - **B9** — API key validation duplication (setup_wizard vs dashboard) — moderate refactor
-- **E1** — Monolithic server functions (2785 + 1405 lines) — architectural refactor, out of scope
+- **E1** — Monolithic server functions (2862 + 1406 lines) — architectural refactor, out of scope
+
+### Review 2 — Production Readiness (2026-03-17)
+
+**Status:** Stage 3 complete (surgical fixes applied). Tests passing. Ruff clean.
+
+**Stage 3 fixes applied (engine):**
+- **U15-1/U14-2/U15-2/U15-4/U11-1**: Added rate limits to `/mesh/api`, `/mesh/api/stream`, `/mesh/notify`, `/mesh/spawn`, `/mesh/vault/store`
+- **U14-1**: Webhook body size limit (1MB) with Content-Length pre-check
+- **U14-4**: Webhook response no longer includes full agent reply
+- **U16-2**: Browser service fails startup when auth token missing in production
+- **U17-1**: WhatsApp webhook logs warning when signature verification disabled
+- **U19-2**: CSRF protection via `X-Requested-With` header requirement on all state-changing dashboard endpoints
+- **U19-3**: Wallet seed reveal endpoint disabled (seed shown once at init)
+- **U8-1+U8-2**: Skill self-authoring forbidden imports expanded (pathlib, io, pty, gc, asyncio, etc.) and `type()` blocked
+- **U18-1**: Git clone hooks disabled via `core.hooksPath=/dev/null`
+- **U18-3**: Marketplace AST validation now includes `__init__.py` files
+- **U5-1**: `_trim_context` merges summary into first user message (fixes role alternation)
+- **U2-7**: Empty LLM summary now falls back to hard prune
+- **U9-7**: Inter-agent messages sanitized via `sanitize_for_prompt()` before daily log
+- **U9-5**: `_FILE_CAPS` enforced on workspace writes (HTTP 413)
+- **U5-2**: Env-var iteration bounds clamped with validation
+- **U12-1**: Agent ID regex unified to `AGENT_ID_RE_PATTERN` in `src/shared/types.py`
+
+**Stage 3 fixes applied (app):**
+- **U20-1 (CRITICAL)**: `getInstance()` now uses explicit column selection excluding `sshPrivateKey`, `hostKey`, `accessToken`, `proxyConfig`
+
+**Findings summary (engine only):**
+- 0 critical, 6 high, ~26 medium, 60+ low
+- **High**: skill_tool `type()` bypass (U8-1), webhook no body size limit (U14-1), wallet stale prices (U14-8), LLM proxy no rate limit (U15-1), browser auth silently disabled (U16-2), WhatsApp webhook spoofable (U17-1)
+- **Key medium**: no auth on agent server (U9-1), no CSRF on dashboard (U19-2), `_trim_context` role alternation violation (U5-1), unsynchronized SQLite writes in memory.py (U3-1), empty summary causes context loss (U2-7), wallet approve bypass (U8-9)
+
+**Cross-repo findings:**
+- Auth SSO chain verified solid across all 3 repos
+- Provisioner configure/resize claims lack `user_id` in WHERE clause (U26-2/U26-3)
+- UFW rule `172.16.0.0/12` broader than needed, could allow private network access to mesh (U27-6)
