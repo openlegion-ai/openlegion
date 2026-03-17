@@ -298,12 +298,9 @@ def test_cost_tracker_no_event_on_track(tmp_path):
     """CostTracker.track() no longer emits cost_update (merged into llm_call in server.py)."""
     from src.host.costs import CostTracker
 
-    bus = EventBus()
-    ct = CostTracker(db_path=str(tmp_path / "costs.db"), event_bus=bus)
+    ct = CostTracker(db_path=str(tmp_path / "costs.db"))
     ct.track("agent1", "openai/gpt-4o", prompt_tokens=100, completion_tokens=50)
     ct.close()
-
-    assert len(bus._buffer) == 0
 
 
 # === Integration: HealthMonitor emits on state change ===

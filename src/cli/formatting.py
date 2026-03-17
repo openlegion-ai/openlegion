@@ -103,11 +103,6 @@ def display_tool_line(name: str, inp: dict, out: dict, index: int) -> None:
 # ── Styled output helpers ───────────────────────────────────
 
 
-def echo_json(data: object) -> None:
-    """Print data as formatted JSON."""
-    click.echo(json.dumps(data, indent=2, default=str))
-
-
 def echo_header(text: str) -> None:
     """Section header during startup."""
     click.echo(click.style(f"\n  {text}", bold=True))

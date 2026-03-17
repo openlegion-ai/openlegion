@@ -27,13 +27,14 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from src.shared.utils import generate_id, setup_logging
 
 logger = setup_logging("host.cron")
 
 _EMPTY_RESPONSES = frozenset({"", "ok", "heartbeat_ok", "nothing to do", "no updates"})
+_MAX_CRON_SCAN_MINUTES = 43200  # 30 days
 
 
 @dataclass
@@ -55,10 +56,10 @@ class CronJob:
     enabled: bool = True
     suppress_empty: bool = True
     heartbeat: bool = False
-    tool_name: Optional[str] = None    # invoke this tool directly — no LLM involved
-    tool_params: Optional[str] = None  # JSON-encoded params dict for the tool
-    last_run: Optional[str] = None
-    next_run: Optional[str] = None
+    tool_name: str | None = None    # invoke this tool directly — no LLM involved
+    tool_params: str | None = None  # JSON-encoded params dict for the tool
+    last_run: str | None = None
+    next_run: str | None = None
     run_count: int = 0
     error_count: int = 0
 
@@ -77,12 +78,12 @@ class CronScheduler:
     def __init__(
         self,
         config_path: str = "config/cron.json",
-        dispatch_fn: Optional[Callable] = None,
-        invoke_fn: Optional[Callable] = None,
+        dispatch_fn: Callable | None = None,
+        invoke_fn: Callable | None = None,
         blackboard: Any = None,
         trace_store: Any = None,
-        context_fn: Optional[Callable] = None,
-        heartbeat_dispatch_fn: Optional[Callable] = None,
+        context_fn: Callable | None = None,
+        heartbeat_dispatch_fn: Callable | None = None,
         event_bus: Any = None,
     ):
         self.config_path = Path(config_path)
@@ -164,7 +165,7 @@ class CronScheduler:
         parts = schedule.split()
         if len(parts) == 5:
             candidate = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
-            for _ in range(43200):  # scan up to 30 days
+            for _ in range(_MAX_CRON_SCAN_MINUTES):  # scan up to 30 days
                 if all(
                     _match_cron_field(f, c)
                     for f, c in zip(parts, [
@@ -181,8 +182,8 @@ class CronScheduler:
     def add_job(
         self, agent: str, schedule: str, message: str = "",
         heartbeat: bool = False,
-        tool_name: Optional[str] = None,
-        tool_params: Optional[str] = None,
+        tool_name: str | None = None,
+        tool_params: str | None = None,
         **kwargs: Any,
     ) -> CronJob:
         error = self._validate_schedule(schedule)

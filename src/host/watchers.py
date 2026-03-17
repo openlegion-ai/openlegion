@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 from src.shared.utils import sanitize_for_prompt, setup_logging
 
@@ -21,7 +21,7 @@ class FileWatcher:
 
     POLL_INTERVAL = 5
 
-    def __init__(self, dispatch_fn: Optional[Callable] = None):
+    def __init__(self, dispatch_fn: Callable | None = None):
         self.watches: list[dict] = []
         self.dispatch_fn = dispatch_fn
         self._seen: dict[str, float] = {}

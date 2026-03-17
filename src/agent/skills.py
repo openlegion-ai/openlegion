@@ -77,6 +77,12 @@ class SkillRegistry:
     CUSTOM_SKILLS_DIR = "/data/custom_skills"
     MARKETPLACE_SKILLS_DIR = "/app/marketplace_skills"
 
+    # Class-level defaults so attribute access is safe even when __init__
+    # is bypassed (e.g. via __new__ in tests).
+    _mcp_client: MCPClient | None = None
+    _tool_defs_cache: dict[frozenset[str] | None, list[dict]] | None = None
+    _descriptions_cache: dict[frozenset[str] | None, str] | None = None
+
     def __init__(self, skills_dir: str, mcp_client: MCPClient | None = None):
         self.skills_dir = skills_dir
         self._mcp_client = mcp_client
@@ -127,7 +133,7 @@ class SkillRegistry:
 
     def _register_mcp_tools(self) -> None:
         """Register tools from connected MCP servers."""
-        if not getattr(self, "_mcp_client", None):
+        if not self._mcp_client:
             return
         for tool_def in self._mcp_client.list_tools():
             name = tool_def["name"]
@@ -149,8 +155,8 @@ class SkillRegistry:
             self._discover(self.MARKETPLACE_SKILLS_DIR)
             self.skills = dict(_skill_staging)
         self._register_mcp_tools()
-        self._tool_defs_cache.clear()
-        self._descriptions_cache.clear()
+        self._tool_defs_cache = {}
+        self._descriptions_cache = {}
         logger.info(f"Reloaded {len(self.skills)} skills")
         return len(self.skills)
 
@@ -163,7 +169,7 @@ class SkillRegistry:
         memory_store: Any = None,
     ) -> Any:
         """Execute a skill by name with given arguments."""
-        if getattr(self, "_mcp_client", None) and self._mcp_client.has_tool(name):
+        if self._mcp_client and self._mcp_client.has_tool(name):
             return await self._mcp_client.call_tool(name, arguments)
 
         if name not in self.skills:
@@ -257,9 +263,9 @@ class SkillRegistry:
 
     def get_descriptions(self, exclude: frozenset[str] | None = None) -> str:
         """Return human-readable descriptions of all skills (memoized)."""
-        cache = getattr(self, "_descriptions_cache", None)
-        if cache is None:
-            self._descriptions_cache = cache = {}
+        if self._descriptions_cache is None:
+            self._descriptions_cache = {}
+        cache = self._descriptions_cache
         cache_key = exclude
         cached = cache.get(cache_key)
         if cached is not None:
@@ -284,9 +290,9 @@ class SkillRegistry:
 
     def get_tool_definitions(self, exclude: frozenset[str] | None = None) -> list[dict]:
         """Return OpenAI-compatible tool definitions for LLM function calling (memoized)."""
-        cache = getattr(self, "_tool_defs_cache", None)
-        if cache is None:
-            self._tool_defs_cache = cache = {}
+        if self._tool_defs_cache is None:
+            self._tool_defs_cache = {}
+        cache = self._tool_defs_cache
         cache_key = exclude
         cached = cache.get(cache_key)
         if cached is not None:

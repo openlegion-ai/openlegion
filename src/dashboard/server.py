@@ -1353,8 +1353,8 @@ def create_dashboard_router(
             _ws_ref[0] = ws
             addresses["evm"] = ws._derive_evm_account(0).address
             addresses["solana"] = str(ws._derive_solana_keypair(0).pubkey())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("WalletService init failed: %s", e)
 
         return {"initialized": True, "seed": words, "sample_addresses": addresses}
 
@@ -1728,6 +1728,26 @@ def create_dashboard_router(
             "entries": [e.model_dump(mode="json") for e in entries],
         }
 
+    def _parse_event_preview(data: str) -> dict:
+        """Parse event data JSON and extract a human-readable preview."""
+        result: dict = {}
+        try:
+            parsed = json.loads(data)
+            if isinstance(parsed, dict):
+                result["agent"] = parsed.get("source", parsed.get("agent", ""))
+                for f in ("text", "summary", "status", "message",
+                          "description", "name", "result"):
+                    if f in parsed and isinstance(parsed[f], str):
+                        result["preview"] = parsed[f][:200]
+                        break
+                if "preview" not in result:
+                    result["preview"] = json.dumps(parsed, default=str)[:200]
+            else:
+                result["preview"] = str(parsed)[:200]
+        except (ValueError, TypeError):
+            result["preview"] = str(data)[:200]
+        return result
+
     @api_router.get("/api/comms/activity")
     async def api_comms_activity(limit: int = 100, project: str = "") -> dict:
         """Recent inter-agent communication: blackboard writes/deletes + pubsub events."""
@@ -1760,21 +1780,10 @@ def create_dashboard_router(
                     "timestamp": ts,
                 }
                 if data:
-                    try:
-                        parsed = json.loads(data)
-                        # Extract a human-readable preview from the value
-                        if isinstance(parsed, dict):
-                            for f in ("text", "summary", "status", "message",
-                                      "description", "name", "result"):
-                                if f in parsed and isinstance(parsed[f], str):
-                                    entry["preview"] = parsed[f][:200]
-                                    break
-                            if "preview" not in entry:
-                                entry["preview"] = json.dumps(parsed, default=str)[:200]
-                        else:
-                            entry["preview"] = str(parsed)[:200]
-                    except (ValueError, TypeError):
-                        entry["preview"] = str(data)[:200]
+                    preview_info = _parse_event_preview(data)
+                    # Don't overwrite agent from the database row
+                    preview_info.pop("agent", None)
+                    entry.update(preview_info)
                 activity.append(entry)
         except Exception:
             pass  # event_log may not exist yet
@@ -1803,18 +1812,8 @@ def create_dashboard_router(
                         "timestamp": ts,
                     }
                     if data:
-                        try:
-                            parsed = json.loads(data)
-                            if isinstance(parsed, dict):
-                                entry["agent"] = parsed.get("source", parsed.get("agent", ""))
-                                for f in ("message", "summary", "result", "text"):
-                                    if f in parsed and isinstance(parsed[f], str):
-                                        entry["preview"] = parsed[f][:200]
-                                        break
-                            if "preview" not in entry:
-                                entry["preview"] = str(data)[:200]
-                        except (ValueError, TypeError):
-                            entry["preview"] = str(data)[:200]
+                        preview_info = _parse_event_preview(data)
+                        entry.update(preview_info)
                     activity.append(entry)
             except Exception:
                 pass
@@ -2441,6 +2440,14 @@ def create_dashboard_router(
                 if val:
                     credential_vault.add_credential(env_name, val, system=True)
                     persisted_env_names.append(env_name)
+
+        def _rollback_credentials() -> None:
+            for env_name in persisted_env_names:
+                try:
+                    credential_vault.remove_credential(env_name)
+                except Exception:
+                    pass
+
         try:
             routers = channel_manager.start_channel(channel_type, tokens)
             if routers:
@@ -2448,19 +2455,10 @@ def create_dashboard_router(
                     request.app.include_router(ch_router)
             return {"connected": True, "type": channel_type}
         except ValueError as e:
-            # Rollback persisted credentials on validation/startup failure
-            for env_name in persisted_env_names:
-                try:
-                    credential_vault.remove_credential(env_name)
-                except Exception:
-                    pass
+            _rollback_credentials()
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            for env_name in persisted_env_names:
-                try:
-                    credential_vault.remove_credential(env_name)
-                except Exception:
-                    pass
+            _rollback_credentials()
             logger.error("Failed to connect channel %s: %s", channel_type, e)
             raise HTTPException(status_code=500, detail=str(e))
 

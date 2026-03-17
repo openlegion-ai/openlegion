@@ -18,12 +18,13 @@ the file through its regular tool suite.
 from __future__ import annotations
 
 import base64
-import logging
 import mimetypes
 import re
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from src.shared.utils import setup_logging
+
+logger = setup_logging("agent.attachments")
 
 # Annotation pattern emitted by the dashboard when a user attaches a file.
 # Format: "📎 File attached: <name> (available at /data/uploads/<name>)"

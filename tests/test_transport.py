@@ -6,22 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.host.transport import HttpTransport, SandboxTransport, resolve_url
-
-# ── resolve_url helper ────────────────────────────────────────
-
-class TestResolveUrl:
-    def test_dict_entry(self):
-        registry = {"alpha": {"url": "http://localhost:8401", "caps": []}}
-        assert resolve_url(registry, "alpha") == "http://localhost:8401"
-
-    def test_string_entry(self):
-        registry = {"alpha": "http://localhost:8401"}
-        assert resolve_url(registry, "alpha") == "http://localhost:8401"
-
-    def test_missing(self):
-        assert resolve_url({}, "alpha") is None
-
+from src.host.transport import HttpTransport, SandboxTransport
 
 # ── HttpTransport ─────────────────────────────────────────────
 

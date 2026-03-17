@@ -14,7 +14,7 @@ import json
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -38,7 +38,7 @@ class WebhookManager:
     def __init__(
         self,
         config_path: str = "config/webhooks.json",
-        dispatch_fn: Optional[Callable] = None,
+        dispatch_fn: Callable | None = None,
     ):
         self.config_path = Path(config_path)
         self.hooks: dict[str, dict] = {}

@@ -891,7 +891,7 @@ class WalletService:
                     price = resp.json()[coingecko_id]["usd"]
                     self._price_cache[symbol] = (price, time.time())
                     return price
-        except Exception:
+        except (httpx.HTTPError, OSError, KeyError, ValueError):
             pass
         return _FALLBACK_PRICES.get(symbol, 3000.0)
 

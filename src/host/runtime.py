@@ -463,8 +463,7 @@ class DockerBackend(RuntimeBackend):
         try:
             _settings_path = Path("config/settings.json")
             if _settings_path.exists():
-                import json as _json
-                _saved = _json.loads(_settings_path.read_text())
+                _saved = json.loads(_settings_path.read_text())
                 _speed = _saved.get("browser_speed")
                 if _speed is not None:
                     _httpx.post(

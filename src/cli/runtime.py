@@ -244,7 +244,7 @@ class RuntimeContext:
         self.blackboard = Blackboard(event_bus=self.event_bus)
         self.pubsub = PubSub(db_path="pubsub.db")
         self.permissions = PermissionMatrix()
-        self.cost_tracker = CostTracker(event_bus=self.event_bus)
+        self.cost_tracker = CostTracker()
         failover_config = self.cfg.get("llm", {}).get("failover", {})
         self.credential_vault = CredentialVault(
             cost_tracker=self.cost_tracker,

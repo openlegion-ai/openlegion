@@ -11,11 +11,11 @@ from __future__ import annotations
 import abc
 import asyncio
 import json
-import re
 from collections.abc import AsyncIterator, Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
+from src.channels import AT_MENTION_RE
 from src.host.credentials import SYSTEM_CREDENTIAL_PROVIDERS, is_system_credential
 from src.shared.utils import sanitize_for_prompt, setup_logging
 
@@ -200,7 +200,7 @@ class Channel(abc.ABC):
         # @agent mention routing
         target = current
         message = text
-        match = re.match(r"^@(\w+)\s+(.+)$", text, re.DOTALL)
+        match = AT_MENTION_RE.match(text)
         if match:
             mentioned = match.group(1)
             if mentioned in agents:

@@ -327,11 +327,3 @@ class SandboxTransport(Transport):
             return {"error": f"Timeout after {timeout}s"}
         except Exception as e:
             return {"error": str(e)}
-
-
-def resolve_url(agent_registry: dict, agent_id: str) -> str | None:
-    """Extract a URL from the router's agent_registry entry."""
-    info = agent_registry.get(agent_id)
-    if info is None:
-        return None
-    return info.get("url", info) if isinstance(info, dict) else info
