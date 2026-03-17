@@ -84,7 +84,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `server.py` | Browser service FastAPI app. Auth token warning on startup. |
 | `service.py` | BrowserManager with per-agent Camoufox instances. `_MAX_WALK_DEPTH=50` for DOM snapshot. |
 | `redaction.py` | Credential redaction for browser output |
-| `stealth.py` | Anti-bot fingerprint building (Windows fingerprint, WebRTC kill) |
+| `stealth.py` | Anti-bot fingerprint building (Windows fingerprint, WebRTC kill, `BROWSER_UA_VERSION` override) |
 | `timing.py` | Timing jitter for human-like behavior |
 | **`src/channels/`** | |
 | `base.py` | Abstract Channel with PairingManager. All messages sanitized. |

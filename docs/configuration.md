@@ -277,5 +277,11 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `OPENLEGION_MAX_PROJECTS` | `0` | Plan limit: maximum projects allowed. `0` means unlimited. |
 | `OPENLEGION_HOST_NETWORK` | `0` | Use Docker host networking for agent containers instead of bridge network. Set to `1` to enable. Not recommended — disables network isolation. |
 | `OPENLEGION_SYSTEM_WALLET_MASTER_SEED` | -- | BIP-39 mnemonic (24 words) for HD wallet key derivation. Required to enable wallet features. Generate with `openlegion wallet init`. |
+| `BROWSER_OS` | `windows` | OS fingerprint for Camoufox browser: `windows`, `macos`, or `linux`. Windows is recommended (≈70% desktop market share; Linux is a datacenter signal). |
+| `BROWSER_LOCALE` | `en-US` | BCP-47 locale tag for browser fingerprint (e.g. `en-US`, `de-DE`). |
+| `BROWSER_UA_VERSION` | -- | Override Firefox version in User-Agent string (e.g. `138.0`). Useful when Camoufox's bundled Firefox is too old for sites that enforce minimum browser versions (e.g. Shopify). Uses Camoufox's native config system. |
+| `BROWSER_PROXY_URL` | -- | Proxy server URL for browser traffic (e.g. `http://proxy:8080`). Residential proxies recommended for bot-protected sites. |
+| `BROWSER_PROXY_USER` | -- | Proxy authentication username. |
+| `BROWSER_PROXY_PASS` | -- | Proxy authentication password. |
 
 The mesh port is configured in `config/mesh.yaml` (`mesh.port`), not via environment variable.
