@@ -240,6 +240,7 @@ class CamoufoxInstance:
         self.dialog_active: bool = False  # True when snapshot scoped to a modal dialog
         self.dialog_detected: bool = False  # True when a modal was found (even if scoping failed)
         self.lock = asyncio.Lock()  # serialize page operations per instance
+        self.x11_wid: int | None = None  # X11 window ID for targeted focus
 
     def touch(self):
         self.last_activity = time.time()
@@ -310,19 +311,27 @@ class BrowserManager:
         Called periodically by the VNC keepalive.  When a modal, popup, or
         internal Firefox dialog steals X11 focus, subsequent VNC mouse clicks
         go to the wrong window and appear to do nothing.
+
+        Targets the most recently active agent's specific X11 window when
+        available, so we don't accidentally raise a different agent's browser.
         """
         async with self._lock:
             if not self._instances:
                 return
+            mru = max(self._instances.values(), key=lambda i: i.last_activity)
+            wid = mru.x11_wid
         try:
+            if wid:
+                wid_s = str(wid)
+                cmd = ["xdotool", "windowmap", "--sync", wid_s,
+                       "windowraise", wid_s, "windowfocus", wid_s]
+            else:
+                cmd = ["xdotool", "search", "--class", "firefox",
+                       "windowmap", "--sync", "windowraise", "windowfocus"]
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(
-                    ["xdotool", "search", "--class", "firefox",
-                     "windowmap", "--sync", "windowraise", "windowfocus"],
-                    capture_output=True, timeout=3,
-                ),
+                lambda: subprocess.run(cmd, capture_output=True, timeout=3),
             )
         except Exception:
             pass
@@ -359,6 +368,33 @@ class BrowserManager:
             self._playwright = pw
         return self._playwright
 
+    async def _get_firefox_wids(self) -> set[int]:
+        """Return the set of current X11 window IDs for Firefox windows."""
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["xdotool", "search", "--class", "firefox"],
+                    capture_output=True, text=True, timeout=2,
+                ),
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return {int(w) for w in result.stdout.strip().split("\n") if w.strip()}
+        except Exception:
+            pass
+        return set()
+
+    async def _discover_new_wid(self, before: set[int]) -> int | None:
+        """Poll for a new Firefox X11 window that wasn't in *before*."""
+        for _ in range(15):  # up to ~3s
+            current = await self._get_firefox_wids()
+            new = current - before
+            if new:
+                return next(iter(new))
+            await asyncio.sleep(0.2)
+        return None
+
     async def _start_browser(self, agent_id: str) -> CamoufoxInstance:
         """Launch a Camoufox browser for an agent."""
         from camoufox.async_api import AsyncNewBrowser
@@ -371,13 +407,26 @@ class BrowserManager:
         options = build_launch_options(agent_id, profile_dir)
         logger.info("Starting Camoufox for '%s' (profile=%s)", agent_id, profile_dir)
 
+        # Snapshot existing Firefox windows so we can identify the new one
+        wids_before = await self._get_firefox_wids()
+
         # persistent_context=True → returns a BrowserContext directly
         browser = await AsyncNewBrowser(pw, **options)
         context = browser
         pages = context.pages
         page = pages[0] if pages else await context.new_page()
 
-        return CamoufoxInstance(agent_id, browser, context, page)
+        inst = CamoufoxInstance(agent_id, browser, context, page)
+
+        # Discover the new X11 window for targeted focus
+        wid = await self._discover_new_wid(wids_before)
+        if wid:
+            inst.x11_wid = wid
+            logger.debug("Agent '%s' browser window: X11 WID %d", agent_id, wid)
+        else:
+            logger.debug("Could not discover X11 WID for '%s', focus will use fallback", agent_id)
+
+        return inst
 
     async def stop(self, agent_id: str) -> None:
         """Stop and clean up a specific agent's browser."""
@@ -467,15 +516,24 @@ class BrowserManager:
             # minimised/iconic case; windowraise moves it to the top of the
             # stacking order. Failures here are non-fatal — the tab is already
             # focused at the protocol level.
+            #
+            # When a specific X11 window ID is known, target it directly.
+            # Without this, `search --class firefox` matches ALL Firefox
+            # windows and raises whichever it finds first — breaking
+            # per-agent browser switching on the shared VNC display.
             try:
+                wid = inst.x11_wid
+                if wid:
+                    wid_s = str(wid)
+                    cmd = ["xdotool", "windowmap", "--sync", wid_s,
+                           "windowraise", wid_s, "windowfocus", wid_s]
+                else:
+                    cmd = ["xdotool", "search", "--class", "firefox",
+                           "windowmap", "--sync", "windowraise", "windowfocus"]
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
                     None,
-                    lambda: subprocess.run(
-                        ["xdotool", "search", "--class", "firefox",
-                         "windowmap", "--sync", "windowraise", "windowfocus"],
-                        capture_output=True, timeout=3,
-                    ),
+                    lambda: subprocess.run(cmd, capture_output=True, timeout=3),
                 )
             except Exception as e:
                 logger.debug("xdotool raise skipped for '%s': %s", agent_id, e)
