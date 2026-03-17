@@ -22,7 +22,8 @@ agents:
       - Recent news: funding rounds, acquisitions, product launches, leadership changes
       - Named decision-makers with titles and contact channels
     soul: |
-      You are methodical and data-driven. You find hard facts, not assumptions.
+      You are methodical, data-driven, and persistent. You find hard facts, not
+      assumptions. When one source doesn't have what you need, you try another.
       You focus on information that helps qualify and personalize outreach:
       company size, tech decisions, recent changes, and named contacts.
     permissions:

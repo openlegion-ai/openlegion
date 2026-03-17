@@ -68,6 +68,12 @@ _WORD_BOUNDARY_CHARS = frozenset(" ,.:;!?\n\t")
 # excluded because force-clicking genuinely disabled items in those roles causes
 # unwanted side-effects (selecting unavailable options, toggling locked switches).
 _ARIA_FORCE_ROLES = frozenset({"button", "link"})
+# Button names (lowercased) that indicate a modal close/dismiss action.
+# When clicking these inside a modal doesn't dismiss it, we fall back to
+# pressing Escape — Camoufox's patched Firefox has known issues where
+# pointer events on modal close buttons silently fail in some SPAs
+# (X/Twitter compose modal, etc.).
+_MODAL_CLOSE_NAMES = frozenset({"close", "×", "✕", "✖"})
 # CSS selector for modal dialog detection via DOM queries.
 # Used in both snapshot() (to scope the a11y tree) and _locator_from_ref()
 # (to scope click/type locators). Must stay in sync — hence a single constant.
@@ -858,6 +864,64 @@ class BrowserManager:
                 else:
                     return {"success": False, "error": "Must provide ref or selector"}
                 await asyncio.sleep(action_delay())
+
+                # Fallback: if a close-type button was clicked inside a
+                # modal but the modal persists, press Escape.  Camoufox's
+                # patched Firefox silently drops pointer events on some
+                # SPA modal close buttons (X/Twitter compose modal, etc.).
+                if inst.dialog_active and ref and ref in inst.refs:
+                    ri = inst.refs[ref]
+                    nm = (ri.get("name") or "").lower().strip()
+                    is_close = ri.get("role") == "button" and (
+                        nm in _MODAL_CLOSE_NAMES
+                        or nm.startswith("close")
+                    )
+                    if is_close:
+                        await asyncio.sleep(0.3)
+                        still_open = False
+                        try:
+                            modal_els = await inst.page.query_selector_all(
+                                _MODAL_SELECTOR,
+                            )
+                            for el in modal_els:
+                                try:
+                                    if await el.is_visible():
+                                        still_open = True
+                                        break
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        if still_open:
+                            logger.info(
+                                "Close-button click did not dismiss "
+                                "modal for %s — sending Escape",
+                                agent_id,
+                            )
+                            await inst.page.keyboard.press("Escape")
+                            await asyncio.sleep(0.5)
+                            # Escape may surface a confirmation dialog
+                            # (e.g. "Discard draft?" on X/Twitter).
+                            # Click through it to finish dismissing.
+                            try:
+                                confirm = inst.page.locator(
+                                    _MODAL_SELECTOR,
+                                ).get_by_role(
+                                    "button", name="Discard",
+                                )
+                                if await confirm.count() > 0:
+                                    await self._human_click(
+                                        inst.page, confirm.first,
+                                        force=True,
+                                    )
+                                    await asyncio.sleep(action_delay())
+                                    logger.info(
+                                        "Clicked Discard on confirmation"
+                                        " dialog for %s", agent_id,
+                                    )
+                            except Exception:
+                                pass
+
                 result = {"success": True, "data": {"clicked": ref or selector}}
                 if snapshot_after:
                     snap = await self._snapshot_impl(inst, agent_id)

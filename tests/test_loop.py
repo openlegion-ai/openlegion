@@ -83,9 +83,43 @@ async def test_simple_task_completes():
     result = await loop.execute_task(assignment)
     assert result.status == "complete"
     assert result.result == {"answer": "42"}
-    assert result.tokens_used == 100
+    assert result.tokens_used == 100  # no tools available → no nudge, completes on iteration 0
     assert loop.tasks_completed == 1
     assert loop.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_task_nudge_fires_when_tools_available():
+    """Agent gets nudged once when it responds with text on iteration 0 but has tools."""
+    loop = _make_loop()
+    # Give the agent tools so the nudge triggers
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "web_search"}}]
+    )
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research", input_data={"query": "test"}
+    )
+
+    result = await loop.execute_task(assignment)
+    assert result.status == "complete"
+    # 2 LLM calls: nudge on iteration 0, then accepted on iteration 1
+    assert result.tokens_used == 200
+    assert loop.tasks_completed == 1
+
+
+@pytest.mark.asyncio
+async def test_task_nudge_skipped_when_no_tools():
+    """Agent completes immediately on iteration 0 when no tools are available."""
+    loop = _make_loop()
+    # Default mock returns [] for get_tool_definitions — no tools
+    assignment = TaskAssignment(
+        workflow_id="wf1", step_id="s1", task_type="research", input_data={"query": "test"}
+    )
+
+    result = await loop.execute_task(assignment)
+    assert result.status == "complete"
+    assert result.tokens_used == 100  # no nudge
+    assert loop.tasks_completed == 1
 
 
 @pytest.mark.asyncio
@@ -1779,6 +1813,38 @@ async def test_heartbeat_skips_when_chat_locked():
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_skips_when_no_rules():
+    """Heartbeat skips LLM call when HEARTBEAT.md is empty and no goals set."""
+    loop = _make_loop()
+    loop.workspace = MagicMock()
+    loop.workspace.load_heartbeat_rules = MagicMock(return_value="# Heartbeat Rules\n")
+
+    result = await loop.execute_heartbeat("Check stuff")
+    assert result["skipped"] is True
+    assert result["reason"] == "no_heartbeat_rules"
+    loop.llm.chat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_runs_when_empty_rules_but_goals_exist():
+    """Heartbeat still runs when HEARTBEAT.md is empty but goals are set."""
+    loop = _make_loop()
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="Done", tokens_used=10))
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.mesh_client.read_blackboard = AsyncMock(return_value={"goal": "Monitor competitors"})
+    loop.workspace = MagicMock()
+    loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.get_learnings_context = MagicMock(return_value="")
+    loop.workspace.load_heartbeat_rules = MagicMock(return_value="# Heartbeat Rules\n")
+    loop.workspace.append_daily_log = MagicMock()
+    loop.workspace.append_activity = MagicMock()
+
+    result = await loop.execute_heartbeat("check")
+    assert not result.get("skipped", False)
+    loop.llm.chat.assert_called()
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_with_tool_calls():
     """Heartbeat executes tools and tracks them in result."""
     tool_call_response = LLMResponse(
@@ -1797,6 +1863,7 @@ async def test_heartbeat_with_tool_calls():
     loop.workspace = MagicMock()
     loop.workspace.get_bootstrap_content = MagicMock(return_value="")
     loop.workspace.get_learnings_context = MagicMock(return_value="")
+    loop.workspace.load_heartbeat_rules = MagicMock(return_value="- Check alerts every hour")
     loop.workspace.append_daily_log = MagicMock()
     loop.workspace.append_activity = MagicMock()
 
@@ -1820,6 +1887,7 @@ async def test_heartbeat_does_not_touch_chat():
     loop.workspace = MagicMock()
     loop.workspace.get_bootstrap_content = MagicMock(return_value="")
     loop.workspace.get_learnings_context = MagicMock(return_value="")
+    loop.workspace.load_heartbeat_rules = MagicMock(return_value="- Check status")
     loop.workspace.append_daily_log = MagicMock()
     loop.workspace.append_activity = MagicMock()
 
@@ -1845,6 +1913,7 @@ async def test_heartbeat_logs_to_activity():
     loop.workspace = MagicMock()
     loop.workspace.get_bootstrap_content = MagicMock(return_value="")
     loop.workspace.get_learnings_context = MagicMock(return_value="")
+    loop.workspace.load_heartbeat_rules = MagicMock(return_value="- Monitor targets")
     loop.workspace.append_daily_log = MagicMock()
     loop.workspace.append_activity = MagicMock()
 
@@ -2116,6 +2185,7 @@ async def test_heartbeat_includes_learnings():
     loop.workspace.get_learnings_context = MagicMock(
         return_value="- Always verify API response status before parsing"
     )
+    loop.workspace.load_heartbeat_rules = MagicMock(return_value="- Check alerts")
     loop.workspace.append_daily_log = MagicMock()
     loop.workspace.append_activity = MagicMock()
 

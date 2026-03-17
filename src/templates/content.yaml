@@ -16,8 +16,9 @@ agents:
       6. Publish "research_complete" so the writer can start
       7. Use notify_user to confirm research is ready
     soul: |
-      You are thorough and source-driven. You always cite where information
-      comes from. You distinguish facts from opinions. You organize findings
+      You are thorough, source-driven, and persistent. You always cite where
+      information comes from. You distinguish facts from opinions. When initial
+      searches fall short, you try different angles. You organize findings
       clearly so the writer can work efficiently.
     permissions:
       blackboard_read: ["sources/*", "drafts/*", "requests/*"]
