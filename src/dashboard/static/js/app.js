@@ -158,6 +158,7 @@ function dashboard() {
     systemSettings: null,
     systemSettingsLoading: false,
     _systemSettingsDebounce: null,
+    _restartingAll: false,
 
     // Storage
     storageData: null,
@@ -2777,6 +2778,27 @@ function dashboard() {
           this.showToast(`Error: ${err.detail || 'Update failed'}`);
         }
       } catch (e) { console.warn('saveDefaultModel failed:', e); }
+    },
+
+    restartAllAgents() {
+      this.showConfirm('Restart All Agents', 'Restart all agents and the browser service to apply settings changes? This will interrupt any active work.', async () => {
+        this._restartingAll = true;
+        this.showToast('Restarting all agents...');
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/restart-agents`, { method: 'POST' });
+          if (resp.ok) {
+            const data = await resp.json();
+            const agents = Object.entries(data.restarted || {});
+            const ok = agents.filter(([, s]) => s === 'ready').length;
+            this.showToast(`Restarted ${ok}/${agents.length} agents`);
+            this.fetchAgents();
+          } else {
+            const err = await resp.json().catch(() => ({}));
+            this.showToast(`Error: ${err.detail || 'Restart failed'}`);
+          }
+        } catch (e) { this.showToast(`Error: ${e.message}`); }
+        this._restartingAll = false;
+      }, true);
     },
 
     async fetchStorage() {
