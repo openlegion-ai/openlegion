@@ -79,6 +79,10 @@ def build_launch_options(agent_id: str, profile_dir: str) -> dict:
     Environment variables (all optional):
       BROWSER_OS     — "windows" (default) | "macos" | "linux"
       BROWSER_LOCALE — BCP-47 locale tag, e.g. "en-US" (default)
+      BROWSER_UA_VERSION — Firefox version to report in User-Agent, e.g. "138.0".
+                           If set, overrides the UA string to spoof a newer Firefox.
+                           Useful when Camoufox's bundled Firefox is too old for
+                           sites that enforce minimum browser versions (e.g. Shopify).
     """
     proxy = get_proxy_config()
 
@@ -134,7 +138,51 @@ def build_launch_options(agent_id: str, profile_dir: str) -> dict:
 
     options["firefox_user_prefs"] = _stealth_prefs()
 
+    # ── User-Agent version override ──────────────────────────────────────────
+    # Camoufox bundles a specific Firefox build (e.g. 135.0).  Some sites
+    # (Shopify, etc.) enforce minimum browser versions and block old Firefox.
+    # BROWSER_UA_VERSION overrides the reported version without upgrading the
+    # Camoufox binary.
+    #
+    # Primary mechanism: Camoufox's `config` dict with `navigator.userAgent`.
+    # This feeds into Camoufox's fingerprint injection system, which controls
+    # both navigator.userAgent (JS) and the User-Agent HTTP header.
+    # Fallback: `general.useragent.override` Firefox pref, in case an older
+    # Camoufox version doesn't honour the config dict.
+    ua_version = os.environ.get("BROWSER_UA_VERSION", "")
+    if ua_version:
+        ua = _build_ua_string(os_hint, ua_version)
+        if ua:
+            options["config"] = {"navigator.userAgent": ua}
+            options["i_know_what_im_doing"] = True
+            options["firefox_user_prefs"]["general.useragent.override"] = ua
+            logger.info("UA override: Firefox/%s", ua_version)
+
     return options
+
+
+def _build_ua_string(os_hint: str, version: str) -> str | None:
+    """Build a Firefox User-Agent string for the given OS and version.
+
+    Returns None and logs a warning if the version format is invalid.
+    Accepts versions like "138.0" or "138.0.1".
+    """
+    version = version.strip()
+    parts = version.split(".")
+    if len(parts) < 2 or not all(p.isdigit() for p in parts):
+        logger.warning(
+            "Invalid BROWSER_UA_VERSION %r (expected e.g. '138.0'), ignoring",
+            version,
+        )
+        return None
+
+    _OS_UA_TEMPLATES = {
+        "macos": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:{v}) Gecko/20100101 Firefox/{v}",
+        "linux": "Mozilla/5.0 (X11; Linux x86_64; rv:{v}) Gecko/20100101 Firefox/{v}",
+        "windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{v}) Gecko/20100101 Firefox/{v}",
+    }
+    template = _OS_UA_TEMPLATES.get(os_hint, _OS_UA_TEMPLATES["windows"])
+    return template.format(v=version)
 
 
 def _stealth_prefs() -> dict:
