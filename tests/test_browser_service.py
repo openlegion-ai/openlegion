@@ -125,6 +125,153 @@ class TestBrowserManagerLifecycle:
         mock_page.bring_to_front.assert_awaited_once()
 
 
+class TestX11WindowTracking:
+    """Tests for per-agent X11 window ID tracking and targeted focus."""
+
+    @pytest.mark.asyncio
+    async def test_get_firefox_wids_parses_output(self):
+        """_get_firefox_wids should parse xdotool output into a set of ints."""
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "12345\n67890\n"
+        with patch("src.browser.service.subprocess.run", return_value=mock_result):
+            wids = await mgr._get_firefox_wids()
+        assert wids == {12345, 67890}
+
+    @pytest.mark.asyncio
+    async def test_get_firefox_wids_empty_when_no_windows(self):
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_result = MagicMock()
+        mock_result.returncode = 1  # xdotool returns 1 when no windows found
+        mock_result.stdout = ""
+        with patch("src.browser.service.subprocess.run", return_value=mock_result):
+            wids = await mgr._get_firefox_wids()
+        assert wids == set()
+
+    @pytest.mark.asyncio
+    async def test_get_firefox_wids_handles_exception(self):
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        with patch("src.browser.service.subprocess.run", side_effect=FileNotFoundError):
+            wids = await mgr._get_firefox_wids()
+        assert wids == set()
+
+    @pytest.mark.asyncio
+    async def test_discover_new_wid_finds_new_window(self):
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        # First call returns existing windows, second call returns with a new one
+        mgr._get_firefox_wids = AsyncMock(
+            side_effect=[{100, 200}, {100, 200, 300}]
+        )
+        wid = await mgr._discover_new_wid({100, 200})
+        assert wid == 300
+
+    @pytest.mark.asyncio
+    async def test_discover_new_wid_picks_highest(self):
+        """When multiple new windows appear, pick the highest WID (most recent)."""
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr._get_firefox_wids = AsyncMock(return_value={100, 200, 300, 400})
+        wid = await mgr._discover_new_wid({100})
+        assert wid == 400
+
+    @pytest.mark.asyncio
+    async def test_discover_new_wid_returns_none_on_timeout(self):
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        # Always returns the same set — no new windows
+        mgr._get_firefox_wids = AsyncMock(return_value={100, 200})
+        with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+            wid = await mgr._discover_new_wid({100, 200})
+        assert wid is None
+
+    @pytest.mark.asyncio
+    async def test_focus_uses_specific_wid(self):
+        """focus() should use the stored X11 WID for xdotool, not search --class."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.bring_to_front = AsyncMock()
+        inst = CamoufoxInstance("agent1", MagicMock(), AsyncMock(), mock_page)
+        inst.x11_wid = 12345
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        with patch("src.browser.service.subprocess.run") as mock_run:
+            await mgr.focus("agent1")
+            cmd = mock_run.call_args[0][0]
+            assert "12345" in cmd
+            assert "search" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_focus_falls_back_without_wid(self):
+        """focus() should fall back to search --class when no WID is stored."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.bring_to_front = AsyncMock()
+        inst = CamoufoxInstance("agent1", MagicMock(), AsyncMock(), mock_page)
+        inst.x11_wid = None
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        with patch("src.browser.service.subprocess.run") as mock_run:
+            await mgr.focus("agent1")
+            cmd = mock_run.call_args[0][0]
+            assert "search" in cmd
+            assert "--class" in cmd
+            assert "firefox" in cmd
+
+    @pytest.mark.asyncio
+    async def test_refocus_active_targets_mru_wid(self):
+        """refocus_active() should target the most recently active agent's WID."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        inst_a = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
+        inst_a.x11_wid = 111
+        inst_a.last_activity = 100
+        inst_b = CamoufoxInstance("b", MagicMock(), AsyncMock(), AsyncMock())
+        inst_b.x11_wid = 222
+        inst_b.last_activity = 200  # more recent
+        mgr._instances = {"a": inst_a, "b": inst_b}
+        with patch("src.browser.service.subprocess.run") as mock_run:
+            await mgr.refocus_active()
+            cmd = mock_run.call_args[0][0]
+            assert "222" in cmd
+            assert "111" not in cmd
+
+    @pytest.mark.asyncio
+    async def test_refocus_active_falls_back_without_wid(self):
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
+        inst.x11_wid = None
+        mgr._instances = {"a": inst}
+        with patch("src.browser.service.subprocess.run") as mock_run:
+            await mgr.refocus_active()
+            cmd = mock_run.call_args[0][0]
+            assert "search" in cmd
+
+    @pytest.mark.asyncio
+    async def test_instance_has_x11_wid_attribute(self):
+        """CamoufoxInstance should have x11_wid initialized to None."""
+        from src.browser.service import CamoufoxInstance
+        inst = CamoufoxInstance("test", MagicMock(), AsyncMock(), AsyncMock())
+        assert inst.x11_wid is None
+
+    @pytest.mark.asyncio
+    async def test_reset_clears_stale_wid(self):
+        """After reset, next get_or_start creates new instance with fresh WID."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_context = AsyncMock()
+        inst = CamoufoxInstance("agent1", MagicMock(), mock_context, AsyncMock())
+        inst.x11_wid = 99999
+        mgr._instances["agent1"] = inst
+        await mgr.reset("agent1")
+        assert "agent1" not in mgr._instances
+
+
 class TestBrowserServer:
     """Tests for the browser service FastAPI endpoints."""
 

@@ -386,12 +386,17 @@ class BrowserManager:
         return set()
 
     async def _discover_new_wid(self, before: set[int]) -> int | None:
-        """Poll for a new Firefox X11 window that wasn't in *before*."""
+        """Poll for a new Firefox X11 window that wasn't in *before*.
+
+        Takes the highest WID when multiple new windows appear, since X11
+        assigns incrementing IDs — the highest is the most recently created
+        (the main browser window, not a transient popup from startup).
+        """
         for _ in range(15):  # up to ~3s
             current = await self._get_firefox_wids()
             new = current - before
             if new:
-                return next(iter(new))
+                return max(new)
             await asyncio.sleep(0.2)
         return None
 
