@@ -146,7 +146,7 @@ class TestAddAgentPermissions(_TempConfigMixin):
         with open(self._perms_path) as f:
             perms = json.load(f)
         alice = perms["permissions"]["alice"]
-        assert alice["allowed_apis"] == ["llm"]
+        assert alice["allowed_apis"] == ["llm", "image_gen"]
         assert alice["blackboard_read"] == []
         assert alice["blackboard_write"] == []
 
