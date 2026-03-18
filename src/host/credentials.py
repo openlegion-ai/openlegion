@@ -759,10 +759,11 @@ class CredentialVault:
     def _oauth_headers(token: str) -> dict[str, str]:
         """Build Anthropic API headers for OAuth bearer auth.
 
-        Only ``claude-code`` + ``oauth`` betas are included — adding
-        ``interleaved-thinking`` or ``fine-grained-tool-streaming`` causes
-        HTTP 400 from the API (likely requires matching request-body fields
-        that our ``_build_anthropic_body`` doesn't produce).
+        The ``anthropic-beta`` value MUST only include ``claude-code`` and
+        ``oauth`` betas.  Other betas like ``fine-grained-tool-streaming``
+        and ``interleaved-thinking`` require specific request body fields
+        that ``_build_anthropic_body`` does not produce — including them
+        causes Anthropic to return HTTP 400.
         ``context-1m`` is also excluded per openclaw's behavior.
         """
         return {
@@ -970,6 +971,10 @@ class CredentialVault:
                 msg = error_data.get("error", {}).get("message", "Authentication failed")
             except (json.JSONDecodeError, ValueError):
                 msg = resp.text[:200] or "Authentication failed"
+            logger.debug(
+                "OAuth 401: model=%s, body_keys=%s",
+                model, sorted(body.keys()),
+            )
             raise RuntimeError(
                 f"OAuth authentication failed (token may have expired): {msg}"
             )
@@ -978,8 +983,8 @@ class CredentialVault:
             error_text = resp.text[:500]
             self._health_tracker.record_failure(model, "HTTPError", resp.status_code)
             logger.debug(
-                "Anthropic OAuth %d — model=%s body_keys=%s",
-                resp.status_code, body.get("model"), list(body.keys()),
+                "Anthropic OAuth %d: model=%s, body_keys=%s, error=%s",
+                resp.status_code, model, sorted(body.keys()), error_text[:200],
             )
             raise RuntimeError(
                 f"Anthropic API error (HTTP {resp.status_code}): {error_text}"
