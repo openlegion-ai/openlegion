@@ -41,7 +41,7 @@ def _make_success_response(image_b64="aW1hZ2VkYXRh", mime_type="image/png"):
         "data": {
             "image_base64": image_b64,
             "mime_type": mime_type,
-            "model": "gemini-2.0-flash-preview-image-generation",
+            "model": "gemini-2.0-flash-image-generation",
             "fixed_cost_usd": 0.04,
         },
     }
@@ -375,6 +375,55 @@ async def test_openai_size_mapping():
     assert v._OPENAI_SIZE_MAP["square"] == "1024x1024"
     assert v._OPENAI_SIZE_MAP["landscape"] == "1792x1024"
     assert v._OPENAI_SIZE_MAP["portrait"] == "1024x1792"
+
+
+async def test_gemini_model_fallback(vault_with_gemini):
+    """When first model returns 403, falls back to next model in chain."""
+    mock_403 = MagicMock()
+    mock_403.status_code = 403
+    mock_403.is_success = False
+    mock_403.text = "Model not found"
+
+    mock_ok = MagicMock()
+    mock_ok.status_code = 200
+    mock_ok.is_success = True
+    mock_ok.json.return_value = _gemini_response_json()
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(side_effect=[mock_403, mock_ok])
+    mock_client.is_closed = False
+    vault_with_gemini._http_client = mock_client
+
+    req = APIProxyRequest(
+        service="image_gen", action="generate",
+        params={"prompt": "a dog", "provider": "gemini"},
+    )
+    result = await vault_with_gemini._handle_image_gen(req)
+    assert result.success
+    assert result.data["image_base64"] == "Z2VtaW5pX2ltYWdl"
+    # Should have been called twice (first model 403, second succeeds)
+    assert mock_client.post.call_count == 2
+
+
+async def test_gemini_all_models_unavailable(vault_with_gemini):
+    """When all models return 403, returns clear error."""
+    mock_403 = MagicMock()
+    mock_403.status_code = 403
+    mock_403.is_success = False
+    mock_403.text = "Model not found"
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_403)
+    mock_client.is_closed = False
+    vault_with_gemini._http_client = mock_client
+
+    req = APIProxyRequest(
+        service="image_gen", action="generate",
+        params={"prompt": "a dog", "provider": "gemini"},
+    )
+    result = await vault_with_gemini._handle_image_gen(req)
+    assert not result.success
+    assert "unavailable" in result.error.lower()
 
 
 # ── Cost tracking tests ───────────────────────────────────────
