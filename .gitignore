@@ -42,3 +42,5 @@ benchmark_report.md
 skills/_marketplace/
 uv.lock
 .claude/
+.openlegion
+config/
