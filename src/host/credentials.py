@@ -1991,10 +1991,12 @@ class CredentialVault:
 
     # ── Image generation ──────────────────────────────────────
 
-    _GEMINI_IMAGE_MODEL = "gemini-2.0-flash-preview-image-generation"
-    _GEMINI_IMAGE_URL = (
+    _GEMINI_IMAGE_MODELS = [
+        "gemini-2.0-flash-image-generation",
+        "gemini-2.5-flash-image",
+    ]
+    _GEMINI_IMAGE_BASE = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{_GEMINI_IMAGE_MODEL}:generateContent"
     )
 
     _IMAGE_GEN_COSTS = {
@@ -2025,7 +2027,11 @@ class CredentialVault:
         )
 
     async def _image_gen_gemini(self, request: APIProxyRequest) -> APIProxyResponse:
-        """Generate an image via Gemini's generateContent API."""
+        """Generate an image via Gemini's generateContent API.
+
+        Tries models in _GEMINI_IMAGE_MODELS order, falling back on
+        403/404 (model unavailable) so we survive model deprecation.
+        """
         api_key = self.system_credentials.get("gemini_api_key")
         if not api_key:
             api_key = self.system_credentials.get("google_api_key")
@@ -2044,42 +2050,61 @@ class CredentialVault:
             },
         }
 
-        try:
-            resp = await client.post(
-                f"{self._GEMINI_IMAGE_URL}?key={api_key}",
-                json=body,
-                timeout=60,
-            )
-        except (httpx.TimeoutException, httpx.ConnectError) as e:
-            return APIProxyResponse(success=False, error=f"Gemini request failed: {e}")
+        last_error = ""
+        for model in self._GEMINI_IMAGE_MODELS:
+            url = f"{self._GEMINI_IMAGE_BASE}{model}:generateContent?key={api_key}"
+            try:
+                resp = await client.post(url, json=body, timeout=60)
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                return APIProxyResponse(
+                    success=False, error=f"Gemini request failed: {e}",
+                )
 
-        if not resp.is_success:
+            # Model unavailable — try next in chain
+            if resp.status_code in (403, 404):
+                last_error = (
+                    f"{model}: {resp.status_code} {resp.text[:200]}"
+                )
+                logger.warning(
+                    "Gemini image model %s unavailable (%s), trying next",
+                    model, resp.status_code,
+                )
+                continue
+
+            if not resp.is_success:
+                return APIProxyResponse(
+                    success=False,
+                    error=f"Gemini API error {resp.status_code}: "
+                    f"{resp.text[:500]}",
+                    status_code=resp.status_code,
+                )
+
+            data = resp.json()
+            for candidate in data.get("candidates", []):
+                for part in candidate.get("content", {}).get("parts", []):
+                    inline = part.get("inlineData")
+                    if inline and inline.get("mimeType", "").startswith(
+                        "image/"
+                    ):
+                        cost = self._IMAGE_GEN_COSTS["gemini"]
+                        return APIProxyResponse(
+                            success=True,
+                            data={
+                                "image_base64": inline["data"],
+                                "mime_type": inline["mimeType"],
+                                "model": model,
+                                "fixed_cost_usd": cost,
+                            },
+                        )
+
             return APIProxyResponse(
                 success=False,
-                error=f"Gemini API error {resp.status_code}: {resp.text[:500]}",
-                status_code=resp.status_code,
+                error="Gemini returned no image data",
             )
-
-        data = resp.json()
-        # Extract image from response candidates
-        for candidate in data.get("candidates", []):
-            for part in candidate.get("content", {}).get("parts", []):
-                inline = part.get("inlineData")
-                if inline and inline.get("mimeType", "").startswith("image/"):
-                    cost = self._IMAGE_GEN_COSTS["gemini"]
-                    return APIProxyResponse(
-                        success=True,
-                        data={
-                            "image_base64": inline["data"],
-                            "mime_type": inline["mimeType"],
-                            "model": self._GEMINI_IMAGE_MODEL,
-                            "fixed_cost_usd": cost,
-                        },
-                    )
 
         return APIProxyResponse(
             success=False,
-            error="Gemini returned no image data",
+            error=f"All Gemini image models unavailable: {last_error}",
         )
 
     async def _image_gen_openai(self, request: APIProxyRequest) -> APIProxyResponse:
