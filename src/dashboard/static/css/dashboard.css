@@ -517,6 +517,7 @@ select:focus-visible,
   color: #d1d5db;
   white-space: normal;
   width: 240px;
+  max-width: calc(100vw - 2rem);
   line-height: 1.45;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   z-index: 50;
@@ -530,6 +531,17 @@ select:focus-visible,
   left: 7px;
   border: 5px solid transparent;
   border-top-color: rgba(75, 85, 99, 0.6);
+}
+
+/* Right-aligned variant — use on hints near the right edge of the screen */
+.setting-hint-right .setting-hint-text {
+  left: auto;
+  right: 0;
+}
+
+.setting-hint-right .setting-hint-text::after {
+  left: auto;
+  right: 7px;
 }
 
 .setting-hint:hover .setting-hint-text,
