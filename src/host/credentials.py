@@ -762,9 +762,9 @@ class CredentialVault:
         The ``anthropic-beta`` value MUST only include ``claude-code`` and
         ``oauth`` betas.  Other betas like ``fine-grained-tool-streaming``
         and ``interleaved-thinking`` require specific request body fields
-        (e.g. ``stream`` event granularity, interleaved content blocks)
         that ``_build_anthropic_body`` does not produce — including them
         causes Anthropic to return HTTP 400.
+        ``context-1m`` is also excluded per openclaw's behavior.
         """
         return {
             "Content-Type": "application/json",
@@ -983,7 +983,7 @@ class CredentialVault:
             error_text = resp.text[:500]
             self._health_tracker.record_failure(model, "HTTPError", resp.status_code)
             logger.debug(
-                "OAuth HTTP %d: model=%s, body_keys=%s, error=%s",
+                "Anthropic OAuth %d: model=%s, body_keys=%s, error=%s",
                 resp.status_code, model, sorted(body.keys()), error_text[:200],
             )
             raise RuntimeError(
