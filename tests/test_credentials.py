@@ -2966,3 +2966,61 @@ async def test_token_refresh_no_creds(monkeypatch):
     v = CredentialVault()
     with pytest.raises(RuntimeError, match="No OpenAI OAuth credentials"):
         await v._ensure_openai_oauth_token()
+
+
+# ── normalize_openai_oauth tests ─────────────────────────────────
+
+
+def test_normalize_openai_oauth_flat():
+    """Flat format with access_token at top level passes through."""
+    data = {"access_token": "tok", "refresh_token": "ref", "account_id": "acct"}
+    result = CredentialVault.normalize_openai_oauth(data)
+    assert result is data  # same object — no transformation needed
+
+
+def test_normalize_openai_oauth_nested():
+    """Nested Codex CLI format is flattened correctly."""
+    data = {
+        "tokens": {
+            "access_token": "tok",
+            "refresh_token": "ref",
+            "account_id": "acct-123",
+        },
+        "last_refresh": "2025-01-01T00:00:00Z",
+    }
+    result = CredentialVault.normalize_openai_oauth(data)
+    assert result == {
+        "access_token": "tok",
+        "refresh_token": "ref",
+        "account_id": "acct-123",
+    }
+
+
+def test_normalize_openai_oauth_nested_no_account_id():
+    """Nested format without account_id omits it."""
+    data = {
+        "tokens": {"access_token": "tok", "refresh_token": "ref"},
+    }
+    result = CredentialVault.normalize_openai_oauth(data)
+    assert result == {"access_token": "tok", "refresh_token": "ref"}
+    assert "account_id" not in result
+
+
+def test_normalize_openai_oauth_nested_no_refresh():
+    """Nested format without refresh_token defaults to empty string."""
+    data = {"tokens": {"access_token": "tok"}}
+    result = CredentialVault.normalize_openai_oauth(data)
+    assert result["access_token"] == "tok"
+    assert result["refresh_token"] == ""
+
+
+def test_normalize_openai_oauth_missing_access_token():
+    """Dict without access_token returns None."""
+    assert CredentialVault.normalize_openai_oauth({"refresh_token": "ref"}) is None
+    assert CredentialVault.normalize_openai_oauth({}) is None
+
+
+def test_normalize_openai_oauth_nested_empty_tokens():
+    """Nested format with empty tokens dict returns None."""
+    assert CredentialVault.normalize_openai_oauth({"tokens": {}}) is None
+    assert CredentialVault.normalize_openai_oauth({"tokens": "not-a-dict"}) is None

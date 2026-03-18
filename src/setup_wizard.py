@@ -697,6 +697,9 @@ class SetupWizard:
 def _validate_openai_oauth_format(raw: str) -> str | None:
     """Validate that *raw* is a JSON blob with access_token + refresh_token.
 
+    Accepts both flat ``{access_token, ...}`` and the nested Codex CLI
+    format ``{tokens: {access_token, ...}}``.
+
     Returns an error message string, or None if valid.
     """
     try:
@@ -705,10 +708,10 @@ def _validate_openai_oauth_format(raw: str) -> str | None:
         return "Not valid JSON"
     if not isinstance(data, dict):
         return "Expected a JSON object"
-    if "access_token" not in data:
-        return "Missing 'access_token'"
-    if "refresh_token" not in data:
-        return "Missing 'refresh_token'"
+    from src.host.credentials import CredentialVault
+
+    if CredentialVault.normalize_openai_oauth(data) is None:
+        return "Missing 'access_token' (expected flat or {tokens: {...}} format)"
     return None
 
 
@@ -751,7 +754,9 @@ def _prompt_openai_oauth() -> str:
                 click.echo(f"  {error}.")
             continue
         click.echo("  Credentials accepted.\n")
-        return raw
+        # Normalize nested Codex CLI format to flat
+        normalized = CredentialVault.normalize_openai_oauth(json.loads(raw))
+        return json.dumps(normalized)
     return ""
 
 
@@ -760,15 +765,19 @@ def _store_provider_key(
     credential_vault=None,
 ) -> None:
     """Store a provider key, detecting OpenAI OAuth JSON blobs."""
-    # Detect OpenAI OAuth JSON blob
+    # Detect OpenAI OAuth JSON blob (flat or nested Codex CLI format)
+    from src.host.credentials import CredentialVault
+
     try:
         parsed = json.loads(api_key)
-        if isinstance(parsed, dict) and "access_token" in parsed and "refresh_token" in parsed:
-            if credential_vault:
-                credential_vault.store_openai_oauth(parsed)
-            _set_env_key("openai_oauth", api_key, system=True)
-            click.echo("  OpenAI OAuth credentials stored.")
-            return
+        if isinstance(parsed, dict):
+            normalized = CredentialVault.normalize_openai_oauth(parsed)
+            if normalized is not None:
+                if credential_vault:
+                    credential_vault.store_openai_oauth(normalized)
+                _set_env_key("openai_oauth", json.dumps(normalized), system=True)
+                click.echo("  OpenAI OAuth credentials stored.")
+                return
     except (json.JSONDecodeError, ValueError):
         pass
 
@@ -858,12 +867,16 @@ class InlineSetup:
             else:
                 click.echo(" could not validate (saved anyway).\n")
             return api_key
-        # Auto-detect pasted JSON blob (OpenAI OAuth)
+        # Auto-detect pasted JSON blob (OpenAI OAuth — flat or nested Codex CLI)
+        from src.host.credentials import CredentialVault
+
         try:
             parsed = json.loads(api_key)
-            if isinstance(parsed, dict) and "access_token" in parsed and "refresh_token" in parsed:
-                click.echo("  Detected OpenAI OAuth credentials.")
-                return api_key
+            if isinstance(parsed, dict):
+                normalized = CredentialVault.normalize_openai_oauth(parsed)
+                if normalized is not None:
+                    click.echo("  Detected OpenAI OAuth credentials.")
+                    return json.dumps(normalized)
         except (json.JSONDecodeError, ValueError):
             pass
         click.echo("  Validating API key...", nl=False)
