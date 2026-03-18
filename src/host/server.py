@@ -135,6 +135,7 @@ def create_mesh_app(
         "wallet_read": (120, 60),
         "wallet_transfer": (10, 3600),
         "wallet_execute": (10, 3600),
+        "image_gen": (10, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
@@ -428,6 +429,8 @@ def create_mesh_app(
         """Proxy external API calls. Agent never sees credentials."""
         agent_id = _resolve_agent_id(agent_id, request)
         await _check_rate_limit("api_proxy", agent_id)
+        if api_request.service in _RATE_LIMITS:
+            await _check_rate_limit(api_request.service, agent_id)
         if not permissions.can_use_api(agent_id, api_request.service):
             raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
         if credential_vault is None:
@@ -484,6 +487,7 @@ def create_mesh_app(
             input_tok = result.data.get("input_tokens", 0)
             output_tok = result.data.get("output_tokens", 0)
             from src.host.costs import estimate_cost
+            fixed_cost = result.data.get("fixed_cost_usd", 0)
             event_data = {
                 "service": api_request.service, "action": api_request.action,
                 "duration_ms": duration_ms,
@@ -491,7 +495,7 @@ def create_mesh_app(
                 "total_tokens": tokens,
                 "input_tokens": input_tok,
                 "output_tokens": output_tok,
-                "cost_usd": estimate_cost(
+                "cost_usd": fixed_cost if fixed_cost else estimate_cost(
                     model, input_tokens=input_tok, output_tokens=output_tok, total_tokens=tokens,
                 ),
             }

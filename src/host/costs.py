@@ -124,6 +124,39 @@ class CostTracker:
 
         return {"cost": cost, "over_budget": over_budget}
 
+    def track_fixed_cost(self, agent: str, model: str, cost_usd: float) -> dict:
+        """Record a fixed-cost API call (e.g. image generation).
+
+        Inserts a row with zero tokens and the given USD cost.
+        Returns {"cost": float, "over_budget": bool}.
+        """
+        self.db.execute(
+            "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd) "
+            "VALUES (?, ?, 0, 0, 0, ?)",
+            (agent, model, cost_usd),
+        )
+        self.db.commit()
+
+        over_budget = False
+        budget = self.budgets.get(agent)
+        if budget:
+            daily_spent = self.get_spend(agent, "today").get("total_cost", 0)
+            if daily_spent > budget["daily_usd"]:
+                logger.warning(
+                    "Agent '%s' exceeded daily budget: $%.4f / $%.2f",
+                    agent, daily_spent, budget["daily_usd"],
+                )
+                over_budget = True
+            monthly_spent = self.get_spend(agent, "month").get("total_cost", 0)
+            if monthly_spent > budget["monthly_usd"]:
+                logger.warning(
+                    "Agent '%s' exceeded monthly budget: $%.4f / $%.2f",
+                    agent, monthly_spent, budget["monthly_usd"],
+                )
+                over_budget = True
+
+        return {"cost": cost_usd, "over_budget": over_budget}
+
     def check_budget(self, agent: str) -> dict:
         """Check if agent is within budget.
 

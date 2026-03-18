@@ -484,6 +484,34 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    # === Image generation (via mesh API proxy) ===
+
+    async def image_generate(
+        self,
+        prompt: str,
+        size: str = "square",
+        provider: str = "gemini",
+        timeout: int = 60,
+    ) -> dict:
+        """Generate an image via the mesh API proxy."""
+        from src.shared.types import APIProxyRequest
+
+        api_request = APIProxyRequest(
+            service="image_gen",
+            action="generate",
+            params={"prompt": prompt, "size": size, "provider": provider},
+        )
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/api",
+            params={"agent_id": self.agent_id},
+            json=api_request.model_dump(mode="json"),
+            timeout=timeout,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     # === Browser (shared browser service via mesh proxy) ===
 
     async def browser_command(self, action: str, params: dict | None = None) -> dict:

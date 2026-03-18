@@ -360,6 +360,7 @@ class CredentialVault:
             "apollo": self._handle_apollo,
             "hunter": self._handle_hunter,
             "brave_search": self._handle_brave_search,
+            "image_gen": self._handle_image_gen,
         }
 
     async def execute_api_call(
@@ -380,7 +381,8 @@ class CredentialVault:
             _oauth_key = self._get_api_key_for_model(request.params.get("model", ""))
             _is_oauth = bool(_oauth_key and is_oauth_token(_oauth_key))
 
-        use_budget_lock = bool(self.cost_tracker and agent_id and is_llm and not _is_oauth)
+        _needs_budget = (is_llm and not _is_oauth) or request.service == "image_gen"
+        use_budget_lock = bool(self.cost_tracker and agent_id and _needs_budget)
 
         if use_budget_lock:
             if agent_id not in self._budget_locks:
@@ -390,18 +392,36 @@ class CredentialVault:
             lock = None
 
         async def _execute() -> APIProxyResponse:
-            if self.cost_tracker and agent_id and is_llm and not _is_oauth:
-                model = request.params.get("model", "unknown")
-                preflight = self.cost_tracker.preflight_check(agent_id, model)
-                if not preflight["allowed"]:
-                    return APIProxyResponse(
-                        success=False,
-                        error=(
-                            f"Budget exceeded: ${preflight['daily_used']:.2f}/${preflight['daily_limit']:.2f} daily, "
-                            f"${preflight['monthly_used']:.2f}/${preflight['monthly_limit']:.2f} monthly "
-                            f"(estimated next call: ${preflight['estimated_cost']:.4f})"
-                        ),
-                    )
+            if self.cost_tracker and agent_id and _needs_budget:
+                if request.service == "image_gen":
+                    budget_check = self.cost_tracker.check_budget(agent_id)
+                    if not budget_check["allowed"]:
+                        return APIProxyResponse(
+                            success=False,
+                            error=(
+                                "Budget exceeded: "
+                                f"${budget_check['daily_used']:.2f}"
+                                f"/${budget_check['daily_limit']:.2f} daily, "
+                                f"${budget_check['monthly_used']:.2f}"
+                                f"/${budget_check['monthly_limit']:.2f} monthly"
+                            ),
+                        )
+                else:
+                    model = request.params.get("model", "unknown")
+                    preflight = self.cost_tracker.preflight_check(agent_id, model)
+                    if not preflight["allowed"]:
+                        return APIProxyResponse(
+                            success=False,
+                            error=(
+                                "Budget exceeded: "
+                                f"${preflight['daily_used']:.2f}"
+                                f"/${preflight['daily_limit']:.2f} daily, "
+                                f"${preflight['monthly_used']:.2f}"
+                                f"/${preflight['monthly_limit']:.2f} monthly "
+                                f"(estimated next call: "
+                                f"${preflight['estimated_cost']:.4f})"
+                            ),
+                        )
 
             handler = self.service_handlers.get(request.service)
             if not handler:
@@ -421,6 +441,13 @@ class CredentialVault:
                             raw_ct = response.data.get("output_tokens")
                             completion_tokens = raw_ct if raw_ct else (tokens_used - prompt_tokens)
                             self.cost_tracker.track(agent_id, model, prompt_tokens, completion_tokens)
+
+                    fixed_cost = response.data.get("fixed_cost_usd")
+                    if fixed_cost and fixed_cost > 0:
+                        fc_model = response.data.get("model", request.service)
+                        self.cost_tracker.track_fixed_cost(
+                            agent_id, fc_model, fixed_cost,
+                        )
 
                 return response
             except Exception as e:
@@ -1646,4 +1673,153 @@ class CredentialVault:
             data=response.json() if response.is_success else None,
             error=response.text if not response.is_success else None,
             status_code=response.status_code,
+        )
+
+    # ── Image generation ──────────────────────────────────────
+
+    _GEMINI_IMAGE_MODEL = "gemini-2.0-flash-preview-image-generation"
+    _GEMINI_IMAGE_URL = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{_GEMINI_IMAGE_MODEL}:generateContent"
+    )
+
+    _IMAGE_GEN_COSTS = {
+        "gemini": 0.04,     # Gemini image gen per image
+        "openai": 0.04,     # DALL-E 3 standard 1024x1024
+    }
+
+    _OPENAI_SIZE_MAP = {
+        "square": "1024x1024",
+        "landscape": "1792x1024",
+        "portrait": "1024x1792",
+    }
+
+    async def _handle_image_gen(self, request: APIProxyRequest) -> APIProxyResponse:
+        """Dispatch image generation to the requested provider."""
+        prompt = request.params.get("prompt", "").strip()
+        if not prompt:
+            return APIProxyResponse(success=False, error="prompt is required")
+
+        provider = request.params.get("provider", "gemini")
+        if provider == "gemini":
+            return await self._image_gen_gemini(request)
+        if provider == "openai":
+            return await self._image_gen_openai(request)
+        return APIProxyResponse(
+            success=False,
+            error=f"Unknown image_gen provider: {provider}. Use 'gemini' or 'openai'.",
+        )
+
+    async def _image_gen_gemini(self, request: APIProxyRequest) -> APIProxyResponse:
+        """Generate an image via Gemini's generateContent API."""
+        api_key = self.system_credentials.get("gemini_api_key")
+        if not api_key:
+            api_key = self.system_credentials.get("google_api_key")
+        if not api_key:
+            return APIProxyResponse(
+                success=False,
+                error="Gemini API key not configured (set OPENLEGION_SYSTEM_GEMINI_API_KEY)",
+            )
+
+        prompt = request.params.get("prompt", "")
+        client = await self._get_http_client()
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "responseModalities": ["IMAGE", "TEXT"],
+            },
+        }
+
+        try:
+            resp = await client.post(
+                f"{self._GEMINI_IMAGE_URL}?key={api_key}",
+                json=body,
+                timeout=60,
+            )
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            return APIProxyResponse(success=False, error=f"Gemini request failed: {e}")
+
+        if not resp.is_success:
+            return APIProxyResponse(
+                success=False,
+                error=f"Gemini API error {resp.status_code}: {resp.text[:500]}",
+                status_code=resp.status_code,
+            )
+
+        data = resp.json()
+        # Extract image from response candidates
+        for candidate in data.get("candidates", []):
+            for part in candidate.get("content", {}).get("parts", []):
+                inline = part.get("inlineData")
+                if inline and inline.get("mimeType", "").startswith("image/"):
+                    cost = self._IMAGE_GEN_COSTS["gemini"]
+                    return APIProxyResponse(
+                        success=True,
+                        data={
+                            "image_base64": inline["data"],
+                            "mime_type": inline["mimeType"],
+                            "model": self._GEMINI_IMAGE_MODEL,
+                            "fixed_cost_usd": cost,
+                        },
+                    )
+
+        return APIProxyResponse(
+            success=False,
+            error="Gemini returned no image data",
+        )
+
+    async def _image_gen_openai(self, request: APIProxyRequest) -> APIProxyResponse:
+        """Generate an image via OpenAI DALL-E 3 API."""
+        api_key = self.system_credentials.get("openai_api_key")
+        if not api_key:
+            return APIProxyResponse(
+                success=False,
+                error="OpenAI API key not configured (set OPENLEGION_SYSTEM_OPENAI_API_KEY)",
+            )
+
+        prompt = request.params.get("prompt", "")
+        size_name = request.params.get("size", "square")
+        size = self._OPENAI_SIZE_MAP.get(size_name, "1024x1024")
+
+        client = await self._get_http_client()
+        body = {
+            "model": "dall-e-3",
+            "prompt": prompt,
+            "n": 1,
+            "size": size,
+            "response_format": "b64_json",
+        }
+
+        try:
+            resp = await client.post(
+                "https://api.openai.com/v1/images/generations",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=body,
+                timeout=60,
+            )
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            return APIProxyResponse(success=False, error=f"OpenAI request failed: {e}")
+
+        if not resp.is_success:
+            return APIProxyResponse(
+                success=False,
+                error=f"OpenAI API error {resp.status_code}: {resp.text[:500]}",
+                status_code=resp.status_code,
+            )
+
+        data = resp.json()
+        images = data.get("data", [])
+        if not images:
+            return APIProxyResponse(success=False, error="OpenAI returned no image data")
+
+        image_b64 = images[0].get("b64_json", "")
+        cost = self._IMAGE_GEN_COSTS["openai"]
+        return APIProxyResponse(
+            success=True,
+            data={
+                "image_base64": image_b64,
+                "mime_type": "image/png",
+                "model": "dall-e-3",
+                "fixed_cost_usd": cost,
+            },
         )
