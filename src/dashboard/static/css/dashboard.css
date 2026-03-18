@@ -743,7 +743,7 @@ select:focus-visible,
 /* ── Queue depth badge on agent cards ─────────────── */
 
 .queue-badge {
-  font-size: 0.625rem;
+  font-size: 0.6875rem;
   letter-spacing: -0.01em;
 }
 
@@ -798,7 +798,14 @@ select:focus-visible,
   position: relative;
 }
 
-.messenger-contact:hover .messenger-close-btn {
+.messenger-contact .messenger-close-btn {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.messenger-contact:hover .messenger-close-btn,
+.messenger-contact:focus-within .messenger-close-btn,
+.messenger-close-btn:focus-visible {
   opacity: 1;
 }
 
@@ -1109,6 +1116,25 @@ select:focus-visible,
 
 .chat-markdown a:hover {
   color: #bfdbfe;
+}
+
+/* ── Chat steer mode indicator ──────────────────── */
+
+.steer-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 9999px;
+  background: rgba(217, 119, 6, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(217, 119, 6, 0.3);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* ── Reduced motion ──────────────────────────────── */
