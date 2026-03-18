@@ -967,7 +967,7 @@
                 <div class="stat-row">
                   <span class="stat-label">
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-                    Activity
+                    Activity<span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Current agent state: thinking (processing LLM), tool (executing a tool), streaming (sending response), or idle (waiting for input).</span></span>
                   </span>
                   <span class="event-badge font-medium"
                     :class="{
@@ -992,7 +992,7 @@
                 <div class="stat-row">
                   <span class="stat-label">
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-                    Cost today
+                    Cost today<span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Total USD spent on LLM API calls today. Resets at midnight UTC.</span></span>
                   </span>
                   <span class="stat-value" x-text="formatCost(agent.daily_cost)"></span>
                 </div>
@@ -1516,7 +1516,7 @@
                           </div>
                         </div>
                         <div class="bg-gray-800/50 rounded p-3">
-                          <div class="text-xs text-gray-500 mb-1">Budget (daily / monthly)</div>
+                          <div class="text-xs text-gray-500 mb-1 flex items-center gap-1">Budget (daily / monthly)<span class="setting-hint setting-hint-sm" tabindex="0">?<span class="setting-hint-text">Per-agent spending caps on LLM API calls. When exceeded, the agent stops accepting tasks until the limit resets. Set in mesh.yaml or via the edit form.</span></span></div>
                           <div class="text-sm text-gray-200 font-mono">
                             <span x-text="agentConfigs[selectedAgent]?.budget?.daily_usd ? formatCost(agentConfigs[selectedAgent].budget.daily_usd) + '/day' : '-/day'"></span>
                             <span class="text-gray-600 mx-1">·</span>
@@ -1987,7 +1987,7 @@
               <!-- Right column: Spend & Budget (combined) -->
               <div class="md:col-span-2 space-y-4">
                 <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-                  <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Spend & Budget</div>
+                  <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Spend & Budget<span class="setting-hint setting-hint-right" tabindex="0">?<span class="setting-hint-text">LLM API spending and budget enforcement for this agent. When daily or monthly limits are exceeded, the agent stops accepting new tasks.</span></span></div>
                   <!-- Spend summary -->
                   <div class="space-y-3 mb-4">
                     <div class="flex justify-between items-baseline">
@@ -2078,7 +2078,7 @@
             <div>
               <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
                 <div class="flex items-center justify-between mb-3">
-                  <div class="text-xs text-gray-500 uppercase tracking-wider">Automations</div>
+                  <div class="text-xs text-gray-500 uppercase tracking-wider flex items-center gap-1.5">Automations<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Scheduled cron jobs for this agent. Heartbeat jobs run autonomously on a timer; custom cron jobs send a message on a schedule.</span></span></div>
                   <button @click="addCronForAgent()"
                     class="text-[10px] px-2 py-1 rounded border border-gray-700 hover:border-indigo-500/50 text-gray-400 hover:text-indigo-300 transition-colors">+ Cron Job</button>
                 </div>
@@ -2369,7 +2369,7 @@
         </div>
 
         <!-- Workflows -->
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Workflows</div>
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Workflows<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Multi-step automation chains triggered by events or schedules. Each step dispatches work to an agent in sequence.</span></span></div>
         <div class="mb-6">
           <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
             <div x-show="workflows.length > 0">
@@ -2431,7 +2431,7 @@
         <div x-show="systemTab === 'integrations'">
 
         <!-- Channels -->
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Channels</div>
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Channels<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Messaging platform integrations. Connect Telegram, Discord, Slack, or WhatsApp so users can chat with agents from those platforms.</span></span></div>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
           <template x-for="ch in channels" :key="ch.type">
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -2548,7 +2548,7 @@
         <div x-show="channels.length === 0" class="text-sm text-gray-500 py-4 mb-6">No channel data available</div>
 
         <!-- Webhooks -->
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Webhooks</div>
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Webhooks<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Named HTTP endpoints that accept POST requests and route them to agents. Use these to integrate external services, CI/CD pipelines, or custom apps.</span></span></div>
         <div class="mb-6">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
             <div class="space-y-2 mb-3">
@@ -2901,7 +2901,7 @@
         <div x-show="systemTab === 'storage'" x-init="if (systemTab === 'storage') { fetchUploads(); fetchStorage(); }">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
             <div class="flex items-center justify-between mb-1">
-              <div class="text-xs text-gray-500 uppercase tracking-wider">Shared Uploads</div>
+              <div class="text-xs text-gray-500 uppercase tracking-wider flex items-center gap-1.5">Shared Uploads<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Files uploaded here are read-only and accessible to all agents. Useful for reference documents, datasets, or configuration files.</span></span></div>
               <button @click="fetchUploads()" class="text-gray-600 hover:text-gray-400 transition-colors" title="Refresh" aria-label="Refresh uploads">
                 <svg class="w-3.5 h-3.5" :class="uploadsLoading && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
               </button>
@@ -2959,7 +2959,7 @@
           </div>
         <!-- Disk & Engine Data -->
         <div class="mt-6" x-show="storageData">
-          <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Disk Usage</div>
+          <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Disk Usage<span class="setting-hint setting-hint-sm ml-1" tabindex="0">?<span class="setting-hint-text">Storage utilization across the server. Includes agent workspaces, uploaded files, and engine databases.</span></span></div>
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <!-- Disk usage -->
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
