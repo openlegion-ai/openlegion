@@ -1106,6 +1106,30 @@ class CredentialVault:
         """Return True if OpenAI OAuth credentials are available."""
         return self._openai_oauth is not None
 
+    @staticmethod
+    def normalize_openai_oauth(data: dict) -> dict | None:
+        """Normalize OpenAI OAuth credentials from Codex CLI nested or flat format.
+
+        Codex CLI stores ``{tokens: {access_token, refresh_token, ...}, last_refresh}``.
+        We need a flat dict with ``access_token`` at top level.
+
+        Returns a flat dict or None if *data* lacks an ``access_token``.
+        """
+        # Nested: {tokens: {access_token, ...}}
+        tokens = data.get("tokens")
+        if isinstance(tokens, dict) and tokens.get("access_token"):
+            result = {
+                "access_token": tokens["access_token"],
+                "refresh_token": tokens.get("refresh_token", ""),
+            }
+            if tokens.get("account_id"):
+                result["account_id"] = tokens["account_id"]
+            return result
+        # Flat: {access_token, ...}
+        if data.get("access_token"):
+            return data
+        return None
+
     def store_openai_oauth(self, creds: dict) -> None:
         """Store OpenAI OAuth credentials in memory and .env.
 

@@ -1227,11 +1227,13 @@ def create_dashboard_router(
                 return {"valid": True, "skipped": False, "oauth": True}
             return {"valid": False, "skipped": False, "reason": "Invalid or expired setup-token"}
 
-        # OpenAI OAuth JSON blob detection
+        # OpenAI OAuth JSON blob detection (flat or nested Codex CLI format)
         import json as _json
+
+        from src.host.credentials import CredentialVault as _CV
         try:
             parsed = _json.loads(key)
-            if isinstance(parsed, dict) and "access_token" in parsed and "refresh_token" in parsed:
+            if isinstance(parsed, dict) and _CV.normalize_openai_oauth(parsed) is not None:
                 return {"valid": True, "skipped": False, "oauth": True}
         except (_json.JSONDecodeError, ValueError):
             pass
@@ -1294,13 +1296,17 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="Key value too long (max 10000 chars)")
         if "\n" in key or "\r" in key:
             raise HTTPException(status_code=400, detail="Key value must not contain newline characters")
-        # Detect OpenAI OAuth JSON blob and route to store_openai_oauth()
+        # Detect OpenAI OAuth JSON blob (flat or nested Codex CLI format)
         import json as _json
+
+        from src.host.credentials import CredentialVault as _CV
         try:
             parsed = _json.loads(key)
-            if isinstance(parsed, dict) and "access_token" in parsed and "refresh_token" in parsed:
-                credential_vault.store_openai_oauth(parsed)
-                return {"stored": True, "service": "openai_oauth", "tier": "system"}
+            if isinstance(parsed, dict):
+                normalized = _CV.normalize_openai_oauth(parsed)
+                if normalized is not None:
+                    credential_vault.store_openai_oauth(normalized)
+                    return {"stored": True, "service": "openai_oauth", "tier": "system"}
         except (_json.JSONDecodeError, ValueError):
             pass
         # Normalize bare provider names

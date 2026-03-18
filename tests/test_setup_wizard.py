@@ -289,6 +289,40 @@ class TestInlineSetup:
         assert "default_model" in cfg.get("llm", {})
 
 
+class TestOpenAIOAuthValidation:
+    """Tests for _validate_openai_oauth_format with nested Codex CLI format."""
+
+    def test_flat_format_valid(self):
+        from src.setup_wizard import _validate_openai_oauth_format
+
+        raw = '{"access_token": "tok", "refresh_token": "ref"}'
+        assert _validate_openai_oauth_format(raw) is None
+
+    def test_nested_format_valid(self):
+        from src.setup_wizard import _validate_openai_oauth_format
+
+        raw = '{"tokens": {"access_token": "tok", "refresh_token": "ref"}, "last_refresh": "2025-01-01"}'
+        assert _validate_openai_oauth_format(raw) is None
+
+    def test_missing_access_token(self):
+        from src.setup_wizard import _validate_openai_oauth_format
+
+        raw = '{"refresh_token": "ref"}'
+        err = _validate_openai_oauth_format(raw)
+        assert err is not None
+        assert "access_token" in err
+
+    def test_not_json(self):
+        from src.setup_wizard import _validate_openai_oauth_format
+
+        assert _validate_openai_oauth_format("not json") is not None
+
+    def test_not_dict(self):
+        from src.setup_wizard import _validate_openai_oauth_format
+
+        assert _validate_openai_oauth_format("[1, 2]") is not None
+
+
 class TestOAuthTokenValidation:
     """Tests for OAuth setup-token format validation."""
 
