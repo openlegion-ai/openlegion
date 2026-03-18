@@ -982,6 +982,16 @@ class REPLSession:
             click.echo("No key provided.")
             return
         key_value = key_value.strip()
+        # Auto-detect OpenAI OAuth JSON blob
+        try:
+            parsed = json.loads(key_value)
+            if isinstance(parsed, dict) and "access_token" in parsed and "refresh_token" in parsed:
+                click.echo("  Detected OpenAI OAuth credentials.")
+                self.ctx.credential_vault.store_openai_oauth(parsed)
+                click.echo("  OpenAI OAuth credentials stored.")
+                return
+        except (json.JSONDecodeError, ValueError):
+            pass
         # Auto-detect OAuth setup-token pasted as an Anthropic key
         if is_oauth_token(key_value) and "anthropic" in service.lower():
             click.echo("  Detected OAuth setup-token (experimental subscription auth).")

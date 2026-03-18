@@ -64,6 +64,7 @@ def test_handler_dispatch():
 async def test_llm_missing_key_returns_error(monkeypatch):
     monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENLEGION_CRED_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
     v = CredentialVault()
     req = APIProxyRequest(
         service="llm",
@@ -1970,8 +1971,8 @@ async def test_oauth_chat_401_non_json(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_oauth_chat_401_oauth_disabled(monkeypatch):
-    """_oauth_chat raises specific message when Anthropic disables OAuth."""
+async def test_oauth_chat_401_expired_token(monkeypatch):
+    """_oauth_chat raises token-may-have-expired message on 401."""
     import httpx
 
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
@@ -1998,7 +1999,7 @@ async def test_oauth_chat_401_oauth_disabled(monkeypatch):
             "messages": [{"role": "user", "content": "hi"}],
         },
     )
-    with pytest.raises(RuntimeError, match="disabled OAuth for third-party"):
+    with pytest.raises(RuntimeError, match="token may have expired"):
         await v._oauth_chat(req, "sk-ant-oat01-" + "x" * 80, "anthropic/claude-sonnet-4-6")
 
 
@@ -2294,10 +2295,11 @@ async def test_regular_key_still_tracks_costs(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_budget_lock_timeout_returns_error():
+async def test_budget_lock_timeout_returns_error(monkeypatch):
     """Budget lock timeout returns an error instead of silently retrying."""
     import asyncio
 
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
     v = CredentialVault()
     cost_tracker = MagicMock()
     cost_tracker.check_budget.return_value = {
@@ -2323,196 +2325,252 @@ async def test_budget_lock_timeout_returns_error():
     assert "Budget lock contention" in result.error
 
 
-# ── OpenAI OAuth tests ─────────────────────────────────────
+# ── OpenAI Codex Responses API tests ─────────────────────────
 
 
-class TestOpenAIOAuthHelpers:
-    """Tests for OpenAI OAuth helper methods."""
+class TestOpenAICodexHelpers:
+    """Tests for OpenAI Codex Responses API helper methods."""
 
-    def test_is_openai_oauth_token(self):
-        from src.host.credentials import is_openai_oauth_token
-        assert is_openai_oauth_token("sk-oai-oat-" + "x" * 80)
-        assert not is_openai_oauth_token("sk-ant-oat01-" + "x" * 80)
-        assert not is_openai_oauth_token("sk-regular-key")
-        assert not is_openai_oauth_token("")
-
-    def test_is_oauth_token_detects_both(self):
+    def test_is_oauth_token_anthropic_only(self):
         from src.host.credentials import is_oauth_token
         assert is_oauth_token("sk-ant-oat01-" + "x" * 80)
-        assert is_oauth_token("sk-oai-oat-" + "x" * 80)
+        assert not is_oauth_token("sk-oai-oat-" + "x" * 80)
         assert not is_oauth_token("sk-regular-key")
 
     def test_openai_oauth_headers_structure(self):
-        headers = CredentialVault._openai_oauth_headers("sk-oai-oat-test")
-        assert headers["Authorization"] == "Bearer sk-oai-oat-test"
+        headers = CredentialVault._openai_oauth_headers("tok-abc", "acct-123")
+        assert headers["Authorization"] == "Bearer tok-abc"
+        assert headers["ChatGPT-Account-Id"] == "acct-123"
         assert headers["Content-Type"] == "application/json"
 
-    def test_build_openai_body_basic(self):
+    def test_openai_oauth_headers_no_account_id(self):
+        headers = CredentialVault._openai_oauth_headers("tok-abc", "")
+        assert "ChatGPT-Account-Id" not in headers
+
+    def test_has_openai_oauth_false(self):
+        v = CredentialVault()
+        assert v._has_openai_oauth() is False
+
+    def test_has_openai_oauth_true(self, monkeypatch):
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+        assert v._has_openai_oauth() is True
+
+    def test_jwt_expiry_extraction(self):
+        import base64
+        import json
+        # Build a fake JWT with exp claim
+        header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
+        payload_data = {"exp": 1700000000, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-abc"}}
+        payload = base64.urlsafe_b64encode(json.dumps(payload_data).encode()).rstrip(b"=").decode()
+        token = f"{header}.{payload}.sig"
+        assert CredentialVault._extract_jwt_expiry(token) == 1700000000
+        assert CredentialVault._extract_account_id_from_jwt(token) == "acct-abc"
+
+    def test_jwt_expiry_invalid_token(self):
+        assert CredentialVault._extract_jwt_expiry("not-a-jwt") == 0
+        assert CredentialVault._extract_account_id_from_jwt("not-a-jwt") == ""
+
+    def test_load_codex_auth_flat(self, tmp_path, monkeypatch):
+        import json
+        auth_dir = tmp_path / ".codex"
+        auth_dir.mkdir()
+        auth_file = auth_dir / "auth.json"
+        auth_file.write_text(json.dumps({
+            "access_token": "tok-flat",
+            "refresh_token": "ref-flat",
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        result = CredentialVault.load_codex_auth()
+        assert result["access_token"] == "tok-flat"
+
+    def test_load_codex_auth_nested(self, tmp_path, monkeypatch):
+        import json
+        auth_dir = tmp_path / ".codex"
+        auth_dir.mkdir()
+        auth_file = auth_dir / "auth.json"
+        auth_file.write_text(json.dumps({
+            "tokens": {
+                "access_token": "tok-nested",
+                "refresh_token": "ref-nested",
+            },
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        result = CredentialVault.load_codex_auth()
+        assert result["access_token"] == "tok-nested"
+
+    def test_load_codex_auth_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        result = CredentialVault.load_codex_auth()
+        assert result is None
+
+
+class TestBuildOpenAIResponsesBody:
+    """Tests for _build_openai_responses_body message conversion."""
+
+    def test_basic_user_message(self):
         params = {
             "model": "openai/gpt-4o",
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 1024,
-            "temperature": 0.5,
         }
-        body = CredentialVault._build_openai_body(params)
+        body = CredentialVault._build_openai_responses_body(params)
         assert body["model"] == "gpt-4o"
-        assert body["messages"] == [{"role": "user", "content": "Hello"}]
-        assert body["max_tokens"] == 1024
-        assert body["temperature"] == 0.5
+        assert body["max_output_tokens"] == 1024
+        assert len(body["input"]) == 1
+        assert body["input"][0]["type"] == "message"
+        assert body["input"][0]["content"][0]["type"] == "input_text"
+        assert body["input"][0]["content"][0]["text"] == "Hello"
 
-    def test_build_openai_body_strips_prefix(self):
-        params = {"model": "openai/gpt-4o-mini", "messages": []}
-        body = CredentialVault._build_openai_body(params)
-        assert body["model"] == "gpt-4o-mini"
+    def test_system_to_instructions(self):
+        params = {
+            "model": "openai/gpt-4o",
+            "messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hi"},
+            ],
+        }
+        body = CredentialVault._build_openai_responses_body(params)
+        assert body["instructions"] == "You are helpful."
+        assert len(body["input"]) == 1
 
-    def test_build_openai_body_bare_model(self):
-        params = {"model": "gpt-4o", "messages": []}
-        body = CredentialVault._build_openai_body(params)
-        assert body["model"] == "gpt-4o"
-
-    def test_build_openai_body_with_tools(self):
-        tools = [{
-            "type": "function",
-            "function": {
-                "name": "search",
-                "description": "Search the web",
-                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
-            },
-        }]
+    def test_assistant_with_tool_calls(self):
         params = {
             "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "test"}],
-            "tools": tools,
-            "tool_choice": "auto",
+            "messages": [
+                {"role": "user", "content": "search"},
+                {
+                    "role": "assistant",
+                    "content": "Searching...",
+                    "tool_calls": [
+                        {"id": "call_1", "function": {"name": "search", "arguments": '{"q":"test"}'}},
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "results"},
+            ],
         }
-        body = CredentialVault._build_openai_body(params)
-        assert body["tools"] == tools
-        assert body["tool_choice"] == "auto"
+        body = CredentialVault._build_openai_responses_body(params)
+        # user, assistant text, function_call, function_call_output
+        assert any(i["type"] == "function_call" for i in body["input"])
+        assert any(i["type"] == "function_call_output" for i in body["input"])
 
-    def test_build_openai_body_max_completion_tokens(self):
-        """o-series models use max_completion_tokens instead of max_tokens."""
+    def test_tools_unwrapped(self):
         params = {
-            "model": "o3",
+            "model": "gpt-4o",
             "messages": [],
-            "max_completion_tokens": 2048,
-            "max_tokens": 1024,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search the web",
+                    "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+                },
+            }],
         }
-        body = CredentialVault._build_openai_body(params)
-        assert body["max_completion_tokens"] == 2048
-        assert "max_tokens" not in body
+        body = CredentialVault._build_openai_responses_body(params)
+        assert len(body["tools"]) == 1
+        assert body["tools"][0]["name"] == "search"
+        assert body["tools"][0]["type"] == "function"
 
-    def test_build_openai_body_reasoning_effort(self):
-        params = {
-            "model": "o3",
-            "messages": [],
-            "reasoning_effort": "high",
-        }
-        body = CredentialVault._build_openai_body(params)
+    def test_strips_prefix(self):
+        params = {"model": "openai/gpt-4o-mini", "messages": []}
+        body = CredentialVault._build_openai_responses_body(params)
+        assert body["model"] == "gpt-4o-mini"
+
+    def test_bare_model(self):
+        params = {"model": "gpt-4o", "messages": []}
+        body = CredentialVault._build_openai_responses_body(params)
+        assert body["model"] == "gpt-4o"
+
+    def test_max_completion_tokens(self):
+        params = {"model": "o3", "messages": [], "max_completion_tokens": 2048, "max_tokens": 1024}
+        body = CredentialVault._build_openai_responses_body(params)
+        assert body["max_output_tokens"] == 2048
+
+    def test_reasoning_effort(self):
+        params = {"model": "o3", "messages": [], "reasoning_effort": "high"}
+        body = CredentialVault._build_openai_responses_body(params)
         assert body["reasoning_effort"] == "high"
 
-    def test_build_openai_body_no_max_tokens(self):
-        """When neither max_tokens nor max_completion_tokens provided."""
+    def test_no_max_tokens(self):
         params = {"model": "gpt-4o", "messages": []}
-        body = CredentialVault._build_openai_body(params)
-        assert "max_tokens" not in body
-        assert "max_completion_tokens" not in body
+        body = CredentialVault._build_openai_responses_body(params)
+        assert "max_output_tokens" not in body
 
-    def test_parse_openai_response_text(self):
+
+class TestParseOpenAIResponsesResponse:
+    """Tests for _parse_openai_responses_response."""
+
+    def test_text_response(self):
         data = {
-            "choices": [{"message": {"content": "Hello!", "role": "assistant"}}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": "Hello!"}]},
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
         }
-        result = CredentialVault._parse_openai_response(data, "openai/gpt-4o")
+        result = CredentialVault._parse_openai_responses_response(data, "openai/gpt-4o")
         assert result["content"] == "Hello!"
         assert result["tokens_used"] == 15
-        assert result["input_tokens"] == 10
-        assert result["output_tokens"] == 5
         assert result["tool_calls"] == []
 
-    def test_parse_openai_response_tool_calls(self):
+    def test_function_call_response(self):
         data = {
-            "choices": [{
-                "message": {
-                    "content": None,
-                    "tool_calls": [{
-                        "id": "call_123",
-                        "type": "function",
-                        "function": {"name": "search", "arguments": '{"q": "test"}'},
-                    }],
-                },
-            }],
-            "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+            "output": [
+                {"type": "function_call", "name": "search", "arguments": '{"q":"test"}'},
+            ],
+            "usage": {"input_tokens": 20, "output_tokens": 10},
         }
-        result = CredentialVault._parse_openai_response(data, "openai/gpt-4o")
-        assert result["content"] == ""
+        result = CredentialVault._parse_openai_responses_response(data, "openai/gpt-4o")
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["name"] == "search"
-        assert result["tool_calls"][0]["arguments"] == '{"q": "test"}'
 
-    def test_parse_openai_response_reasoning(self):
+    def test_reasoning_response(self):
         data = {
-            "choices": [{
-                "message": {
-                    "content": "Answer",
-                    "reasoning_content": "Let me think...",
-                },
-            }],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+            "output": [
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "I think..."}]},
+                {"type": "message", "content": [{"type": "output_text", "text": "Answer"}]},
+            ],
+            "usage": {"input_tokens": 50, "output_tokens": 100},
         }
-        result = CredentialVault._parse_openai_response(data, "o3")
+        result = CredentialVault._parse_openai_responses_response(data, "o3")
         assert result["content"] == "Answer"
-        assert result["thinking_content"] == "Let me think..."
+        assert result["thinking_content"] == "I think..."
 
-    def test_parse_openai_response_tool_calls_null(self):
-        """OpenAI returns tool_calls: null (not absent) — must not crash."""
-        data = {
-            "choices": [{"message": {"content": "Hello", "tool_calls": None}}],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-        }
-        result = CredentialVault._parse_openai_response(data, "openai/gpt-4o")
-        assert result["content"] == "Hello"
-        assert result["tool_calls"] == []
-
-    def test_parse_openai_response_empty_choices(self):
-        """Empty choices list must not crash."""
-        data = {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 0}}
-        result = CredentialVault._parse_openai_response(data, "openai/gpt-4o")
+    def test_empty_output(self):
+        data = {"output": [], "usage": {"input_tokens": 5, "output_tokens": 0}}
+        result = CredentialVault._parse_openai_responses_response(data, "openai/gpt-4o")
         assert result["content"] == ""
         assert result["tool_calls"] == []
 
-    def test_parse_openai_response_no_usage(self):
-        """Missing usage block must not crash."""
-        data = {"choices": [{"message": {"content": "ok"}}]}
-        result = CredentialVault._parse_openai_response(data, "openai/gpt-4o")
+    def test_no_usage(self):
+        data = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]}
+        result = CredentialVault._parse_openai_responses_response(data, "openai/gpt-4o")
         assert result["content"] == "ok"
         assert result["tokens_used"] == 0
 
-    def test_build_openai_body_forwards_user_param(self):
-        """The 'user' param should be forwarded to OpenAI."""
-        params = {
-            "model": "gpt-4o",
-            "messages": [],
-            "user": "agent-123",
-        }
-        body = CredentialVault._build_openai_body(params)
-        assert body["user"] == "agent-123"
-
 
 @pytest.mark.asyncio
-async def test_openai_oauth_chat_success(monkeypatch):
-    """_openai_oauth_chat returns parsed response on 200."""
+async def test_codex_chat_success(monkeypatch):
+    """_openai_oauth_chat (Codex) returns parsed response on 200."""
     import httpx
 
-    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai-oat-" + "x" * 80)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref","account_id":"acct","expires_at":9999999999}',
+    )
     v = CredentialVault()
 
     mock_response = httpx.Response(
         200,
         json={
-            "choices": [{"message": {"content": "Hello!", "role": "assistant"}}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "Hello!"}]}],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
         },
-        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+        request=httpx.Request("POST", "https://chatgpt.com/backend-api/codex/responses"),
     )
 
     async def mock_post(*args, **kwargs):
@@ -2531,19 +2589,125 @@ async def test_openai_oauth_chat_success(monkeypatch):
             "max_tokens": 100,
         },
     )
-    result = await v._openai_oauth_chat(req, v.system_credentials["openai_api_key"], "openai/gpt-4o")
+    result = await v._openai_oauth_chat(req, "openai/gpt-4o")
     assert result.success
     assert result.data["content"] == "Hello!"
-    assert result.data["tokens_used"] == 15
     assert result.data["oauth"] is True
 
 
 @pytest.mark.asyncio
-async def test_openai_oauth_chat_connect_error(monkeypatch):
+async def test_codex_chat_401_retry(monkeypatch):
+    """_openai_oauth_chat retries once on 401 after forcing token refresh."""
+    import base64
+    import json as _json
+
+    import httpx
+
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"old-tok","refresh_token":"ref","account_id":"acct","expires_at":9999999999}',
+    )
+    v = CredentialVault()
+
+    # Build fake JWT for refreshed token
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
+    payload_data = {"exp": 9999999999, "https://api.openai.com/auth": {"chatgpt_account_id": "acct"}}
+    payload = base64.urlsafe_b64encode(_json.dumps(payload_data).encode()).rstrip(b"=").decode()
+    refreshed_jwt = f"{header}.{payload}.sig"
+
+    api_call_count = 0
+
+    async def mock_post(url, *args, **kwargs):
+        nonlocal api_call_count
+        url_str = str(url)
+        # Token refresh endpoint
+        if "auth.openai.com" in url_str:
+            return httpx.Response(
+                200,
+                json={"access_token": refreshed_jwt, "refresh_token": "new-ref"},
+                request=httpx.Request("POST", url_str),
+            )
+        # Codex API endpoint
+        api_call_count += 1
+        if api_call_count == 1:
+            return httpx.Response(
+                401,
+                json={"error": {"message": "expired"}},
+                request=httpx.Request("POST", url_str),
+            )
+        return httpx.Response(
+            200,
+            json={
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
+                "usage": {"input_tokens": 5, "output_tokens": 3},
+            },
+            request=httpx.Request("POST", url_str),
+        )
+
+    mock_client = MagicMock()
+    mock_client.post = mock_post
+    mock_client.is_closed = False
+    v._http_client = mock_client
+
+    # Patch _persist_to_env to avoid writing to real .env
+    import src.host.credentials as cred_mod
+    original = cred_mod._persist_to_env
+    cred_mod._persist_to_env = lambda *a, **kw: None
+    try:
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        result = await v._openai_oauth_chat(req, "openai/gpt-4o")
+        assert result.success
+        assert api_call_count == 2
+    finally:
+        cred_mod._persist_to_env = original
+
+
+@pytest.mark.asyncio
+async def test_codex_chat_500(monkeypatch):
+    """_openai_oauth_chat raises RuntimeError on 500."""
+    import httpx
+
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref","account_id":"acct","expires_at":9999999999}',
+    )
+    v = CredentialVault()
+
+    async def mock_post(*args, **kwargs):
+        return httpx.Response(
+            500,
+            text="Internal Server Error",
+            request=httpx.Request("POST", "https://chatgpt.com/backend-api/codex/responses"),
+        )
+
+    mock_client = MagicMock()
+    mock_client.post = mock_post
+    mock_client.is_closed = False
+    v._http_client = mock_client
+
+    req = APIProxyRequest(
+        service="llm", action="chat",
+        params={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        await v._openai_oauth_chat(req, "openai/gpt-4o")
+
+
+@pytest.mark.asyncio
+async def test_codex_chat_connect_error(monkeypatch):
     """_openai_oauth_chat raises RuntimeError on ConnectError."""
     import httpx
 
-    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai-oat-" + "x" * 80)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref","account_id":"acct","expires_at":9999999999}',
+    )
     v = CredentialVault()
 
     async def mock_post(*args, **kwargs):
@@ -2556,125 +2720,22 @@ async def test_openai_oauth_chat_connect_error(monkeypatch):
 
     req = APIProxyRequest(
         service="llm", action="chat",
-        params={
-            "model": "openai/gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-        },
+        params={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
     )
-    with pytest.raises(RuntimeError, match="OpenAI API connection error"):
-        await v._openai_oauth_chat(req, "sk-oai-oat-" + "x" * 80, "openai/gpt-4o")
+    with pytest.raises(RuntimeError, match="connection error"):
+        await v._openai_oauth_chat(req, "openai/gpt-4o")
 
 
 @pytest.mark.asyncio
-async def test_openai_oauth_chat_401(monkeypatch):
-    """_openai_oauth_chat raises RuntimeError on 401."""
-    import httpx
-
-    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai-oat-" + "x" * 80)
-    v = CredentialVault()
-
-    mock_response = httpx.Response(
-        401,
-        json={"error": {"message": "Invalid authentication token"}},
-        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
-    )
-
-    async def mock_post(*args, **kwargs):
-        return mock_response
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
-
-    req = APIProxyRequest(
-        service="llm", action="chat",
-        params={
-            "model": "openai/gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-        },
-    )
-    with pytest.raises(RuntimeError, match="OpenAI OAuth authentication failed"):
-        await v._openai_oauth_chat(req, "sk-oai-oat-" + "x" * 80, "openai/gpt-4o")
-
-
-@pytest.mark.asyncio
-async def test_openai_oauth_chat_401_non_json(monkeypatch):
-    """_openai_oauth_chat handles non-JSON 401 response gracefully."""
-    import httpx
-
-    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai-oat-" + "x" * 80)
-    v = CredentialVault()
-
-    mock_response = httpx.Response(
-        401,
-        text="Unauthorized",
-        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
-    )
-
-    async def mock_post(*args, **kwargs):
-        return mock_response
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
-
-    req = APIProxyRequest(
-        service="llm", action="chat",
-        params={
-            "model": "openai/gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-        },
-    )
-    with pytest.raises(RuntimeError, match="OpenAI OAuth authentication failed"):
-        await v._openai_oauth_chat(req, "sk-oai-oat-" + "x" * 80, "openai/gpt-4o")
-
-
-@pytest.mark.asyncio
-async def test_openai_oauth_chat_500_records_health_failure(monkeypatch):
-    """_openai_oauth_chat records health failure for server errors."""
-    import httpx
-
-    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai-oat-" + "x" * 80)
-    v = CredentialVault()
-
-    mock_response = httpx.Response(
-        500,
-        text="Internal Server Error",
-        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
-    )
-
-    async def mock_post(*args, **kwargs):
-        return mock_response
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
-
-    req = APIProxyRequest(
-        service="llm", action="chat",
-        params={
-            "model": "openai/gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-        },
-    )
-    with pytest.raises(RuntimeError, match="HTTP 500"):
-        await v._openai_oauth_chat(req, "sk-oai-oat-" + "x" * 80, "openai/gpt-4o")
-
-    status = v._health_tracker.get_status()
-    model_status = [s for s in status if s["model"] == "openai/gpt-4o"]
-    assert len(model_status) == 1
-    assert model_status[0]["failure_count"] > 0
-
-
-@pytest.mark.asyncio
-async def test_handle_llm_routes_openai_oauth_bare_model(monkeypatch):
-    """Bare model name like 'gpt-4o' still routes through OpenAI OAuth path."""
+async def test_codex_routing_bare_model(monkeypatch):
+    """Bare model name 'gpt-4o' routes through Codex path when no API key."""
     from unittest.mock import AsyncMock
 
-    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai-oat-" + "x" * 80)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref","account_id":"acct","expires_at":9999999999}',
+    )
     v = CredentialVault()
 
     mock_result = MagicMock()
@@ -2684,10 +2745,7 @@ async def test_handle_llm_routes_openai_oauth_bare_model(monkeypatch):
 
     req = APIProxyRequest(
         service="llm", action="chat",
-        params={
-            "model": "gpt-4o",  # bare name, no openai/ prefix
-            "messages": [{"role": "user", "content": "hi"}],
-        },
+        params={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
     )
     result = await v._handle_llm(req)
     v._openai_oauth_chat.assert_called_once()
@@ -2695,11 +2753,15 @@ async def test_handle_llm_routes_openai_oauth_bare_model(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_llm_routes_openai_oauth_to_direct_path(monkeypatch):
-    """_handle_llm routes OpenAI OAuth tokens to _openai_oauth_chat, not LiteLLM."""
+async def test_codex_routing_prefixed_model(monkeypatch):
+    """Prefixed model 'openai/gpt-4o' routes through Codex path when no API key."""
     from unittest.mock import AsyncMock
 
-    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai-oat-" + "x" * 80)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref","account_id":"acct","expires_at":9999999999}',
+    )
     v = CredentialVault()
 
     mock_result = MagicMock()
@@ -2709,10 +2771,7 @@ async def test_handle_llm_routes_openai_oauth_to_direct_path(monkeypatch):
 
     req = APIProxyRequest(
         service="llm", action="chat",
-        params={
-            "model": "openai/gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-        },
+        params={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
     )
     result = await v._handle_llm(req)
     v._openai_oauth_chat.assert_called_once()
@@ -2720,22 +2779,25 @@ async def test_handle_llm_routes_openai_oauth_to_direct_path(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_openai_oauth_skips_cost_tracking(monkeypatch):
-    """OpenAI OAuth calls via execute_api_call must NOT record costs."""
-    import httpx
-
-    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai-oat-" + "x" * 80)
+async def test_codex_skips_cost_tracking(monkeypatch):
+    """Codex calls via execute_api_call must NOT record costs."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref","account_id":"acct","expires_at":9999999999}',
+    )
     cost_tracker = MagicMock()
     cost_tracker.preflight_check.return_value = {"allowed": True}
     v = CredentialVault(cost_tracker=cost_tracker)
 
+    import httpx
     mock_response = httpx.Response(
         200,
         json={
-            "choices": [{"message": {"content": "Hello!", "role": "assistant"}}],
-            "usage": {"prompt_tokens": 50, "completion_tokens": 25, "total_tokens": 75},
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "Hi"}]}],
+            "usage": {"input_tokens": 50, "output_tokens": 25},
         },
-        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+        request=httpx.Request("POST", "https://chatgpt.com/backend-api/codex/responses"),
     )
 
     async def mock_post(*args, **kwargs):
@@ -2748,28 +2810,28 @@ async def test_openai_oauth_skips_cost_tracking(monkeypatch):
 
     req = APIProxyRequest(
         service="llm", action="chat",
-        params={
-            "model": "openai/gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-        },
+        params={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
     )
     result = await v.execute_api_call(req, agent_id="test-agent")
-
     assert result.success
     cost_tracker.track.assert_not_called()
     cost_tracker.preflight_check.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_openai_oauth_stream_skips_cost_tracking(monkeypatch):
-    """Streaming OpenAI OAuth calls via stream_llm must NOT record costs."""
+async def test_codex_stream_skips_cost_tracking(monkeypatch):
+    """Streaming Codex calls via stream_llm must NOT record costs."""
     import json as _json
 
-    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai-oat-" + "x" * 80)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref","account_id":"acct","expires_at":9999999999}',
+    )
     cost_tracker = MagicMock()
     v = CredentialVault(cost_tracker=cost_tracker)
 
-    async def mock_stream(request, api_key, model):
+    async def mock_stream(request, model):
         yield f"data: {_json.dumps({'type': 'text_delta', 'content': 'hi'})}\n\n"
         done = {'type': 'done', 'content': 'hi', 'tokens_used': 100, 'model': model, 'tool_calls': []}
         yield f"data: {_json.dumps(done)}\n\n"
@@ -2778,10 +2840,7 @@ async def test_openai_oauth_stream_skips_cost_tracking(monkeypatch):
 
     req = APIProxyRequest(
         service="llm", action="chat",
-        params={
-            "model": "openai/gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-        },
+        params={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
     )
     events = []
     async for event in v.stream_llm(req, agent_id="test-agent"):
@@ -2790,3 +2849,102 @@ async def test_openai_oauth_stream_skips_cost_tracking(monkeypatch):
     assert any("done" in e for e in events)
     cost_tracker.track.assert_not_called()
     cost_tracker.preflight_check.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_token_refresh_fresh(monkeypatch):
+    """_ensure_openai_oauth_token returns cached token when not expired."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref","account_id":"acct","expires_at":9999999999}',
+    )
+    v = CredentialVault()
+    token, acct = await v._ensure_openai_oauth_token()
+    assert token == "tok"
+    assert acct == "acct"
+
+
+@pytest.mark.asyncio
+async def test_token_refresh_expired(monkeypatch):
+    """_ensure_openai_oauth_token refreshes when expired."""
+    import base64
+
+    import httpx
+
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"old","refresh_token":"ref","account_id":"acct","expires_at":0}',
+    )
+    v = CredentialVault()
+
+    # Build fake JWT for new token
+    import json as _json
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
+    payload_data = {"exp": 9999999999, "https://api.openai.com/auth": {"chatgpt_account_id": "new-acct"}}
+    payload = base64.urlsafe_b64encode(_json.dumps(payload_data).encode()).rstrip(b"=").decode()
+    new_jwt = f"{header}.{payload}.sig"
+
+    mock_response = httpx.Response(
+        200,
+        json={"access_token": new_jwt, "refresh_token": "new-ref"},
+        request=httpx.Request("POST", "https://auth.openai.com/oauth/token"),
+    )
+
+    async def mock_post(*args, **kwargs):
+        return mock_response
+
+    mock_client = MagicMock()
+    mock_client.post = mock_post
+    mock_client.is_closed = False
+    v._http_client = mock_client
+
+    # Patch _persist_to_env to avoid writing to real .env
+    import src.host.credentials as cred_mod
+    original = cred_mod._persist_to_env
+    cred_mod._persist_to_env = lambda *a, **kw: None
+    try:
+        token, acct = await v._ensure_openai_oauth_token()
+        assert token == new_jwt
+        assert acct == "new-acct"
+    finally:
+        cred_mod._persist_to_env = original
+
+
+@pytest.mark.asyncio
+async def test_token_refresh_failure(monkeypatch):
+    """_ensure_openai_oauth_token raises on refresh failure."""
+    import httpx
+
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"old","refresh_token":"ref","account_id":"acct","expires_at":0}',
+    )
+    v = CredentialVault()
+
+    async def mock_post(*args, **kwargs):
+        return httpx.Response(
+            400,
+            text="invalid_grant",
+            request=httpx.Request("POST", "https://auth.openai.com/oauth/token"),
+        )
+
+    mock_client = MagicMock()
+    mock_client.post = mock_post
+    mock_client.is_closed = False
+    v._http_client = mock_client
+
+    with pytest.raises(RuntimeError, match="token refresh failed"):
+        await v._ensure_openai_oauth_token()
+
+
+@pytest.mark.asyncio
+async def test_token_refresh_no_creds(monkeypatch):
+    """_ensure_openai_oauth_token raises when no creds configured."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+    v = CredentialVault()
+    with pytest.raises(RuntimeError, match="No OpenAI OAuth credentials"):
+        await v._ensure_openai_oauth_token()

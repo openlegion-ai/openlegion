@@ -1212,21 +1212,29 @@ def create_dashboard_router(
         if not service or not key:
             raise HTTPException(status_code=400, detail="service and key are required")
 
-        # OAuth setup-token: validate directly against provider API
-        from src.host.credentials import is_oauth_token, is_openai_oauth_token
+        # Anthropic OAuth setup-token: validate directly against provider API
+        from src.host.credentials import is_oauth_token
         if is_oauth_token(key):
             from src.setup_wizard import SetupWizard
-            oauth_provider = "openai" if is_openai_oauth_token(key) else "anthropic"
-            fmt_error = SetupWizard._validate_oauth_token_format(key, oauth_provider)
+            fmt_error = SetupWizard._validate_oauth_token_format(key)
             if fmt_error:
                 return {"valid": False, "skipped": False, "reason": fmt_error}
             import asyncio
             valid = await asyncio.get_running_loop().run_in_executor(
-                None, SetupWizard._validate_oauth_token_live, key, oauth_provider,
+                None, SetupWizard._validate_oauth_token_live, key,
             )
             if valid:
                 return {"valid": True, "skipped": False, "oauth": True}
             return {"valid": False, "skipped": False, "reason": "Invalid or expired setup-token"}
+
+        # OpenAI OAuth JSON blob detection
+        import json as _json
+        try:
+            parsed = _json.loads(key)
+            if isinstance(parsed, dict) and "access_token" in parsed and "refresh_token" in parsed:
+                return {"valid": True, "skipped": False, "oauth": True}
+        except (_json.JSONDecodeError, ValueError):
+            pass
 
         # Strip _api_key suffix to get provider name
         provider = service.replace("_api_key", "")
