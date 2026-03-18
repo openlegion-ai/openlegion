@@ -235,7 +235,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 
 ## Git Workflow
 
-- **Always use worktrees.** Multiple agents work concurrently. Use `isolation: "worktree"` for subagents.
+- **MANDATORY: Use worktrees for ALL code changes.** Every subagent that touches code MUST use `isolation: "worktree"`. Multiple agents work concurrently — without worktrees they overwrite each other's changes, cause conflicts, and break in-progress work. No exceptions. This applies to the main conversation dispatching subagents too — always set `isolation: "worktree"` on the Agent tool.
 - **Never `pip install` from a worktree.** Hijacks the global `openlegion` entry point.
 - **Never merge directly to main.** Always create a PR via `gh pr create` and merge through GitHub.
 - **Wait for CI before merging.** Run `gh pr checks <number> --watch`.
