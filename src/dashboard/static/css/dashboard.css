@@ -24,7 +24,6 @@
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border-radius: 0.75rem;
-  overflow: hidden;
   transition: border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1),
               box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1),
               transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
@@ -392,6 +391,21 @@
   scrollbar-color: rgba(55, 55, 75, 0.6) transparent;
 }
 
+/* ── Scrollbar-hidden utility for tab strips ───────── */
+
+.hide-scrollbar {
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.hide-scrollbar > * {
+  flex-shrink: 0;
+}
+
 /* ── Smooth transitions for panel switching ────────── */
 
 main > div {
@@ -528,6 +542,39 @@ select:focus-visible,
 .queue-busy { color: #f59e0b; }
 .queue-idle { color: #9ca3af; }
 
+/* ── Empty state pattern ─────────────────────────── */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 2rem 1.5rem;
+  text-align: center;
+}
+
+.empty-state > svg {
+  width: 2.5rem;
+  height: 2.5rem;
+  color: #1f2937;
+  margin-bottom: 0.75rem;
+}
+
+.empty-state-title {
+  font-size: 0.8125rem;
+  color: #9ca3af;
+  margin-bottom: 0.25rem;
+}
+
+.empty-state-desc {
+  font-size: 0.75rem;
+  color: #4b5563;
+  max-width: 20rem;
+}
+
+.empty-state-action {
+  margin-top: 0.75rem;
+}
+
 /* ── Toast notifications ──────────────────────────── */
 
 @keyframes toast-in {
@@ -663,7 +710,7 @@ select:focus-visible,
 
 .comms-type-badge {
   display: inline-block;
-  font-size: 0.5625rem;
+  font-size: 0.6875rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
