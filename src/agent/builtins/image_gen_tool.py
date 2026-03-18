@@ -48,9 +48,8 @@ _FILENAME_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9._-]")
         },
         "provider": {
             "type": "string",
-            "description": "Image generation provider: 'gemini' (default) or 'openai'",
+            "description": "Image generation provider: 'gemini' or 'openai'. Uses system default if not specified.",
             "enum": ["gemini", "openai"],
-            "default": "gemini",
         },
     },
 )
@@ -58,7 +57,7 @@ async def generate_image(
     prompt: str,
     size: str = "square",
     filename: str = "",
-    provider: str = "gemini",
+    provider: str = "",
     *,
     mesh_client=None,
     workspace_manager=None,
@@ -73,8 +72,8 @@ async def generate_image(
     if size not in _VALID_SIZES:
         size = "square"
 
-    if provider not in _VALID_PROVIDERS:
-        provider = "gemini"
+    if provider and provider not in _VALID_PROVIDERS:
+        provider = ""  # Let server use configured default
 
     # Generate filename if not provided
     if not filename:
@@ -142,6 +141,6 @@ async def generate_image(
     return {
         "status": "image generated",
         "path": str(filepath),
-        "provider": provider,
+        "provider": provider or data.get("model", "default"),
         "_image": {"data": image_base64, "media_type": mime_type},
     }

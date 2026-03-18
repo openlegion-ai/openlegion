@@ -2782,8 +2782,13 @@ function dashboard() {
 
     saveSystemSetting(key, value) {
       if (!this.systemSettings) return;
-      const typ = ['default_daily_budget', 'default_monthly_budget'].includes(key) ? parseFloat : parseInt;
-      this.systemSettings[key] = typ(value);
+      const strKeys = ['image_gen_provider'];
+      if (strKeys.includes(key)) {
+        this.systemSettings[key] = value;
+      } else {
+        const typ = ['default_daily_budget', 'default_monthly_budget'].includes(key) ? parseFloat : parseInt;
+        this.systemSettings[key] = typ(value);
+      }
       if (this._systemSettingsDebounce) clearTimeout(this._systemSettingsDebounce);
       this._systemSettingsDebounce = setTimeout(async () => {
         try {
