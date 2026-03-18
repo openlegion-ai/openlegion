@@ -61,7 +61,7 @@ async def test_generate_image_success(mock_mesh_client, tmp_artifacts):
 
     assert result["status"] == "image generated"
     assert "path" in result
-    assert result["provider"] == "gemini"
+    assert result["provider"]  # non-empty (model name or provider)
     assert "_image" in result
     assert result["_image"]["data"] == "aW1hZ2VkYXRh"
     assert result["_image"]["media_type"] == "image/png"

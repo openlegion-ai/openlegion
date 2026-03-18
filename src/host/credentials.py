@@ -2039,13 +2039,27 @@ class CredentialVault:
         "portrait": "1024x1792",
     }
 
+    @staticmethod
+    def _default_image_provider() -> str:
+        """Read the configured default image gen provider from settings."""
+        try:
+            p = Path("config/settings.json")
+            if p.exists():
+                data = json.loads(p.read_text())
+                prov = data.get("image_gen_provider", "gemini")
+                if prov in ("gemini", "openai"):
+                    return prov
+        except (json.JSONDecodeError, OSError):
+            pass
+        return "gemini"
+
     async def _handle_image_gen(self, request: APIProxyRequest) -> APIProxyResponse:
         """Dispatch image generation to the requested provider."""
         prompt = request.params.get("prompt", "").strip()
         if not prompt:
             return APIProxyResponse(success=False, error="prompt is required")
 
-        provider = request.params.get("provider", "gemini")
+        provider = request.params.get("provider") or self._default_image_provider()
         if provider == "gemini":
             return await self._image_gen_gemini(request)
         if provider == "openai":
