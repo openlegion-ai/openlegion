@@ -759,18 +759,17 @@ class CredentialVault:
     def _oauth_headers(token: str) -> dict[str, str]:
         """Build Anthropic API headers for OAuth bearer auth.
 
-        The ``anthropic-beta`` value intentionally excludes ``prompt-caching``
-        and ``context-1m`` — those are separate features not needed for OAuth.
+        Only ``claude-code`` + ``oauth`` betas are included — adding
+        ``interleaved-thinking`` or ``fine-grained-tool-streaming`` causes
+        HTTP 400 from the API (likely requires matching request-body fields
+        that our ``_build_anthropic_body`` doesn't produce).
+        ``context-1m`` is also excluded per openclaw's behavior.
         """
         return {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
             "anthropic-version": "2023-06-01",
-            "anthropic-beta": (
-                "claude-code-20250219,oauth-2025-04-20,"
-                "fine-grained-tool-streaming-2025-05-14,"
-                "interleaved-thinking-2025-05-14"
-            ),
+            "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
             "user-agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
         }
 
@@ -978,6 +977,10 @@ class CredentialVault:
         if not resp.is_success:
             error_text = resp.text[:500]
             self._health_tracker.record_failure(model, "HTTPError", resp.status_code)
+            logger.debug(
+                "Anthropic OAuth %d — model=%s body_keys=%s",
+                resp.status_code, body.get("model"), list(body.keys()),
+            )
             raise RuntimeError(
                 f"Anthropic API error (HTTP {resp.status_code}): {error_text}"
             )

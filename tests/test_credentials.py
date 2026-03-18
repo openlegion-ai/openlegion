@@ -2347,7 +2347,8 @@ class TestOpenAICodexHelpers:
         headers = CredentialVault._openai_oauth_headers("tok-abc", "")
         assert "ChatGPT-Account-Id" not in headers
 
-    def test_has_openai_oauth_false(self):
+    def test_has_openai_oauth_false(self, monkeypatch):
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
         v = CredentialVault()
         assert v._has_openai_oauth() is False
 
