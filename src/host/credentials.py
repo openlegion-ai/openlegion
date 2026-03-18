@@ -1997,8 +1997,8 @@ class CredentialVault:
     # ── Image generation ──────────────────────────────────────
 
     _GEMINI_IMAGE_MODELS = [
-        "gemini-2.0-flash-image-generation",
         "gemini-2.5-flash-image",
+        "gemini-2.0-flash-image-generation",
     ]
     _GEMINI_IMAGE_BASE = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
