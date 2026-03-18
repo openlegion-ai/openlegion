@@ -975,6 +975,20 @@ function dashboard() {
       if (!this._skipPush) this._pushUrl(false);
     },
 
+    switchSystemTab(tabId) {
+      if (this.systemTab === 'activity' && tabId !== 'activity') this._stopActivityRefresh();
+      this.systemTab = tabId;
+      this._pushUrl(false);
+      if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); }
+      if (tabId === 'apikeys') { this.fetchSettings(); }
+      if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); }
+      if (tabId === 'settings') { this.fetchBrowserSettings(); }
+      if (tabId === 'activity') {
+        if (this.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
+        else if (this.activityView === 'logs') { this.fetchSystemLogs(); }
+      }
+    },
+
     // ── Markdown rendering for chat messages ─────────────
 
     renderMarkdown(text) {

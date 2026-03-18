@@ -362,7 +362,7 @@
                 x-text="activeProject"></span>
               <span class="text-[10px] text-gray-600 flex-shrink-0 hidden sm:block"
                 x-text="(activeProjectData?.members || []).length + ' member' + ((activeProjectData?.members || []).length !== 1 ? 's' : '')"></span>
-              <span x-show="activeProjectData?.description" class="text-[10px] text-gray-700 truncate hidden md:block"
+              <span x-show="activeProjectData?.description" class="text-[10px] text-gray-600 truncate hidden md:block"
                 :title="activeProjectData?.description" x-text="activeProjectData?.description"></span>
               <!-- Tab pills — desktop only, click stops propagation to header toggle -->
               <div class="hidden sm:flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Project sections">
@@ -533,7 +533,7 @@
                       x-text="'+' + (Object.keys(commsSubs).length - 8) + ' more'"></span>
                   </div>
                   <div x-show="Object.keys(commsSubs).length === 0" class="flex-1" x-cloak></div>
-                  <button @click="fetchCommsActivity()" title="Refresh activity"
+                  <button @click="fetchCommsActivity()" title="Refresh activity" aria-label="Refresh activity"
                     class="flex-shrink-0 text-gray-600 hover:text-gray-400 transition-colors ml-auto">
                     <svg class="w-3.5 h-3.5" :class="commsActivityLoading && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                   </button>
@@ -571,8 +571,10 @@
                       Loading…
                     </div>
                   </div>
-                  <div x-show="commsActivity.length === 0 && !commsActivityLoading" class="text-center py-8 px-6" x-cloak>
-                    <div class="text-gray-600 text-xs">No agent communication yet in this project.</div>
+                  <div x-show="commsActivity.length === 0 && !commsActivityLoading" class="empty-state" x-cloak>
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    <div class="empty-state-title">No activity yet</div>
+                    <div class="empty-state-desc">Blackboard writes and pub/sub events will appear here as agents communicate.</div>
                   </div>
                 </div>
               </div>
@@ -639,15 +641,15 @@
                           <span class="text-gray-500 text-xs truncate flex-shrink-0 hidden sm:block" style="max-width:10rem" x-text="valueSummary(entry.value)"></span>
                           <span class="text-gray-600 text-[10px] whitespace-nowrap flex-shrink-0 hidden sm:block" x-text="timeAgo(entry.updated_at)"></span>
                           <button @click.stop="deleteBlackboard(entry.key)" :disabled="entry.key.startsWith('history/')"
-                            class="text-[10px] px-1.5 py-0.5 rounded text-gray-700 hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0">Del</button>
+                            class="text-[10px] px-1.5 py-0.5 rounded text-gray-600 hover:text-red-400 hover:bg-red-900/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0">Del</button>
                         </div>
                         <div class="bb-detail" :class="bbExpanded[entry.key] ? 'bb-detail-open' : ''">
                           <div class="px-4 pb-3 pt-1">
                             <div class="flex items-center gap-2 flex-wrap mb-2 text-xs text-gray-500">
                               <span>by <span class="text-gray-400" x-text="entry.written_by"></span></span>
-                              <span class="text-gray-700">&middot;</span>
+                              <span class="text-gray-600">&middot;</span>
                               <span>v<span x-text="entry.version"></span></span>
-                              <span class="text-gray-700">&middot;</span>
+                              <span class="text-gray-600">&middot;</span>
                               <span class="font-mono text-gray-600 text-[10px]" x-text="entry.updated_at"></span>
                               <!-- value summary visible on mobile only (hidden from row) -->
                               <span class="text-gray-500 sm:hidden" x-text="valueSummary(entry.value)"></span>
@@ -664,8 +666,10 @@
                       Loading…
                     </div>
                   </div>
-                  <div x-show="filteredBbEntries.length === 0 && !bbLoading" class="text-center py-8 px-6" x-cloak>
-                    <div class="text-gray-600 text-xs">No shared state entries in this project yet.</div>
+                  <div x-show="filteredBbEntries.length === 0 && !bbLoading" class="empty-state" x-cloak>
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                    <div class="empty-state-title">No shared state</div>
+                    <div class="empty-state-desc">Agents write to the blackboard to coordinate. Entries will appear here as they work.</div>
                   </div>
                 </div>
 
@@ -703,7 +707,7 @@
                 <div class="flex items-center justify-between px-4 pt-3 pb-2">
                   <span class="text-[10px] text-gray-600 font-mono" x-show="artifactsList.length > 0" x-text="artifactsList.length + ' file' + (artifactsList.length !== 1 ? 's' : '')"></span>
                   <div x-show="artifactsList.length === 0" x-cloak></div>
-                  <button @click="fetchArtifacts()" title="Refresh files"
+                  <button @click="fetchArtifacts()" title="Refresh files" aria-label="Refresh files"
                     class="ml-auto text-gray-600 hover:text-gray-400 transition-colors">
                     <svg class="w-3.5 h-3.5" :class="artifactsLoading && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                   </button>
@@ -719,7 +723,7 @@
                         <div class="text-xs font-mono text-blue-400 truncate" x-text="art.name"></div>
                         <div class="text-[10px] text-gray-600 mt-0.5 flex items-center gap-1">
                           <span class="truncate" x-text="art.agent"></span>
-                          <span class="text-gray-700 flex-shrink-0">&middot;</span>
+                          <span class="text-gray-600 flex-shrink-0">&middot;</span>
                           <span class="flex-shrink-0" x-text="formatFileSize(art.size)"></span>
                         </div>
                       </div>
@@ -751,8 +755,10 @@
                       Loading…
                     </div>
                   </div>
-                  <div x-show="artifactsList.length === 0 && !artifactsLoading" class="text-center py-8 px-6" x-cloak>
-                    <div class="text-gray-600 text-xs">No artifacts yet. Agents create them using <span class="font-mono text-gray-500">save_artifact</span>.</div>
+                  <div x-show="artifactsList.length === 0 && !artifactsLoading" class="empty-state" x-cloak>
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    <div class="empty-state-title">No files yet</div>
+                    <div class="empty-state-desc">Agents create files using <span class="font-mono text-gray-400">save_artifact</span>. They will appear here.</div>
                   </div>
                 </div>
               </div>
@@ -806,7 +812,7 @@
                 <!-- No eligible targets -->
                 <div x-show="broadcastTargets.length === 0" x-cloak class="text-center py-6">
                   <p class="text-xs text-gray-600">No running agents to broadcast to.</p>
-                  <p class="text-[10px] text-gray-700 mt-1">Add agents to this project or wait for them to start.</p>
+                  <p class="text-[10px] text-gray-600 mt-1">Add agents to this project or wait for them to start.</p>
                 </div>
                 <!-- Has targets -->
                 <div x-show="broadcastTargets.length > 0" x-cloak>
@@ -922,8 +928,8 @@
                     <span class="font-semibold text-white group-hover:text-indigo-300 transition-colors truncate cursor-pointer" @click="drillDown(agent.id)" :title="agent.id" x-text="agent.id"></span>
                     <svg class="w-3 h-3 text-gray-600 group-hover:text-indigo-400 transition-colors shrink-0 cursor-pointer" @click="drillDown(agent.id)" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                   </div>
-                  <div class="text-xs text-gray-500 truncate mt-0.5" x-show="agent.role" :title="agent.role" x-text="agent.role"></div>
-                  <div class="text-[10px] text-gray-600 truncate mt-0.5" x-show="agent.model" :title="agent.model" x-text="formatModelName(agent.model)"></div>
+                  <div class="text-xs text-gray-500 truncate mt-0.5" x-show="agent.role || agent.model"
+                    x-text="[agent.role, agent.model ? formatModelName(agent.model) : ''].filter(Boolean).join(' · ')"></div>
                   <div x-show="agent.project && !activeProject" class="mt-0.5">
                     <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800/80 text-gray-500 border border-gray-700/40"
                       x-text="agent.project"></span>
@@ -979,18 +985,9 @@
                     <span>Heartbeat</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Periodic autonomous wakeup. The agent checks its HEARTBEAT.md rules on this schedule and acts on anything that needs attention — no user message required.</span></span>
                   </span>
                   <span class="text-[11px] font-medium"
-                    :class="agent.heartbeat_enabled ? 'text-pink-400' : 'text-gray-600'">
-                    <template x-if="agent.heartbeat_enabled">
-                      <span>
-                        <span x-text="_heartbeatCountdowns[agent.id] || '...'"></span>
-                        <span class="text-gray-600 font-normal">&middot;</span>
-                        <span class="text-gray-500 font-normal text-[10px]" x-text="agent.heartbeat_schedule"></span>
-                      </span>
-                    </template>
-                    <template x-if="!agent.heartbeat_enabled">
-                      <span>paused</span>
-                    </template>
-                  </span>
+                    :class="agent.heartbeat_enabled ? 'text-pink-400' : 'text-gray-600'"
+                    x-text="agent.heartbeat_enabled ? (_heartbeatCountdowns[agent.id] || '...') : 'paused'"
+                    :title="agent.heartbeat_schedule"></span>
                 </div>
                 <div class="stat-row">
                   <span class="stat-label">
@@ -1290,9 +1287,9 @@
               </div>
             </div>
             <!-- 2-column detail layout -->
-            <div class="grid grid-cols-1 lg:grid-cols-5 gap-5 mb-5">
+            <div class="grid grid-cols-1 md:grid-cols-5 gap-5 mb-5">
               <!-- Left column: Identity panel -->
-              <div class="lg:col-span-3">
+              <div class="md:col-span-3">
                 <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
                   <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Settings</div>
                   <!-- Tab bar (4 tabs, no access badges) -->
@@ -1903,7 +1900,7 @@
                         x-text="'/data' + (agentFilesPath === '.' ? '' : '/' + agentFilesPath)"></span>
                       <button @click="fetchAgentFiles(selectedAgent, agentFilesPath)"
                         class="flex-shrink-0 text-gray-600 hover:text-gray-400 transition-colors"
-                        title="Refresh">
+                        title="Refresh" aria-label="Refresh files">
                         <svg class="w-3.5 h-3.5" :class="agentFilesLoading && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                       </button>
                     </div>
@@ -1988,7 +1985,7 @@
                 </div>
               </div>
               <!-- Right column: Spend & Budget (combined) -->
-              <div class="lg:col-span-2 space-y-4">
+              <div class="md:col-span-2 space-y-4">
                 <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
                   <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Spend & Budget</div>
                   <!-- Spend summary -->
@@ -2124,7 +2121,7 @@
                 </div>
                 <div x-show="detailAgentCronJobs.length === 0" class="text-center py-6">
                   <div class="text-gray-600 text-xs">No automations configured for this agent.</div>
-                  <div class="text-gray-700 text-[10px] mt-1">Add heartbeat rules or cron jobs to automate tasks.</div>
+                  <div class="text-gray-600 text-[10px] mt-1">Add heartbeat rules or cron jobs to automate tasks.</div>
                 </div>
               </div>
             </div>
@@ -2135,13 +2132,12 @@
       <!-- System (Activity + Costs + Automation + Integrations + API Keys + Wallet + Storage + Settings) -->
       <div x-show="activeTab === 'system'" x-cloak>
         <!-- System sub-tab bar -->
-        <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
+        <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4 overflow-x-auto hide-scrollbar">
           <template x-for="st in systemTabs" :key="st.id">
-            <button @click="if (systemTab === 'activity' && st.id !== 'activity') _stopActivityRefresh(); systemTab = st.id; _pushUrl(false); if (st.id === 'integrations') { fetchChannels(); fetchWebhooks(); } if (st.id === 'apikeys') { fetchSettings(); } if (st.id === 'storage') { fetchUploads(); fetchStorage(); } if (st.id === 'settings') { fetchBrowserSettings(); } if (st.id === 'activity') { if (activityView === 'traces') { fetchTraces(); _startActivityRefresh(); } else if (activityView === 'logs') { fetchSystemLogs(); } }"
-              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative"
+            <button @click="switchSystemTab(st.id)"
+              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative whitespace-nowrap"
               :class="systemTab === st.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
               <span x-text="st.label"></span>
-              <!-- unread event badge removed -->
             </button>
           </template>
         </div>
@@ -2169,8 +2165,10 @@
               <div class="h-72" x-show="costData.agents && costData.agents.length > 0">
                 <canvas id="costChart"></canvas>
               </div>
-              <div x-show="!costData.agents || costData.agents.length === 0" class="flex items-center justify-center h-72 text-gray-600">
-                No cost data for this period
+              <div x-show="!costData.agents || costData.agents.length === 0" class="empty-state h-72">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                <div class="empty-state-title">No cost data</div>
+                <div class="empty-state-desc">Costs will appear once agents start making LLM calls</div>
               </div>
             </div>
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -2192,7 +2190,7 @@
                           :style="'width:' + Math.min(100, (item.cost / costData.budgets[item.agent].daily_limit) * 100) + '%'"
                         ></div>
                       </div>
-                      <div class="text-[10px] text-gray-700 mt-1 font-mono" x-text="formatCost(item.cost) + ' / ' + formatCost(costData.budgets[item.agent].daily_limit) + ' daily'"></div>
+                      <div class="text-[10px] text-gray-600 mt-1 font-mono" x-text="formatCost(item.cost) + ' / ' + formatCost(costData.budgets[item.agent].daily_limit) + ' daily'"></div>
                     </div>
                     <span x-show="!costData.budgets || !costData.budgets[item.agent] || !(costData.budgets[item.agent]?.daily_limit > 0)" class="text-[10px] text-gray-600 italic">No budget set</span>
                   </div>
@@ -2561,7 +2559,7 @@
                     <span class="text-gray-300 font-mono font-medium" x-text="wh.name"></span>
                     <span class="text-gray-600">&rarr;</span>
                     <span class="text-gray-400" x-text="wh.agent"></span>
-                    <span class="text-gray-700 text-[10px] font-mono truncate flex-1" x-text="wh.url || ''"></span>
+                    <span class="text-gray-600 text-[10px] font-mono truncate flex-1" x-text="wh.url || ''"></span>
                     <button x-show="wh.url" @click.stop="copyToClipboard(wh.url)"
                       class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all" title="Copy URL" aria-label="Copy webhook URL">
                       <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
@@ -2848,7 +2846,7 @@
                         <template x-if="a.wallet_enabled">
                           <div class="flex items-center gap-1.5">
                             <template x-for="ch in a.wallet_chains || []" :key="ch">
-                              <span class="text-[9px] px-1.5 py-0.5 rounded bg-indigo-900/20 text-indigo-400/70 border border-indigo-800/30" x-text="ch"></span>
+                              <span class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-900/20 text-indigo-400/70 border border-indigo-800/30" x-text="ch"></span>
                             </template>
                             <span x-show="!a.wallet_chains?.length" class="text-[10px] text-gray-600">no chains</span>
                           </div>
@@ -2904,7 +2902,7 @@
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
             <div class="flex items-center justify-between mb-1">
               <div class="text-xs text-gray-500 uppercase tracking-wider">Shared Uploads</div>
-              <button @click="fetchUploads()" class="text-gray-600 hover:text-gray-400 transition-colors" title="Refresh">
+              <button @click="fetchUploads()" class="text-gray-600 hover:text-gray-400 transition-colors" title="Refresh" aria-label="Refresh uploads">
                 <svg class="w-3.5 h-3.5" :class="uploadsLoading && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
               </button>
             </div>
@@ -2921,7 +2919,7 @@
               @drop.prevent="handleUploadFiles($event.dataTransfer.files)">
               <input type="file" multiple x-ref="uploadInput" class="hidden"
                 @change="handleUploadFiles($event.target.files); $event.target.value = ''">
-              <svg class="w-8 h-8 text-gray-700 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
+              <svg class="w-8 h-8 text-gray-600 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
               <div x-show="!uploadsUploading" class="text-sm text-gray-500">Drop files here or <span class="text-indigo-400">browse</span></div>
               <div x-show="uploadsUploading" class="text-sm text-gray-500 flex items-center justify-center gap-2">
                 <svg class="animate-spin h-4 w-4 text-indigo-400" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
@@ -3053,9 +3051,9 @@
                   <span class="text-gray-400 text-xs shrink-0 w-24 truncate" :title="t.agents.join(', ')" x-text="t.agents.join(', ') || '-'"></span>
                   <span class="text-gray-300 truncate flex-1" :title="t.trigger_preview || t.trigger_detail || t.trace_id" x-text="t.trigger_preview || t.trigger_detail || t.trace_id.substring(0, 12)"></span>
                   <span class="text-gray-600 text-[10px] font-mono shrink-0" x-text="t.event_count + ' events'"></span>
-                  <span x-show="t.total_duration_ms > 0" class="text-gray-700 text-[10px] font-mono shrink-0" x-text="t.total_duration_ms + 'ms'"></span>
+                  <span x-show="t.total_duration_ms > 0" class="text-gray-600 text-[10px] font-mono shrink-0" x-text="t.total_duration_ms + 'ms'"></span>
                   <span x-show="t.has_error" class="text-[10px] px-1.5 py-0.5 rounded-full bg-red-900/30 text-red-400 border border-red-800/40 shrink-0">ERR</span>
-                  <span class="text-gray-700 text-xs font-mono shrink-0" x-text="timeAgo(t.started)"></span>
+                  <span class="text-gray-600 text-xs font-mono shrink-0" x-text="timeAgo(t.started)"></span>
                 </div>
                 <!-- Expanded trace detail -->
                 <template x-if="expandedTraces[t.trace_id]">
@@ -3082,7 +3080,7 @@
                           <template x-if="evt.meta && Object.keys(evt.meta).length > 0">
                             <div class="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
                               <template x-for="[k, v] in Object.entries(evt.meta)" :key="k">
-                                <span class="text-[10px] text-gray-600"><span class="text-gray-700" x-text="k"></span>=<span class="text-gray-500" x-text="typeof v === 'string' && v.length > 80 ? v.substring(0, 80) + '...' : v"></span></span>
+                                <span class="text-[10px] text-gray-600"><span class="text-gray-500" x-text="k"></span>=<span class="text-gray-500" x-text="typeof v === 'string' && v.length > 80 ? v.substring(0, 80) + '...' : v"></span></span>
                               </template>
                             </div>
                           </template>
@@ -3146,7 +3144,7 @@
                   <span class="event-badge shrink-0 mt-0.5" :class="eventColor(evt.type)" x-text="evt.type"></span>
                   <span class="text-gray-500 shrink-0 w-20 truncate" :title="evt.agent" x-text="evt.agent || '-'"></span>
                   <span class="text-gray-300 truncate flex-1" :title="eventSummary(evt)" x-text="eventSummary(evt)"></span>
-                  <span class="text-gray-700 text-xs shrink-0 font-mono" x-text="timeAgo(evt.timestamp)"></span>
+                  <span class="text-gray-600 text-xs shrink-0 font-mono" x-text="timeAgo(evt.timestamp)"></span>
                 </div>
                 <template x-if="open">
                   <div class="bg-gray-900 border border-gray-800/80 border-t-gray-700/50 rounded-b-md px-4 py-3">
@@ -3542,7 +3540,7 @@
               </template>
             </div>
           </div>
-          <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label class="text-xs text-gray-500 mb-1 block">Name</label>
               <input id="add-agent-name-input" type="text" x-model="addAgentForm.name"
@@ -3705,13 +3703,13 @@
                 <div class="flex items-center justify-between gap-1">
                   <span class="text-xs font-medium truncate" x-text="chatId"></span>
                   <span x-show="chatUnread[chatId] > 0"
-                    class="flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-amber-500 text-[9px] font-bold text-black shrink-0"
+                    class="flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-amber-500 text-[10px] font-bold text-black shrink-0"
                     x-text="chatUnread[chatId]"></span>
                 </div>
                 <div class="text-[10px] text-gray-600 truncate mt-0.5"
                   x-text="(chatHistories[chatId] || []).length > 0 ? (chatHistories[chatId][chatHistories[chatId].length - 1].content || '').slice(0, 40) : 'No messages yet'"></div>
               </div>
-              <button @click.stop="closeChat(chatId)" class="text-gray-700 hover:text-gray-400 transition-colors shrink-0 p-0.5 rounded" style="opacity:0" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity=0" aria-label="Close chat">
+              <button @click.stop="closeChat(chatId)" class="messenger-close-btn text-gray-600 hover:text-gray-400 transition-colors shrink-0 p-0.5 rounded" aria-label="Close chat">
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
               </button>
             </div>
@@ -3787,7 +3785,7 @@
               <template x-if="msg.role === 'system'">
                 <div class="flex items-center gap-2 py-1 select-none">
                   <div class="flex-1 border-t border-dashed border-gray-800"></div>
-                  <span class="text-[9px] text-gray-600 uppercase tracking-wider whitespace-nowrap flex items-center gap-1">
+                  <span class="text-[11px] text-gray-600 uppercase tracking-wider whitespace-nowrap flex items-center gap-1">
                     <svg class="w-2.5 h-2.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
                     <span x-text="msg.content"></span>
                   </span>
@@ -3823,11 +3821,11 @@
                         <template x-if="open">
                           <div class="mt-0.5 rounded bg-gray-950/80 border border-gray-800/50 px-2 py-1.5 text-[10px] space-y-1.5">
                             <div x-show="tool.input || tool.inputPreview">
-                              <div class="text-gray-600 uppercase tracking-wider text-[9px] mb-0.5">Input</div>
+                              <div class="text-gray-600 uppercase tracking-wider text-[11px] mb-0.5">Input</div>
                               <pre class="text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar" x-text="chatToolDetailText(tool.input, tool.inputPreview)"></pre>
                             </div>
                             <div x-show="tool.status === 'done' && (tool.output || tool.outputPreview)">
-                              <div class="text-gray-600 uppercase tracking-wider text-[9px] mb-0.5">Output</div>
+                              <div class="text-gray-600 uppercase tracking-wider text-[11px] mb-0.5">Output</div>
                               <pre class="text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar" x-text="chatToolDetailText(tool.output, tool.outputPreview)"></pre>
                             </div>
                             <div x-show="tool.status === 'running'" class="text-gray-600 italic">Running&hellip;</div>
@@ -3850,15 +3848,15 @@
                 <div x-show="msg.role !== 'user'" class="chat-markdown break-words" x-html="renderMarkdown(msg.content)"></div>
                 <span x-show="msg.streaming" class="inline-block w-1 h-3 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
                 <div x-show="formatRelativeTime(msg.ts)"
-                  class="text-[9px] mt-0.5 opacity-40"
+                  class="text-[11px] mt-0.5 opacity-40"
                   :class="msg.role === 'user' ? 'text-indigo-200' : 'text-gray-500'"
                   x-text="formatRelativeTime(msg.ts)"></div>
                 <template x-if="msg.tool_limit_reached">
                   <div class="mt-2 flex items-center gap-1.5 border-t border-gray-700/50 pt-1.5">
                     <svg class="w-2.5 h-2.5 text-yellow-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M12 3a9 9 0 100 18A9 9 0 0012 3z"/></svg>
-                    <span class="text-[9px] text-gray-600">Tool limit reached mid-task.</span>
+                    <span class="text-[11px] text-gray-600">Tool limit reached mid-task.</span>
                     <button @click="sendChatTo(activeChatId, 'Continue')"
-                      class="text-[9px] text-indigo-400 hover:text-indigo-300 transition-colors font-medium">
+                      class="text-[11px] text-indigo-400 hover:text-indigo-300 transition-colors font-medium">
                       Continue →
                     </button>
                   </div>
@@ -3874,9 +3872,10 @@
               Thinking...
             </div>
           </div>
-          <div x-show="(chatHistories[activeChatId] || []).length === 0 && !chatLoadingAgents[activeChatId]" class="flex flex-col items-center justify-center h-full text-center">
-            <svg class="w-10 h-10 text-gray-800 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <span class="text-gray-600 text-xs">Send a message to <span class="text-gray-400 font-medium" x-text="activeChatId"></span></span>
+          <div x-show="(chatHistories[activeChatId] || []).length === 0 && !chatLoadingAgents[activeChatId]" class="empty-state h-full justify-center">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <div class="empty-state-title">Start a conversation</div>
+            <div class="empty-state-desc">Send a message to <span class="text-gray-400 font-medium" x-text="activeChatId"></span></div>
           </div>
         </div>
         <!-- Input area -->
@@ -3978,6 +3977,14 @@
               </div>
             </div>
           </template>
+          <!-- Steer mode indicator -->
+          <div x-show="isAgentBusy(activeChatId)" x-cloak class="flex items-center gap-2 mb-2 px-1">
+            <span class="steer-badge">
+              <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>
+              Steering
+            </span>
+            <span class="text-[11px] text-gray-600">Agent is working &mdash; your message will redirect it</span>
+          </div>
           <!-- Input row -->
           <div class="chat-input-wrap">
             <!-- Hidden file input -->
