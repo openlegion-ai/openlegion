@@ -450,7 +450,7 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
         "can_subscribe": ["*"] if collab else [],
         "blackboard_read": [],
         "blackboard_write": [],
-        "allowed_apis": ["llm"],
+        "allowed_apis": ["llm", "image_gen"],
         "allowed_credentials": ["*"],
         "can_use_browser": True,
         "can_manage_cron": True,
