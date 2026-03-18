@@ -1094,18 +1094,23 @@
                       <option value="{{ p.name }}">{{ p.label }}</option>
                       {% endfor %}
                     </select>
-                    <template x-if="onboardProvider === 'anthropic'">
+                    <template x-if="onboardProvider === 'anthropic' || onboardProvider === 'openai'">
                       <select x-model="onboardAuthType" :disabled="onboardSaving" class="dash-select text-xs w-48">
                         <option value="api_key">API Key (recommended)</option>
-                        <option value="oauth">Subscription Token</option>
+                        <option value="oauth" x-text="onboardProvider === 'openai' ? 'ChatGPT OAuth (JSON)' : 'Subscription Token'"></option>
                       </select>
                     </template>
                     <input type="password" x-model="onboardKey" :disabled="onboardSaving" class="dash-input flex-1 min-w-0 sm:min-w-[200px]"
-                      :placeholder="onboardAuthType === 'oauth' ? 'sk-ant-oat01-...' : 'API key'">
+                      :placeholder="onboardAuthType === 'oauth' ? (onboardProvider === 'openai' ? '{&quot;access_token&quot;:...,&quot;refresh_token&quot;:...}' : 'sk-ant-oat01-...') : 'API key'">
                   </div>
-                  <template x-if="onboardAuthType === 'oauth'">
+                  <template x-if="onboardAuthType === 'oauth' && onboardProvider === 'anthropic'">
                     <div class="text-[10px] text-amber-400/80 leading-snug">
                       Experimental — uses unofficial OAuth that may break without notice. Generate with: <code class="font-mono bg-gray-800 px-1 rounded">claude setup-token</code>
+                    </div>
+                  </template>
+                  <template x-if="onboardAuthType === 'oauth' && onboardProvider === 'openai'">
+                    <div class="text-[10px] text-amber-400/80 leading-snug">
+                      Paste the JSON blob from <code class="font-mono bg-gray-800 px-1 rounded">~/.codex/auth.json</code> containing <code class="font-mono bg-gray-800 px-1 rounded">access_token</code> and <code class="font-mono bg-gray-800 px-1 rounded">refresh_token</code>.
                     </div>
                   </template>
                   <div x-show="onboardAuthType !== 'oauth'" class="flex flex-wrap gap-2 items-center">
@@ -2692,10 +2697,10 @@
                     </optgroup>
                     <option value="__custom__">Custom...</option>
                   </select>
-                  <template x-if="credService === 'anthropic'">
+                  <template x-if="credService === 'anthropic' || credService === 'openai'">
                     <select x-model="credAuthType" :disabled="credSaving" class="dash-select text-xs w-48">
                       <option value="api_key">API Key (recommended)</option>
-                      <option value="oauth">Subscription Token</option>
+                      <option value="oauth" x-text="credService === 'openai' ? 'ChatGPT OAuth (JSON)' : 'Subscription Token'"></option>
                     </select>
                   </template>
                   <input x-show="credService === '__custom__'" type="text" x-model="credCustomService" :disabled="credSaving" class="dash-input text-xs w-40" placeholder="credential_name">
@@ -2704,11 +2709,16 @@
                     <option value="system">System tier</option>
                   </select>
                   <input x-show="credService !== 'ollama'" type="password" x-model="credKey" :disabled="credSaving" class="dash-input flex-1"
-                    :placeholder="credAuthType === 'oauth' && credService === 'anthropic' ? 'sk-ant-oat01-...' : 'API key or value'">
+                    :placeholder="credAuthType === 'oauth' ? (credService === 'openai' ? '{&quot;access_token&quot;:...,&quot;refresh_token&quot;:...}' : 'sk-ant-oat01-...') : 'API key or value'">
                 </div>
                 <template x-if="credAuthType === 'oauth' && credService === 'anthropic'">
                   <div class="text-[10px] text-amber-400/80 leading-snug mb-2">
                     Experimental — uses unofficial OAuth that may break without notice. Generate with: <code class="font-mono bg-gray-800 px-1 rounded">claude setup-token</code>
+                  </div>
+                </template>
+                <template x-if="credAuthType === 'oauth' && credService === 'openai'">
+                  <div class="text-[10px] text-amber-400/80 leading-snug mb-2">
+                    Paste the JSON blob from <code class="font-mono bg-gray-800 px-1 rounded">~/.codex/auth.json</code> containing <code class="font-mono bg-gray-800 px-1 rounded">access_token</code> and <code class="font-mono bg-gray-800 px-1 rounded">refresh_token</code>.
                   </div>
                 </template>
                 <template x-if="credService === 'ollama'">
@@ -2717,7 +2727,7 @@
                     <div class="text-[10px] text-gray-500 mb-3">Ollama URL — no API key needed. Make sure Ollama is running.</div>
                   </div>
                 </template>
-                <input x-show="credService !== 'ollama' && !(credAuthType === 'oauth' && credService === 'anthropic')" type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
+                <input x-show="credService !== 'ollama' && credAuthType !== 'oauth'" type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
                 <div class="flex justify-between">
                   <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'; credAuthType = 'api_key'" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
                   <button @click="addCredential()" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">

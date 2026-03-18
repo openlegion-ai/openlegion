@@ -759,18 +759,18 @@ class CredentialVault:
     def _oauth_headers(token: str) -> dict[str, str]:
         """Build Anthropic API headers for OAuth bearer auth.
 
-        The ``anthropic-beta`` value intentionally excludes ``prompt-caching``
-        and ``context-1m`` — those are separate features not needed for OAuth.
+        The ``anthropic-beta`` value MUST only include ``claude-code`` and
+        ``oauth`` betas.  Other betas like ``fine-grained-tool-streaming``
+        and ``interleaved-thinking`` require specific request body fields
+        (e.g. ``stream`` event granularity, interleaved content blocks)
+        that ``_build_anthropic_body`` does not produce — including them
+        causes Anthropic to return HTTP 400.
         """
         return {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
             "anthropic-version": "2023-06-01",
-            "anthropic-beta": (
-                "claude-code-20250219,oauth-2025-04-20,"
-                "fine-grained-tool-streaming-2025-05-14,"
-                "interleaved-thinking-2025-05-14"
-            ),
+            "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
             "user-agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
         }
 
@@ -971,6 +971,10 @@ class CredentialVault:
                 msg = error_data.get("error", {}).get("message", "Authentication failed")
             except (json.JSONDecodeError, ValueError):
                 msg = resp.text[:200] or "Authentication failed"
+            logger.debug(
+                "OAuth 401: model=%s, body_keys=%s",
+                model, sorted(body.keys()),
+            )
             raise RuntimeError(
                 f"OAuth authentication failed (token may have expired): {msg}"
             )
@@ -978,6 +982,10 @@ class CredentialVault:
         if not resp.is_success:
             error_text = resp.text[:500]
             self._health_tracker.record_failure(model, "HTTPError", resp.status_code)
+            logger.debug(
+                "OAuth HTTP %d: model=%s, body_keys=%s, error=%s",
+                resp.status_code, model, sorted(body.keys()), error_text[:200],
+            )
             raise RuntimeError(
                 f"Anthropic API error (HTTP {resp.status_code}): {error_text}"
             )

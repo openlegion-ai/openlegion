@@ -3702,7 +3702,7 @@ function dashboard() {
       if (!service || (!isKeyless && !this.credKey.trim())) return;
       if (isKeyless && !this.credBaseUrl.trim()) return;
       this.credSaving = true;
-      const isOAuth = this.credAuthType === 'oauth' && this.credService === 'anthropic';
+      const isOAuth = this.credAuthType === 'oauth' && (this.credService === 'anthropic' || this.credService === 'openai');
       if (isKeyless) {
         this.showToast('Saving Ollama configuration...');
       } else {
@@ -3906,7 +3906,7 @@ function dashboard() {
       if (this.onboardSaving) return;
       if (!this.onboardProvider || !this.onboardKey.trim()) return;
       this.onboardSaving = true;
-      const isOAuth = this.onboardAuthType === 'oauth' && this.onboardProvider === 'anthropic';
+      const isOAuth = this.onboardAuthType === 'oauth' && (this.onboardProvider === 'anthropic' || this.onboardProvider === 'openai');
       this.showToast(isOAuth ? 'Validating token...' : 'Validating API key...');
       try {
         const baseUrl = isOAuth ? '' : this.onboardBaseUrl.trim();
