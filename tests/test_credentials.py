@@ -2500,6 +2500,23 @@ class TestBuildOpenAIResponsesBody:
         body = CredentialVault._build_openai_responses_body(params)
         assert "max_output_tokens" not in body
 
+    def test_multimodal_user_content(self):
+        params = {
+            "model": "gpt-4o",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is this?"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}},
+                ],
+            }],
+        }
+        body = CredentialVault._build_openai_responses_body(params)
+        assert len(body["input"]) == 1
+        content = body["input"][0]["content"]
+        assert content[0] == {"type": "input_text", "text": "What is this?"}
+        assert content[1] == {"type": "input_image", "image_url": "https://example.com/img.png"}
+
 
 class TestParseOpenAIResponsesResponse:
     """Tests for _parse_openai_responses_response."""

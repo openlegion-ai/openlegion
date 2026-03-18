@@ -230,6 +230,9 @@ class SetupWizard:
                 os.environ.get(f"OPENLEGION_SYSTEM_{key_name.upper()}", "")
                 or os.environ.get(f"OPENLEGION_CRED_{key_name.upper()}", "")
             )
+            # Also detect OpenAI OAuth credentials
+            if not existing_key and provider == "openai":
+                existing_key = os.environ.get("OPENLEGION_SYSTEM_OPENAI_OAUTH", "")
             if existing_key:
                 click.echo(f"  API key already set for {provider}.")
                 if click.confirm("  Replace it?", default=False):
@@ -237,13 +240,13 @@ class SetupWizard:
                         provider, _PROVIDERS[choice - 1]["label"],
                     )
                     if api_key:
-                        _set_env_key(key_name, api_key, system=True)
+                        _store_provider_key(provider, api_key, _set_env_key)
             else:
                 api_key = self._prompt_and_validate_key_with_oauth(
                     provider, _PROVIDERS[choice - 1]["label"],
                 )
                 if api_key:
-                    _set_env_key(key_name, api_key, system=True)
+                    _store_provider_key(provider, api_key, _set_env_key)
 
             click.echo("  Tip: Use /addkey or the dashboard to set a custom API base URL.\n")
 
