@@ -1212,16 +1212,17 @@ def create_dashboard_router(
         if not service or not key:
             raise HTTPException(status_code=400, detail="service and key are required")
 
-        # OAuth setup-token: validate directly against Anthropic API
-        from src.host.credentials import is_oauth_token
+        # OAuth setup-token: validate directly against provider API
+        from src.host.credentials import is_oauth_token, is_openai_oauth_token
         if is_oauth_token(key):
             from src.setup_wizard import SetupWizard
-            fmt_error = SetupWizard._validate_oauth_token_format(key)
+            oauth_provider = "openai" if is_openai_oauth_token(key) else "anthropic"
+            fmt_error = SetupWizard._validate_oauth_token_format(key, oauth_provider)
             if fmt_error:
                 return {"valid": False, "skipped": False, "reason": fmt_error}
             import asyncio
             valid = await asyncio.get_running_loop().run_in_executor(
-                None, SetupWizard._validate_oauth_token_live, key,
+                None, SetupWizard._validate_oauth_token_live, key, oauth_provider,
             )
             if valid:
                 return {"valid": True, "skipped": False, "oauth": True}
