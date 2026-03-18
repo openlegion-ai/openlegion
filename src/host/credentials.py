@@ -37,6 +37,13 @@ _OAUTH_TOKEN_PREFIX = "sk-ant-oat01-"
 _CLAUDE_CLI_VERSION = "2.1.62"
 _ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
+# OpenAI's OAuth path for ChatGPT Plus/Pro/Team subscriptions.
+# Tokens from `codex setup-token` (or equivalent) use Bearer auth
+# against the standard chat completions endpoint but are billed against
+# the user's subscription instead of API usage.
+_OPENAI_OAUTH_TOKEN_PREFIX = "sk-oai-oat-"
+_OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+
 
 def _model_supports_vision(model: str) -> bool:
     """Check if a model supports image content blocks.
@@ -159,8 +166,13 @@ SYSTEM_CREDENTIAL_SUFFIXES = ("_api_key", "_api_base")
 
 
 def is_oauth_token(token: str) -> bool:
-    """Check if a token is an Anthropic OAuth setup-token."""
-    return token.startswith(_OAUTH_TOKEN_PREFIX)
+    """Check if a token is an OAuth setup-token (Anthropic or OpenAI)."""
+    return token.startswith(_OAUTH_TOKEN_PREFIX) or token.startswith(_OPENAI_OAUTH_TOKEN_PREFIX)
+
+
+def is_openai_oauth_token(token: str) -> bool:
+    """Check if a token is an OpenAI OAuth setup-token."""
+    return token.startswith(_OPENAI_OAUTH_TOKEN_PREFIX)
 
 
 def is_system_credential(name: str) -> bool:
@@ -876,6 +888,8 @@ class CredentialVault:
             result["thinking_content"] = thinking_content
         return result
 
+    # ── Anthropic OAuth helpers ───────────────────────────────
+
     async def _oauth_chat(
         self, request: APIProxyRequest, api_key: str, model: str,
     ) -> APIProxyResponse:
@@ -1027,11 +1041,252 @@ class CredentialVault:
             self._health_tracker.record_failure(model, type(e).__name__, 0)
             yield f"data: {json.dumps({'error': friendly_streaming_error(e)})}\n\n"
 
+    # ── OpenAI OAuth helpers ───────────────────────────────
+
+    @staticmethod
+    def _openai_oauth_headers(token: str) -> dict[str, str]:
+        """Build OpenAI API headers for OAuth bearer auth."""
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+
+    @staticmethod
+    def _build_openai_body(params: dict) -> dict:
+        """Convert internal params to OpenAI Chat Completions API format.
+
+        Messages are already in OpenAI format so no conversion is needed —
+        we just forward optional parameters.
+        """
+        model = params.get("model", "")
+        # Strip provider prefix if present (e.g. "openai/gpt-4o" → "gpt-4o")
+        if model.startswith("openai/"):
+            model = model[len("openai/"):]
+
+        body: dict = {
+            "model": model,
+            "messages": params.get("messages", []),
+        }
+
+        # max_tokens vs max_completion_tokens: OpenAI o-series models use
+        # max_completion_tokens; others use max_tokens.
+        max_completion = params.get("max_completion_tokens")
+        max_tokens = params.get("max_tokens")
+        if max_completion is not None:
+            body["max_completion_tokens"] = max_completion
+        elif max_tokens is not None:
+            body["max_tokens"] = max_tokens
+
+        # Forward optional params
+        _OPTIONAL_PARAMS = (
+            "temperature", "top_p", "stop", "response_format", "seed",
+            "presence_penalty", "frequency_penalty", "logit_bias", "n",
+            "logprobs", "top_logprobs", "reasoning_effort", "user",
+        )
+        for key in _OPTIONAL_PARAMS:
+            val = params.get(key)
+            if val is not None:
+                body[key] = val
+
+        # Tools / tool_choice
+        tools = params.get("tools")
+        if tools:
+            body["tools"] = tools
+            tool_choice = params.get("tool_choice")
+            if tool_choice is not None:
+                body["tool_choice"] = tool_choice
+
+        return body
+
+    @staticmethod
+    def _parse_openai_response(data: dict, model_prefix: str) -> dict:
+        """Convert OpenAI Chat Completions response to our standard result dict."""
+        choices = data.get("choices") or []
+        choice = choices[0] if choices else {}
+        message = choice.get("message", {})
+        content = message.get("content", "") or ""
+
+        tool_calls: list[dict] = []
+        # OpenAI returns tool_calls: null (not absent) when there are none
+        for tc in (message.get("tool_calls") or []):
+            func = tc.get("function", {})
+            tool_calls.append({
+                "name": func.get("name", ""),
+                "arguments": func.get("arguments", "{}"),
+            })
+
+        usage = data.get("usage", {})
+        input_t = usage.get("prompt_tokens", 0)
+        output_t = usage.get("completion_tokens", 0)
+
+        result: dict = {
+            "content": content,
+            "tokens_used": input_t + output_t,
+            "input_tokens": input_t,
+            "output_tokens": output_t,
+            "model": model_prefix,
+            "tool_calls": tool_calls,
+        }
+        # reasoning_content for o-series models
+        reasoning = message.get("reasoning_content")
+        if reasoning:
+            result["thinking_content"] = reasoning
+        return result
+
+    async def _openai_oauth_chat(
+        self, request: APIProxyRequest, api_key: str, model: str,
+    ) -> APIProxyResponse:
+        """Direct OpenAI API call using OAuth bearer auth (non-streaming)."""
+        sanitized = sanitize_for_provider(
+            request.params.get("messages", []), model,
+        )
+        params = {**request.params, "messages": sanitized}
+        body = self._build_openai_body(params)
+        headers = self._openai_oauth_headers(api_key)
+
+        client = await self._get_http_client()
+        try:
+            resp = await client.post(
+                _OPENAI_API_URL, headers=headers, json=body, timeout=120,
+            )
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            self._health_tracker.record_failure(model, type(e).__name__, 0)
+            raise RuntimeError(f"OpenAI API connection error: {e}") from e
+
+        if resp.status_code == 401:
+            self._health_tracker.record_failure(model, "AuthError", 401)
+            try:
+                error_data = resp.json()
+                msg = error_data.get("error", {}).get("message", "Authentication failed")
+            except (json.JSONDecodeError, ValueError):
+                msg = resp.text[:200] or "Authentication failed"
+            raise RuntimeError(f"OpenAI OAuth authentication failed: {msg}")
+
+        if not resp.is_success:
+            error_text = resp.text[:500]
+            self._health_tracker.record_failure(model, "HTTPError", resp.status_code)
+            raise RuntimeError(
+                f"OpenAI API error (HTTP {resp.status_code}): {error_text}"
+            )
+
+        data = resp.json()
+        result = self._parse_openai_response(data, model)
+        result["oauth"] = True
+        self._health_tracker.record_success(model)
+        return APIProxyResponse(success=True, data=result)
+
+    async def _openai_oauth_chat_stream(
+        self, request: APIProxyRequest, api_key: str, model: str,
+    ):
+        """Streaming OpenAI API call using OAuth bearer auth.
+
+        Yields SSE-formatted strings matching the ``stream_llm`` protocol.
+        """
+        sanitized = sanitize_for_provider(
+            request.params.get("messages", []), model,
+        )
+        params = {**request.params, "messages": sanitized}
+        body = self._build_openai_body(params)
+        body["stream"] = True
+        body["stream_options"] = {"include_usage": True}
+        headers = self._openai_oauth_headers(api_key)
+
+        client = await self._get_http_client()
+        collected_content = ""
+        collected_thinking = ""
+        collected_tool_calls: list[dict] = []
+        input_tokens = 0
+        output_tokens = 0
+
+        try:
+            async with client.stream(
+                "POST", _OPENAI_API_URL, headers=headers,
+                json=body, timeout=120,
+            ) as resp:
+                if resp.status_code == 401:
+                    self._health_tracker.record_failure(model, "AuthError", 401)
+                    await resp.aread()
+                    try:
+                        error_data = resp.json()
+                        msg = error_data.get("error", {}).get("message", "Auth failed")
+                    except (json.JSONDecodeError, ValueError):
+                        msg = resp.text[:200] or "Auth failed"
+                    yield f"data: {json.dumps({'error': f'OpenAI OAuth auth failed: {msg}'})}\n\n"
+                    return
+                if not resp.is_success:
+                    self._health_tracker.record_failure(
+                        model, "HTTPError", resp.status_code,
+                    )
+                    await resp.aread()
+                    yield f"data: {json.dumps({'error': f'OpenAI API error (HTTP {resp.status_code})'})}\n\n"
+                    return
+
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:]
+                    if payload.strip() == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Usage info (sent with stream_options.include_usage)
+                    usage = event.get("usage")
+                    if usage:
+                        input_tokens = usage.get("prompt_tokens", input_tokens)
+                        output_tokens = usage.get("completion_tokens", output_tokens)
+
+                    choices = event.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+
+                    # Text content
+                    text = delta.get("content")
+                    if text:
+                        collected_content += text
+                        yield f"data: {json.dumps({'type': 'text_delta', 'content': text})}\n\n"
+
+                    # Reasoning content (o-series models)
+                    reasoning = delta.get("reasoning_content")
+                    if reasoning:
+                        collected_thinking += reasoning
+
+                    # Tool calls
+                    for tc in (delta.get("tool_calls") or []):
+                        idx = tc.get("index", 0)
+                        while len(collected_tool_calls) <= idx:
+                            collected_tool_calls.append({"name": "", "arguments": ""})
+                        func = tc.get("function", {})
+                        if func.get("name"):
+                            collected_tool_calls[idx]["name"] = func["name"]
+                        if func.get("arguments"):
+                            collected_tool_calls[idx]["arguments"] += func["arguments"]
+
+            tokens_used = input_tokens + output_tokens
+            self._health_tracker.record_success(model)
+
+            done_data: dict = {
+                "type": "done", "content": collected_content,
+                "tool_calls": collected_tool_calls,
+                "tokens_used": tokens_used, "model": model,
+            }
+            if collected_thinking:
+                done_data["thinking_content"] = collected_thinking
+            yield f"data: {json.dumps(done_data)}\n\n"
+
+        except Exception as e:
+            logger.error(f"OpenAI OAuth streaming call failed: {e}")
+            self._health_tracker.record_failure(model, type(e).__name__, 0)
+            yield f"data: {json.dumps({'error': friendly_streaming_error(e)})}\n\n"
+
     async def _handle_llm(self, request: APIProxyRequest) -> APIProxyResponse:
         """Unified LLM handler. Auto-detects provider from model prefix via LiteLLM.
 
         OAuth setup-tokens bypass LiteLLM entirely — direct httpx calls to
-        Anthropic's Messages API with Bearer auth.
+        the provider's API with Bearer auth.
         """
         import litellm
 
@@ -1044,9 +1299,11 @@ class CredentialVault:
         requested_model = request.params.get("model", "")
 
         if request.action == "chat":
-            # OAuth fast-path: bypass LiteLLM for Anthropic OAuth tokens
+            # OAuth fast-path: bypass LiteLLM for OAuth tokens
             api_key = self._get_api_key_for_model(requested_model)
             if api_key and is_oauth_token(api_key):
+                if is_openai_oauth_token(api_key):
+                    return await self._openai_oauth_chat(request, api_key, requested_model)
                 return await self._oauth_chat(request, api_key, requested_model)
 
             async def _chat(
@@ -1134,13 +1391,16 @@ class CredentialVault:
 
         requested_model = request.params.get("model", "")
 
-        # OAuth fast-path: bypass LiteLLM for Anthropic OAuth tokens.
+        # OAuth fast-path: bypass LiteLLM for OAuth tokens.
         # No cost tracking or budget enforcement — subscription-based usage.
         api_key = self._get_api_key_for_model(requested_model)
         if api_key and is_oauth_token(api_key):
-            async for chunk in self._oauth_chat_stream(
-                request, api_key, requested_model,
-            ):
+            stream_fn = (
+                self._openai_oauth_chat_stream
+                if is_openai_oauth_token(api_key)
+                else self._oauth_chat_stream
+            )
+            async for chunk in stream_fn(request, api_key, requested_model):
                 yield chunk
             return
 

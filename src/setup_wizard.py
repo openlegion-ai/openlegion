@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import click
 import yaml
 
-from src.host.credentials import _OAUTH_TOKEN_PREFIX
+from src.host.credentials import _OAUTH_TOKEN_PREFIX, _OPENAI_OAUTH_TOKEN_PREFIX
 from src.shared.models import KEYLESS_PROVIDERS as _KEYLESS_PROVIDERS
 from src.shared.utils import setup_logging
 
@@ -469,33 +469,49 @@ class SetupWizard:
         return ""
 
     def _prompt_and_validate_key_with_oauth(self, provider: str, label: str) -> str:
-        """Prompt for API key with optional OAuth setup-token path for Anthropic."""
-        if provider != "anthropic":
+        """Prompt for API key with optional OAuth setup-token path."""
+        if provider not in ("anthropic", "openai"):
             return self._prompt_and_validate_key(provider, label)
 
-        click.echo("  How would you like to authenticate?\n")
-        click.echo("  1. API Key (recommended) — from console.anthropic.com")
-        click.echo("  2. Claude Subscription Token (experimental) — from `claude setup-token`\n")
+        if provider == "anthropic":
+            click.echo("  How would you like to authenticate?\n")
+            click.echo("  1. API Key (recommended) — from console.anthropic.com")
+            click.echo("  2. Claude Subscription Token (experimental) — from `claude setup-token`\n")
+        else:
+            click.echo("  How would you like to authenticate?\n")
+            click.echo("  1. API Key (recommended) — from platform.openai.com")
+            click.echo("  2. ChatGPT Subscription Token (experimental) — from `codex setup-token`\n")
+
         try:
             auth_choice = click.prompt("  Auth method", default="1").strip()
         except (EOFError, KeyboardInterrupt):
             return ""
 
         if auth_choice == "2":
-            return self._prompt_and_validate_oauth_token()
+            return self._prompt_and_validate_oauth_token(provider)
         return self._prompt_and_validate_key(provider, label)
 
-    def _prompt_and_validate_oauth_token(self) -> str:
-        """Prompt for and validate a Claude OAuth setup-token."""
-        click.echo(
-            "\n  Subscription tokens use an unofficial OAuth path that may break\n"
-            "  without notice. For production workloads, use an API key.\n"
-            "\n  Generate one with: claude setup-token\n"
-        )
+    def _prompt_and_validate_oauth_token(self, provider: str = "anthropic") -> str:
+        """Prompt for and validate an OAuth setup-token."""
+        if provider == "openai":
+            click.echo(
+                "\n  Subscription tokens use an unofficial OAuth path that may break\n"
+                "  without notice. For production workloads, use an API key.\n"
+                "\n  Generate one with: codex setup-token\n"
+            )
+            prompt_text = f"  Setup token ({_OPENAI_OAUTH_TOKEN_PREFIX}...)"
+        else:
+            click.echo(
+                "\n  Subscription tokens use an unofficial OAuth path that may break\n"
+                "  without notice. For production workloads, use an API key.\n"
+                "\n  Generate one with: claude setup-token\n"
+            )
+            prompt_text = f"  Setup token ({_OAUTH_TOKEN_PREFIX}...)"
+
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
-                token = click.prompt("  Setup token (sk-ant-oat01-...)", hide_input=True)
+                token = click.prompt(prompt_text, hide_input=True)
             except (EOFError, KeyboardInterrupt):
                 return ""
             token = token.strip()
@@ -504,14 +520,14 @@ class SetupWizard:
                 continue
 
             # Format validation
-            error = self._validate_oauth_token_format(token)
+            error = self._validate_oauth_token_format(token, provider)
             if error:
                 click.echo(f"  {error}")
                 continue
 
             # Live validation
             click.echo("  Validating token...", nl=False)
-            valid = self._validate_oauth_token_live(token)
+            valid = self._validate_oauth_token_live(token, provider)
             if valid:
                 click.echo(" valid.\n")
                 return token
@@ -525,10 +541,17 @@ class SetupWizard:
         return ""
 
     @staticmethod
-    def _validate_oauth_token_format(token: str) -> str | None:
+    def _validate_oauth_token_format(
+        token: str, provider: str = "anthropic",
+    ) -> str | None:
         """Validate OAuth token format. Returns error message or None."""
-        if not token.startswith(_OAUTH_TOKEN_PREFIX):
-            return f"Expected prefix {_OAUTH_TOKEN_PREFIX}"
+        if provider == "openai":
+            expected_prefix = _OPENAI_OAUTH_TOKEN_PREFIX
+        else:
+            expected_prefix = _OAUTH_TOKEN_PREFIX
+
+        if not token.startswith(expected_prefix):
+            return f"Expected prefix {expected_prefix}"
         if len(token) < _OAUTH_MIN_LENGTH:
             return "Token appears truncated (check for line breaks in terminal)"
         if "\n" in token or "\r" in token:
@@ -536,25 +559,37 @@ class SetupWizard:
         return None
 
     @staticmethod
-    def _validate_oauth_token_live(token: str) -> bool:
+    def _validate_oauth_token_live(
+        token: str, provider: str = "anthropic",
+    ) -> bool:
         """Test an OAuth token with a minimal API call."""
         import httpx as _httpx
 
         from src.host.credentials import (
             _ANTHROPIC_API_URL,
+            _OPENAI_API_URL,
             CredentialVault,
         )
 
-        headers = CredentialVault._oauth_headers(token)
-        body = {
-            "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "hi"}],
-        }
+        if provider == "openai":
+            headers = CredentialVault._openai_oauth_headers(token)
+            body = {
+                "model": "gpt-4.1-mini",
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+            url = _OPENAI_API_URL
+        else:
+            headers = CredentialVault._oauth_headers(token)
+            body = {
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+            url = _ANTHROPIC_API_URL
+
         try:
-            resp = _httpx.post(
-                _ANTHROPIC_API_URL, headers=headers, json=body, timeout=30,
-            )
+            resp = _httpx.post(url, headers=headers, json=body, timeout=30)
             if resp.status_code == 200:
                 return True
             # 401 is a definitive auth failure — token is invalid
@@ -716,7 +751,7 @@ class InlineSetup:
     ) -> str:
         """Prompt for API key, validate, and return stripped key or empty string.
 
-        For Anthropic, offers the OAuth setup-token path.
+        For Anthropic and OpenAI, offers the OAuth setup-token path.
         """
         if provider == "anthropic":
             click.echo("  How would you like to authenticate?\n")
@@ -727,8 +762,17 @@ class InlineSetup:
             except (EOFError, KeyboardInterrupt):
                 return ""
             if auth_choice == "2":
-                token = wizard._prompt_and_validate_oauth_token()
-                return token
+                return wizard._prompt_and_validate_oauth_token("anthropic")
+        elif provider == "openai":
+            click.echo("  How would you like to authenticate?\n")
+            click.echo("  1. API Key (recommended) — from platform.openai.com")
+            click.echo("  2. ChatGPT Subscription Token (experimental) — from `codex setup-token`\n")
+            try:
+                auth_choice = click.prompt("  Auth method", default="1").strip()
+            except (EOFError, KeyboardInterrupt):
+                return ""
+            if auth_choice == "2":
+                return wizard._prompt_and_validate_oauth_token("openai")
 
         try:
             api_key = click.prompt(f"  {label} API key", hide_input=True)
@@ -738,11 +782,20 @@ class InlineSetup:
             click.echo("  No key provided.")
             return ""
         api_key = api_key.strip()
-        # Auto-detect pasted OAuth token
+        # Auto-detect pasted OAuth token (Anthropic or OpenAI)
         if api_key.startswith(_OAUTH_TOKEN_PREFIX):
-            click.echo("  Detected OAuth setup-token.")
+            click.echo("  Detected Anthropic OAuth setup-token.")
             click.echo("  Validating token...", nl=False)
-            valid = wizard._validate_oauth_token_live(api_key)
+            valid = wizard._validate_oauth_token_live(api_key, "anthropic")
+            if valid:
+                click.echo(" valid.\n")
+            else:
+                click.echo(" could not validate (saved anyway).\n")
+            return api_key
+        if api_key.startswith(_OPENAI_OAUTH_TOKEN_PREFIX):
+            click.echo("  Detected OpenAI OAuth setup-token.")
+            click.echo("  Validating token...", nl=False)
+            valid = wizard._validate_oauth_token_live(api_key, "openai")
             if valid:
                 click.echo(" valid.\n")
             else:
