@@ -1120,6 +1120,115 @@ def create_mesh_app(
             return []
         return trace_store.get_trace(trace_id)
 
+    # === External API (API-key authenticated) ===
+    #
+    # These endpoints let external systems (like Walter's backend) manage
+    # credentials and query agent status without a dashboard session cookie.
+    # Authenticated via X-API-Key header matching OPENLEGION_API_KEY env var.
+
+    import os as _os
+    _external_api_key = _os.environ.get("OPENLEGION_API_KEY", "")
+
+    _RATE_LIMITS["ext_credentials"] = (30, 60)
+    _RATE_LIMITS["ext_status"] = (60, 60)
+
+    def _require_api_key(request: Request) -> None:
+        """Verify the X-API-Key header against OPENLEGION_API_KEY."""
+        if not _external_api_key:
+            raise HTTPException(503, "External API not configured (set OPENLEGION_API_KEY)")
+        provided = request.headers.get("x-api-key", "")
+        if not provided or not hmac.compare_digest(provided, _external_api_key):
+            raise HTTPException(401, "Invalid or missing API key")
+
+    _CRED_NAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]{1,128}$")
+
+    @app.post("/mesh/credentials")
+    async def ext_store_credential(request: Request) -> dict:
+        """Store an agent-tier credential. Returns an opaque $CRED{name} handle.
+
+        External systems use this to inject per-session secrets (e.g. PII)
+        that agents reference by handle without seeing raw values.
+        """
+        _require_api_key(request)
+        await _check_rate_limit("ext_credentials", "_api_key")
+        if credential_vault is None:
+            raise HTTPException(503, "Credential vault not configured")
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+        value = (body.get("value") or "").strip()
+        if not name or not value:
+            raise HTTPException(400, "name and value are required")
+        if not _CRED_NAME_RE.match(name):
+            raise HTTPException(400, "name must be 1-128 alphanumeric/underscore/dot/dash chars")
+        if len(value) > 10_000:
+            raise HTTPException(400, "value exceeds 10KB limit")
+        if is_system_credential(name):
+            raise HTTPException(403, "Cannot store system credentials via external API")
+        handle = credential_vault.add_credential(name, value)
+        return {"stored": True, "handle": handle, "name": name}
+
+    @app.delete("/mesh/credentials/{name}")
+    async def ext_remove_credential(name: str, request: Request) -> dict:
+        """Remove an agent-tier credential by name."""
+        _require_api_key(request)
+        await _check_rate_limit("ext_credentials", "_api_key")
+        if credential_vault is None:
+            raise HTTPException(503, "Credential vault not configured")
+        if is_system_credential(name):
+            raise HTTPException(403, "Cannot remove system credentials via external API")
+        existed = credential_vault.remove_credential(name)
+        if not existed:
+            raise HTTPException(404, f"Credential not found: {name}")
+        return {"removed": True, "name": name}
+
+    @app.get("/mesh/credentials")
+    async def ext_list_credentials(request: Request) -> dict:
+        """List agent-tier credential names (never values)."""
+        _require_api_key(request)
+        await _check_rate_limit("ext_credentials", "_api_key")
+        if credential_vault is None:
+            raise HTTPException(503, "Credential vault not configured")
+        names = credential_vault.list_agent_credential_names()
+        return {"credentials": names, "count": len(names)}
+
+    @app.get("/mesh/credentials/{name}/exists")
+    async def ext_credential_exists(name: str, request: Request) -> dict:
+        """Check if a credential exists by name (never returns value)."""
+        _require_api_key(request)
+        await _check_rate_limit("ext_credentials", "_api_key")
+        if credential_vault is None:
+            raise HTTPException(503, "Credential vault not configured")
+        return {"name": name, "exists": credential_vault.has_credential(name)}
+
+    @app.get("/mesh/agents/{agent_id}/ext-status")
+    async def ext_agent_status(agent_id: str, request: Request) -> dict:
+        """Query agent status from an external system.
+
+        Returns agent state, queue depth, and health — enough for an
+        external system to decide whether to trigger a workflow.
+        """
+        _require_api_key(request)
+        await _check_rate_limit("ext_status", "_api_key")
+        _validate_agent_id(agent_id)
+        result: dict = {"agent_id": agent_id}
+        if agent_id not in router.agent_registry:
+            raise HTTPException(404, f"Agent not found: {agent_id}")
+        if health_monitor is not None:
+            statuses = health_monitor.get_status()
+            result["health"] = next(
+                (s for s in statuses if s["agent"] == agent_id), None,
+            )
+        if lane_manager is not None:
+            lane_status = lane_manager.get_status()
+            agent_lane = lane_status.get(agent_id, {})
+            result["queue"] = {
+                "queued": agent_lane.get("queued", 0),
+                "busy": agent_lane.get("busy", False),
+            }
+        if cost_tracker is not None:
+            result["budget"] = cost_tracker.check_budget(agent_id)
+        return result
+
     # === Browser Service Proxy ===
 
     import httpx as _httpx
