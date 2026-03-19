@@ -2487,9 +2487,13 @@ class TestBuildOpenAIResponsesBody:
             ],
         }
         body = CredentialVault._build_openai_responses_body(params)
-        # user, assistant text, function_call, function_call_output
-        assert any(i["type"] == "function_call" for i in body["input"])
-        assert any(i["type"] == "function_call_output" for i in body["input"])
+        # user (no type), assistant text (type=message), function_call, function_call_output
+        assert any(i.get("type") == "function_call" for i in body["input"])
+        assert any(i.get("type") == "function_call_output" for i in body["input"])
+        # User message has no "type" key (pi-ai format)
+        user_item = body["input"][0]
+        assert "type" not in user_item
+        assert user_item["role"] == "user"
 
     def test_tools_unwrapped(self):
         params = {
@@ -2548,7 +2552,7 @@ class TestBuildOpenAIResponsesBody:
         assert len(body["input"]) == 1
         content = body["input"][0]["content"]
         assert content[0] == {"type": "input_text", "text": "What is this?"}
-        assert content[1] == {"type": "input_image", "image_url": "https://example.com/img.png"}
+        assert content[1] == {"type": "input_image", "detail": "auto", "image_url": "https://example.com/img.png"}
 
 
 class TestParseOpenAIResponsesResponse:

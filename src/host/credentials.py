@@ -1440,9 +1440,13 @@ class CredentialVault:
         if model.startswith("openai/"):
             model = model[len("openai/"):]
 
+        # Message conversion matching pi-ai's convertResponsesMessages exactly.
+        # System → instructions (NOT in input). User → {role, content} (no type).
+        # Assistant → {type: "message", ...} with id. Tool calls → {type: "function_call"}.
         messages = params.get("messages", [])
         instructions_parts: list[str] = []
         input_items: list[dict] = []
+        msg_idx = 0
 
         for m in messages:
             role = m.get("role", "")
@@ -1457,9 +1461,9 @@ class CredentialVault:
                     ))
 
             elif role == "user":
+                # pi-ai: {role: "user", content: [...]} — NO type: "message"
                 if isinstance(content, str):
                     input_items.append({
-                        "type": "message",
                         "role": "user",
                         "content": [{"type": "input_text", "text": content}],
                     })
@@ -1473,42 +1477,40 @@ class CredentialVault:
                             blocks.append({"type": "input_text", "text": b.get("text", "")})
                         elif btype == "image_url":
                             url = b.get("image_url", {}).get("url", "")
-                            blocks.append({"type": "input_image", "image_url": url})
+                            blocks.append({
+                                "type": "input_image",
+                                "detail": "auto",
+                                "image_url": url,
+                            })
                     if blocks:
-                        input_items.append({
-                            "type": "message",
-                            "role": "user",
-                            "content": blocks,
-                        })
+                        input_items.append({"role": "user", "content": blocks})
+                msg_idx += 1
 
             elif role == "assistant":
-                if m.get("tool_calls"):
-                    if content:
-                        text_val = content if isinstance(content, str) else str(content)
-                        input_items.append({
-                            "type": "message",
-                            "role": "assistant",
-                            "status": "completed",
-                            "content": [{"type": "output_text", "text": text_val}],
-                        })
-                    for tc in m["tool_calls"]:
-                        func = tc.get("function", tc)
-                        args = func.get("arguments", "{}")
-                        input_items.append({
-                            "type": "function_call",
-                            "call_id": tc.get("id", ""),
-                            "name": func.get("name", ""),
-                            "arguments": args,
-                        })
-                else:
+                # pi-ai flattens assistant content into separate items
+                if content:
                     text_val = content if isinstance(content, str) else str(content)
                     if text_val:
                         input_items.append({
                             "type": "message",
                             "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": text_val,
+                                "annotations": [],
+                            }],
                             "status": "completed",
-                            "content": [{"type": "output_text", "text": text_val}],
+                            "id": f"msg_{msg_idx}",
                         })
+                for tc in (m.get("tool_calls") or []):
+                    func = tc.get("function", tc)
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": tc.get("id", ""),
+                        "name": func.get("name", ""),
+                        "arguments": func.get("arguments", "{}"),
+                    })
+                msg_idx += 1
 
             elif role == "tool":
                 input_items.append({
@@ -1516,6 +1518,7 @@ class CredentialVault:
                     "call_id": m.get("tool_call_id", ""),
                     "output": content if isinstance(content, str) else json.dumps(content),
                 })
+                msg_idx += 1
 
         # Build body matching EXACTLY what pi-ai sends to the Codex backend.
         # Missing fields cause 400 errors — the backend is strict.
