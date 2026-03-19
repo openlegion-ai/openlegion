@@ -1299,9 +1299,7 @@ def create_dashboard_router(
             )
         if len(key) > 10_000:
             raise HTTPException(status_code=400, detail="Key value too long (max 10000 chars)")
-        if "\n" in key or "\r" in key:
-            raise HTTPException(status_code=400, detail="Key value must not contain newline characters")
-        # Detect OAuth JSON blobs (Anthropic or OpenAI)
+        # Detect OAuth JSON blobs BEFORE newline check (JSON blobs have newlines)
         import json as _json
 
         from src.host.credentials import CredentialVault as _CV
@@ -1319,6 +1317,9 @@ def create_dashboard_router(
                     return {"stored": True, "service": "openai_oauth", "tier": "system"}
         except (_json.JSONDecodeError, ValueError):
             pass
+        # Non-OAuth keys must not contain newlines
+        if "\n" in key or "\r" in key:
+            raise HTTPException(status_code=400, detail="Key value must not contain newline characters")
         # Normalize bare provider names
         from src.host.credentials import (
             SYSTEM_CREDENTIAL_PROVIDERS,

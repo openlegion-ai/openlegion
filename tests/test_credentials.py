@@ -2742,7 +2742,6 @@ async def test_codex_routing_prefixed_model(monkeypatch):
 @pytest.mark.asyncio
 async def test_codex_skips_cost_tracking(monkeypatch):
     """Codex calls via execute_api_call must NOT record costs."""
-    import json as _json
     from unittest.mock import AsyncMock
 
     monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
