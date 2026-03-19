@@ -1308,6 +1308,30 @@ class TestGetAuthForModel:
         providers = v.get_providers_with_credentials()
         assert providers == {"ollama"}
 
+    def test_providers_with_credentials_includes_openai_oauth(self, monkeypatch):
+        """OpenAI OAuth counts as having OpenAI credentials."""
+        for p in ("anthropic", "openai", "gemini", "deepseek",
+                   "moonshot", "minimax", "xai", "groq", "zai"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{p.upper()}_API_KEY", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+        providers = v.get_providers_with_credentials()
+        assert "openai" in providers
+
+    def test_openai_oauth_not_in_system_credentials(self, monkeypatch):
+        """OPENLEGION_SYSTEM_OPENAI_OAUTH should not appear in system_credentials."""
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+        assert "openai_oauth" not in v.system_credentials
+        assert v._has_openai_oauth()
+
     def test_get_auth_for_model_oauth_token(self, monkeypatch):
         """OAuth setup-token returns key with empty headers (OAuth bypasses LiteLLM)."""
         monkeypatch.setenv(
