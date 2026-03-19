@@ -1517,18 +1517,27 @@ class CredentialVault:
                     "output": content if isinstance(content, str) else json.dumps(content),
                 })
 
-        body: dict = {"model": model, "input": input_items, "store": False}
+        # Build body matching EXACTLY what pi-ai sends to the Codex backend.
+        # Missing fields cause 400 errors — the backend is strict.
+        body: dict = {
+            "model": model,
+            "input": input_items,
+            "store": False,
+            "stream": True,
+            "text": {"verbosity": "medium"},
+            "include": ["reasoning.encrypted_content"],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+        }
         if instructions_parts:
             body["instructions"] = "\n\n".join(instructions_parts)
 
-        # The Codex backend (chatgpt.com) does NOT support max_output_tokens
-        # or most optional params. Only forward what pi-ai sends.
-        for key in ("temperature", "top_p"):
-            val = params.get(key)
-            if val is not None:
-                body[key] = val
+        # Only temperature is safe to forward — most params are unsupported
+        temp = params.get("temperature")
+        if temp is not None:
+            body["temperature"] = temp
 
-        # Tools — unwrap the function wrapper
+        # Tools — unwrap the function wrapper, add strict: null (pi-ai format)
         tools = params.get("tools")
         if tools:
             unwrapped: list[dict] = []
@@ -1540,6 +1549,7 @@ class CredentialVault:
                         "name": func["name"],
                         "description": func.get("description", ""),
                         "parameters": func.get("parameters", {"type": "object"}),
+                        "strict": None,
                     })
                 else:
                     unwrapped.append(t)
@@ -1638,7 +1648,6 @@ class CredentialVault:
         )
         params = {**request.params, "messages": sanitized}
         body = self._build_openai_responses_body(params)
-        body["stream"] = True
 
         collected_content = ""
         collected_thinking = ""

@@ -2445,13 +2445,17 @@ class TestBuildOpenAIResponsesBody:
         params = {
             "model": "openai/gpt-4o",
             "messages": [{"role": "user", "content": "Hello"}],
-            "max_tokens": 1024,
         }
         body = CredentialVault._build_openai_responses_body(params)
         assert body["model"] == "gpt-4o"
-        assert body["max_output_tokens"] == 1024
+        assert body["store"] is False
+        assert body["stream"] is True
+        assert body["text"] == {"verbosity": "medium"}
+        assert body["include"] == ["reasoning.encrypted_content"]
+        assert body["tool_choice"] == "auto"
+        assert body["parallel_tool_calls"] is True
+        assert "max_output_tokens" not in body
         assert len(body["input"]) == 1
-        assert body["input"][0]["type"] == "message"
         assert body["input"][0]["content"][0]["type"] == "input_text"
         assert body["input"][0]["content"][0]["text"] == "Hello"
 
@@ -2504,6 +2508,7 @@ class TestBuildOpenAIResponsesBody:
         assert len(body["tools"]) == 1
         assert body["tools"][0]["name"] == "search"
         assert body["tools"][0]["type"] == "function"
+        assert body["tools"][0]["strict"] is None
 
     def test_strips_prefix(self):
         params = {"model": "openai/gpt-4o-mini", "messages": []}
@@ -2515,20 +2520,18 @@ class TestBuildOpenAIResponsesBody:
         body = CredentialVault._build_openai_responses_body(params)
         assert body["model"] == "gpt-4o"
 
-    def test_max_completion_tokens(self):
-        params = {"model": "o3", "messages": [], "max_completion_tokens": 2048, "max_tokens": 1024}
-        body = CredentialVault._build_openai_responses_body(params)
-        assert body["max_output_tokens"] == 2048
-
-    def test_reasoning_effort(self):
-        params = {"model": "o3", "messages": [], "reasoning_effort": "high"}
-        body = CredentialVault._build_openai_responses_body(params)
-        assert body["reasoning_effort"] == "high"
-
-    def test_no_max_tokens(self):
-        params = {"model": "gpt-4o", "messages": []}
+    def test_unsupported_params_excluded(self):
+        """max_tokens, max_completion_tokens, reasoning_effort are not sent to Codex."""
+        params = {
+            "model": "o3", "messages": [],
+            "max_completion_tokens": 2048, "max_tokens": 1024,
+            "reasoning_effort": "high",
+        }
         body = CredentialVault._build_openai_responses_body(params)
         assert "max_output_tokens" not in body
+        assert "max_tokens" not in body
+        assert "max_completion_tokens" not in body
+        assert "reasoning_effort" not in body
 
     def test_multimodal_user_content(self):
         params = {
