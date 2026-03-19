@@ -982,12 +982,19 @@ class REPLSession:
             click.echo("No key provided.")
             return
         key_value = key_value.strip()
-        # Auto-detect OpenAI OAuth JSON blob (flat or nested Codex CLI format)
+        # Auto-detect OAuth JSON blobs (Anthropic or OpenAI)
         from src.host.credentials import CredentialVault
 
         try:
             parsed = json.loads(key_value)
             if isinstance(parsed, dict):
+                # Check for Anthropic OAuth (access_token starts with sk-ant-oat)
+                if parsed.get("access_token", "").startswith("sk-ant-oat"):
+                    click.echo("  Detected Anthropic OAuth credentials.")
+                    self.ctx.credential_vault.store_anthropic_oauth(parsed)
+                    click.echo("  Anthropic OAuth credentials stored.")
+                    return
+                # Check for OpenAI OAuth (flat or nested Codex CLI format)
                 normalized = CredentialVault.normalize_openai_oauth(parsed)
                 if normalized is not None:
                     click.echo("  Detected OpenAI OAuth credentials.")
