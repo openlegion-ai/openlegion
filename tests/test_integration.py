@@ -1624,8 +1624,8 @@ def ext_api_components(tmp_path, monkeypatch):
     """Mesh components with OPENLEGION_API_KEY configured for external API tests."""
     from unittest.mock import MagicMock
 
-    from src.host.credentials import CredentialVault
     from src.host.costs import CostTracker
+    from src.host.credentials import CredentialVault
     from src.host.health import HealthMonitor
 
     monkeypatch.setenv("OPENLEGION_API_KEY", "test-external-key-abc")
