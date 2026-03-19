@@ -1127,17 +1127,21 @@ def create_mesh_app(
     # Authenticated via X-API-Key header matching OPENLEGION_API_KEY env var.
 
     import os as _os
-    _external_api_key = _os.environ.get("OPENLEGION_API_KEY", "")
 
     _RATE_LIMITS["ext_credentials"] = (30, 60)
     _RATE_LIMITS["ext_status"] = (60, 60)
 
     def _require_api_key(request: Request) -> None:
-        """Verify the X-API-Key header against OPENLEGION_API_KEY."""
-        if not _external_api_key:
+        """Verify the X-API-Key header against OPENLEGION_API_KEY.
+
+        Reads from os.environ on each call so that keys generated or
+        rotated via the dashboard take effect without a restart.
+        """
+        api_key = _os.environ.get("OPENLEGION_API_KEY", "")
+        if not api_key:
             raise HTTPException(503, "External API not configured (set OPENLEGION_API_KEY)")
         provided = request.headers.get("x-api-key", "")
-        if not provided or not hmac.compare_digest(provided, _external_api_key):
+        if not provided or not hmac.compare_digest(provided, api_key):
             raise HTTPException(401, "Invalid or missing API key")
 
     _CRED_NAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]{1,128}$")

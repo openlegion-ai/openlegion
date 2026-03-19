@@ -347,6 +347,7 @@ function dashboard() {
     webhookCreating: false,
     webhookTesting: {},
     webhookSaving: false,
+    extApiKey: { configured: null, preview: null, revealed: null, generating: false, justGenerated: false },
     broadcastSending: false,
     confirmLoading: false,
 
@@ -498,7 +499,7 @@ function dashboard() {
               if (this.systemTab === 'activity') this._stopActivityRefresh();
               this.systemTab = route.systemTab;
               if (route.systemTab === 'integrations') {
-                this.fetchChannels(); this.fetchWebhooks();
+                this.fetchChannels(); this.fetchWebhooks(); this.fetchExtApiKey();
               }
               if (route.systemTab === 'apikeys') {
                 this.fetchSettings();
@@ -963,6 +964,7 @@ function dashboard() {
         if (this.systemTab === 'integrations') {
           this.fetchWebhooks();
           this.fetchChannels();
+          this.fetchExtApiKey();
         }
         if (this.systemTab === 'settings') {
           this.fetchBrowserSettings();
@@ -985,7 +987,7 @@ function dashboard() {
       if (this.systemTab === 'activity' && tabId !== 'activity') this._stopActivityRefresh();
       this.systemTab = tabId;
       this._pushUrl(false);
-      if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); }
+      if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchExtApiKey(); }
       if (tabId === 'apikeys') { this.fetchSettings(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); }
@@ -4190,6 +4192,72 @@ function dashboard() {
           }
         } catch (e) { this.showToast(`Error: ${e.message}`); }
       }, true);
+    },
+
+    // ── External API key ──────────────────────────────────
+
+    async fetchExtApiKey() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/external-api-key`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.extApiKey = { ...this.extApiKey, configured: data.configured, preview: data.preview || null, revealed: null, justGenerated: false };
+        }
+      } catch (e) { console.warn('fetchExtApiKey failed:', e); }
+    },
+
+    async generateExtApiKey() {
+      if (this.extApiKey.generating) return;
+      this.extApiKey.generating = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/external-api-key`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          this.extApiKey = { configured: true, preview: null, revealed: data.key, generating: false, justGenerated: true };
+          if (navigator.clipboard) navigator.clipboard.writeText(data.key).catch(() => {});
+          this.showToast('API key generated and copied to clipboard');
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Generation failed'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+      finally { this.extApiKey.generating = false; }
+    },
+
+    rotateExtApiKey() {
+      this.showConfirm('Rotate API Key', 'Generate a new API key? The current key will stop working immediately.', async () => {
+        await this.generateExtApiKey();
+      }, true);
+    },
+
+    revokeExtApiKey() {
+      this.showConfirm('Revoke API Key', 'Revoke the external API key? External integrations will lose access immediately.', async () => {
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/external-api-key`, { method: 'DELETE' });
+          if (resp.ok) {
+            this.extApiKey = { configured: false, preview: null, revealed: null, generating: false, justGenerated: false };
+            this.showToast('API key revoked');
+          } else {
+            const err = await resp.json().catch(() => ({}));
+            this.showToast(`Error: ${err.detail || 'Revoke failed'}`);
+          }
+        } catch (e) { this.showToast(`Error: ${e.message}`); }
+      }, true);
+    },
+
+    async revealExtApiKey() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/external-api-key?reveal=true`);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.key) {
+            this.extApiKey.revealed = data.key;
+            setTimeout(() => { this.extApiKey.revealed = null; }, 30000);
+          }
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
     },
 
     // ── Agent drill-down ──────────────────────────────────

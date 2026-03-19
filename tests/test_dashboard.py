@@ -3160,3 +3160,68 @@ class TestDashboardBrowserSettings:
         import json
         saved = json.loads(Path("config/settings.json").read_text())
         assert saved["browser_speed"] == 1.5
+
+
+# ── External API Key Management ──────────────────────────────
+
+
+class TestExternalApiKey:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+        os.environ.pop("OPENLEGION_API_KEY", None)
+
+    def test_get_not_configured(self):
+        """GET returns configured=False when no key is set."""
+        os.environ.pop("OPENLEGION_API_KEY", None)
+        resp = self.client.get("/dashboard/api/external-api-key")
+        assert resp.status_code == 200
+        assert resp.json()["configured"] is False
+
+    def test_get_configured_masked(self):
+        """GET returns masked preview when key is set."""
+        os.environ["OPENLEGION_API_KEY"] = "abcdefghijklmnop"
+        resp = self.client.get("/dashboard/api/external-api-key")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["configured"] is True
+        assert data["preview"] == "abcd...mnop"
+        assert "key" not in data
+
+    def test_get_reveal(self):
+        """GET with reveal=true returns full key."""
+        os.environ["OPENLEGION_API_KEY"] = "secret-key-value"
+        resp = self.client.get("/dashboard/api/external-api-key?reveal=true")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["key"] == "secret-key-value"
+
+    @patch("src.host.credentials._persist_to_env")
+    def test_generate(self, mock_persist):
+        """POST generates a new key and persists it."""
+        resp = self.client.post(
+            "/dashboard/api/external-api-key",
+            json={},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "key" in data
+        assert len(data["key"]) > 20
+        mock_persist.assert_called_once()
+        call_args = mock_persist.call_args[0]
+        assert call_args[0] == "OPENLEGION_API_KEY"
+        assert call_args[1] == data["key"]
+
+    @patch("src.host.credentials._remove_from_env")
+    def test_revoke(self, mock_remove):
+        """DELETE revokes the key."""
+        os.environ["OPENLEGION_API_KEY"] = "to-be-revoked"
+        resp = self.client.delete("/dashboard/api/external-api-key")
+        assert resp.status_code == 200
+        assert resp.json()["revoked"] is True
+        mock_remove.assert_called_once_with("OPENLEGION_API_KEY")

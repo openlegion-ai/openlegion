@@ -2638,6 +2638,43 @@
           </div>
         </div>
 
+        <!-- External API Key -->
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5 mt-6">External API Key<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">API key for external system integrations. Use this key in the X-API-Key header to call /mesh/credentials and /mesh/agents/{id}/ext-status from your backend without a dashboard session.</span></span></div>
+        <div class="mb-6">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <template x-if="!extApiKey.configured">
+              <div class="text-center py-2">
+                <div class="text-sm text-gray-500 mb-3">No external API key configured</div>
+                <button @click="generateExtApiKey()" :disabled="extApiKey.generating"
+                  class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                  <svg x-show="extApiKey.generating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                  <span x-text="extApiKey.generating ? 'Generating...' : 'Generate API Key'"></span>
+                </button>
+              </div>
+            </template>
+            <template x-if="extApiKey.configured">
+              <div>
+                <div class="flex items-center gap-2 text-xs">
+                  <span class="w-2 h-2 rounded-full bg-green-500/50"></span>
+                  <code class="text-gray-300 font-mono flex-1" x-text="extApiKey.revealed || extApiKey.preview || '••••••••'"></code>
+                  <button x-show="extApiKey.revealed" @click="copyToClipboard(extApiKey.revealed)"
+                    class="text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors">Copy</button>
+                  <button @click="extApiKey.revealed ? (extApiKey.revealed = null) : revealExtApiKey()"
+                    class="text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors"
+                    x-text="extApiKey.revealed ? 'Hide' : 'Reveal'"></button>
+                  <button @click="rotateExtApiKey()" :disabled="extApiKey.generating"
+                    class="text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-yellow-900/40 text-gray-400 hover:text-yellow-400 transition-colors disabled:opacity-50">Rotate</button>
+                  <button @click="revokeExtApiKey()"
+                    class="text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">Revoke</button>
+                </div>
+                <div x-show="extApiKey.justGenerated" x-transition class="mt-2 p-2 bg-indigo-900/20 border border-indigo-800/30 rounded text-[11px] text-indigo-300">
+                  Copy this key now — it won't be shown in full again after you leave this page.
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
         </div><!-- /integrations sub-tab -->
 
         <!-- ═══ API KEYS SUB-TAB ═══ -->

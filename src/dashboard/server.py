@@ -1363,6 +1363,42 @@ def create_dashboard_router(
             raise HTTPException(status_code=404, detail=f"Credential '{name}' not found")
         return {"name": name, "value": value}
 
+    # ── External API key management ─────────────────────────
+
+    _API_KEY_ENV = "OPENLEGION_API_KEY"
+
+    @api_router.get("/api/external-api-key")
+    async def api_get_external_key(request: Request, reveal: bool = False) -> dict:
+        """Return the external API key status. Pass reveal=true for full value."""
+        _verify_dashboard_auth(request)
+        raw = os.environ.get(_API_KEY_ENV, "")
+        if not raw:
+            return {"configured": False}
+        result: dict = {"configured": True, "length": len(raw)}
+        if reveal:
+            result["key"] = raw
+        else:
+            result["preview"] = raw[:4] + "..." + raw[-4:] if len(raw) > 12 else raw[:2] + "..." + raw[-2:]
+        return result
+
+    @api_router.post("/api/external-api-key")
+    async def api_generate_external_key(request: Request) -> dict:
+        """Generate a new external API key and persist to .env."""
+        _verify_dashboard_auth(request)
+        import secrets as _secrets
+        from src.host.credentials import _persist_to_env
+        key = _secrets.token_urlsafe(32)
+        _persist_to_env(_API_KEY_ENV, key)
+        return {"key": key}
+
+    @api_router.delete("/api/external-api-key")
+    async def api_revoke_external_key(request: Request) -> dict:
+        """Revoke the external API key."""
+        _verify_dashboard_auth(request)
+        from src.host.credentials import _remove_from_env
+        _remove_from_env(_API_KEY_ENV)
+        return {"revoked": True}
+
     # ── Wallet management ────────────────────────────────────
 
     @api_router.post("/api/wallet/init")
