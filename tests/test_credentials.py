@@ -2601,8 +2601,8 @@ class TestParseOpenAIResponsesResponse:
 
 @pytest.mark.asyncio
 async def test_codex_chat_success(monkeypatch):
-    """_openai_oauth_chat (Codex) returns parsed response on 200."""
-    import httpx
+    """_openai_oauth_chat collects streamed SSE into a final response."""
+    import json as _json
 
     monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
     monkeypatch.setenv(
@@ -2611,22 +2611,17 @@ async def test_codex_chat_success(monkeypatch):
     )
     v = CredentialVault()
 
-    mock_response = httpx.Response(
-        200,
-        json={
-            "output": [{"type": "message", "content": [{"type": "output_text", "text": "Hello!"}]}],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-        },
-        request=httpx.Request("POST", "https://chatgpt.com/backend-api/codex/responses"),
-    )
+    # Mock the streaming path (Codex always streams)
+    async def mock_stream(request, model):
+        yield f"data: {_json.dumps({'type': 'text_delta', 'content': 'Hello!'})}\n\n"
+        done = {
+            'type': 'done', 'content': 'Hello!', 'tokens_used': 15,
+            'model': model, 'tool_calls': [],
+            'input_tokens': 10, 'output_tokens': 5,
+        }
+        yield f"data: {_json.dumps(done)}\n\n"
 
-    async def mock_post(*args, **kwargs):
-        return mock_response
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
+    v._openai_oauth_chat_stream = mock_stream
 
     req = APIProxyRequest(
         service="llm", action="chat",
@@ -2643,80 +2638,9 @@ async def test_codex_chat_success(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_codex_chat_401_retry(monkeypatch):
-    """_openai_oauth_chat retries once on 401 after forcing token refresh."""
-    import base64
+async def test_codex_chat_error(monkeypatch):
+    """_openai_oauth_chat propagates errors from the streaming path."""
     import json as _json
-
-    import httpx
-
-    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv(
-        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
-        '{"access_token":"old-tok","refresh_token":"ref","account_id":"acct","expires_at":9999999999}',
-    )
-    v = CredentialVault()
-
-    # Build fake JWT for refreshed token
-    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
-    payload_data = {"exp": 9999999999, "https://api.openai.com/auth": {"chatgpt_account_id": "acct"}}
-    payload = base64.urlsafe_b64encode(_json.dumps(payload_data).encode()).rstrip(b"=").decode()
-    refreshed_jwt = f"{header}.{payload}.sig"
-
-    api_call_count = 0
-
-    async def mock_post(url, *args, **kwargs):
-        nonlocal api_call_count
-        url_str = str(url)
-        # Token refresh endpoint
-        if "auth.openai.com" in url_str:
-            return httpx.Response(
-                200,
-                json={"access_token": refreshed_jwt, "refresh_token": "new-ref"},
-                request=httpx.Request("POST", url_str),
-            )
-        # Codex API endpoint
-        api_call_count += 1
-        if api_call_count == 1:
-            return httpx.Response(
-                401,
-                json={"error": {"message": "expired"}},
-                request=httpx.Request("POST", url_str),
-            )
-        return httpx.Response(
-            200,
-            json={
-                "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
-                "usage": {"input_tokens": 5, "output_tokens": 3},
-            },
-            request=httpx.Request("POST", url_str),
-        )
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
-
-    # Patch _persist_to_env to avoid writing to real .env
-    import src.host.credentials as cred_mod
-    original = cred_mod._persist_to_env
-    cred_mod._persist_to_env = lambda *a, **kw: None
-    try:
-        req = APIProxyRequest(
-            service="llm", action="chat",
-            params={"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
-        )
-        result = await v._openai_oauth_chat(req, "openai/gpt-4o")
-        assert result.success
-        assert api_call_count == 2
-    finally:
-        cred_mod._persist_to_env = original
-
-
-@pytest.mark.asyncio
-async def test_codex_chat_500(monkeypatch):
-    """_openai_oauth_chat raises RuntimeError on 500."""
-    import httpx
 
     monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
     monkeypatch.setenv(
@@ -2725,17 +2649,10 @@ async def test_codex_chat_500(monkeypatch):
     )
     v = CredentialVault()
 
-    async def mock_post(*args, **kwargs):
-        return httpx.Response(
-            500,
-            text="Internal Server Error",
-            request=httpx.Request("POST", "https://chatgpt.com/backend-api/codex/responses"),
-        )
+    async def mock_stream(request, model):
+        yield f"data: {_json.dumps({'error': 'OpenAI Codex API error (HTTP 500)'})}\n\n"
 
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
+    v._openai_oauth_chat_stream = mock_stream
 
     req = APIProxyRequest(
         service="llm", action="chat",
@@ -2748,7 +2665,7 @@ async def test_codex_chat_500(monkeypatch):
 @pytest.mark.asyncio
 async def test_codex_chat_connect_error(monkeypatch):
     """_openai_oauth_chat raises RuntimeError on ConnectError."""
-    import httpx
+    import json as _json
 
     monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
     monkeypatch.setenv(
@@ -2757,13 +2674,10 @@ async def test_codex_chat_connect_error(monkeypatch):
     )
     v = CredentialVault()
 
-    async def mock_post(*args, **kwargs):
-        raise httpx.ConnectError("Connection refused")
+    async def mock_stream(request, model):
+        yield f"data: {_json.dumps({'error': 'connection error: Connection refused'})}\n\n"
 
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
+    v._openai_oauth_chat_stream = mock_stream
 
     req = APIProxyRequest(
         service="llm", action="chat",
@@ -2828,6 +2742,9 @@ async def test_codex_routing_prefixed_model(monkeypatch):
 @pytest.mark.asyncio
 async def test_codex_skips_cost_tracking(monkeypatch):
     """Codex calls via execute_api_call must NOT record costs."""
+    import json as _json
+    from unittest.mock import AsyncMock
+
     monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
     monkeypatch.setenv(
         "OPENLEGION_SYSTEM_OPENAI_OAUTH",
@@ -2837,23 +2754,11 @@ async def test_codex_skips_cost_tracking(monkeypatch):
     cost_tracker.preflight_check.return_value = {"allowed": True}
     v = CredentialVault(cost_tracker=cost_tracker)
 
-    import httpx
-    mock_response = httpx.Response(
-        200,
-        json={
-            "output": [{"type": "message", "content": [{"type": "output_text", "text": "Hi"}]}],
-            "usage": {"input_tokens": 50, "output_tokens": 25},
-        },
-        request=httpx.Request("POST", "https://chatgpt.com/backend-api/codex/responses"),
-    )
-
-    async def mock_post(*args, **kwargs):
-        return mock_response
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
+    # Mock _openai_oauth_chat directly (it delegates to streaming internally)
+    mock_result = MagicMock()
+    mock_result.success = True
+    mock_result.data = {"content": "Hi", "tokens_used": 75, "oauth": True}
+    v._openai_oauth_chat = AsyncMock(return_value=mock_result)
 
     req = APIProxyRequest(
         service="llm", action="chat",

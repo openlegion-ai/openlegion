@@ -1574,69 +1574,35 @@ class CredentialVault:
     async def _openai_oauth_chat(
         self, request: APIProxyRequest, model: str,
     ) -> APIProxyResponse:
-        """Codex Responses API call (non-streaming).
+        """Codex Responses API call (non-streaming wrapper).
 
-        Credentials are sourced from ``self._openai_oauth`` — no api_key param.
-        On 401 the token is force-refreshed and the request retried once.
+        The Codex endpoint at ``chatgpt.com`` requires ``stream: true`` —
+        there is no non-streaming mode.  This method streams internally
+        and collects the final result from SSE events.
         """
-        sanitized = sanitize_for_provider(
-            request.params.get("messages", []), model,
-        )
-        params = {**request.params, "messages": sanitized}
-        body = self._build_openai_responses_body(params)
+        result: dict = {}
+        last_error: str | None = None
 
-        for attempt in range(2):
-            access_token, account_id = await self._ensure_openai_oauth_token()
-            headers = self._openai_oauth_headers(access_token, account_id)
-
-            client = await self._get_http_client()
-            try:
-                resp = await client.post(
-                    _OPENAI_RESPONSES_URL, headers=headers,
-                    json=body, timeout=120,
-                )
-            except (httpx.TimeoutException, httpx.ConnectError) as e:
-                self._health_tracker.record_failure(model, type(e).__name__, 0)
-                raise RuntimeError(
-                    f"OpenAI Codex API connection error: {e}"
-                ) from e
-
-            if resp.status_code == 401 and attempt == 0:
-                # Force token refresh and retry
-                self._openai_oauth["expires_at"] = 0
+        async for chunk in self._openai_oauth_chat_stream(request, model):
+            if not chunk.startswith("data: "):
                 continue
+            try:
+                data = json.loads(chunk[6:].strip())
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if data.get("error"):
+                last_error = data["error"]
+            elif data.get("type") == "done":
+                result = data
 
-            if resp.status_code == 401:
-                self._health_tracker.record_failure(model, "AuthError", 401)
-                try:
-                    error_data = resp.json()
-                    msg = error_data.get("error", {}).get(
-                        "message", "Authentication failed",
-                    )
-                except (json.JSONDecodeError, ValueError):
-                    msg = resp.text[:200] or "Authentication failed"
-                raise RuntimeError(
-                    f"OpenAI Codex authentication failed: {msg}"
-                )
+        if last_error:
+            raise RuntimeError(f"OpenAI Codex API error: {last_error}")
 
-            if not resp.is_success:
-                error_text = resp.text[:500]
-                self._health_tracker.record_failure(
-                    model, "HTTPError", resp.status_code,
-                )
-                raise RuntimeError(
-                    f"OpenAI Codex API error (HTTP {resp.status_code}): "
-                    f"{error_text}"
-                )
+        if not result:
+            raise RuntimeError("OpenAI Codex returned no response")
 
-            data = resp.json()
-            result = self._parse_openai_responses_response(data, model)
-            result["oauth"] = True
-            self._health_tracker.record_success(model)
-            return APIProxyResponse(success=True, data=result)
-
-        # Should not reach here, but just in case
-        raise RuntimeError("OpenAI Codex request failed after retry")
+        result["oauth"] = True
+        return APIProxyResponse(success=True, data=result)
 
     async def _openai_oauth_chat_stream(
         self, request: APIProxyRequest, model: str,
