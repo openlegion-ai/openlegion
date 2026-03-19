@@ -440,6 +440,175 @@ class TestUpdateHook:
         assert mgr.hooks[hook["id"]]["name"] == "original-name"
 
 
+class TestWebhookDashboardPatch:
+    """Test the PATCH /api/webhooks/{hook_id} endpoint via create_dashboard_router."""
+
+    def setup_method(self):
+        import os
+        import tempfile
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = os.path.join(self._tmpdir, "webhooks.json")
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _make_app(self, dispatch_fn=None):
+        import os
+        from fastapi import FastAPI
+        from src.dashboard.server import create_dashboard_router
+        from src.dashboard.events import EventBus
+        from src.host.costs import CostTracker
+        from src.host.mesh import Blackboard
+        from src.host.traces import TraceStore
+        from src.host.health import HealthMonitor
+        from unittest.mock import MagicMock
+
+        tmp = self._tmpdir
+        bb = Blackboard(db_path=os.path.join(tmp, "bb.db"))
+        cost_tracker = CostTracker(db_path=os.path.join(tmp, "costs.db"))
+        trace_store = TraceStore(db_path=os.path.join(tmp, "traces.db"))
+        event_bus = EventBus()
+        runtime_mock = MagicMock()
+        runtime_mock.browser_vnc_url = None
+        runtime_mock.browser_service_url = None
+        runtime_mock.browser_auth_token = ""
+        transport_mock = MagicMock()
+        router_mock = MagicMock()
+        health_monitor = HealthMonitor(
+            runtime=runtime_mock, transport=transport_mock, router=router_mock,
+        )
+
+        mgr = WebhookManager(config_path=self.config_path, dispatch_fn=dispatch_fn)
+        dashboard_router = create_dashboard_router(
+            blackboard=bb,
+            health_monitor=health_monitor,
+            cost_tracker=cost_tracker,
+            trace_store=trace_store,
+            event_bus=event_bus,
+            agent_registry={},
+            mesh_port=8420,
+            webhook_manager=mgr,
+        )
+        app = FastAPI()
+        app.include_router(dashboard_router)
+        return app, mgr
+
+    def test_patch_via_dashboard_success(self):
+        app, mgr = self._make_app()
+        hook = mgr.add_hook(agent="a", name="original")
+        client = TestClient(app)
+
+        resp = client.patch(
+            f"/dashboard/api/webhooks/{hook['id']}",
+            json={"name": "updated", "instructions": "Do X."},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["updated"] is True
+        assert data["hook"]["name"] == "updated"
+        assert data["hook"]["instructions"] == "Do X."
+        assert "url" in data["hook"]
+
+    def test_patch_via_dashboard_not_found(self):
+        app, _ = self._make_app()
+        client = TestClient(app)
+
+        resp = client.patch(
+            "/dashboard/api/webhooks/nonexistent",
+            json={"name": "x"},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert resp.status_code == 404
+
+    def test_patch_via_dashboard_empty_body_rejected(self):
+        app, mgr = self._make_app()
+        hook = mgr.add_hook(agent="a", name="test")
+        client = TestClient(app)
+
+        resp = client.patch(
+            f"/dashboard/api/webhooks/{hook['id']}",
+            json={},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert resp.status_code == 400
+
+    def test_patch_via_dashboard_empty_name_rejected(self):
+        app, mgr = self._make_app()
+        hook = mgr.add_hook(agent="a", name="test")
+        client = TestClient(app)
+
+        resp = client.patch(
+            f"/dashboard/api/webhooks/{hook['id']}",
+            json={"name": ""},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert resp.status_code == 400
+
+    def test_patch_via_dashboard_enable_signature(self):
+        app, mgr = self._make_app()
+        hook = mgr.add_hook(agent="a", name="test")
+        assert "secret" not in hook
+        client = TestClient(app)
+
+        resp = client.patch(
+            f"/dashboard/api/webhooks/{hook['id']}",
+            json={"require_signature": True},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "secret" in data["hook"]
+        assert len(data["hook"]["secret"]) == 64
+
+    def test_patch_via_dashboard_no_manager(self):
+        import os
+        from fastapi import FastAPI
+        from src.dashboard.server import create_dashboard_router
+        from src.dashboard.events import EventBus
+        from src.host.costs import CostTracker
+        from src.host.mesh import Blackboard
+        from src.host.traces import TraceStore
+        from src.host.health import HealthMonitor
+        from unittest.mock import MagicMock
+
+        tmp = self._tmpdir
+        bb = Blackboard(db_path=os.path.join(tmp, "bb2.db"))
+        cost_tracker = CostTracker(db_path=os.path.join(tmp, "costs2.db"))
+        trace_store = TraceStore(db_path=os.path.join(tmp, "traces2.db"))
+        event_bus = EventBus()
+        runtime_mock = MagicMock()
+        runtime_mock.browser_vnc_url = None
+        runtime_mock.browser_service_url = None
+        runtime_mock.browser_auth_token = ""
+        transport_mock = MagicMock()
+        router_mock = MagicMock()
+        health_monitor = HealthMonitor(
+            runtime=runtime_mock, transport=transport_mock, router=router_mock,
+        )
+
+        dashboard_router = create_dashboard_router(
+            blackboard=bb,
+            health_monitor=health_monitor,
+            cost_tracker=cost_tracker,
+            trace_store=trace_store,
+            event_bus=event_bus,
+            agent_registry={},
+            mesh_port=8420,
+            webhook_manager=None,
+        )
+        app = FastAPI()
+        app.include_router(dashboard_router)
+        client = TestClient(app)
+
+        resp = client.patch(
+            "/dashboard/api/webhooks/some-id",
+            json={"name": "x"},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        assert resp.status_code == 503
+
+
 class TestWebhookUpdateRouter:
     """Test the PATCH /api/webhooks/{hook_id} endpoint."""
 
