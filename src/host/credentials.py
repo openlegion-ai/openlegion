@@ -1028,54 +1028,33 @@ class CredentialVault:
     async def _oauth_chat(
         self, request: APIProxyRequest, api_key: str, model: str,
     ) -> APIProxyResponse:
-        """Direct Anthropic API call using OAuth bearer auth (non-streaming)."""
-        sanitized = sanitize_for_provider(
-            request.params.get("messages", []), model,
-        )
-        params = {**request.params, "messages": sanitized}
-        body = self._build_anthropic_body(params)
-        self._patch_anthropic_oauth_body(body)
-        headers = self._oauth_headers(api_key)
+        """Anthropic OAuth call (non-streaming wrapper).
 
-        client = await self._get_http_client()
-        try:
-            resp = await client.post(
-                _ANTHROPIC_API_URL, headers=headers, json=body, timeout=120,
-            )
-        except (httpx.TimeoutException, httpx.ConnectError) as e:
-            self._health_tracker.record_failure(model, type(e).__name__, 0)
-            raise RuntimeError(f"Anthropic API connection error: {e}") from e
+        pi-ai always streams — there is no non-streaming OAuth path.
+        This method streams internally and collects the final result.
+        """
+        result: dict = {}
+        last_error: str | None = None
 
-        if resp.status_code == 401:
-            self._health_tracker.record_failure(model, "AuthError", 401)
+        async for chunk in self._oauth_chat_stream(request, api_key, model):
+            if not chunk.startswith("data: "):
+                continue
             try:
-                error_data = resp.json()
-                msg = error_data.get("error", {}).get("message", "Authentication failed")
+                data = json.loads(chunk[6:].strip())
             except (json.JSONDecodeError, ValueError):
-                msg = resp.text[:200] or "Authentication failed"
-            logger.debug(
-                "OAuth 401: model=%s, body_keys=%s",
-                model, sorted(body.keys()),
-            )
-            raise RuntimeError(
-                f"OAuth authentication failed (token may have expired): {msg}"
-            )
+                continue
+            if data.get("error"):
+                last_error = data["error"]
+            elif data.get("type") == "done":
+                result = data
 
-        if not resp.is_success:
-            error_text = resp.text[:500]
-            self._health_tracker.record_failure(model, "HTTPError", resp.status_code)
-            logger.debug(
-                "Anthropic OAuth %d: model=%s, body_keys=%s, error=%s",
-                resp.status_code, model, sorted(body.keys()), error_text[:200],
-            )
-            raise RuntimeError(
-                f"Anthropic API error (HTTP {resp.status_code}): {error_text}"
-            )
+        if last_error:
+            raise RuntimeError(f"Anthropic OAuth error: {last_error}")
 
-        data = resp.json()
-        result = self._parse_anthropic_response(data, model)
+        if not result:
+            raise RuntimeError("Anthropic OAuth returned no response")
+
         result["oauth"] = True
-        self._health_tracker.record_success(model)
         return APIProxyResponse(success=True, data=result)
 
     async def _oauth_chat_stream(

@@ -1900,29 +1900,22 @@ class TestOllamaThinkingDisable:
 
 @pytest.mark.asyncio
 async def test_oauth_chat_success(monkeypatch):
-    """_oauth_chat returns parsed response on 200."""
-    import httpx
+    """_oauth_chat collects streamed SSE into a final response."""
+    import json as _json
 
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
     v = CredentialVault()
 
-    mock_response = httpx.Response(
-        200,
-        json={
-            "content": [{"type": "text", "text": "Hello!"}],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-            "model": "claude-sonnet-4-6",
-        },
-        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-    )
+    # Mock the streaming path (OAuth always streams, like pi-ai)
+    async def mock_stream(request, api_key, model):
+        yield f"data: {_json.dumps({'type': 'text_delta', 'content': 'Hello!'})}\n\n"
+        done = {
+            'type': 'done', 'content': 'Hello!', 'tokens_used': 15,
+            'model': model, 'tool_calls': [],
+        }
+        yield f"data: {_json.dumps(done)}\n\n"
 
-    async def mock_post(*args, **kwargs):
-        return mock_response
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
+    v._oauth_chat_stream = mock_stream
 
     req = APIProxyRequest(
         service="llm", action="chat",
@@ -1935,24 +1928,21 @@ async def test_oauth_chat_success(monkeypatch):
     result = await v._oauth_chat(req, v.system_credentials["anthropic_api_key"], "anthropic/claude-sonnet-4-6")
     assert result.success
     assert result.data["content"] == "Hello!"
-    assert result.data["tokens_used"] == 15
+    assert result.data["oauth"] is True
 
 
 @pytest.mark.asyncio
-async def test_oauth_chat_connect_error(monkeypatch):
-    """_oauth_chat raises RuntimeError on ConnectError."""
-    import httpx
+async def test_oauth_chat_error(monkeypatch):
+    """_oauth_chat propagates errors from the streaming path."""
+    import json as _json
 
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
     v = CredentialVault()
 
-    async def mock_post(*args, **kwargs):
-        raise httpx.ConnectError("Connection refused")
+    async def mock_stream(request, api_key, model):
+        yield f"data: {_json.dumps({'error': 'Anthropic API connection error: Connection refused'})}\n\n"
 
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
+    v._oauth_chat_stream = mock_stream
 
     req = APIProxyRequest(
         service="llm", action="chat",
@@ -1966,26 +1956,17 @@ async def test_oauth_chat_connect_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_oauth_chat_401_non_json(monkeypatch):
-    """_oauth_chat handles non-JSON 401 response gracefully."""
-    import httpx
+async def test_oauth_chat_401(monkeypatch):
+    """_oauth_chat propagates 401 errors from streaming path."""
+    import json as _json
 
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
     v = CredentialVault()
 
-    mock_response = httpx.Response(
-        401,
-        text="Unauthorized",
-        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-    )
+    async def mock_stream(request, api_key, model):
+        yield f"data: {_json.dumps({'error': 'Anthropic OAuth failed: Unauthorized (token may be expired)'})}\n\n"
 
-    async def mock_post(*args, **kwargs):
-        return mock_response
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
+    v._oauth_chat_stream = mock_stream
 
     req = APIProxyRequest(
         service="llm", action="chat",
@@ -1994,31 +1975,22 @@ async def test_oauth_chat_401_non_json(monkeypatch):
             "messages": [{"role": "user", "content": "hi"}],
         },
     )
-    with pytest.raises(RuntimeError, match="OAuth authentication failed"):
+    with pytest.raises(RuntimeError, match="Anthropic OAuth"):
         await v._oauth_chat(req, "sk-ant-oat01-" + "x" * 80, "anthropic/claude-sonnet-4-6")
 
 
 @pytest.mark.asyncio
 async def test_oauth_chat_401_expired_token(monkeypatch):
     """_oauth_chat raises token-may-have-expired message on 401."""
-    import httpx
+    import json as _json
 
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
     v = CredentialVault()
 
-    mock_response = httpx.Response(
-        401,
-        json={"error": {"message": "OAuth access has been disabled for this application"}},
-        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-    )
+    async def mock_stream(request, api_key, model):
+        yield f"data: {_json.dumps({'error': 'OAuth auth failed (token may have expired): disabled'})}\n\n"
 
-    async def mock_post(*args, **kwargs):
-        return mock_response
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
+    v._oauth_chat_stream = mock_stream
 
     req = APIProxyRequest(
         service="llm", action="chat",
@@ -2032,26 +2004,17 @@ async def test_oauth_chat_401_expired_token(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_oauth_chat_500_records_health_failure(monkeypatch):
-    """_oauth_chat records health failure for server errors."""
-    import httpx
+async def test_oauth_chat_500_propagates(monkeypatch):
+    """_oauth_chat propagates 500 errors from streaming path."""
+    import json as _json
 
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
     v = CredentialVault()
 
-    mock_response = httpx.Response(
-        500,
-        text="Internal Server Error",
-        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-    )
+    async def mock_stream(request, api_key, model):
+        yield f"data: {_json.dumps({'error': 'Anthropic API error (HTTP 500): Internal Server Error'})}\n\n"
 
-    async def mock_post(*args, **kwargs):
-        return mock_response
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
+    v._oauth_chat_stream = mock_stream
 
     req = APIProxyRequest(
         service="llm", action="chat",
@@ -2062,12 +2025,6 @@ async def test_oauth_chat_500_records_health_failure(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="HTTP 500"):
         await v._oauth_chat(req, "sk-ant-oat01-" + "x" * 80, "anthropic/claude-sonnet-4-6")
-
-    # Verify health tracker recorded the failure
-    status = v._health_tracker.get_status()
-    model_status = [s for s in status if s["model"] == "anthropic/claude-sonnet-4-6"]
-    assert len(model_status) == 1
-    assert model_status[0]["failure_count"] > 0
 
 
 @pytest.mark.asyncio
@@ -2101,29 +2058,18 @@ async def test_handle_llm_routes_oauth_to_direct_path(monkeypatch):
 @pytest.mark.asyncio
 async def test_oauth_skips_cost_tracking(monkeypatch):
     """OAuth calls via execute_api_call must NOT record costs."""
-    import httpx
+    from unittest.mock import AsyncMock
 
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
     cost_tracker = MagicMock()
     cost_tracker.preflight_check.return_value = {"allowed": True}
     v = CredentialVault(cost_tracker=cost_tracker)
 
-    mock_response = httpx.Response(
-        200,
-        json={
-            "content": [{"type": "text", "text": "Hello!"}],
-            "usage": {"input_tokens": 50, "output_tokens": 25},
-        },
-        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-    )
-
-    async def mock_post(*args, **kwargs):
-        return mock_response
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
+    # Mock _oauth_chat directly (it delegates to streaming internally)
+    mock_result = MagicMock()
+    mock_result.success = True
+    mock_result.data = {"content": "Hello!", "tokens_used": 75, "oauth": True}
+    v._oauth_chat = AsyncMock(return_value=mock_result)
 
     req = APIProxyRequest(
         service="llm", action="chat",
@@ -2142,28 +2088,16 @@ async def test_oauth_skips_cost_tracking(monkeypatch):
 @pytest.mark.asyncio
 async def test_oauth_skips_budget_lock(monkeypatch):
     """OAuth calls must not acquire the per-agent budget lock."""
-    import httpx
+    from unittest.mock import AsyncMock
 
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
     cost_tracker = MagicMock()
     v = CredentialVault(cost_tracker=cost_tracker)
 
-    mock_response = httpx.Response(
-        200,
-        json={
-            "content": [{"type": "text", "text": "ok"}],
-            "usage": {"input_tokens": 5, "output_tokens": 3},
-        },
-        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-    )
-
-    async def mock_post(*args, **kwargs):
-        return mock_response
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
+    mock_result = MagicMock()
+    mock_result.success = True
+    mock_result.data = {"content": "ok", "tokens_used": 8, "oauth": True}
+    v._oauth_chat = AsyncMock(return_value=mock_result)
 
     req = APIProxyRequest(
         service="llm", action="chat",
@@ -2180,27 +2114,16 @@ async def test_oauth_skips_budget_lock(monkeypatch):
 @pytest.mark.asyncio
 async def test_oauth_response_has_oauth_flag(monkeypatch):
     """_oauth_chat response data includes oauth=True flag."""
-    import httpx
+    import json as _json
 
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
     v = CredentialVault()
 
-    mock_response = httpx.Response(
-        200,
-        json={
-            "content": [{"type": "text", "text": "test"}],
-            "usage": {"input_tokens": 5, "output_tokens": 3},
-        },
-        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
-    )
+    async def mock_stream(request, api_key, model):
+        done = {'type': 'done', 'content': 'test', 'tokens_used': 8, 'model': model, 'tool_calls': []}
+        yield f"data: {_json.dumps(done)}\n\n"
 
-    async def mock_post(*args, **kwargs):
-        return mock_response
-
-    mock_client = MagicMock()
-    mock_client.post = mock_post
-    mock_client.is_closed = False
-    v._http_client = mock_client
+    v._oauth_chat_stream = mock_stream
 
     req = APIProxyRequest(
         service="llm", action="chat",
