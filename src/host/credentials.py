@@ -36,7 +36,7 @@ logger = setup_logging("host.credentials")
 # Anthropic's unofficial OAuth path for Claude Pro/Max subscriptions.
 # Tokens from `claude setup-token` use Bearer auth instead of x-api-key.
 _OAUTH_TOKEN_PREFIX = "sk-ant-oat01-"
-_CLAUDE_CLI_VERSION = "2.5.0"
+_CLAUDE_CLI_VERSION = "2.1.75"
 _ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 # OpenAI Codex Responses API — uses ChatGPT subscription via OAuth.
@@ -788,18 +788,27 @@ class CredentialVault:
     def _oauth_headers(token: str) -> dict[str, str]:
         """Build Anthropic API headers for OAuth bearer auth.
 
-        The ``anthropic-beta`` value MUST only include ``claude-code`` and
-        ``oauth`` betas.  Other betas like ``fine-grained-tool-streaming``
-        and ``interleaved-thinking`` require specific request body fields
-        that ``_build_anthropic_body`` does not produce — including them
-        causes Anthropic to return HTTP 400.
-        ``context-1m`` is also excluded per openclaw's behavior.
+        Headers match what pi-ai (openclaw's underlying library) sends:
+          - ``anthropic-dangerous-direct-browser-access`` — required for
+            OAuth tokens that bypass the standard x-api-key path.
+          - ``x-app: cli`` — identifies the client type.
+          - ``fine-grained-tool-streaming`` — always included by pi-ai.
+          - ``interleaved-thinking`` is NOT included — pi-ai skips it
+            for adaptive-thinking models (Opus 4.6 / Sonnet 4.6).
+          - ``context-1m`` is excluded per openclaw's behavior.
         """
         return {
             "Content-Type": "application/json",
+            "accept": "application/json",
             "Authorization": f"Bearer {token}",
             "anthropic-version": "2023-06-01",
-            "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+            "anthropic-beta": (
+                "claude-code-20250219,"
+                "oauth-2025-04-20,"
+                "fine-grained-tool-streaming-2025-05-14"
+            ),
+            "anthropic-dangerous-direct-browser-access": "true",
+            "x-app": "cli",
             "user-agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
         }
 
@@ -1379,13 +1388,19 @@ class CredentialVault:
     def _openai_oauth_headers(
         access_token: str, account_id: str,
     ) -> dict[str, str]:
-        """Build headers for the OpenAI Codex Responses API."""
+        """Build headers for the OpenAI Codex Responses API.
+
+        Headers match what pi-ai sends: ``OpenAI-Beta`` is required,
+        ``chatgpt-account-id`` uses lowercase (matching pi-ai's format).
+        """
         headers: dict[str, str] = {
             "Content-Type": "application/json",
+            "accept": "text/event-stream",
             "Authorization": f"Bearer {access_token}",
+            "OpenAI-Beta": "responses=experimental",
         }
         if account_id:
-            headers["ChatGPT-Account-Id"] = account_id
+            headers["chatgpt-account-id"] = account_id
         return headers
 
     @staticmethod

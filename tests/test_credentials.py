@@ -1294,6 +1294,8 @@ class TestGetAuthForModel:
                          "moonshot", "minimax", "xai", "groq", "zai"):
             monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider.upper()}_API_KEY", raising=False)
         monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
         v = CredentialVault()
         providers = v.get_providers_with_credentials()
         assert providers == set()
@@ -1303,6 +1305,8 @@ class TestGetAuthForModel:
         for provider in ("anthropic", "openai", "gemini", "deepseek",
                          "moonshot", "minimax", "xai", "groq", "zai"):
             monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider.upper()}_API_KEY", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
         monkeypatch.setenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", "http://localhost:11434")
         v = CredentialVault()
         providers = v.get_providers_with_credentials()
@@ -2364,12 +2368,13 @@ class TestOpenAICodexHelpers:
     def test_openai_oauth_headers_structure(self):
         headers = CredentialVault._openai_oauth_headers("tok-abc", "acct-123")
         assert headers["Authorization"] == "Bearer tok-abc"
-        assert headers["ChatGPT-Account-Id"] == "acct-123"
+        assert headers["chatgpt-account-id"] == "acct-123"
         assert headers["Content-Type"] == "application/json"
+        assert headers["OpenAI-Beta"] == "responses=experimental"
 
     def test_openai_oauth_headers_no_account_id(self):
         headers = CredentialVault._openai_oauth_headers("tok-abc", "")
-        assert "ChatGPT-Account-Id" not in headers
+        assert "chatgpt-account-id" not in headers
 
     def test_has_openai_oauth_false(self, monkeypatch):
         monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
