@@ -343,6 +343,10 @@ class CredentialVault:
     def list_credential_names(self) -> list[str]:
         """Return all credential names across both tiers (never values)."""
         combined = set(self.system_credentials.keys()) | set(self.credentials.keys())
+        if self._openai_oauth is not None:
+            combined.add("openai_oauth")
+        if self._anthropic_oauth is not None:
+            combined.add("anthropic_oauth")
         return sorted(combined)
 
     def list_agent_credential_names(self) -> list[str]:
@@ -365,6 +369,21 @@ class CredentialVault:
         """
         cred_key = name.lower()
         existed = False
+        # Handle OAuth credential removal
+        if cred_key == "openai_oauth":
+            existed = self._openai_oauth is not None
+            self._openai_oauth = None
+            _remove_from_env("OPENLEGION_SYSTEM_OPENAI_OAUTH")
+            if existed:
+                logger.info("Credential removed: openai_oauth")
+            return existed
+        if cred_key == "anthropic_oauth":
+            existed = self._anthropic_oauth is not None
+            self._anthropic_oauth = None
+            _remove_from_env("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH")
+            if existed:
+                logger.info("Credential removed: anthropic_oauth")
+            return existed
         if cred_key.endswith("_api_base"):
             existed = cred_key in self.api_bases
             self.api_bases.pop(cred_key, None)
@@ -385,6 +404,10 @@ class CredentialVault:
     def has_credential(self, name: str) -> bool:
         """Check if a credential exists by name (either tier)."""
         lower = name.lower()
+        if lower == "openai_oauth" and self._openai_oauth is not None:
+            return True
+        if lower == "anthropic_oauth" and self._anthropic_oauth is not None:
+            return True
         return lower in self.credentials or lower in self.system_credentials
 
     def _register_handlers(self) -> None:
@@ -1644,14 +1667,18 @@ class CredentialVault:
                 if resp.status_code == 401:
                     self._health_tracker.record_failure(model, "AuthError", 401)
                     await resp.aread()
-                    yield f"data: {json.dumps({'error': 'OpenAI Codex auth failed (token may have expired)'})}\n\n"
+                    detail = resp.text[:500] if resp.text else ""
+                    msg = f"OpenAI Codex auth failed (token may have expired): {detail}"
+                    yield f"data: {json.dumps({'error': msg})}\n\n"
                     return
                 if not resp.is_success:
                     self._health_tracker.record_failure(
                         model, "HTTPError", resp.status_code,
                     )
                     await resp.aread()
-                    yield f"data: {json.dumps({'error': f'OpenAI Codex API error (HTTP {resp.status_code})'})}\n\n"
+                    detail = resp.text[:500] if resp.text else ""
+                    msg = f"OpenAI Codex API error (HTTP {resp.status_code}): {detail}"
+                    yield f"data: {json.dumps({'error': msg})}\n\n"
                     return
 
                 async for line in resp.aiter_lines():
