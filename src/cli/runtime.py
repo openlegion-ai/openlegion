@@ -52,8 +52,10 @@ def _default_embedding_model(llm_model: str) -> str:
 class RuntimeContext:
     """Manages the full OpenLegion runtime lifecycle."""
 
-    def __init__(self, config_path: str, use_sandbox: bool = False):
+    def __init__(self, config_path: str, use_sandbox: bool = False, port_override: int | None = None):
         self.cfg = _load_config(Path(config_path))
+        if port_override is not None:
+            self.cfg["mesh"]["port"] = port_override
         self.use_sandbox = use_sandbox
         self.runtime = None
         self.transport = None

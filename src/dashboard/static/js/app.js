@@ -83,7 +83,7 @@ function dashboard() {
 
     // Add agent
     addAgentMode: false,
-    addAgentForm: { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false },
+    addAgentForm: { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false, _templateSearch: '', _templateDropdownOpen: false, _modelSearch: '', _modelDropdownOpen: false },
     addAgentLoading: false,
     agentTemplates: [],
 
@@ -2248,7 +2248,7 @@ function dashboard() {
           const projectNote = data.project ? ` in ${data.project}` : '';
           this.showToast(data.ready ? `${data.agent} added and ready${projectNote}` : `${data.agent} added (starting)${projectNote}`);
           this.addAgentMode = false;
-          this.addAgentForm = { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false };
+          this.addAgentForm = { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false, _templateSearch: '', _templateDropdownOpen: false, _modelSearch: '', _modelDropdownOpen: false };
           this.fetchAgents();
           if (data.project) this.fetchProjects();
         } else {
@@ -2282,7 +2282,7 @@ function dashboard() {
     closeAddAgentModal() {
       if (this.addAgentLoading) return;
       this.addAgentMode = false;
-      this.addAgentForm = { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false };
+      this.addAgentForm = { name: '', role: '', model: '', avatar: 1, color: null, project: '', template: '', _showPicker: false, _showColorPicker: false, _templateSearch: '', _templateDropdownOpen: false, _modelSearch: '', _modelDropdownOpen: false };
     },
 
     async fetchAgentTemplates() {
