@@ -1532,10 +1532,8 @@ class CredentialVault:
         if instructions_parts:
             body["instructions"] = "\n\n".join(instructions_parts)
 
-        # Only temperature is safe to forward — most params are unsupported
-        temp = params.get("temperature")
-        if temp is not None:
-            body["temperature"] = temp
+        # The Codex backend rejects ALL optional params (temperature, top_p,
+        # max_output_tokens, reasoning_effort, etc.) — don't forward any.
 
         # Tools — unwrap the function wrapper, add strict: null (pi-ai format)
         tools = params.get("tools")
