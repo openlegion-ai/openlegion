@@ -204,6 +204,8 @@ class CredentialVault:
         self._budget_locks: dict[str, asyncio.Lock] = {}
         self._openai_oauth: dict | None = None
         self._openai_oauth_lock = asyncio.Lock()
+        self._anthropic_oauth: dict | None = None
+        self._anthropic_oauth_lock = asyncio.Lock()
         self._load_credentials()
         self._register_handlers()
 
@@ -244,8 +246,8 @@ class CredentialVault:
         for key, value in os.environ.items():
             if key.startswith(SYSTEM_PREFIX):
                 cred_name = key[len(SYSTEM_PREFIX):].lower()
-                if cred_name == "openai_oauth":
-                    continue  # Handled separately below as _openai_oauth
+                if cred_name in ("openai_oauth", "anthropic_oauth"):
+                    continue  # Handled separately below as structured OAuth
                 if cred_name.endswith("_api_base"):
                     self.api_bases[cred_name] = value
                 else:
@@ -277,6 +279,22 @@ class CredentialVault:
                     )
             except (json.JSONDecodeError, ValueError):
                 logger.warning("OPENLEGION_SYSTEM_OPENAI_OAUTH is not valid JSON")
+
+        # Load Anthropic structured OAuth credentials (JSON blob)
+        raw_anthropic_oauth = os.environ.get("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", "")
+        if raw_anthropic_oauth:
+            try:
+                parsed_anth_oauth = json.loads(raw_anthropic_oauth)
+                if isinstance(parsed_anth_oauth, dict) and "access_token" in parsed_anth_oauth:
+                    self._anthropic_oauth = parsed_anth_oauth
+                    logger.info("Loaded Anthropic OAuth credentials")
+                else:
+                    logger.warning(
+                        "OPENLEGION_SYSTEM_ANTHROPIC_OAUTH is not a valid "
+                        "credentials object (missing access_token)"
+                    )
+            except (json.JSONDecodeError, ValueError):
+                logger.warning("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH is not valid JSON")
 
         loaded_system = list(self.system_credentials.keys())
         loaded_agent = list(self.credentials.keys())
@@ -396,10 +414,12 @@ class CredentialVault:
         if is_llm:
             _oauth_key = self._get_api_key_for_model(request.params.get("model", ""))
             _is_oauth = bool(_oauth_key and is_oauth_token(_oauth_key))
-            # Also detect OpenAI Codex (no regular key + OAuth creds present)
-            if not _is_oauth and not _oauth_key and self._has_openai_oauth():
+            # Also detect structured OAuth (OpenAI Codex or Anthropic CLI)
+            if not _is_oauth and not _oauth_key:
                 _provider = self._resolve_provider(request.params.get("model", ""))
-                if _provider == "openai":
+                if _provider == "openai" and self._has_openai_oauth():
+                    _is_oauth = True
+                elif _provider == "anthropic" and self._has_anthropic_oauth():
                     _is_oauth = True
 
         _needs_budget = (is_llm and not _is_oauth) or request.service == "image_gen"
@@ -581,6 +601,9 @@ class CredentialVault:
         # OpenAI Codex OAuth counts as having OpenAI credentials
         if self._has_openai_oauth():
             providers.add("openai")
+        # Anthropic structured OAuth counts as having Anthropic credentials
+        if self._has_anthropic_oauth():
+            providers.add("anthropic")
         return providers
 
     _OLLAMA_DEFAULT_BASE = "http://localhost:11434"
@@ -1111,6 +1134,84 @@ class CredentialVault:
     def _has_openai_oauth(self) -> bool:
         """Return True if OpenAI OAuth credentials are available."""
         return self._openai_oauth is not None
+
+    # ── Anthropic structured OAuth helpers ──────────────────
+
+    def _has_anthropic_oauth(self) -> bool:
+        """Return True if structured Anthropic OAuth credentials are available."""
+        return self._anthropic_oauth is not None
+
+    def store_anthropic_oauth(self, creds: dict) -> None:
+        """Store Anthropic OAuth credentials in memory and .env.
+
+        Accepts a dict with at least ``access_token``.  Optionally includes
+        ``refresh_token`` and ``expires_at``.
+        """
+        self._anthropic_oauth = creds
+        _persist_to_env("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", json.dumps(creds))
+        logger.info("Anthropic OAuth credentials stored")
+
+    @staticmethod
+    def load_claude_cli_auth() -> dict | None:
+        """Load OAuth credentials from ``~/.claude/.credentials.json``.
+
+        Reads the ``claudeAiOauth`` field and normalizes camelCase keys
+        to snake_case (``accessToken`` -> ``access_token``, etc.).
+
+        Returns a normalized dict or None if unavailable.
+        """
+        creds_path = Path.home() / ".claude" / ".credentials.json"
+        if not creds_path.exists():
+            return None
+        try:
+            data = json.loads(creds_path.read_text())
+            if not isinstance(data, dict):
+                return None
+            oauth_data = data.get("claudeAiOauth")
+            if not isinstance(oauth_data, dict):
+                return None
+            if not oauth_data.get("accessToken"):
+                return None
+            # Normalize camelCase to snake_case
+            normalized: dict = {
+                "access_token": oauth_data["accessToken"],
+            }
+            if oauth_data.get("refreshToken"):
+                normalized["refresh_token"] = oauth_data["refreshToken"]
+            if oauth_data.get("expiresAt"):
+                normalized["expires_at"] = oauth_data["expiresAt"]
+            return normalized
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    async def _ensure_anthropic_oauth_token(self) -> str:
+        """Return the access_token, checking expiry with a 5-minute buffer.
+
+        Since the Anthropic OAuth refresh endpoint is not publicly documented,
+        this raises ``RuntimeError`` when the token is expired rather than
+        attempting a refresh.  Users should regenerate with ``claude setup-token``
+        or re-import from Claude CLI.
+        """
+        if self._anthropic_oauth is None:
+            raise RuntimeError("No Anthropic OAuth credentials configured")
+
+        now = int(time.time())
+        expires_at = self._anthropic_oauth.get("expires_at", 0)
+
+        # If no expiry set or still valid, return the token
+        if expires_at == 0 or expires_at > now + 300:
+            return self._anthropic_oauth["access_token"]
+
+        async with self._anthropic_oauth_lock:
+            # Double-check after lock
+            expires_at = self._anthropic_oauth.get("expires_at", 0)
+            if expires_at == 0 or expires_at > now + 300:
+                return self._anthropic_oauth["access_token"]
+
+            raise RuntimeError(
+                "Anthropic OAuth token expired — regenerate with "
+                "`claude setup-token` or re-import from Claude CLI"
+            )
 
     @staticmethod
     def normalize_openai_oauth(data: dict) -> dict | None:
@@ -1671,8 +1772,18 @@ class CredentialVault:
             if api_key and is_oauth_token(api_key):
                 return await self._oauth_chat(request, api_key, requested_model)
 
-            # OpenAI Codex fast-path: only when NO regular OpenAI API key
             provider = self._resolve_provider(requested_model)
+
+            # Anthropic structured OAuth (from Claude CLI import)
+            if (
+                not api_key
+                and self._has_anthropic_oauth()
+                and provider == "anthropic"
+            ):
+                access_token = await self._ensure_anthropic_oauth_token()
+                return await self._oauth_chat(request, access_token, requested_model)
+
+            # OpenAI Codex fast-path: only when NO regular OpenAI API key
             if (
                 not api_key
                 and self._has_openai_oauth()
@@ -1773,8 +1884,16 @@ class CredentialVault:
                 yield chunk
             return
 
-        # OpenAI Codex fast-path: only when NO regular OpenAI API key.
         provider = self._resolve_provider(requested_model)
+
+        # Anthropic structured OAuth (from Claude CLI import)
+        if not api_key and self._has_anthropic_oauth() and provider == "anthropic":
+            access_token = await self._ensure_anthropic_oauth_token()
+            async for chunk in self._oauth_chat_stream(request, access_token, requested_model):
+                yield chunk
+            return
+
+        # OpenAI Codex fast-path: only when NO regular OpenAI API key.
         if not api_key and self._has_openai_oauth() and provider == "openai":
             async for chunk in self._openai_oauth_chat_stream(request, requested_model):
                 yield chunk

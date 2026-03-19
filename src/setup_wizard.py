@@ -480,12 +480,15 @@ class SetupWizard:
         if provider == "anthropic":
             click.echo("  How would you like to authenticate?\n")
             click.echo("  1. API Key (recommended) — from console.anthropic.com")
-            click.echo("  2. Claude Subscription Token (experimental) — from `claude setup-token`\n")
+            click.echo("  2. Claude CLI import (experimental) — from ~/.claude/.credentials.json")
+            click.echo("  3. Claude Subscription Token (experimental) — from `claude setup-token`\n")
             try:
                 auth_choice = click.prompt("  Auth method", default="1").strip()
             except (EOFError, KeyboardInterrupt):
                 return ""
             if auth_choice == "2":
+                return _prompt_anthropic_oauth()
+            if auth_choice == "3":
                 return self._prompt_and_validate_oauth_token()
             return self._prompt_and_validate_key(provider, label)
 
@@ -760,17 +763,80 @@ def _prompt_openai_oauth() -> str:
     return ""
 
 
+def _prompt_anthropic_oauth() -> str:
+    """Prompt for Anthropic OAuth credentials via Claude CLI import or manual paste.
+
+    Returns a JSON string suitable for ``OPENLEGION_SYSTEM_ANTHROPIC_OAUTH``,
+    or empty string on cancel.
+    """
+    from src.host.credentials import CredentialVault
+
+    # Try auto-import from Claude CLI
+    creds = CredentialVault.load_claude_cli_auth()
+    if creds:
+        click.echo("  Found Claude CLI credentials (~/.claude/.credentials.json)")
+        if click.confirm("  Import these credentials?", default=True):
+            return json.dumps(creds)
+
+    click.echo(
+        "\n  Paste the OAuth JSON blob (must contain access_token).\n"
+        "  You can get this by running `claude setup-token` or from\n"
+        "  ~/.claude/.credentials.json (claudeAiOauth field).\n"
+    )
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            raw = click.prompt("  OAuth JSON", hide_input=True)
+        except (EOFError, KeyboardInterrupt):
+            return ""
+        raw = raw.strip()
+        if not raw:
+            click.echo("  No input provided.")
+            continue
+
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            remaining = max_attempts - attempt - 1
+            if remaining > 0:
+                click.echo(f"  Not valid JSON. {remaining} attempt(s) remaining.")
+            else:
+                click.echo("  Not valid JSON.")
+            continue
+
+        if not isinstance(data, dict) or not data.get("access_token"):
+            remaining = max_attempts - attempt - 1
+            if remaining > 0:
+                click.echo(f"  Missing 'access_token'. {remaining} attempt(s) remaining.")
+            else:
+                click.echo("  Missing 'access_token'.")
+            continue
+
+        click.echo("  Credentials accepted.\n")
+        return json.dumps(data)
+    return ""
+
+
 def _store_provider_key(
     provider: str, api_key: str, _set_env_key,
     credential_vault=None,
 ) -> None:
-    """Store a provider key, detecting OpenAI OAuth JSON blobs."""
-    # Detect OpenAI OAuth JSON blob (flat or nested Codex CLI format)
+    """Store a provider key, detecting OAuth JSON blobs."""
     from src.host.credentials import CredentialVault
 
+    # Detect OAuth JSON blobs (OpenAI Codex or Anthropic CLI)
     try:
         parsed = json.loads(api_key)
         if isinstance(parsed, dict):
+            # Check for Anthropic OAuth (access_token starts with sk-ant-oat)
+            access_token = parsed.get("access_token", "")
+            if access_token.startswith("sk-ant-oat"):
+                if credential_vault:
+                    credential_vault.store_anthropic_oauth(parsed)
+                _set_env_key("anthropic_oauth", json.dumps(parsed), system=True)
+                click.echo("  Anthropic OAuth credentials stored.")
+                return
+            # Check for OpenAI OAuth (flat or nested Codex CLI format)
             normalized = CredentialVault.normalize_openai_oauth(parsed)
             if normalized is not None:
                 if credential_vault:
@@ -831,12 +897,15 @@ class InlineSetup:
         if provider == "anthropic":
             click.echo("  How would you like to authenticate?\n")
             click.echo("  1. API Key (recommended) — from console.anthropic.com")
-            click.echo("  2. Claude Subscription Token (experimental) — from `claude setup-token`\n")
+            click.echo("  2. Claude CLI import (experimental) — from ~/.claude/.credentials.json")
+            click.echo("  3. Claude Subscription Token (experimental) — from `claude setup-token`\n")
             try:
                 auth_choice = click.prompt("  Auth method", default="1").strip()
             except (EOFError, KeyboardInterrupt):
                 return ""
             if auth_choice == "2":
+                return _prompt_anthropic_oauth()
+            if auth_choice == "3":
                 return wizard._prompt_and_validate_oauth_token()
         elif provider == "openai":
             click.echo("  How would you like to authenticate?\n")
@@ -867,12 +936,17 @@ class InlineSetup:
             else:
                 click.echo(" could not validate (saved anyway).\n")
             return api_key
-        # Auto-detect pasted JSON blob (OpenAI OAuth — flat or nested Codex CLI)
+        # Auto-detect pasted JSON blob (Anthropic or OpenAI OAuth)
         from src.host.credentials import CredentialVault
 
         try:
             parsed = json.loads(api_key)
             if isinstance(parsed, dict):
+                # Check Anthropic OAuth (access_token starts with sk-ant-oat)
+                if parsed.get("access_token", "").startswith("sk-ant-oat"):
+                    click.echo("  Detected Anthropic OAuth credentials.")
+                    return json.dumps(parsed)
+                # Check OpenAI OAuth (flat or nested Codex CLI format)
                 normalized = CredentialVault.normalize_openai_oauth(parsed)
                 if normalized is not None:
                     click.echo("  Detected OpenAI OAuth credentials.")

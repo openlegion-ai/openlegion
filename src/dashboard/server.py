@@ -1227,14 +1227,19 @@ def create_dashboard_router(
                 return {"valid": True, "skipped": False, "oauth": True}
             return {"valid": False, "skipped": False, "reason": "Invalid or expired setup-token"}
 
-        # OpenAI OAuth JSON blob detection (flat or nested Codex CLI format)
+        # OAuth JSON blob detection (Anthropic or OpenAI)
         import json as _json
 
         from src.host.credentials import CredentialVault as _CV
         try:
             parsed = _json.loads(key)
-            if isinstance(parsed, dict) and _CV.normalize_openai_oauth(parsed) is not None:
-                return {"valid": True, "skipped": False, "oauth": True}
+            if isinstance(parsed, dict):
+                # Anthropic OAuth (access_token starts with sk-ant-oat)
+                if parsed.get("access_token", "").startswith("sk-ant-oat"):
+                    return {"valid": True, "skipped": False, "oauth": True}
+                # OpenAI OAuth (flat or nested Codex CLI format)
+                if _CV.normalize_openai_oauth(parsed) is not None:
+                    return {"valid": True, "skipped": False, "oauth": True}
         except (_json.JSONDecodeError, ValueError):
             pass
 
@@ -1296,13 +1301,18 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="Key value too long (max 10000 chars)")
         if "\n" in key or "\r" in key:
             raise HTTPException(status_code=400, detail="Key value must not contain newline characters")
-        # Detect OpenAI OAuth JSON blob (flat or nested Codex CLI format)
+        # Detect OAuth JSON blobs (Anthropic or OpenAI)
         import json as _json
 
         from src.host.credentials import CredentialVault as _CV
         try:
             parsed = _json.loads(key)
             if isinstance(parsed, dict):
+                # Check for Anthropic OAuth (access_token starts with sk-ant-oat)
+                if parsed.get("access_token", "").startswith("sk-ant-oat"):
+                    credential_vault.store_anthropic_oauth(parsed)
+                    return {"stored": True, "service": "anthropic_oauth", "tier": "system"}
+                # Check for OpenAI OAuth (flat or nested Codex CLI format)
                 normalized = _CV.normalize_openai_oauth(parsed)
                 if normalized is not None:
                     credential_vault.store_openai_oauth(normalized)

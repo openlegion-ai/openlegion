@@ -12,7 +12,7 @@ from src.host.credentials import (
     _extract_content,
     is_system_credential,
 )
-from src.shared.types import APIProxyRequest
+from src.shared.types import APIProxyRequest, APIProxyResponse
 
 
 @pytest.fixture
@@ -3048,3 +3048,251 @@ def test_normalize_openai_oauth_nested_empty_tokens():
     """Nested format with empty tokens dict returns None."""
     assert CredentialVault.normalize_openai_oauth({"tokens": {}}) is None
     assert CredentialVault.normalize_openai_oauth({"tokens": "not-a-dict"}) is None
+
+
+# ── Anthropic structured OAuth tests ──────────────────────────
+
+
+class TestAnthropicOAuth:
+    """Tests for structured Anthropic OAuth credential support."""
+
+    def test_has_anthropic_oauth_false(self):
+        """_has_anthropic_oauth returns False when no credentials loaded."""
+        v = CredentialVault()
+        assert v._has_anthropic_oauth() is False
+
+    def test_has_anthropic_oauth_true(self, monkeypatch):
+        """_has_anthropic_oauth returns True when credentials are loaded."""
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_OAUTH",
+            '{"access_token":"sk-ant-oat01-test","refresh_token":"ref","expires_at":9999999999}',
+        )
+        v = CredentialVault()
+        assert v._has_anthropic_oauth() is True
+
+    def test_store_anthropic_oauth(self):
+        """store_anthropic_oauth persists credentials in memory and .env."""
+        v = CredentialVault()
+        import src.host.credentials as cred_mod
+        original = cred_mod._persist_to_env
+        persisted = {}
+        cred_mod._persist_to_env = lambda k, val, **kw: persisted.update({k: val})
+        try:
+            creds = {
+                "access_token": "sk-ant-oat01-abc",
+                "refresh_token": "ref-tok",
+                "expires_at": 1234567890,
+            }
+            v.store_anthropic_oauth(creds)
+            assert v._has_anthropic_oauth()
+            assert v._anthropic_oauth["access_token"] == "sk-ant-oat01-abc"
+            assert "OPENLEGION_SYSTEM_ANTHROPIC_OAUTH" in persisted
+        finally:
+            cred_mod._persist_to_env = original
+
+    def test_load_claude_cli_auth_valid(self, tmp_path, monkeypatch):
+        """load_claude_cli_auth reads and normalizes Claude CLI credentials."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        creds_file = claude_dir / ".credentials.json"
+        import json
+        creds_file.write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-ant-oat01-test123",
+                "refreshToken": "ref-tok-456",
+                "expiresAt": 1234567890,
+            }
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        result = CredentialVault.load_claude_cli_auth()
+        assert result is not None
+        assert result["access_token"] == "sk-ant-oat01-test123"
+        assert result["refresh_token"] == "ref-tok-456"
+        assert result["expires_at"] == 1234567890
+
+    def test_load_claude_cli_auth_missing_file(self, tmp_path, monkeypatch):
+        """load_claude_cli_auth returns None when file doesn't exist."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        assert CredentialVault.load_claude_cli_auth() is None
+
+    def test_load_claude_cli_auth_missing_field(self, tmp_path, monkeypatch):
+        """load_claude_cli_auth returns None when claudeAiOauth is absent."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        creds_file = claude_dir / ".credentials.json"
+        import json
+        creds_file.write_text(json.dumps({"someOtherField": "value"}))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        assert CredentialVault.load_claude_cli_auth() is None
+
+    def test_load_claude_cli_auth_missing_access_token(self, tmp_path, monkeypatch):
+        """load_claude_cli_auth returns None when accessToken is missing."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        creds_file = claude_dir / ".credentials.json"
+        import json
+        creds_file.write_text(json.dumps({
+            "claudeAiOauth": {"refreshToken": "ref", "expiresAt": 123}
+        }))
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        assert CredentialVault.load_claude_cli_auth() is None
+
+    @pytest.mark.asyncio
+    async def test_ensure_anthropic_oauth_token_fresh(self):
+        """_ensure_anthropic_oauth_token returns token when not expired."""
+        v = CredentialVault()
+        import time
+        v._anthropic_oauth = {
+            "access_token": "sk-ant-oat01-fresh",
+            "expires_at": int(time.time()) + 3600,
+        }
+        token = await v._ensure_anthropic_oauth_token()
+        assert token == "sk-ant-oat01-fresh"
+
+    @pytest.mark.asyncio
+    async def test_ensure_anthropic_oauth_token_no_expiry(self):
+        """_ensure_anthropic_oauth_token returns token when no expires_at set."""
+        v = CredentialVault()
+        v._anthropic_oauth = {
+            "access_token": "sk-ant-oat01-noexp",
+        }
+        token = await v._ensure_anthropic_oauth_token()
+        assert token == "sk-ant-oat01-noexp"
+
+    @pytest.mark.asyncio
+    async def test_ensure_anthropic_oauth_token_expired(self):
+        """_ensure_anthropic_oauth_token raises on expired token."""
+        v = CredentialVault()
+        v._anthropic_oauth = {
+            "access_token": "sk-ant-oat01-expired",
+            "expires_at": 1000,  # long past
+        }
+        with pytest.raises(RuntimeError, match="expired"):
+            await v._ensure_anthropic_oauth_token()
+
+    @pytest.mark.asyncio
+    async def test_ensure_anthropic_oauth_token_none(self):
+        """_ensure_anthropic_oauth_token raises when no credentials."""
+        v = CredentialVault()
+        with pytest.raises(RuntimeError, match="No Anthropic OAuth"):
+            await v._ensure_anthropic_oauth_token()
+
+    def test_providers_with_credentials_includes_anthropic_oauth(self, monkeypatch):
+        """Anthropic OAuth counts as having Anthropic credentials."""
+        for p in ("anthropic", "openai", "gemini", "deepseek",
+                   "moonshot", "minimax", "xai", "groq", "zai"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{p.upper()}_API_KEY", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_OAUTH",
+            '{"access_token":"sk-ant-oat01-test","expires_at":9999999999}',
+        )
+        v = CredentialVault()
+        providers = v.get_providers_with_credentials()
+        assert "anthropic" in providers
+
+    def test_anthropic_oauth_not_in_system_credentials(self, monkeypatch):
+        """OPENLEGION_SYSTEM_ANTHROPIC_OAUTH should not appear in system_credentials."""
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_OAUTH",
+            '{"access_token":"sk-ant-oat01-test"}',
+        )
+        v = CredentialVault()
+        assert "anthropic_oauth" not in v.system_credentials
+        assert v._has_anthropic_oauth()
+
+    @pytest.mark.asyncio
+    async def test_handle_llm_routes_anthropic_oauth(self, monkeypatch):
+        """_handle_llm routes through structured OAuth when no regular API key."""
+        monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_OAUTH",
+            '{"access_token":"sk-ant-oat01-testabc"}',
+        )
+        v = CredentialVault()
+
+        # Mock _oauth_chat to verify it's called with the right token
+        oauth_called = {}
+
+        async def mock_oauth_chat(request, api_key, model):
+            oauth_called["api_key"] = api_key
+            oauth_called["model"] = model
+            return APIProxyResponse(
+                success=True,
+                data={"content": "oauth reply", "tokens_used": 10, "model": model, "tool_calls": []},
+            )
+
+        monkeypatch.setattr(v, "_oauth_chat", mock_oauth_chat)
+
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "anthropic/claude-sonnet-4-6", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        result = await v.execute_api_call(req)
+
+        assert result.success
+        assert oauth_called["api_key"] == "sk-ant-oat01-testabc"
+        assert oauth_called["model"] == "anthropic/claude-sonnet-4-6"
+
+    @pytest.mark.asyncio
+    async def test_stream_llm_routes_anthropic_oauth(self, monkeypatch):
+        """stream_llm routes through OAuth streaming for structured Anthropic OAuth."""
+        monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_OAUTH",
+            '{"access_token":"sk-ant-oat01-streamtest"}',
+        )
+        v = CredentialVault()
+
+        stream_called = {}
+
+        async def mock_oauth_chat_stream(request, api_key, model):
+            stream_called["api_key"] = api_key
+            import json as _json
+            done = {"type": "done", "content": "streamed", "tool_calls": [],
+                    "tokens_used": 5, "model": model}
+            yield f"data: {_json.dumps(done)}\n\n"
+
+        monkeypatch.setattr(v, "_oauth_chat_stream", mock_oauth_chat_stream)
+
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "anthropic/claude-sonnet-4-6", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        events = []
+        async for event in v.stream_llm(req):
+            events.append(event)
+
+        assert stream_called["api_key"] == "sk-ant-oat01-streamtest"
+        assert any("done" in e for e in events)
+
+    @pytest.mark.asyncio
+    async def test_oauth_budget_skip_anthropic_oauth(self, monkeypatch):
+        """Budget enforcement is skipped for Anthropic structured OAuth."""
+        monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_OAUTH",
+            '{"access_token":"sk-ant-oat01-budget"}',
+        )
+        cost_tracker = MagicMock()
+        v = CredentialVault(cost_tracker=cost_tracker)
+
+        async def mock_oauth_chat(request, api_key, model):
+            return APIProxyResponse(
+                success=True,
+                data={"content": "ok", "tokens_used": 10, "model": model, "tool_calls": [], "oauth": True},
+            )
+
+        monkeypatch.setattr(v, "_oauth_chat", mock_oauth_chat)
+
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "anthropic/claude-sonnet-4-6", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        result = await v.execute_api_call(req, agent_id="test-agent")
+
+        assert result.success
+        # Budget should NOT have been checked (OAuth = subscription-based)
+        cost_tracker.preflight_check.assert_not_called()
+        cost_tracker.check_budget.assert_not_called()
