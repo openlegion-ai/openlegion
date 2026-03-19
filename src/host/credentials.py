@@ -1479,7 +1479,7 @@ class CredentialVault:
                     "output": content if isinstance(content, str) else json.dumps(content),
                 })
 
-        body: dict = {"model": model, "input": input_items}
+        body: dict = {"model": model, "input": input_items, "store": False}
         if instructions_parts:
             body["instructions"] = "\n\n".join(instructions_parts)
 
