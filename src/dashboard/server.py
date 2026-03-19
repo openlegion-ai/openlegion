@@ -1386,6 +1386,7 @@ def create_dashboard_router(
         """Generate a new external API key and persist to .env."""
         _verify_dashboard_auth(request)
         import secrets as _secrets
+
         from src.host.credentials import _persist_to_env
         key = _secrets.token_urlsafe(32)
         _persist_to_env(_API_KEY_ENV, key)
