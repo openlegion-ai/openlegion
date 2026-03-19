@@ -435,15 +435,15 @@ class CredentialVault:
         # skip budget enforcement and cost tracking for them.
         _is_oauth = False
         if is_llm:
-            _oauth_key = self._get_api_key_for_model(request.params.get("model", ""))
-            _is_oauth = bool(_oauth_key and is_oauth_token(_oauth_key))
-            # Also detect structured OAuth (OpenAI Codex or Anthropic CLI)
-            if not _is_oauth and not _oauth_key:
-                _provider = self._resolve_provider(request.params.get("model", ""))
-                if _provider == "openai" and self._has_openai_oauth():
-                    _is_oauth = True
-                elif _provider == "anthropic" and self._has_anthropic_oauth():
-                    _is_oauth = True
+            _provider = self._resolve_provider(request.params.get("model", ""))
+            # Structured OAuth takes priority (matches routing in _handle_llm)
+            if _provider == "anthropic" and self._has_anthropic_oauth():
+                _is_oauth = True
+            elif _provider == "openai" and self._has_openai_oauth():
+                _is_oauth = True
+            else:
+                _oauth_key = self._get_api_key_for_model(request.params.get("model", ""))
+                _is_oauth = bool(_oauth_key and is_oauth_token(_oauth_key))
 
         _needs_budget = (is_llm and not _is_oauth) or request.service == "image_gen"
         use_budget_lock = bool(self.cost_tracker and agent_id and _needs_budget)
@@ -1778,28 +1778,19 @@ class CredentialVault:
         requested_model = request.params.get("model", "")
 
         if request.action == "chat":
-            # Anthropic OAuth fast-path: bypass LiteLLM for OAuth tokens
+            provider = self._resolve_provider(requested_model)
+
+            # OAuth takes priority over API keys for chat — subscription
+            # auth is preferred when available (no per-call cost).
+            if self._has_anthropic_oauth() and provider == "anthropic":
+                access_token = await self._ensure_anthropic_oauth_token()
+                return await self._oauth_chat(request, access_token, requested_model)
+
             api_key = self._get_api_key_for_model(requested_model)
             if api_key and is_oauth_token(api_key):
                 return await self._oauth_chat(request, api_key, requested_model)
 
-            provider = self._resolve_provider(requested_model)
-
-            # Anthropic structured OAuth (from Claude CLI import)
-            if (
-                not api_key
-                and self._has_anthropic_oauth()
-                and provider == "anthropic"
-            ):
-                access_token = await self._ensure_anthropic_oauth_token()
-                return await self._oauth_chat(request, access_token, requested_model)
-
-            # OpenAI Codex fast-path: only when NO regular OpenAI API key
-            if (
-                not api_key
-                and self._has_openai_oauth()
-                and provider == "openai"
-            ):
+            if self._has_openai_oauth() and provider == "openai":
                 return await self._openai_oauth_chat(request, requested_model)
 
             async def _chat(
@@ -1887,25 +1878,22 @@ class CredentialVault:
 
         requested_model = request.params.get("model", "")
 
-        # Anthropic OAuth fast-path: bypass LiteLLM for OAuth tokens.
-        # No cost tracking or budget enforcement — subscription-based usage.
+        provider = self._resolve_provider(requested_model)
+
+        # OAuth takes priority over API keys — no cost tracking needed.
+        if self._has_anthropic_oauth() and provider == "anthropic":
+            access_token = await self._ensure_anthropic_oauth_token()
+            async for chunk in self._oauth_chat_stream(request, access_token, requested_model):
+                yield chunk
+            return
+
         api_key = self._get_api_key_for_model(requested_model)
         if api_key and is_oauth_token(api_key):
             async for chunk in self._oauth_chat_stream(request, api_key, requested_model):
                 yield chunk
             return
 
-        provider = self._resolve_provider(requested_model)
-
-        # Anthropic structured OAuth (from Claude CLI import)
-        if not api_key and self._has_anthropic_oauth() and provider == "anthropic":
-            access_token = await self._ensure_anthropic_oauth_token()
-            async for chunk in self._oauth_chat_stream(request, access_token, requested_model):
-                yield chunk
-            return
-
-        # OpenAI Codex fast-path: only when NO regular OpenAI API key.
-        if not api_key and self._has_openai_oauth() and provider == "openai":
+        if self._has_openai_oauth() and provider == "openai":
             async for chunk in self._openai_oauth_chat_stream(request, requested_model):
                 yield chunk
             return
