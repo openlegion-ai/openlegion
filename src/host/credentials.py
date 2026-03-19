@@ -1521,16 +1521,9 @@ class CredentialVault:
         if instructions_parts:
             body["instructions"] = "\n\n".join(instructions_parts)
 
-        # max_output_tokens
-        max_completion = params.get("max_completion_tokens")
-        max_tokens = params.get("max_tokens")
-        if max_completion is not None:
-            body["max_output_tokens"] = max_completion
-        elif max_tokens is not None:
-            body["max_output_tokens"] = max_tokens
-
-        # Optional params
-        for key in ("temperature", "top_p", "reasoning_effort"):
+        # The Codex backend (chatgpt.com) does NOT support max_output_tokens
+        # or most optional params. Only forward what pi-ai sends.
+        for key in ("temperature", "top_p"):
             val = params.get(key)
             if val is not None:
                 body[key] = val
