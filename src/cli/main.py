@@ -88,7 +88,8 @@ def cli(verbose: bool, quiet: bool):
 @click.option("--detach", "-d", is_flag=True, help="Run in background (no interactive REPL)")
 @click.option("--sandbox", is_flag=True, help="Use Docker Sandbox microVMs (requires Docker Desktop 4.58+)")
 @click.option("--serve", is_flag=True, hidden=True, help="Headless mode (used by -d internally)")
-def start(config_path: str, detach: bool, sandbox: bool, serve: bool):
+@click.option("--port", "-p", default=None, type=int, help="Override mesh/dashboard port (default: from config)")
+def start(config_path: str, detach: bool, sandbox: bool, serve: bool, port: int | None):
     """Start the runtime and chat with your agents.
 
     By default, starts the mesh and all agents then drops into an interactive
@@ -106,7 +107,7 @@ def start(config_path: str, detach: bool, sandbox: bool, serve: bool):
 
     from src.cli.runtime import RuntimeContext
 
-    ctx = RuntimeContext(config_path, use_sandbox=sandbox)
+    ctx = RuntimeContext(config_path, use_sandbox=sandbox, port_override=port)
     try:
         ctx.start()
         if serve or not sys.stdin.isatty():
