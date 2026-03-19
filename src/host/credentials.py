@@ -1005,6 +1005,26 @@ class CredentialVault:
 
     # ── Anthropic OAuth helpers ───────────────────────────────
 
+    _CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+
+    @staticmethod
+    def _patch_anthropic_oauth_body(body: dict) -> None:
+        """Patch an Anthropic body for OAuth — required by pi-ai / openclaw.
+
+        1. Convert ``system`` from a plain string to an array of content
+           blocks with the Claude Code identity as the mandatory first block.
+        2. Always set ``stream: true``.
+        """
+        identity = CredentialVault._CLAUDE_CODE_IDENTITY
+        existing = body.get("system", "")
+        system_blocks = [{"type": "text", "text": identity}]
+        if existing and isinstance(existing, str):
+            system_blocks.append({"type": "text", "text": existing})
+        elif isinstance(existing, list):
+            system_blocks.extend(existing)
+        body["system"] = system_blocks
+        body["stream"] = True
+
     async def _oauth_chat(
         self, request: APIProxyRequest, api_key: str, model: str,
     ) -> APIProxyResponse:
@@ -1014,6 +1034,7 @@ class CredentialVault:
         )
         params = {**request.params, "messages": sanitized}
         body = self._build_anthropic_body(params)
+        self._patch_anthropic_oauth_body(body)
         headers = self._oauth_headers(api_key)
 
         client = await self._get_http_client()
@@ -1069,7 +1090,7 @@ class CredentialVault:
         )
         params = {**request.params, "messages": sanitized}
         body = self._build_anthropic_body(params)
-        body["stream"] = True
+        self._patch_anthropic_oauth_body(body)
         headers = self._oauth_headers(api_key)
 
         client = await self._get_http_client()
