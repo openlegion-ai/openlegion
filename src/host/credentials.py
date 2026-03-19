@@ -244,6 +244,8 @@ class CredentialVault:
         for key, value in os.environ.items():
             if key.startswith(SYSTEM_PREFIX):
                 cred_name = key[len(SYSTEM_PREFIX):].lower()
+                if cred_name == "openai_oauth":
+                    continue  # Handled separately below as _openai_oauth
                 if cred_name.endswith("_api_base"):
                     self.api_bases[cred_name] = value
                 else:
@@ -575,6 +577,10 @@ class CredentialVault:
                 provider = cred_name[: -len("_api_key")]
                 if provider and provider not in providers:
                     providers.add(provider)
+
+        # OpenAI Codex OAuth counts as having OpenAI credentials
+        if self._has_openai_oauth():
+            providers.add("openai")
         return providers
 
     _OLLAMA_DEFAULT_BASE = "http://localhost:11434"
