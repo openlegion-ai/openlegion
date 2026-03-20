@@ -173,7 +173,7 @@ class LaneManager:
 
     async def _worker(self, agent: str) -> None:
         """Worker loop: drains the queue for a single agent serially."""
-        import time as _time
+        import time
 
         from src.shared.trace import current_trace_id
 
@@ -187,7 +187,7 @@ class LaneManager:
             async with lock:
                 self._busy[agent] = True
             current_trace_id.set(task.trace_id)
-            t0 = _time.time()
+            t0 = time.time()
             if task.trace_id and self._trace_store:
                 self._trace_store.record(
                     trace_id=task.trace_id, source="lane", agent=agent,
@@ -202,7 +202,7 @@ class LaneManager:
                     task.future.set_exception(e)
                 logger.error(f"Lane task {task.id} for '{agent}' failed: {e}")
             finally:
-                duration_ms = int((_time.time() - t0) * 1000)
+                duration_ms = int((time.time() - t0) * 1000)
                 if task.trace_id and self._trace_store:
                     self._trace_store.record(
                         trace_id=task.trace_id, source="lane", agent=agent,

@@ -80,6 +80,16 @@ _STANDALONE_ERROR = (
 )
 
 
+def _parse_json_value(value):
+    """Parse a string as JSON, falling back to a ``{"text": ...}`` wrapper."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return {"text": value}
+
+
 def _sanitize_value(value):
     """Recursively sanitize all strings inside a value (dict, list, or scalar)."""
     if isinstance(value, str):
@@ -159,10 +169,7 @@ async def write_shared_state(key: str, value: str, *, mesh_client=None) -> dict:
         return {"error": "No mesh_client available"}
     if mesh_client.is_standalone:
         return {"error": _STANDALONE_ERROR}
-    try:
-        parsed = json.loads(value) if isinstance(value, str) else value
-    except json.JSONDecodeError:
-        parsed = {"text": value}
+    parsed = _parse_json_value(value)
     try:
         result = await mesh_client.write_blackboard(key, parsed)
         return {"key": key, "written": True, "version": result.get("version", 1)}
@@ -236,10 +243,7 @@ async def publish_event(
         return {"error": "No mesh_client available"}
     if mesh_client.is_standalone:
         return {"error": _STANDALONE_ERROR}
-    try:
-        parsed = json.loads(data) if isinstance(data, str) else data
-    except json.JSONDecodeError:
-        parsed = {"text": data}
+    parsed = _parse_json_value(data)
     try:
         result = await mesh_client.publish_event(topic, parsed)
         return {"published": True, "topic": topic, **result}
@@ -327,10 +331,7 @@ async def claim_task(key: str, claim_value: str, *, mesh_client=None) -> dict:
         return {"error": "No mesh_client available"}
     if mesh_client.is_standalone:
         return {"error": _STANDALONE_ERROR}
-    try:
-        parsed = json.loads(claim_value) if isinstance(claim_value, str) else claim_value
-    except json.JSONDecodeError:
-        parsed = {"text": claim_value}
+    parsed = _parse_json_value(claim_value)
     try:
         # Read current entry to get its version
         entry = await mesh_client.read_blackboard(key)

@@ -24,7 +24,9 @@ Exposes endpoints for the mesh to interact with:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json as json_module
+import mimetypes
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -488,8 +490,6 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         if size > _MAX_ARTIFACT_BYTES:
             raise HTTPException(413, f"Artifact too large ({size} bytes, max {_MAX_ARTIFACT_BYTES})")
         # Try text first, fall back to base64 for binary
-        import base64
-        import mimetypes
         mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
         try:
             content = filepath.read_text(encoding="utf-8")
@@ -516,9 +516,6 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     @app.get("/files/{path:path}")
     async def read_data_file(path: str) -> dict:
         """Read any file from /data. Text returned as-is; binary base64-encoded."""
-        import base64
-        import mimetypes
-
         from src.agent.builtins.file_tool import _MAX_READ, _safe_path
         try:
             safe = _safe_path(path)

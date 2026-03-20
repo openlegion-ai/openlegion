@@ -135,8 +135,8 @@ async def generate_image(
                     "agent": mesh_client.agent_id,
                 },
             )
-        except Exception:
-            pass  # Non-critical — image is already saved
+        except Exception as e:
+            logger.debug("Blackboard registration skipped: %s", e)
 
     return {
         "status": "image generated",
