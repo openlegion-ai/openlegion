@@ -3044,6 +3044,140 @@ class TestDashboardChatHistory:
         resp = self.client.get("/dashboard/api/agents/alpha/chat/history")
         assert resp.status_code == 503
 
+
+# ── Upload .env endpoint tests ─────────────────────────────
+
+
+class TestDashboardUploadEnv:
+    """Tests for POST /dashboard/api/credentials/upload-env."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _upload(self, content: str | bytes, filename: str = "test.env"):
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        return self.client.post(
+            "/dashboard/api/credentials/upload-env",
+            files={"file": (filename, content, "text/plain")},
+        )
+
+    def test_happy_path(self):
+        """Valid .env file stores credentials and returns key names."""
+        vault = self.components["credential_vault"]
+        resp = self._upload("OPENAI_API_KEY=sk-abc123\nMY_CUSTOM_KEY=secret\n")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 2
+        assert "OPENAI_API_KEY" in data["keys"]
+        assert "MY_CUSTOM_KEY" in data["keys"]
+        assert data["errors"] == []
+        assert vault.add_credential.call_count == 2
+
+    def test_values_not_in_response(self):
+        """Response must never include credential values."""
+        resp = self._upload("SECRET_KEY=super_secret_value\n")
+        assert resp.status_code == 200
+        response_text = resp.text
+        assert "super_secret_value" not in response_text
+
+    def test_comments_and_blank_lines_skipped(self):
+        """Comments (#) and blank lines are skipped."""
+        env_content = (
+            "# This is a comment\n"
+            "\n"
+            "VALID_KEY=value1\n"
+            "  # Indented comment\n"
+            "\n"
+            "ANOTHER_KEY=value2\n"
+        )
+        resp = self._upload(env_content)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 2
+        assert "VALID_KEY" in data["keys"]
+        assert "ANOTHER_KEY" in data["keys"]
+
+    def test_malformed_lines_skipped_with_errors(self):
+        """Lines without '=' are reported as errors; valid lines still stored."""
+        env_content = "GOOD_KEY=value\nBAD_LINE_NO_EQUALS\nANOTHER_GOOD=val2\n"
+        vault = self.components["credential_vault"]
+        resp = self._upload(env_content)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 2
+        assert len(data["errors"]) == 1
+        assert "missing '=' separator" in data["errors"][0]
+        assert vault.add_credential.call_count == 2
+
+    def test_invalid_key_names_skipped(self):
+        """Keys with invalid characters are skipped and reported."""
+        env_content = "VALID=ok\nINVALID KEY=bad\n123STARTS_WITH_DIGIT=bad\n"
+        resp = self._upload(env_content)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert "VALID" in data["keys"]
+        assert len(data["errors"]) == 2
+
+    def test_empty_value_skipped(self):
+        """Lines with empty values are skipped and reported."""
+        env_content = "GOOD_KEY=value\nEMPTY_KEY=\n"
+        resp = self._upload(env_content)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert len(data["errors"]) == 1
+        assert "empty value" in data["errors"][0]
+
+    def test_empty_file_returns_400(self):
+        """Empty file returns 400."""
+        resp = self._upload("")
+        assert resp.status_code == 400
+        assert "Empty file" in resp.json()["detail"]
+
+    def test_file_too_large_returns_413(self):
+        """Files larger than 64KB are rejected with 413."""
+        large_content = b"KEY=value\n" * 7000  # ~70KB
+        resp = self._upload(large_content)
+        assert resp.status_code == 413
+        assert "64KB" in resp.json()["detail"]
+
+    def test_all_malformed_returns_400(self):
+        """If all lines are malformed and no credentials loaded, return 400."""
+        resp = self._upload("NOEQUALS\nALSONOEQUALS\n")
+        assert resp.status_code == 400
+        assert "No valid credentials" in resp.json()["detail"]
+
+    def test_system_tier_auto_detected(self):
+        """LLM provider keys are auto-detected as system tier."""
+        vault = self.components["credential_vault"]
+        from src.host.credentials import is_system_credential
+        resp = self._upload("OPENAI_API_KEY=sk-test\n")
+        assert resp.status_code == 200
+        call_kwargs = vault.add_credential.call_args[1]
+        assert call_kwargs.get("system") == is_system_credential("OPENAI_API_KEY")
+
+    def test_no_vault_returns_503(self):
+        """Missing credential vault returns 503."""
+        self.components["credential_vault"] = None
+        self.client = _make_client(self.components)
+        resp = self._upload("KEY=value\n")
+        assert resp.status_code == 503
+
+    def test_value_equals_sign_preserved(self):
+        """Values containing '=' are handled correctly (partition on first '=' only)."""
+        vault = self.components["credential_vault"]
+        resp = self._upload("TOKEN=abc=def=ghi\n")
+        assert resp.status_code == 200
+        assert vault.add_credential.call_args[0][1] == "abc=def=ghi"
+
     def test_transport_error_502(self):
         self.components["transport"].request = AsyncMock(
             side_effect=ConnectionError("agent offline"),

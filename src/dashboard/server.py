@@ -15,7 +15,7 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from jinja2 import Environment, FileSystemLoader
 
@@ -1339,6 +1339,61 @@ def create_dashboard_router(
             credential_vault.add_credential(f"{provider}_api_base", base_url, system=is_system)
         tier = "system" if is_system else "agent"
         return {"stored": True, "service": service, "tier": tier}
+
+    @api_router.post("/api/credentials/upload-env")
+    async def api_upload_env(file: UploadFile = File(...)) -> dict:
+        """Bulk-import credentials from an uploaded .env file.
+
+        Parses KEY=VALUE pairs (skips comments and blank lines) and stores each
+        as a credential in the vault.  Values are never logged or returned.
+        Returns the count of credentials loaded and the list of key names only.
+        """
+        if credential_vault is None:
+            raise HTTPException(status_code=503, detail="Credential vault not available")
+
+        content = await file.read()
+        if len(content) > 64 * 1024:
+            raise HTTPException(status_code=413, detail="File too large (max 64KB)")
+        if not content.strip():
+            raise HTTPException(status_code=400, detail="Empty file")
+
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="File must be UTF-8 encoded")
+
+        from src.host.credentials import is_system_credential
+
+        loaded_keys: list[str] = []
+        parse_errors: list[str] = []
+
+        for line_num, raw_line in enumerate(text.splitlines(), 1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                parse_errors.append(f"Line {line_num}: missing '=' separator")
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+                parse_errors.append(f"Line {line_num}: invalid key name '{key}'")
+                continue
+            if not value:
+                parse_errors.append(f"Line {line_num}: empty value for key '{key}'")
+                continue
+            is_system = is_system_credential(key)
+            credential_vault.add_credential(key, value, system=is_system)
+            loaded_keys.append(key)
+
+        if not loaded_keys and parse_errors:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No valid credentials found. Errors: {'; '.join(parse_errors)}",
+            )
+
+        return {"count": len(loaded_keys), "keys": loaded_keys, "errors": parse_errors}
 
     @api_router.delete("/api/credentials/{name}")
     async def api_remove_credential(name: str) -> dict:
