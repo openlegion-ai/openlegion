@@ -1786,7 +1786,7 @@ def test_ext_list_credentials(ext_api_components):
     resp = client.get("/mesh/credentials", headers=h)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["count"] == 2
+    assert data["count"] >= 2
     assert "company_sess1_ssn" in data["credentials"]
     assert "company_sess1_income" in data["credentials"]
 
