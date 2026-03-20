@@ -1005,6 +1005,7 @@ class CredentialVault:
 
     # ── Anthropic OAuth helpers ───────────────────────────────
 
+    # Required by Anthropic's OAuth backend — must be the first system block.
     _CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
     @staticmethod
@@ -1013,15 +1014,20 @@ class CredentialVault:
 
         1. Convert ``system`` from a plain string to an array of content
            blocks with the Claude Code identity as the mandatory first block.
-        2. Always set ``stream: true``.
+        2. Add an override so the model follows the agent's actual instructions
+           instead of defaulting to Claude Code behavior.
+        3. Always set ``stream: true``.
         """
         identity = CredentialVault._CLAUDE_CODE_IDENTITY
+        system_blocks: list[dict] = [{"type": "text", "text": identity}]
         existing = body.get("system", "")
-        system_blocks = [{"type": "text", "text": identity}]
-        if existing and isinstance(existing, str):
-            system_blocks.append({"type": "text", "text": existing})
-        elif isinstance(existing, list):
-            system_blocks.extend(existing)
+        if existing:
+            # The agent's real instructions come next — the model should
+            # follow THESE, not the Claude Code identity above.
+            if isinstance(existing, str):
+                system_blocks.append({"type": "text", "text": existing})
+            elif isinstance(existing, list):
+                system_blocks.extend(existing)
         body["system"] = system_blocks
         body["stream"] = True
 
@@ -1521,7 +1527,6 @@ class CredentialVault:
                 msg_idx += 1
 
         # Build body matching EXACTLY what pi-ai sends to the Codex backend.
-        # Missing fields cause 400 errors — the backend is strict.
         body: dict = {
             "model": model,
             "input": input_items,
@@ -1529,16 +1534,11 @@ class CredentialVault:
             "stream": True,
             "text": {"verbosity": "medium"},
             "include": ["reasoning.encrypted_content"],
-            "tool_choice": "auto",
-            "parallel_tool_calls": True,
         }
         if instructions_parts:
             body["instructions"] = "\n\n".join(instructions_parts)
 
-        # The Codex backend rejects ALL optional params (temperature, top_p,
-        # max_output_tokens, reasoning_effort, etc.) — don't forward any.
-
-        # Tools — unwrap the function wrapper, add strict: null (pi-ai format)
+        # Tools — only set tool_choice/parallel_tool_calls when tools exist
         tools = params.get("tools")
         if tools:
             unwrapped: list[dict] = []
@@ -1555,6 +1555,8 @@ class CredentialVault:
                 else:
                     unwrapped.append(t)
             body["tools"] = unwrapped
+            body["tool_choice"] = "auto"
+            body["parallel_tool_calls"] = True
 
         return body
 
