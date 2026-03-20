@@ -3165,63 +3165,79 @@ class TestDashboardBrowserSettings:
 # ── External API Key Management ──────────────────────────────
 
 
-class TestExternalApiKey:
+class TestExternalApiKeys:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
         self.components = _make_components(self._tmpdir, include_v2=True)
+
+        from src.host.api_keys import ApiKeyManager
+        self.api_key_mgr = ApiKeyManager(
+            config_path=os.path.join(self._tmpdir, "api_keys.json"),
+        )
+        self.components["api_key_manager"] = self.api_key_mgr
         self.client = _make_client(self.components)
 
     def teardown_method(self):
         _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
-        os.environ.pop("OPENLEGION_API_KEY", None)
 
-    def test_get_not_configured(self):
-        """GET returns configured=False when no key is set."""
-        os.environ.pop("OPENLEGION_API_KEY", None)
-        resp = self.client.get("/dashboard/api/external-api-key")
-        assert resp.status_code == 200
-        assert resp.json()["configured"] is False
-
-    def test_get_configured_masked(self):
-        """GET returns masked preview when key is set."""
-        os.environ["OPENLEGION_API_KEY"] = "abcdefghijklmnop"
-        resp = self.client.get("/dashboard/api/external-api-key")
+    def test_list_empty(self, monkeypatch):
+        """GET returns empty list when no keys exist."""
+        monkeypatch.delenv("OPENLEGION_API_KEY", raising=False)
+        resp = self.client.get("/dashboard/api/external-api-keys")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["configured"] is True
-        assert data["preview"] == "abcd...mnop"
-        assert "key" not in data
+        assert data["keys"] == []
+        assert data["legacy"] is False
 
-    def test_get_reveal(self):
-        """GET with reveal=true returns full key."""
-        os.environ["OPENLEGION_API_KEY"] = "secret-key-value"
-        resp = self.client.get("/dashboard/api/external-api-key?reveal=true")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["key"] == "secret-key-value"
-
-    @patch("src.host.credentials._persist_to_env")
-    def test_generate(self, mock_persist):
-        """POST generates a new key and persists it."""
+    def test_create_key(self):
+        """POST creates a named key and returns the raw value."""
         resp = self.client.post(
-            "/dashboard/api/external-api-key",
-            json={},
+            "/dashboard/api/external-api-keys",
+            json={"name": "walter-prod"},
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert "key" in data
+        assert data["name"] == "walter-prod"
+        assert data["id"].startswith("ak_")
         assert len(data["key"]) > 20
-        mock_persist.assert_called_once()
-        call_args = mock_persist.call_args[0]
-        assert call_args[0] == "OPENLEGION_API_KEY"
-        assert call_args[1] == data["key"]
 
-    @patch("src.host.credentials._remove_from_env")
-    def test_revoke(self, mock_remove):
-        """DELETE revokes the key."""
-        os.environ["OPENLEGION_API_KEY"] = "to-be-revoked"
-        resp = self.client.delete("/dashboard/api/external-api-key")
+    def test_create_key_empty_name(self):
+        """POST with empty name returns 400."""
+        resp = self.client.post(
+            "/dashboard/api/external-api-keys",
+            json={"name": ""},
+        )
+        assert resp.status_code == 400
+
+    def test_list_after_create(self):
+        """GET lists created keys without raw values."""
+        self.api_key_mgr.create_key("key-a")
+        self.api_key_mgr.create_key("key-b")
+        resp = self.client.get("/dashboard/api/external-api-keys")
+        data = resp.json()
+        assert len(data["keys"]) == 2
+        names = {k["name"] for k in data["keys"]}
+        assert names == {"key-a", "key-b"}
+        for k in data["keys"]:
+            assert "key" not in k
+            assert "key_hash" not in k
+
+    def test_revoke_key(self):
+        """DELETE revokes a key by ID."""
+        key_id, _raw = self.api_key_mgr.create_key("to-revoke")
+        resp = self.client.delete(f"/dashboard/api/external-api-keys/{key_id}")
         assert resp.status_code == 200
         assert resp.json()["revoked"] is True
-        mock_remove.assert_called_once_with("OPENLEGION_API_KEY")
+        assert len(self.api_key_mgr.list_keys()) == 0
+
+    def test_revoke_nonexistent(self):
+        """DELETE returns 404 for unknown key ID."""
+        resp = self.client.delete("/dashboard/api/external-api-keys/ak_nonexistent")
+        assert resp.status_code == 404
+
+    def test_legacy_env_var_detected(self, monkeypatch):
+        """GET reports legacy=True when OPENLEGION_API_KEY is set."""
+        monkeypatch.setenv("OPENLEGION_API_KEY", "old-key")
+        resp = self.client.get("/dashboard/api/external-api-keys")
+        assert resp.json()["legacy"] is True

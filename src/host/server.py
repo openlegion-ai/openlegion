@@ -60,6 +60,7 @@ def _extract_prompt_preview(params: dict, max_len: int = 500) -> str:
 
 if TYPE_CHECKING:
     from src.dashboard.events import EventBus
+    from src.host.api_keys import ApiKeyManager
     from src.host.costs import CostTracker
     from src.host.credentials import CredentialVault
     from src.host.cron import CronScheduler
@@ -91,6 +92,7 @@ def create_mesh_app(
     lane_manager: LaneManager | None = None,
     dispatch_loop: asyncio.AbstractEventLoop | None = None,
     wallet_service_ref: list | None = None,
+    api_key_manager: ApiKeyManager | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
@@ -1122,27 +1124,24 @@ def create_mesh_app(
 
     # === External API (API-key authenticated) ===
     #
-    # These endpoints let external systems (like Walter's backend) manage
-    # credentials and query agent status without a dashboard session cookie.
-    # Authenticated via X-API-Key header matching OPENLEGION_API_KEY env var.
-
-    import os as _os
+    # These endpoints let external systems manage credentials and query
+    # agent status without a dashboard session cookie.
+    # Authenticated via X-API-Key header against named keys in ApiKeyManager.
 
     _RATE_LIMITS["ext_credentials"] = (30, 60)
     _RATE_LIMITS["ext_status"] = (60, 60)
 
-    def _require_api_key(request: Request) -> None:
-        """Verify the X-API-Key header against OPENLEGION_API_KEY.
-
-        Reads from os.environ on each call so that keys generated or
-        rotated via the dashboard take effect without a restart.
-        """
-        api_key = _os.environ.get("OPENLEGION_API_KEY", "")
-        if not api_key:
-            raise HTTPException(503, "External API not configured (set OPENLEGION_API_KEY)")
+    def _require_api_key(request: Request) -> str:
+        """Verify the X-API-Key header.  Returns the key ID for rate limiting."""
+        if api_key_manager is None or not api_key_manager.has_keys():
+            raise HTTPException(503, "External API not configured (create an API key in the dashboard)")
         provided = request.headers.get("x-api-key", "")
-        if not provided or not hmac.compare_digest(provided, api_key):
-            raise HTTPException(401, "Invalid or missing API key")
+        if not provided:
+            raise HTTPException(401, "Missing API key (X-API-Key header)")
+        result = api_key_manager.authenticate(provided)
+        if result is None:
+            raise HTTPException(401, "Invalid API key")
+        return result["id"]
 
     _CRED_NAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]{1,128}$")
 
@@ -1153,8 +1152,8 @@ def create_mesh_app(
         External systems use this to inject per-session secrets (e.g. PII)
         that agents reference by handle without seeing raw values.
         """
-        _require_api_key(request)
-        await _check_rate_limit("ext_credentials", "_api_key")
+        kid = _require_api_key(request)
+        await _check_rate_limit("ext_credentials", kid)
         if credential_vault is None:
             raise HTTPException(503, "Credential vault not configured")
         body = await request.json()
@@ -1174,8 +1173,8 @@ def create_mesh_app(
     @app.delete("/mesh/credentials/{name}")
     async def ext_remove_credential(name: str, request: Request) -> dict:
         """Remove an agent-tier credential by name."""
-        _require_api_key(request)
-        await _check_rate_limit("ext_credentials", "_api_key")
+        kid = _require_api_key(request)
+        await _check_rate_limit("ext_credentials", kid)
         if credential_vault is None:
             raise HTTPException(503, "Credential vault not configured")
         if is_system_credential(name):
@@ -1188,8 +1187,8 @@ def create_mesh_app(
     @app.get("/mesh/credentials")
     async def ext_list_credentials(request: Request) -> dict:
         """List agent-tier credential names (never values)."""
-        _require_api_key(request)
-        await _check_rate_limit("ext_credentials", "_api_key")
+        kid = _require_api_key(request)
+        await _check_rate_limit("ext_credentials", kid)
         if credential_vault is None:
             raise HTTPException(503, "Credential vault not configured")
         names = credential_vault.list_agent_credential_names()
@@ -1198,8 +1197,8 @@ def create_mesh_app(
     @app.get("/mesh/credentials/{name}/exists")
     async def ext_credential_exists(name: str, request: Request) -> dict:
         """Check if a credential exists by name (never returns value)."""
-        _require_api_key(request)
-        await _check_rate_limit("ext_credentials", "_api_key")
+        kid = _require_api_key(request)
+        await _check_rate_limit("ext_credentials", kid)
         if credential_vault is None:
             raise HTTPException(503, "Credential vault not configured")
         return {"name": name, "exists": credential_vault.has_credential(name)}
@@ -1211,8 +1210,8 @@ def create_mesh_app(
         Returns agent state, queue depth, and health — enough for an
         external system to decide whether to trigger a workflow.
         """
-        _require_api_key(request)
-        await _check_rate_limit("ext_status", "_api_key")
+        kid = _require_api_key(request)
+        await _check_rate_limit("ext_status", kid)
         _validate_agent_id(agent_id)
         result: dict = {"agent_id": agent_id}
         if agent_id not in router.agent_registry:
