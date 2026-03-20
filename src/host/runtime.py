@@ -561,8 +561,8 @@ class DockerBackend(RuntimeBackend):
         if self._network is not None:
             try:
                 self._network.remove()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Network removal failed: %s", e)
             self._network = None
 
 

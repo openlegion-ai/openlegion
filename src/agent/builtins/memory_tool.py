@@ -161,7 +161,7 @@ async def memory_save(content: str, *, workspace_manager=None, memory_store=None
             )
             saved_db = True
         except Exception as e:
-            logger.warning(f"Failed to store fact in memory DB: {e}")
+            logger.warning("Failed to store fact in memory DB: %s", e)
 
     if not saved_workspace and not saved_db:
         return {"error": "No memory backends available"}

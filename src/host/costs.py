@@ -89,6 +89,28 @@ class CostTracker:
                 monthly_usd = defaults["monthly_usd"]
         self.budgets[agent] = {"daily_usd": daily_usd, "monthly_usd": monthly_usd}
 
+    def _check_budget_post_hoc(self, agent: str) -> bool:
+        """Check if agent exceeded daily/monthly budget. Returns True if over budget."""
+        budget = self.budgets.get(agent)
+        if not budget:
+            return False
+        over = False
+        daily_spent = self.get_spend(agent, "today").get("total_cost", 0)
+        if daily_spent > budget["daily_usd"]:
+            logger.warning(
+                "Agent '%s' exceeded daily budget: $%.4f / $%.2f",
+                agent, daily_spent, budget["daily_usd"],
+            )
+            over = True
+        monthly_spent = self.get_spend(agent, "month").get("total_cost", 0)
+        if monthly_spent > budget["monthly_usd"]:
+            logger.warning(
+                "Agent '%s' exceeded monthly budget: $%.4f / $%.2f",
+                agent, monthly_spent, budget["monthly_usd"],
+            )
+            over = True
+        return over
+
     def track(
         self, agent: str, model: str, prompt_tokens: int, completion_tokens: int,
     ) -> dict:
@@ -103,26 +125,7 @@ class CostTracker:
         )
         self.db.commit()
 
-        # Post-hoc budget enforcement: warn if this call pushed us over
-        over_budget = False
-        budget = self.budgets.get(agent)
-        if budget:
-            daily_spent = self.get_spend(agent, "today").get("total_cost", 0)
-            if daily_spent > budget["daily_usd"]:
-                logger.warning(
-                    "Agent '%s' exceeded daily budget: $%.4f / $%.2f",
-                    agent, daily_spent, budget["daily_usd"],
-                )
-                over_budget = True
-            monthly_spent = self.get_spend(agent, "month").get("total_cost", 0)
-            if monthly_spent > budget["monthly_usd"]:
-                logger.warning(
-                    "Agent '%s' exceeded monthly budget: $%.4f / $%.2f",
-                    agent, monthly_spent, budget["monthly_usd"],
-                )
-                over_budget = True
-
-        return {"cost": cost, "over_budget": over_budget}
+        return {"cost": cost, "over_budget": self._check_budget_post_hoc(agent)}
 
     def track_fixed_cost(self, agent: str, model: str, cost_usd: float) -> dict:
         """Record a fixed-cost API call (e.g. image generation).
@@ -137,25 +140,7 @@ class CostTracker:
         )
         self.db.commit()
 
-        over_budget = False
-        budget = self.budgets.get(agent)
-        if budget:
-            daily_spent = self.get_spend(agent, "today").get("total_cost", 0)
-            if daily_spent > budget["daily_usd"]:
-                logger.warning(
-                    "Agent '%s' exceeded daily budget: $%.4f / $%.2f",
-                    agent, daily_spent, budget["daily_usd"],
-                )
-                over_budget = True
-            monthly_spent = self.get_spend(agent, "month").get("total_cost", 0)
-            if monthly_spent > budget["monthly_usd"]:
-                logger.warning(
-                    "Agent '%s' exceeded monthly budget: $%.4f / $%.2f",
-                    agent, monthly_spent, budget["monthly_usd"],
-                )
-                over_budget = True
-
-        return {"cost": cost_usd, "over_budget": over_budget}
+        return {"cost": cost_usd, "over_budget": self._check_budget_post_hoc(agent)}
 
     def check_budget(self, agent: str) -> dict:
         """Check if agent is within budget.

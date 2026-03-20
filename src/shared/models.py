@@ -318,7 +318,7 @@ def get_provider_models(provider: str) -> list[str]:
             if provider == "openai" and not (
                 litellm_key.startswith("gpt-")
                 or litellm_key.startswith("chatgpt-")
-                or (litellm_key[:1] == "o" and len(litellm_key) > 1 and litellm_key[1:2].isdigit())
+                or (litellm_key.startswith("o") and len(litellm_key) > 1 and litellm_key[1].isdigit())
             ):
                 continue
             if provider == "anthropic" and not litellm_key.startswith("claude"):

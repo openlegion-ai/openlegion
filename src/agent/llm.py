@@ -84,6 +84,27 @@ class LLMClient:
             return {"reasoning_effort": self.thinking}
         return {}
 
+    def _apply_thinking_params(self, params: dict, model: str | None, kwargs: dict) -> None:
+        """Merge thinking/reasoning params into *params*, respecting caller overrides."""
+        for k, v in self._get_thinking_params(model).items():
+            if k not in kwargs:
+                params[k] = v
+
+    @staticmethod
+    def _parse_tool_calls(raw_calls: list[dict]) -> list[ToolCallInfo] | None:
+        """Parse raw tool-call dicts into ToolCallInfo objects."""
+        tool_calls: list[ToolCallInfo] = []
+        for tc in raw_calls:
+            args = tc.get("arguments", "")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    logger.warning("Malformed tool arguments for %s, using raw string", tc.get("name"))
+                    args = {"raw": args}
+            tool_calls.append(ToolCallInfo(name=tc.get("name", ""), arguments=args))
+        return tool_calls if tool_calls else None
+
     async def chat(
         self,
         system: str,
@@ -104,10 +125,7 @@ class LLMClient:
         if tools:
             params["tools"] = tools
         params.update(kwargs)
-        thinking_params = self._get_thinking_params(model)
-        for k, v in thinking_params.items():
-            if k not in kwargs:
-                params[k] = v
+        self._apply_thinking_params(params, model, kwargs)
 
         request = APIProxyRequest(service="llm", action="chat", params=params, timeout=120)
 
@@ -127,21 +145,10 @@ class LLMClient:
             raise RuntimeError(f"LLM call failed: {data.get('error')}")
 
         result = data["data"]
-        tool_calls = []
-        for tc in result.get("tool_calls", []):
-            args = tc["arguments"]
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    logger.warning(f"Malformed tool arguments for {tc['name']}, using raw string")
-                    args = {"raw": args}
-            tool_calls.append(ToolCallInfo(name=tc["name"], arguments=args))
-
         return LLMResponse(
             content=result.get("content", ""),
             thinking_content=result.get("thinking_content"),
-            tool_calls=tool_calls if tool_calls else None,
+            tool_calls=self._parse_tool_calls(result.get("tool_calls", [])),
             tokens_used=result.get("tokens_used", 0),
             model=result.get("model", ""),
         )
@@ -172,10 +179,7 @@ class LLMClient:
         if tools:
             params["tools"] = tools
         params.update(kwargs)
-        thinking_params = self._get_thinking_params(model)
-        for k, v in thinking_params.items():
-            if k not in kwargs:
-                params[k] = v
+        self._apply_thinking_params(params, model, kwargs)
 
         request = APIProxyRequest(service="llm", action="chat", params=params, timeout=120)
 
@@ -207,21 +211,10 @@ class LLMClient:
                     yield {"type": "text_delta", "content": data.get("content", "")}
 
                 elif data.get("type") == "done":
-                    # Assemble final LLMResponse from the done event
-                    tool_calls = []
-                    for tc in data.get("tool_calls", []):
-                        args = tc.get("arguments", "")
-                        if isinstance(args, str):
-                            try:
-                                args = json.loads(args)
-                            except json.JSONDecodeError:
-                                args = {"raw": args}
-                        tool_calls.append(ToolCallInfo(name=tc.get("name", ""), arguments=args))
-
                     llm_resp = LLMResponse(
                         content=data.get("content", ""),
                         thinking_content=data.get("thinking_content"),
-                        tool_calls=tool_calls if tool_calls else None,
+                        tool_calls=self._parse_tool_calls(data.get("tool_calls", [])),
                         tokens_used=data.get("tokens_used", 0),
                         model=data.get("model", ""),
                     )

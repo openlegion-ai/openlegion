@@ -29,6 +29,11 @@ logger = setup_logging("host.mesh")
 _PREVIEW_MAX_LEN = 200
 
 
+def _truncate_preview(text: str) -> str:
+    """Truncate text to preview length for dashboard display."""
+    return text[:_PREVIEW_MAX_LEN] if len(text) > _PREVIEW_MAX_LEN else text
+
+
 class Blackboard:
     """Shared state store accessed by agents through the mesh.
 
@@ -124,7 +129,7 @@ class Blackboard:
 
         if self._event_bus:
             # Truncate value preview for dashboard display
-            preview = value_json[:_PREVIEW_MAX_LEN] if len(value_json) > _PREVIEW_MAX_LEN else value_json
+            preview = _truncate_preview(value_json)
             self._event_bus.emit("blackboard_write", agent=written_by,
                 data={"key": key, "version": new_version, "value_preview": preview,
                       "written_by": written_by})
@@ -174,7 +179,7 @@ class Blackboard:
         self._maybe_gc_ttl()
 
         if self._event_bus:
-            preview = value_json[:_PREVIEW_MAX_LEN] if len(value_json) > _PREVIEW_MAX_LEN else value_json
+            preview = _truncate_preview(value_json)
             self._event_bus.emit("blackboard_write", agent=written_by,
                 data={"key": key, "version": new_version, "value_preview": preview,
                       "written_by": written_by})
