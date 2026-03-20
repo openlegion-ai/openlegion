@@ -506,6 +506,9 @@ class RuntimeContext:
         wallet_ref = [wallet_service]
         self._wallet_ref = wallet_ref
 
+        from src.host.api_keys import ApiKeyManager
+        self._api_key_manager = ApiKeyManager()
+
         app = create_mesh_app(
             self.blackboard, self.pubsub, self.router, self.permissions,
             self.credential_vault, self.cron_scheduler, self.runtime,
@@ -520,6 +523,7 @@ class RuntimeContext:
             lane_manager=self.lane_manager,
             dispatch_loop=self._dispatch_loop,
             wallet_service_ref=wallet_ref,
+            api_key_manager=self._api_key_manager,
         )
         app.include_router(webhook_manager.create_router())
 
@@ -546,6 +550,7 @@ class RuntimeContext:
             webhook_manager=webhook_manager,
             channel_manager=self.channel_manager,
             wallet_service_ref=wallet_ref,
+            api_key_manager=self._api_key_manager,
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking

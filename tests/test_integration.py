@@ -1614,3 +1614,262 @@ def test_vnc_proxy_allows_dashboard_user(tmp_path):
     assert b"VNC" in resp.content
 
     bb.close()
+
+
+# === External API (API-key authenticated) ===
+
+
+@pytest.fixture
+def ext_api_components(tmp_path, monkeypatch):
+    """Mesh components with ApiKeyManager for external API tests."""
+    from unittest.mock import MagicMock
+
+    from src.host.api_keys import ApiKeyManager
+    from src.host.costs import CostTracker
+    from src.host.credentials import CredentialVault
+    from src.host.health import HealthMonitor
+
+    monkeypatch.delenv("OPENLEGION_API_KEY", raising=False)
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+
+    router = MessageRouter(permissions=perms, agent_registry={})
+    router.register_agent("card-agent", "http://localhost:8401")
+
+    vault = CredentialVault()
+
+    import src.host.credentials as cred_mod
+    monkeypatch.setattr(cred_mod, "_persist_to_env", lambda *a, **kw: None)
+    monkeypatch.setattr(cred_mod, "_remove_from_env", lambda *a, **kw: None)
+
+    api_key_mgr = ApiKeyManager(config_path=str(tmp_path / "api_keys.json"))
+    _key_id, raw_key = api_key_mgr.create_key("test-key")
+
+    runtime_mock = MagicMock()
+    transport_mock = MagicMock()
+    router_mock_for_health = MagicMock()
+    health_monitor = HealthMonitor(
+        runtime=runtime_mock, transport=transport_mock, router=router_mock_for_health,
+    )
+    health_monitor.register("card-agent")
+    health_monitor.agents["card-agent"].status = "healthy"
+
+    cost_tracker = CostTracker(db_path=str(tmp_path / "costs.db"))
+
+    lane_manager = MagicMock()
+    lane_manager.get_status.return_value = {
+        "card-agent": {"queued": 0, "pending": 0, "collected": 0, "busy": False},
+    }
+
+    app = create_mesh_app(
+        bb, pubsub, router, perms,
+        credential_vault=vault,
+        health_monitor=health_monitor,
+        cost_tracker=cost_tracker,
+        lane_manager=lane_manager,
+        api_key_manager=api_key_mgr,
+    )
+    client = TestClient(app)
+
+    yield {
+        "client": client, "vault": vault, "bb": bb,
+        "cost_tracker": cost_tracker, "health_monitor": health_monitor,
+        "raw_key": raw_key, "api_key_manager": api_key_mgr,
+    }
+
+    cost_tracker.close()
+    bb.close()
+
+
+def _api_headers(key: str) -> dict:
+    return {"X-API-Key": key}
+
+
+def test_ext_store_credential(ext_api_components):
+    """POST /mesh/credentials stores a credential and returns a handle."""
+    client = ext_api_components["client"]
+    h = _api_headers(ext_api_components["raw_key"])
+    resp = client.post(
+        "/mesh/credentials",
+        json={"name": "company_sess1_ssn", "value": "123-45-6789"},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["stored"] is True
+    assert data["handle"] == "$CRED{company_sess1_ssn}"
+    assert data["name"] == "company_sess1_ssn"
+    assert "123-45-6789" not in str(data)
+
+
+def test_ext_store_credential_missing_fields(ext_api_components):
+    """POST /mesh/credentials with missing name/value returns 400."""
+    client = ext_api_components["client"]
+    h = _api_headers(ext_api_components["raw_key"])
+    resp = client.post("/mesh/credentials", json={"name": "", "value": ""}, headers=h)
+    assert resp.status_code == 400
+
+
+def test_ext_store_credential_invalid_name(ext_api_components):
+    """POST /mesh/credentials with invalid name returns 400."""
+    client = ext_api_components["client"]
+    h = _api_headers(ext_api_components["raw_key"])
+    resp = client.post("/mesh/credentials", json={"name": "has spaces!", "value": "abc"}, headers=h)
+    assert resp.status_code == 400
+
+
+def test_ext_store_credential_blocks_system_creds(ext_api_components):
+    """POST /mesh/credentials rejects system credential names."""
+    client = ext_api_components["client"]
+    h = _api_headers(ext_api_components["raw_key"])
+    resp = client.post("/mesh/credentials", json={"name": "openai_api_key", "value": "sk-evil"}, headers=h)
+    assert resp.status_code == 403
+
+
+def test_ext_store_credential_no_api_key(ext_api_components):
+    """POST /mesh/credentials without X-API-Key returns 401."""
+    client = ext_api_components["client"]
+    resp = client.post("/mesh/credentials", json={"name": "test", "value": "val"})
+    assert resp.status_code == 401
+
+
+def test_ext_store_credential_wrong_api_key(ext_api_components):
+    """POST /mesh/credentials with wrong API key returns 401."""
+    client = ext_api_components["client"]
+    resp = client.post(
+        "/mesh/credentials",
+        json={"name": "test", "value": "val"},
+        headers=_api_headers("wrong-key"),
+    )
+    assert resp.status_code == 401
+
+
+def test_ext_remove_credential(ext_api_components):
+    """DELETE /mesh/credentials/{name} removes a stored credential."""
+    client = ext_api_components["client"]
+    vault = ext_api_components["vault"]
+    h = _api_headers(ext_api_components["raw_key"])
+    vault.add_credential("company_sess1_ssn", "123-45-6789")
+    resp = client.delete("/mesh/credentials/company_sess1_ssn", headers=h)
+    assert resp.status_code == 200
+    assert resp.json()["removed"] is True
+    assert not vault.has_credential("company_sess1_ssn")
+
+
+def test_ext_remove_credential_not_found(ext_api_components):
+    """DELETE /mesh/credentials/{name} returns 404 for missing credential."""
+    client = ext_api_components["client"]
+    h = _api_headers(ext_api_components["raw_key"])
+    resp = client.delete("/mesh/credentials/nonexistent", headers=h)
+    assert resp.status_code == 404
+
+
+def test_ext_remove_credential_blocks_system(ext_api_components):
+    """DELETE /mesh/credentials/{name} rejects system credential names."""
+    client = ext_api_components["client"]
+    h = _api_headers(ext_api_components["raw_key"])
+    resp = client.delete("/mesh/credentials/anthropic_api_key", headers=h)
+    assert resp.status_code == 403
+
+
+def test_ext_list_credentials(ext_api_components):
+    """GET /mesh/credentials lists agent-tier credential names."""
+    client = ext_api_components["client"]
+    vault = ext_api_components["vault"]
+    h = _api_headers(ext_api_components["raw_key"])
+    vault.add_credential("company_sess1_ssn", "secret1")
+    vault.add_credential("company_sess1_income", "secret2")
+    resp = client.get("/mesh/credentials", headers=h)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] >= 2
+    assert "company_sess1_ssn" in data["credentials"]
+    assert "company_sess1_income" in data["credentials"]
+
+
+def test_ext_credential_exists(ext_api_components):
+    """GET /mesh/credentials/{name}/exists checks credential existence."""
+    client = ext_api_components["client"]
+    vault = ext_api_components["vault"]
+    h = _api_headers(ext_api_components["raw_key"])
+    vault.add_credential("company_sess1_ssn", "secret")
+    resp = client.get("/mesh/credentials/company_sess1_ssn/exists", headers=h)
+    assert resp.status_code == 200
+    assert resp.json()["exists"] is True
+    resp = client.get("/mesh/credentials/nonexistent/exists", headers=h)
+    assert resp.status_code == 200
+    assert resp.json()["exists"] is False
+
+
+def test_ext_agent_status(ext_api_components):
+    """GET /mesh/agents/{id}/ext-status returns health, queue, and budget."""
+    client = ext_api_components["client"]
+    h = _api_headers(ext_api_components["raw_key"])
+    resp = client.get("/mesh/agents/card-agent/ext-status", headers=h)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["agent_id"] == "card-agent"
+    assert data["health"]["status"] == "healthy"
+    assert data["queue"]["busy"] is False
+    assert data["queue"]["queued"] == 0
+    assert "budget" in data
+    assert data["budget"]["allowed"] is True
+
+
+def test_ext_agent_status_not_found(ext_api_components):
+    """GET /mesh/agents/{id}/ext-status returns 404 for unknown agent."""
+    client = ext_api_components["client"]
+    h = _api_headers(ext_api_components["raw_key"])
+    resp = client.get("/mesh/agents/nonexistent/ext-status", headers=h)
+    assert resp.status_code == 404
+
+
+def test_ext_api_not_configured(tmp_path, monkeypatch):
+    """External API returns 503 when no API keys exist."""
+    monkeypatch.delenv("OPENLEGION_API_KEY", raising=False)
+
+    from src.host.api_keys import ApiKeyManager
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+    empty_mgr = ApiKeyManager(config_path=str(tmp_path / "empty_keys.json"))
+
+    app = create_mesh_app(bb, pubsub, router, perms, api_key_manager=empty_mgr)
+    client = TestClient(app)
+
+    resp = client.get("/mesh/credentials", headers={"X-API-Key": "anything"})
+    assert resp.status_code == 503
+
+    bb.close()
+
+
+def test_ext_store_and_remove_lifecycle(ext_api_components):
+    """Full lifecycle: store, verify exists, list, remove, verify gone."""
+    client = ext_api_components["client"]
+    h = _api_headers(ext_api_components["raw_key"])
+
+    resp = client.post(
+        "/mesh/credentials",
+        json={"name": "company_abc_ssn", "value": "999-88-7777"},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["handle"] == "$CRED{company_abc_ssn}"
+
+    resp = client.get("/mesh/credentials/company_abc_ssn/exists", headers=h)
+    assert resp.json()["exists"] is True
+
+    resp = client.get("/mesh/credentials", headers=h)
+    assert "company_abc_ssn" in resp.json()["credentials"]
+
+    resp = client.delete("/mesh/credentials/company_abc_ssn", headers=h)
+    assert resp.status_code == 200
+
+    resp = client.get("/mesh/credentials/company_abc_ssn/exists", headers=h)
+    assert resp.json()["exists"] is False

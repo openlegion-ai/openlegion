@@ -142,6 +142,7 @@ def create_dashboard_router(
     webhook_manager: Any = None,
     channel_manager: Any = None,
     wallet_service_ref: list | None = None,
+    api_key_manager: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     # Plan limits — read once at startup; provisioner restarts engine after updating .env
@@ -1362,6 +1363,46 @@ def create_dashboard_router(
         if value is None:
             raise HTTPException(status_code=404, detail=f"Credential '{name}' not found")
         return {"name": name, "value": value}
+
+    # ── External API key management ─────────────────────────
+
+    @api_router.get("/api/external-api-keys")
+    async def api_list_external_keys(request: Request) -> dict:
+        """List all named API keys (metadata only, never raw keys)."""
+        _verify_dashboard_auth(request)
+        if api_key_manager is None:
+            return {"keys": [], "legacy": False}
+        keys = api_key_manager.list_keys()
+        legacy = bool(os.environ.get("OPENLEGION_API_KEY", ""))
+        return {"keys": keys, "legacy": legacy}
+
+    @api_router.post("/api/external-api-keys")
+    async def api_create_external_key(request: Request) -> dict:
+        """Create a named API key. Returns the raw key once."""
+        _verify_dashboard_auth(request)
+        if api_key_manager is None:
+            raise HTTPException(status_code=503, detail="API key manager not available")
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        if len(name) > 128:
+            raise HTTPException(status_code=400, detail="name must be 128 characters or fewer")
+        try:
+            key_id, raw_key = api_key_manager.create_key(name)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"id": key_id, "name": name, "key": raw_key}
+
+    @api_router.delete("/api/external-api-keys/{key_id}")
+    async def api_revoke_external_key(key_id: str, request: Request) -> dict:
+        """Revoke an API key by ID."""
+        _verify_dashboard_auth(request)
+        if api_key_manager is None:
+            raise HTTPException(status_code=503, detail="API key manager not available")
+        if not api_key_manager.revoke_key(key_id):
+            raise HTTPException(status_code=404, detail=f"API key not found: {key_id}")
+        return {"revoked": True, "id": key_id}
 
     # ── Wallet management ────────────────────────────────────
 

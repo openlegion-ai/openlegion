@@ -347,6 +347,14 @@ function dashboard() {
     webhookCreating: false,
     webhookTesting: {},
     webhookSaving: false,
+    webhookRevealedSecret: null,
+    webhookRevealedSecretHookId: null,
+    apiKeys: [],
+    apiKeysLegacy: false,
+    apiKeyNewValue: null,
+    apiKeyNewName: '',
+    apiKeyCreating: false,
+    showApiKeyForm: false,
     broadcastSending: false,
     confirmLoading: false,
 
@@ -498,7 +506,7 @@ function dashboard() {
               if (this.systemTab === 'activity') this._stopActivityRefresh();
               this.systemTab = route.systemTab;
               if (route.systemTab === 'integrations') {
-                this.fetchChannels(); this.fetchWebhooks();
+                this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys();
               }
               if (route.systemTab === 'apikeys') {
                 this.fetchSettings();
@@ -963,6 +971,7 @@ function dashboard() {
         if (this.systemTab === 'integrations') {
           this.fetchWebhooks();
           this.fetchChannels();
+          this.fetchApiKeys();
         }
         if (this.systemTab === 'settings') {
           this.fetchBrowserSettings();
@@ -985,7 +994,7 @@ function dashboard() {
       if (this.systemTab === 'activity' && tabId !== 'activity') this._stopActivityRefresh();
       this.systemTab = tabId;
       this._pushUrl(false);
-      if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); }
+      if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); }
       if (tabId === 'apikeys') { this.fetchSettings(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); }
@@ -4047,12 +4056,12 @@ function dashboard() {
         if (resp.ok) {
           const data = await resp.json();
           const hook = data.hook || {};
-          const canCopy = navigator.clipboard && navigator.clipboard.writeText;
           if (hook.secret) {
-            // Secret is one-time — prioritize copying it; URL is always available via list
-            if (canCopy) navigator.clipboard.writeText(hook.secret).catch(() => {});
-            this.showToast(`Webhook "${name}" created — HMAC secret copied`, 8000);
-          } else if (hook.url && canCopy) {
+            this.webhookRevealedSecret = hook.secret;
+            this.webhookRevealedSecretHookId = hook.id;
+            if (navigator.clipboard) navigator.clipboard.writeText(hook.secret).catch(() => {});
+            this.showToast(`Webhook "${name}" created — copy the secret below`, 8000);
+          } else if (hook.url && navigator.clipboard) {
             navigator.clipboard.writeText(hook.url).catch(() => {});
             this.showToast(`Webhook "${name}" created — URL copied`);
           } else {
@@ -4149,10 +4158,11 @@ function dashboard() {
         if (resp.ok) {
           const data = await resp.json();
           const hook = data.hook || {};
-          const canCopy = navigator.clipboard && navigator.clipboard.writeText;
           if (hook.secret) {
-            if (canCopy) navigator.clipboard.writeText(hook.secret).catch(() => {});
-            this.showToast(`Webhook updated — new HMAC secret copied`, 8000);
+            this.webhookRevealedSecret = hook.secret;
+            this.webhookRevealedSecretHookId = hook.id || this.editingWebhookId;
+            if (navigator.clipboard) navigator.clipboard.writeText(hook.secret).catch(() => {});
+            this.showToast(`Webhook updated — copy the secret below`, 8000);
           } else {
             this.showToast(`Webhook "${name}" updated`);
           }
@@ -4176,17 +4186,72 @@ function dashboard() {
           if (resp.ok) {
             const data = await resp.json();
             const hook = data.hook || {};
-            const canCopy = navigator.clipboard && navigator.clipboard.writeText;
-            if (hook.secret && canCopy) {
-              navigator.clipboard.writeText(hook.secret).catch(() => {});
-              this.showToast('New HMAC secret copied to clipboard', 8000);
+            if (hook.secret) {
+              this.webhookRevealedSecret = hook.secret;
+              this.webhookRevealedSecretHookId = hook.id || hookId;
+              if (navigator.clipboard) navigator.clipboard.writeText(hook.secret).catch(() => {});
+              this.showToast('New secret shown below — copy it now', 8000);
             } else {
               this.showToast('Secret regenerated');
             }
+            this.cancelWebhookEdit();
             this.fetchWebhooks();
           } else {
             const err = await resp.json().catch(() => ({}));
             this.showToast(`Error: ${err.detail || 'Regeneration failed'}`);
+          }
+        } catch (e) { this.showToast(`Error: ${e.message}`); }
+      }, true);
+    },
+
+    // ── External API key ──────────────────────────────────
+
+    async fetchApiKeys() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/external-api-keys`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.apiKeys = data.keys || [];
+          this.apiKeysLegacy = data.legacy || false;
+        }
+      } catch (e) { console.warn('fetchApiKeys failed:', e); }
+    },
+
+    async createApiKey() {
+      const name = this.apiKeyNewName.trim();
+      if (!name || this.apiKeyCreating) return;
+      this.apiKeyCreating = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/external-api-keys`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          this.apiKeyNewValue = data.key;
+          if (navigator.clipboard) navigator.clipboard.writeText(data.key).catch(() => {});
+          this.showToast(`API key "${name}" created — copy it from below`, 8000);
+          this.apiKeyNewName = '';
+          this.showApiKeyForm = false;
+          this.fetchApiKeys();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Creation failed'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+      finally { this.apiKeyCreating = false; }
+    },
+
+    revokeApiKey(keyId, name) {
+      this.showConfirm('Revoke API Key', `Revoke "${name}"? Any integration using this key will lose access immediately.`, async () => {
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/external-api-keys/${encodeURIComponent(keyId)}`, { method: 'DELETE' });
+          if (resp.ok) {
+            this.showToast(`API key "${name}" revoked`);
+            this.fetchApiKeys();
+          } else {
+            const err = await resp.json().catch(() => ({}));
+            this.showToast(`Error: ${err.detail || 'Revoke failed'}`);
           }
         } catch (e) { this.showToast(`Error: ${e.message}`); }
       }, true);
