@@ -2680,36 +2680,51 @@
         </div>
 
         <!-- API Keys -->
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5 mt-6">API Keys<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Named API keys for external integrations. Each key authenticates server-to-server calls via the X-API-Key header. Create separate keys for different environments (staging, production) or integrations. Keys are hashed — the raw value is shown once at creation time.</span></span></div>
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5 mt-6">API Keys</div>
         <div class="mb-6">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="text-[12px] text-gray-500 leading-relaxed mb-3">
+              Authenticate your backend for server-to-server API calls. Send as <code class="bg-gray-800 px-1 rounded text-gray-400">X-API-Key</code> header.
+              Create separate keys per environment or integration — each key is hashed and the raw value is shown only once at creation.
+            </div>
+            <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] mb-4">
+              <div class="text-gray-500"><code class="text-gray-400 font-mono">POST</code> <code class="text-gray-400 font-mono">/mesh/credentials</code></div>
+              <div class="text-gray-600">Store a secret &rarr; returns <code class="bg-gray-800/60 px-0.5 rounded">$CRED{name}</code> handle</div>
+              <div class="text-gray-500"><code class="text-gray-400 font-mono">DELETE</code> <code class="text-gray-400 font-mono">/mesh/credentials/{name}</code></div>
+              <div class="text-gray-600">Remove a secret</div>
+              <div class="text-gray-500"><code class="text-gray-400 font-mono">GET</code> <code class="text-gray-400 font-mono">/mesh/credentials</code></div>
+              <div class="text-gray-600">List credential names (never values)</div>
+              <div class="text-gray-500"><code class="text-gray-400 font-mono">GET</code> <code class="text-gray-400 font-mono">/mesh/agents/{id}/ext-status</code></div>
+              <div class="text-gray-600">Agent health, queue depth, budget</div>
+            </div>
+            <div class="border-t border-gray-800 pt-3 mb-3"></div>
             <!-- One-time new key display -->
-            <div x-show="apiKeyNewValue" x-transition class="mb-3 p-3 bg-amber-900/20 border border-amber-800/30 rounded-lg">
-              <div class="text-[11px] text-amber-300 font-medium mb-1.5">New API Key — copy this now, it won't be shown again</div>
+            <div x-show="apiKeyNewValue" x-transition class="mb-3 p-3 bg-emerald-950/40 border border-emerald-700/40 rounded-lg">
+              <div class="text-[11px] text-emerald-400 font-medium mb-2">New API Key — copy this now, it won't be shown again</div>
               <div class="flex items-center gap-2">
-                <code class="text-[11px] text-amber-200 bg-gray-900/60 px-2.5 py-1.5 rounded font-mono flex-1 break-all select-all" x-text="apiKeyNewValue"></code>
-                <button @click="copyToClipboard(apiKeyNewValue)" class="text-[10px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition-colors shrink-0">Copy</button>
-                <button @click="apiKeyNewValue = null" class="text-[10px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors shrink-0">Dismiss</button>
+                <code class="text-[12px] text-emerald-200 bg-gray-950/80 px-3 py-2 rounded font-mono flex-1 break-all select-all tracking-wide" x-text="apiKeyNewValue"></code>
+                <button @click="copyToClipboard(apiKeyNewValue)" class="text-[10px] px-3 py-1.5 rounded bg-emerald-800/40 hover:bg-emerald-700/40 text-emerald-300 hover:text-emerald-200 border border-emerald-700/30 transition-colors shrink-0">Copy</button>
+                <button @click="apiKeyNewValue = null" class="text-[10px] px-2.5 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors shrink-0">Dismiss</button>
               </div>
             </div>
             <!-- Legacy env var notice -->
-            <div x-show="apiKeysLegacy" x-cloak class="mb-3 p-2 bg-yellow-900/15 border border-yellow-800/20 rounded text-[11px] text-yellow-500/80">
-              Legacy key detected from <code class="bg-gray-800 px-1 rounded">OPENLEGION_API_KEY</code> env var. Create named keys below to replace it.
+            <div x-show="apiKeysLegacy" x-cloak class="mb-3 px-3 py-2 bg-amber-950/30 border border-amber-800/25 rounded text-[11px] text-amber-400/90">
+              Legacy key detected from <code class="bg-gray-800/80 text-amber-300 px-1 rounded">OPENLEGION_API_KEY</code> env var. Create named keys below to replace it.
             </div>
             <!-- Key list -->
-            <div class="space-y-1 mb-3">
+            <div class="space-y-0.5 mb-3">
               <template x-for="ak in apiKeys" :key="ak.id">
-                <div class="flex items-center gap-3 text-xs group py-1.5 border-b border-gray-800/40 last:border-0">
-                  <span class="w-2 h-2 rounded-full bg-green-500/50 shrink-0"></span>
-                  <span class="text-gray-300 font-medium" x-text="ak.name"></span>
-                  <span class="text-gray-600 font-mono text-[10px]" x-text="ak.id"></span>
-                  <span class="text-gray-600 text-[10px] flex-1 text-right" x-text="ak.last_used_at ? 'Last used ' + ak.last_used_at.split('T')[0] : 'Never used'"></span>
+                <div class="flex items-center gap-3 text-xs group py-2 px-2 rounded hover:bg-gray-800/30 transition-colors">
+                  <span class="w-2 h-2 rounded-full bg-emerald-500/60 shrink-0"></span>
+                  <span class="text-white font-medium" x-text="ak.name"></span>
+                  <span class="text-gray-500 font-mono text-[10px]" x-text="ak.id"></span>
+                  <span class="text-gray-500 text-[10px] flex-1 text-right" x-text="ak.last_used_at ? 'Used ' + ak.last_used_at.split('T')[0] : 'Never used'"></span>
                   <span class="text-gray-600 text-[10px]" x-text="'Created ' + ak.created_at.split('T')[0]"></span>
                   <button @click="revokeApiKey(ak.id, ak.name)"
                     class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all">Revoke</button>
                 </div>
               </template>
-              <div x-show="apiKeys.length === 0 && !apiKeysLegacy" class="text-gray-600 text-sm py-2 text-center">No API keys configured</div>
+              <div x-show="apiKeys.length === 0 && !apiKeysLegacy" class="text-gray-500 text-sm py-3 text-center">No API keys configured</div>
             </div>
             <!-- Create key form -->
             <div class="border-t border-gray-800 pt-3">
@@ -2719,7 +2734,7 @@
               <div x-show="showApiKeyForm" x-transition>
                 <div class="text-xs text-gray-500 mb-2">New API key</div>
                 <div class="flex gap-2">
-                  <input type="text" x-model="apiKeyNewName" :disabled="apiKeyCreating" class="dash-input text-xs flex-1" placeholder="Key name (e.g. walter-production)" @keydown.enter="createApiKey()">
+                  <input type="text" x-model="apiKeyNewName" :disabled="apiKeyCreating" class="dash-input text-xs flex-1" placeholder="Key name (e.g. company-production)" @keydown.enter="createApiKey()">
                   <button @click="showApiKeyForm = false" :disabled="apiKeyCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
                   <button @click="createApiKey()" :disabled="apiKeyCreating || !apiKeyNewName.trim()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
                     <svg x-show="apiKeyCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>

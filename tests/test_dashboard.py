@@ -3194,11 +3194,11 @@ class TestExternalApiKeys:
         """POST creates a named key and returns the raw value."""
         resp = self.client.post(
             "/dashboard/api/external-api-keys",
-            json={"name": "walter-prod"},
+            json={"name": "company-prod"},
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["name"] == "walter-prod"
+        assert data["name"] == "company-prod"
         assert data["id"].startswith("ak_")
         assert len(data["key"]) > 20
 

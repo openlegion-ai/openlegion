@@ -1695,14 +1695,14 @@ def test_ext_store_credential(ext_api_components):
     h = _api_headers(ext_api_components["raw_key"])
     resp = client.post(
         "/mesh/credentials",
-        json={"name": "walter_sess1_ssn", "value": "123-45-6789"},
+        json={"name": "company_sess1_ssn", "value": "123-45-6789"},
         headers=h,
     )
     assert resp.status_code == 200
     data = resp.json()
     assert data["stored"] is True
-    assert data["handle"] == "$CRED{walter_sess1_ssn}"
-    assert data["name"] == "walter_sess1_ssn"
+    assert data["handle"] == "$CRED{company_sess1_ssn}"
+    assert data["name"] == "company_sess1_ssn"
     assert "123-45-6789" not in str(data)
 
 
@@ -1753,11 +1753,11 @@ def test_ext_remove_credential(ext_api_components):
     client = ext_api_components["client"]
     vault = ext_api_components["vault"]
     h = _api_headers(ext_api_components["raw_key"])
-    vault.add_credential("walter_sess1_ssn", "123-45-6789")
-    resp = client.delete("/mesh/credentials/walter_sess1_ssn", headers=h)
+    vault.add_credential("company_sess1_ssn", "123-45-6789")
+    resp = client.delete("/mesh/credentials/company_sess1_ssn", headers=h)
     assert resp.status_code == 200
     assert resp.json()["removed"] is True
-    assert not vault.has_credential("walter_sess1_ssn")
+    assert not vault.has_credential("company_sess1_ssn")
 
 
 def test_ext_remove_credential_not_found(ext_api_components):
@@ -1781,14 +1781,14 @@ def test_ext_list_credentials(ext_api_components):
     client = ext_api_components["client"]
     vault = ext_api_components["vault"]
     h = _api_headers(ext_api_components["raw_key"])
-    vault.add_credential("walter_sess1_ssn", "secret1")
-    vault.add_credential("walter_sess1_income", "secret2")
+    vault.add_credential("company_sess1_ssn", "secret1")
+    vault.add_credential("company_sess1_income", "secret2")
     resp = client.get("/mesh/credentials", headers=h)
     assert resp.status_code == 200
     data = resp.json()
     assert data["count"] == 2
-    assert "walter_sess1_ssn" in data["credentials"]
-    assert "walter_sess1_income" in data["credentials"]
+    assert "company_sess1_ssn" in data["credentials"]
+    assert "company_sess1_income" in data["credentials"]
 
 
 def test_ext_credential_exists(ext_api_components):
@@ -1796,8 +1796,8 @@ def test_ext_credential_exists(ext_api_components):
     client = ext_api_components["client"]
     vault = ext_api_components["vault"]
     h = _api_headers(ext_api_components["raw_key"])
-    vault.add_credential("walter_sess1_ssn", "secret")
-    resp = client.get("/mesh/credentials/walter_sess1_ssn/exists", headers=h)
+    vault.add_credential("company_sess1_ssn", "secret")
+    resp = client.get("/mesh/credentials/company_sess1_ssn/exists", headers=h)
     assert resp.status_code == 200
     assert resp.json()["exists"] is True
     resp = client.get("/mesh/credentials/nonexistent/exists", headers=h)
@@ -1856,20 +1856,20 @@ def test_ext_store_and_remove_lifecycle(ext_api_components):
 
     resp = client.post(
         "/mesh/credentials",
-        json={"name": "walter_abc_ssn", "value": "999-88-7777"},
+        json={"name": "company_abc_ssn", "value": "999-88-7777"},
         headers=h,
     )
     assert resp.status_code == 200
-    assert resp.json()["handle"] == "$CRED{walter_abc_ssn}"
+    assert resp.json()["handle"] == "$CRED{company_abc_ssn}"
 
-    resp = client.get("/mesh/credentials/walter_abc_ssn/exists", headers=h)
+    resp = client.get("/mesh/credentials/company_abc_ssn/exists", headers=h)
     assert resp.json()["exists"] is True
 
     resp = client.get("/mesh/credentials", headers=h)
-    assert "walter_abc_ssn" in resp.json()["credentials"]
+    assert "company_abc_ssn" in resp.json()["credentials"]
 
-    resp = client.delete("/mesh/credentials/walter_abc_ssn", headers=h)
+    resp = client.delete("/mesh/credentials/company_abc_ssn", headers=h)
     assert resp.status_code == 200
 
-    resp = client.get("/mesh/credentials/walter_abc_ssn/exists", headers=h)
+    resp = client.get("/mesh/credentials/company_abc_ssn/exists", headers=h)
     assert resp.json()["exists"] is False
