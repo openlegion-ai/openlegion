@@ -2591,22 +2591,22 @@
             <div class="space-y-2 mb-3">
               <template x-for="wh in webhooks" :key="wh.id">
                 <div>
-                  <div class="flex items-center gap-3 text-xs group py-1.5 border-b border-gray-800/40 last:border-0">
-                    <span class="w-2 h-2 rounded-full bg-green-500/50 shrink-0"></span>
-                    <span class="text-gray-300 font-mono font-medium" x-text="wh.name"></span>
-                    <span class="text-gray-600">&rarr;</span>
-                    <span class="text-gray-400" x-text="wh.agent"></span>
-                    <span class="text-gray-400 text-[10px] font-mono flex-1 truncate" x-text="wh.url || ''" :title="wh.url || ''"></span>
+                  <div class="flex items-center gap-3 text-xs group py-2 px-2 -mx-2 rounded-md hover:bg-gray-800/40 transition-colors border-b border-gray-800/30 last:border-0">
+                    <span class="w-2 h-2 rounded-full bg-green-400/70 shrink-0"></span>
+                    <span class="text-gray-200 font-mono font-medium shrink-0" x-text="wh.name"></span>
+                    <span class="text-gray-600 shrink-0">&rarr;</span>
+                    <span class="text-gray-400 shrink-0" x-text="wh.agent"></span>
+                    <span class="text-gray-500 text-[10px] font-mono flex-1 truncate bg-gray-800/50 px-2 py-0.5 rounded" x-text="wh.url || ''" :title="wh.url || ''"></span>
                     <button x-show="wh.url" @click.stop="copyToClipboard(wh.url)"
-                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all" title="Copy URL" aria-label="Copy webhook URL">
+                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0" title="Copy URL" aria-label="Copy webhook URL">
                       <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                     </button>
                     <button @click="editWebhook(wh)"
-                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all">Edit</button>
+                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0">Edit</button>
                     <button @click="testWebhook(wh.id)" :disabled="webhookTesting[wh.id] === true"
-                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-all disabled:opacity-50" x-text="webhookTesting[wh.id] === true ? '...' : 'Test'"></button>
+                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-all disabled:opacity-50 shrink-0" x-text="webhookTesting[wh.id] === true ? '...' : 'Test'"></button>
                     <button @click="deleteWebhook(wh.id, wh.name)"
-                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all">Delete</button>
+                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all shrink-0">Delete</button>
                   </div>
                   <!-- Inline edit form -->
                   <div x-show="editingWebhookId === wh.id" x-transition class="bg-gray-800/30 border border-gray-800 rounded-lg p-3 mt-1 mb-2">
@@ -2637,11 +2637,14 @@
                     </div>
                   </div>
                   <!-- One-time secret display -->
-                  <div x-show="webhookRevealedSecret && webhookRevealedSecretHookId === wh.id" x-transition class="mt-1 mb-2 p-3 bg-amber-950/40 border border-amber-700/40 rounded-lg">
-                    <div class="text-[11px] text-amber-400 font-medium mb-2">HMAC Secret — copy this now, it won't be shown again</div>
+                  <div x-show="webhookRevealedSecret && webhookRevealedSecretHookId === wh.id" x-transition class="mt-2 mb-2 p-3 bg-amber-950 border border-amber-700/60 rounded-lg">
+                    <div class="flex items-center gap-1.5 text-[11px] text-amber-300 font-semibold mb-2.5">
+                      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/></svg>
+                      HMAC Secret — copy this now, it won't be shown again
+                    </div>
                     <div class="flex items-center gap-2">
-                      <code class="text-[12px] text-amber-200 bg-gray-950/80 px-3 py-2 rounded font-mono flex-1 break-all select-all tracking-wide" x-text="webhookRevealedSecret"></code>
-                      <button @click="copyToClipboard(webhookRevealedSecret)" class="text-[10px] px-3 py-1.5 rounded bg-amber-800/40 hover:bg-amber-700/40 text-amber-300 hover:text-amber-200 border border-amber-700/30 transition-colors shrink-0">Copy</button>
+                      <code class="text-[12px] text-amber-100 bg-black/40 px-3 py-2 rounded font-mono flex-1 break-all select-all tracking-wide border border-amber-900/60" x-text="webhookRevealedSecret"></code>
+                      <button @click="copyToClipboard(webhookRevealedSecret)" class="text-[10px] px-3 py-1.5 rounded bg-amber-800/60 hover:bg-amber-700/60 text-amber-200 hover:text-white border border-amber-700/50 transition-colors shrink-0 font-medium">Copy</button>
                       <button @click="webhookRevealedSecret = null; webhookRevealedSecretHookId = null" class="text-[10px] px-2.5 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors shrink-0">Dismiss</button>
                     </div>
                   </div>
