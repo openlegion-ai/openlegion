@@ -2588,6 +2588,10 @@
         <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Webhooks<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Named HTTP endpoints that accept POST requests and route them to agents. Enable "Require HMAC signature" to secure the webhook — your app signs the raw request body with HMAC-SHA256(body, secret) and sends it as the X-Webhook-Signature header. The secret is shown once at creation time; use Regenerate Secret if you missed it.</span></span></div>
         <div class="mb-6">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="mb-3 pb-3 border-b border-gray-800">
+              <div class="text-sm text-gray-200 font-medium mb-1">Incoming Webhooks</div>
+              <div class="text-[12px] text-gray-500 leading-relaxed">Named HTTP endpoints that accept <code class="bg-gray-800 px-1 rounded text-gray-400">POST</code> requests and route payloads to agents. Optionally secure each endpoint with HMAC-SHA256 signature verification.</div>
+            </div>
             <div class="space-y-2 mb-3">
               <template x-for="wh in webhooks" :key="wh.id">
                 <div>
