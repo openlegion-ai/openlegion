@@ -900,9 +900,8 @@ class BrowserManager:
         Steps:
         1. Hover to scroll into view + generate natural mouse movement
         2. Get element bounding box (viewport coords)
-        3. Get browser window X11 position via xdotool getwindowgeometry
-        4. Map viewport coords -> screen coords
-        5. xdotool mousemove + click on the target window
+        3. xdotool mousemove + click using viewport coords with --window
+           (Camoufox runs without chrome, so viewport origin = window origin)
         """
         # 1. Hover first — scrolls into view and generates mouse trail
         await locator.hover(timeout=_CLICK_TIMEOUT_MS)
@@ -912,63 +911,41 @@ class BrowserManager:
         box = await locator.bounding_box()
         if not box:
             raise RuntimeError("Element has no bounding box — not visible")
-        vp_x = box["x"] + box["width"] / 2
-        vp_y = box["y"] + box["height"] / 2
+        vp_x = int(box["x"] + box["width"] / 2)
+        vp_y = int(box["y"] + box["height"] / 2)
 
-        # 3. Get browser window position on the X11 display
+        # 3. Move mouse and click via X11
         wid = inst.x11_wid
         if not wid:
             raise RuntimeError("No X11 window ID — cannot use xdotool click")
 
+        wid_s = str(wid)
         loop = asyncio.get_running_loop()
-        geo_result = await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                ["xdotool", "getwindowgeometry", "--shell", str(wid)],
-                capture_output=True, text=True, timeout=3,
-            ),
-        )
-        if geo_result.returncode != 0:
-            raise RuntimeError(f"xdotool getwindowgeometry failed: {geo_result.stderr}")
 
-        # Parse "X=123\nY=456\nWIDTH=...\nHEIGHT=..."
-        geo = {}
-        for line in geo_result.stdout.strip().split("\n"):
-            if "=" in line:
-                k, v = line.split("=", 1)
-                geo[k.strip()] = int(v.strip())
-
-        win_x = geo.get("X", 0)
-        win_y = geo.get("Y", 0)
-
-        # 4. Map viewport -> screen coords.
-        # Browser chrome (toolbar, tabs) offsets the viewport from the
-        # window top. Camoufox in kiosk/fullscreen mode on our Xvnc has
-        # minimal chrome, but we account for it via the window geometry.
-        # The viewport origin is at the top-left of the content area.
-        # In our setup (Openbox, no decorations, Camoufox fills the window),
-        # the content area starts at the window origin.
-        screen_x = int(win_x + vp_x)
-        screen_y = int(win_y + vp_y)
-
-        # 5. Move mouse and click — targeting the specific window
+        # xdotool mousemove --window makes coords relative to the window.
+        # Camoufox runs without browser chrome (kiosk, no Openbox decorations),
+        # so Playwright viewport coords map directly to window-relative coords.
         logger.debug(
-            "X11 click for '%s': viewport=(%.0f,%.0f) screen=(%d,%d) wid=%d",
-            inst.agent_id, vp_x, vp_y, screen_x, screen_y, wid,
+            "X11 click for '%s': viewport=(%d,%d) wid=%s",
+            inst.agent_id, vp_x, vp_y, wid_s,
         )
-        await loop.run_in_executor(
+        mv_result = await loop.run_in_executor(
             None,
             lambda: subprocess.run(
-                ["xdotool", "mousemove", "--sync", "--window", str(wid),
-                 str(screen_x), str(screen_y)],
+                ["xdotool", "mousemove", "--sync", "--window", wid_s,
+                 str(vp_x), str(vp_y)],
                 capture_output=True, timeout=3,
             ),
         )
+        if mv_result.returncode != 0:
+            raise RuntimeError(
+                f"xdotool mousemove failed (rc={mv_result.returncode})"
+            )
         await asyncio.sleep(random.uniform(0.01, 0.03))
         await loop.run_in_executor(
             None,
             lambda: subprocess.run(
-                ["xdotool", "click", "--clearmodifiers", "--window", str(wid), "1"],
+                ["xdotool", "click", "--clearmodifiers", "--window", wid_s, "1"],
                 capture_output=True, timeout=3,
             ),
         )
@@ -1020,7 +997,7 @@ class BrowserManager:
                     None,
                     lambda c=char: subprocess.run(
                         ["xdotool", "type", "--clearmodifiers", "--window", wid_s,
-                         "--delay", "0", c],
+                         "--delay", "0", "--", c],
                         capture_output=True, timeout=3,
                     ),
                 )
@@ -1038,6 +1015,26 @@ class BrowserManager:
         if not selector:
             return False
         return selector in _X11_TYPE_SELECTORS
+
+    def _is_x11_type_ref(self, inst: CamoufoxInstance, ref: str) -> bool:
+        """Check if a ref targets a textbox on a site with bot-detection.
+
+        ArkoseLabs on X/Twitter checks isTrusted on keydown in composer
+        textboxes.  When the agent types by ref (common path — agents use
+        refs from snapshot, not CSS selectors), we detect the site by URL
+        and apply X11 typing to all textbox-role elements.
+        """
+        info = inst.refs.get(ref)
+        if not info or info.get("role") != "textbox":
+            return False
+        try:
+            host = urlparse(inst.page.url).hostname or ""
+        except Exception:
+            return False
+        return (
+            host == "x.com" or host.endswith(".x.com")
+            or host == "twitter.com" or host.endswith(".twitter.com")
+        )
 
     def _ref_to_x11_selector(self, inst: CamoufoxInstance, ref: str) -> str | None:
         """If a ref's element matches a known X11 click selector, return it."""
@@ -1242,8 +1239,14 @@ class BrowserManager:
                     await inst.page.keyboard.press("Control+a")
                     await asyncio.sleep(0.05)
 
-                # Use X11 input for high-sensitivity text fields (tweet composer)
-                if self._is_x11_type_target(selector) and inst.x11_wid:
+                # Use X11 input for high-sensitivity text fields (tweet composer).
+                # Check both CSS selector match and ref-based detection (agents
+                # commonly type by ref from the snapshot, not by CSS selector).
+                _use_x11_type = inst.x11_wid and (
+                    self._is_x11_type_target(selector)
+                    or (ref and self._is_x11_type_ref(inst, ref))
+                )
+                if _use_x11_type:
                     await self._x11_type(inst, text)
                 elif fast:
                     await self._type_fast(inst.page, text)
