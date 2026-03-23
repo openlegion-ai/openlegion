@@ -27,12 +27,12 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | Mesh host | `src/host/server.py` | FastAPI app on :8420 (started by CLI) |
 | Dashboard | `src/dashboard/server.py` | Mounted as router on mesh host |
 
-### Module Map
+### Module Responsibilities
 
 | Path | Responsibility |
 |---|---|
 | **`src/shared/`** | |
-| `types.py` | Pydantic models — THE cross-component contract. `_generate_id()` helper. `AGENT_ID_RE_PATTERN` unified regex. |
+| `types.py` | Pydantic models — THE cross-component contract (~333 lines, 24 models). `_generate_id()` helper. `AGENT_ID_RE_PATTERN` unified regex. |
 | `utils.py` | `sanitize_for_prompt()`, `setup_logging()`, misc helpers |
 | `trace.py` | Distributed trace-ID generation and propagation |
 | `models.py` | Model cost/context window registry backed by LiteLLM |
@@ -57,6 +57,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `mesh_tool.py` | Blackboard (with `sanitize_for_prompt()`), pub/sub, notify_user, list_agents, artifacts, cron, spawn |
 | `vault_tool.py` | Credential generation without returning actual values |
 | `web_search_tool.py` | DuckDuckGo search (no API key needed) |
+| `image_gen_tool.py` | Image generation via Gemini or OpenAI DALL-E 3, saves output as artifacts |
 | `skill_tool.py` | Self-authoring with AST validation (`_FORBIDDEN_ATTRS` denylist, expanded `_FORBIDDEN_IMPORTS` and `_FORBIDDEN_CALLS` including `type()`) |
 | `subagent_tool.py` | In-process subagents (MAX_DEPTH=2, MAX_CONCURRENT=3, MAX_TTL=600s, DEFAULT_MAX_ITERATIONS=10) |
 | `introspect_tool.py` | Runtime state query (permissions, budget, fleet, cron, health) |
@@ -169,7 +170,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - JSON format in production, human-readable in dev
 
 ### State
-- All SQLite with WAL mode — blackboard, memory, costs, cron, traces. `busy_timeout=30000` for mesh/costs/memory; `busy_timeout=5000` for traces.
+- All SQLite with WAL mode — blackboard, memory, costs, cron, traces. `busy_timeout=30000` for mesh/costs/memory/wallet; `busy_timeout=5000` for traces.
 - No Redis, no external databases
 
 ## Security Boundaries
@@ -177,12 +178,12 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - **Agents never hold API keys.** All LLM/API calls go through mesh credential vault.
 - **No `eval()`/`exec()` on untrusted input.**
 - **Permission checks on all mesh endpoints.** Default deny.
-- **Rate limits on state-mutating mesh endpoints.** API proxy, vault, notify, spawn, cron, wallet all rate-limited.
+- **Rate limits on state-mutating mesh endpoints.** API proxy, vault, notify, spawn, cron, wallet, image_gen all rate-limited.
 - **File path traversal protection.** Two-stage validation (reject `..` before resolution, then walk with symlink resolution via `lstat()`).
 - **Container hardening.** Non-root (UID 1000), `no-new-privileges`, `cap_drop=[ALL]`, `read_only=True`, `tmpfs=/tmp` with `noexec,nosuid`, 384MB memory, 0.15 CPU, `pids_limit=256`.
-- **All untrusted text sanitized** via `sanitize_for_prompt()` before reaching LLM context (including inter-agent messages to daily logs).
+- **All untrusted text sanitized** via `sanitize_for_prompt()` before reaching LLM context (applied across 71 locations including inter-agent messages and daily logs).
 - **VNC proxy blocks agent Bearer tokens.** Dashboard auth required (`ol_session` cookie on HTTP and WebSocket).
-- **AST validation for skill self-authoring.** `_FORBIDDEN_ATTRS` denylist, expanded `_FORBIDDEN_IMPORTS` (os, subprocess, pathlib, io, asyncio, gc, etc.), `_FORBIDDEN_CALLS` (type, vars, dir, memoryview, super).
+- **AST validation for skill self-authoring.** `_FORBIDDEN_ATTRS` denylist, `_FORBIDDEN_IMPORTS` (25 modules including os, subprocess, pathlib, io, asyncio, gc, etc.), `_FORBIDDEN_CALLS` (16 functions including type, vars, dir, memoryview, super, eval, exec, open).
 - **SSRF protection.** DNS pinning + IP blocking including `0.0.0.0` (`ip.is_unspecified`) and CGNAT (`100.64.0.0/10`).
 - **Credential isolation.** Two-tier vault (SYSTEM_*/CRED_*), opaque handles.
 - **Bounded execution.** 20 iterations for tasks, 30 tool rounds for chat, 200 total chat rounds, token budgets per task. Env-var bounds clamped with validation.
@@ -227,10 +228,10 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 3. **Module-level globals.** `_skill_staging` in skills.py (threading lock protected), `_client` in http_tool.py (connection pooling). Avoid adding more.
 4. **Subagent browser concurrency.** Module-level state means subagents shouldn't use browser concurrently.
 5. **VNC proxy creates httpx client per request** — acceptable at current usage levels.
-6. **`src/shared/types.py` is the contract.** Every cross-component message is a Pydantic model here (~8700 lines).
+6. **`src/shared/types.py` is the contract.** Every cross-component message is a Pydantic model here (~333 lines, 24 models).
 7. **LLM tool-calling message roles must alternate.** `user → assistant(tool_calls) → tool(result) → assistant`. `_trim_context` merges summary into first user message to preserve this invariant.
 8. **busy_timeout variance.** Traces uses 5000 while other SQLite connections use 30000.
-9. **Monolithic server files.** `dashboard/server.py` (~2900 lines) and `host/server.py` (~1400 lines) are single function-scoped definitions. Splitting into sub-routers by domain would improve maintainability.
+9. **Monolithic server files.** `dashboard/server.py` (~2940 lines) and `host/server.py` (~1420 lines) are single function-scoped definitions.
 10. **`containers.py` backward-compat alias.** Only consumed by E2E tests.
 
 ## Git Workflow
@@ -256,7 +257,7 @@ pytest tests/test_loop.py -x -v
 - Mock LLM responses, not the loop. See `tests/test_loop.py:_make_loop()`.
 - `AsyncMock` for async methods, SQLite in-memory or `tmp_path` for DB paths.
 - E2E tests skip gracefully without Docker + API key.
-- 59 test files covering all modules.
+- 63 test files covering all modules.
 
 ### Test File Mapping
 
@@ -270,6 +271,7 @@ pytest tests/test_loop.py -x -v
 | `src/agent/skills.py` + builtins | `tests/test_skills.py`, `tests/test_builtins.py`, `tests/test_memory_tools.py` |
 | `src/agent/builtins/vault_tool.py` | `tests/test_vault.py` |
 | `src/agent/builtins/wallet_tool.py` | `tests/test_wallet.py`, `tests/test_wallet_tool.py` |
+| `src/agent/builtins/image_gen_tool.py` | `tests/test_image_gen.py` |
 | `src/agent/builtins/subagent_tool.py` | `tests/test_subagent.py` |
 | `src/agent/builtins/web_search_tool.py` | `tests/test_web_search_tool.py` |
 | `src/agent/mcp_client.py` | `tests/test_mcp_client.py`, `tests/test_mcp_e2e.py` |
@@ -344,5 +346,3 @@ pytest tests/test_loop.py -x -v
 4. Templates auto-discovered by `_load_templates()` in `src/cli/config.py`
 
 ## Review State
-
-(Empty — ready for next review cycle)
