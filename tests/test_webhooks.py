@@ -454,14 +454,16 @@ class TestWebhookDashboardPatch:
 
     def _make_app(self, dispatch_fn=None):
         import os
+        from unittest.mock import MagicMock
+
         from fastapi import FastAPI
-        from src.dashboard.server import create_dashboard_router
+
         from src.dashboard.events import EventBus
+        from src.dashboard.server import create_dashboard_router
         from src.host.costs import CostTracker
+        from src.host.health import HealthMonitor
         from src.host.mesh import Blackboard
         from src.host.traces import TraceStore
-        from src.host.health import HealthMonitor
-        from unittest.mock import MagicMock
 
         tmp = self._tmpdir
         bb = Blackboard(db_path=os.path.join(tmp, "bb.db"))
@@ -563,14 +565,16 @@ class TestWebhookDashboardPatch:
 
     def test_patch_via_dashboard_no_manager(self):
         import os
+        from unittest.mock import MagicMock
+
         from fastapi import FastAPI
-        from src.dashboard.server import create_dashboard_router
+
         from src.dashboard.events import EventBus
+        from src.dashboard.server import create_dashboard_router
         from src.host.costs import CostTracker
+        from src.host.health import HealthMonitor
         from src.host.mesh import Blackboard
         from src.host.traces import TraceStore
-        from src.host.health import HealthMonitor
-        from unittest.mock import MagicMock
 
         tmp = self._tmpdir
         bb = Blackboard(db_path=os.path.join(tmp, "bb2.db"))
