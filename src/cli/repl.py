@@ -1011,6 +1011,16 @@ class REPLSession:
         if is_llm_provider:
             is_system = True
         else:
+            click.echo(
+                "\n  Credential tiers:\n"
+                "  Agent  — agents can request this key by name, granted via their\n"
+                "           allowed_credentials permission. The vault returns an opaque\n"
+                "           handle; the raw value is never exposed to the agent.\n"
+                "           Use for: search APIs, CRM tools, data providers, etc.\n"
+                "  System — held exclusively by the mesh host. No agent can read or\n"
+                "           reference it. Use for infrastructure tokens or secrets\n"
+                "           that agents should never touch.\n"
+            )
             is_system = click.confirm(
                 f"  Store '{service}' as system-level? (No = agent-level)", default=False,
             )
