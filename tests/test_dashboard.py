@@ -3158,11 +3158,10 @@ class TestDashboardUploadEnv:
     def test_system_tier_auto_detected(self):
         """LLM provider keys are auto-detected as system tier."""
         vault = self.components["credential_vault"]
-        from src.host.credentials import is_system_credential
         resp = self._upload("OPENAI_API_KEY=sk-test\n")
         assert resp.status_code == 200
         call_kwargs = vault.add_credential.call_args[1]
-        assert call_kwargs.get("system") == is_system_credential("OPENAI_API_KEY")
+        assert call_kwargs.get("system") is True
 
     def test_no_vault_returns_503(self):
         """Missing credential vault returns 503."""
@@ -3177,6 +3176,28 @@ class TestDashboardUploadEnv:
         resp = self._upload("TOKEN=abc=def=ghi\n")
         assert resp.status_code == 200
         assert vault.add_credential.call_args[0][1] == "abc=def=ghi"
+
+    def test_quoted_values_unquoted(self):
+        """Surrounding quotes are stripped from values."""
+        vault = self.components["credential_vault"]
+        resp = self._upload('DOUBLE="hello"\nSINGLE=\'world\'\n')
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 2
+        assert vault.add_credential.call_args_list[0][0][1] == "hello"
+        assert vault.add_credential.call_args_list[1][0][1] == "world"
+
+    def test_export_prefix_stripped(self):
+        """Lines starting with 'export ' are handled correctly."""
+        resp = self._upload("export MY_KEY=secret123\n")
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 1
+        assert "MY_KEY" in resp.json()["keys"]
+
+    def test_non_utf8_rejected(self):
+        """Non-UTF-8 files are rejected with 400."""
+        resp = self._upload(b"\xff\xfe KEY=value\n")
+        assert resp.status_code == 400
+        assert "UTF-8" in resp.json()["detail"]
 
     def test_transport_error_502(self):
         self.components["transport"].request = AsyncMock(

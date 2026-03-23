@@ -34,6 +34,7 @@ logger = setup_logging("dashboard.server")
 _HERE = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _HERE / "templates"
 _STATIC_DIR = _HERE / "static"
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _get_builtin_tool_names() -> frozenset[str]:
@@ -1341,7 +1342,7 @@ def create_dashboard_router(
         return {"stored": True, "service": service, "tier": tier}
 
     @api_router.post("/api/credentials/upload-env")
-    async def api_upload_env(file: UploadFile = File(...)) -> dict:
+    async def api_upload_env(request: Request, file: UploadFile = File(...)) -> dict:
         """Bulk-import credentials from an uploaded .env file.
 
         Parses KEY=VALUE pairs (skips comments and blank lines) and stores each
@@ -1351,7 +1352,15 @@ def create_dashboard_router(
         if credential_vault is None:
             raise HTTPException(status_code=503, detail="Credential vault not available")
 
-        content = await file.read()
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > 64 * 1024:
+                    raise HTTPException(status_code=413, detail="File too large (max 64KB)")
+            except ValueError:
+                pass  # Malformed header; body-length check below is authoritative
+
+        content = await file.read(65537)  # 64*1024 + 1
         if len(content) > 64 * 1024:
             raise HTTPException(status_code=413, detail="File too large (max 64KB)")
         if not content.strip():
@@ -1371,21 +1380,28 @@ def create_dashboard_router(
             line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
+            if line.startswith("export "):
+                line = line[7:]
             if "=" not in line:
                 parse_errors.append(f"Line {line_num}: missing '=' separator")
                 continue
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip()
-            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            if not _ENV_KEY_RE.match(key):
                 parse_errors.append(f"Line {line_num}: invalid key name '{key}'")
                 continue
             if not value:
                 parse_errors.append(f"Line {line_num}: empty value for key '{key}'")
                 continue
             is_system = is_system_credential(key)
-            credential_vault.add_credential(key, value, system=is_system)
-            loaded_keys.append(key)
+            try:
+                credential_vault.add_credential(key, value, system=is_system)
+                loaded_keys.append(key)
+            except Exception as exc:
+                parse_errors.append(f"Line {line_num}: failed to store '{key}': {exc}")
 
         if not loaded_keys and parse_errors:
             raise HTTPException(

@@ -21,6 +21,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "websockets>=13.0",
     "pypdf>=4.0",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
