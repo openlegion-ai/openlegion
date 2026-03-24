@@ -1356,6 +1356,148 @@ def test_cleanup_removes_watchers(tmp_path):
     bb.close()
 
 
+def test_cleanup_agent_full(tmp_path):
+    """cleanup_agent removes watchers, pubsub subs, lanes, and cron jobs."""
+    from unittest.mock import MagicMock
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    # Create mock lane_manager and cron_scheduler
+    lane_manager = MagicMock()
+    cron_scheduler = MagicMock()
+    cron_scheduler.remove_agent_jobs.return_value = 2
+
+    app = create_mesh_app(
+        bb, pubsub, router, perms,
+        lane_manager=lane_manager,
+        cron_scheduler=cron_scheduler,
+    )
+
+    # Set up state to clean
+    bb.add_watch("agent1", "tasks/*")
+    pubsub.subscribe("topic1", "agent1")
+    pubsub.subscribe("topic2", "agent1")
+
+    assert "agent1" in bb.get_watchers_for_key("tasks/foo")
+    assert "agent1" in pubsub.get_subscribers("topic1")
+
+    # Trigger full cleanup
+    app.cleanup_agent("agent1")
+
+    # All state should be cleaned
+    assert "agent1" not in bb.get_watchers_for_key("tasks/foo")
+    assert "agent1" not in pubsub.get_subscribers("topic1")
+    assert "agent1" not in pubsub.get_subscribers("topic2")
+    lane_manager.remove_lane.assert_called_once_with("agent1")
+    cron_scheduler.remove_agent_jobs.assert_called_once_with("agent1")
+
+    bb.close()
+
+
+def test_delete_blackboard_entry(tmp_path):
+    """DELETE /mesh/blackboard/{key} removes the entry."""
+    from starlette.testclient import TestClient
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {"agent1": AgentPermissions(
+        agent_id="agent1", blackboard_read=["*"], blackboard_write=["*"],
+    )}
+    router = MessageRouter(permissions=perms, agent_registry={})
+    app = create_mesh_app(bb, pubsub, router, perms)
+    client = TestClient(app)
+
+    # Write an entry
+    client.put("/mesh/blackboard/test/key1", params={"agent_id": "agent1"}, json={"data": "hello"})
+    assert bb.read("test/key1") is not None
+
+    # Delete it
+    resp = client.delete("/mesh/blackboard/test/key1", params={"agent_id": "agent1"})
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] is True
+
+    # Verify it's gone
+    assert bb.read("test/key1") is None
+
+    bb.close()
+
+
+def test_delete_rejects_history_namespace(tmp_path):
+    """DELETE endpoint blocks deletion from history/ namespace, including project-scoped."""
+    from starlette.testclient import TestClient
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {"agent1": AgentPermissions(
+        agent_id="agent1", blackboard_read=["*"], blackboard_write=["*"],
+    )}
+    router = MessageRouter(permissions=perms, agent_registry={})
+    app = create_mesh_app(bb, pubsub, router, perms)
+    client = TestClient(app)
+
+    # Direct history key
+    resp = client.delete("/mesh/blackboard/history/item1", params={"agent_id": "agent1"})
+    assert resp.status_code == 400
+    assert "history" in resp.json()["detail"].lower()
+
+    # Project-scoped history key
+    resp = client.delete(
+        "/mesh/blackboard/projects/myproject/history/item1",
+        params={"agent_id": "agent1"},
+    )
+    assert resp.status_code == 400
+    assert "history" in resp.json()["detail"].lower()
+
+    bb.close()
+
+
+def test_write_blackboard_ttl_validation(tmp_path):
+    """PUT /mesh/blackboard/{key} rejects non-positive TTL."""
+    from starlette.testclient import TestClient
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {"agent1": AgentPermissions(
+        agent_id="agent1", blackboard_read=["*"], blackboard_write=["*"],
+    )}
+    router = MessageRouter(permissions=perms, agent_registry={})
+    app = create_mesh_app(bb, pubsub, router, perms)
+    client = TestClient(app)
+
+    # Zero TTL should be rejected
+    resp = client.put(
+        "/mesh/blackboard/test/key1",
+        params={"agent_id": "agent1", "ttl": "0"},
+        json={"data": "hello"},
+    )
+    assert resp.status_code == 400
+
+    # Negative TTL should be rejected
+    resp = client.put(
+        "/mesh/blackboard/test/key1",
+        params={"agent_id": "agent1", "ttl": "-1"},
+        json={"data": "hello"},
+    )
+    assert resp.status_code == 400
+
+    # Positive TTL should work
+    resp = client.put(
+        "/mesh/blackboard/test/key1",
+        params={"agent_id": "agent1", "ttl": "3600"},
+        json={"data": "hello"},
+    )
+    assert resp.status_code == 200
+
+    bb.close()
+
+
 # ── VNC reverse proxy tests ─────────────────────────────────────────
 
 

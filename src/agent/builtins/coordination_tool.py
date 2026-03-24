@@ -287,8 +287,8 @@ async def complete_task(task_key: str, *, mesh_client=None) -> dict:
             if output_key:
                 try:
                     await mesh_client.delete_blackboard(output_key)
-                except Exception:
-                    pass  # Output may already be expired or missing
+                except Exception as exc:
+                    logger.debug("Output cleanup for %s skipped: %s", output_key, exc)
     except Exception as e:
         return {"error": f"Failed to complete task: {e}"}
 
