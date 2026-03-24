@@ -1890,27 +1890,27 @@ class TestStandaloneBlackboardGuards:
         return mc
 
     @pytest.mark.asyncio
-    async def test_read_shared_state_blocked_for_standalone(self):
-        from src.agent.builtins.mesh_tool import read_shared_state
-        result = await read_shared_state(key="foo", mesh_client=self._standalone_client())
+    async def test_read_blackboard_blocked_for_standalone(self):
+        from src.agent.builtins.mesh_tool import read_blackboard
+        result = await read_blackboard(key="foo", mesh_client=self._standalone_client())
         assert "error" in result
-        assert "not assigned to any project" in result["error"]
+        assert "not assigned to a project" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_write_shared_state_blocked_for_standalone(self):
-        from src.agent.builtins.mesh_tool import write_shared_state
-        result = await write_shared_state(
+    async def test_write_blackboard_blocked_for_standalone(self):
+        from src.agent.builtins.mesh_tool import write_blackboard
+        result = await write_blackboard(
             key="foo", value="bar", mesh_client=self._standalone_client(),
         )
         assert "error" in result
-        assert "not assigned to any project" in result["error"]
+        assert "not assigned to a project" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_list_shared_state_blocked_for_standalone(self):
-        from src.agent.builtins.mesh_tool import list_shared_state
-        result = await list_shared_state(prefix="", mesh_client=self._standalone_client())
+    async def test_list_blackboard_blocked_for_standalone(self):
+        from src.agent.builtins.mesh_tool import list_blackboard
+        result = await list_blackboard(prefix="", mesh_client=self._standalone_client())
         assert "error" in result
-        assert "not assigned to any project" in result["error"]
+        assert "not assigned to a project" in result["error"]
 
     @pytest.mark.asyncio
     async def test_save_artifact_skips_blackboard_for_standalone(self, tmp_path):
@@ -1929,32 +1929,32 @@ class TestStandaloneBlackboardGuards:
         mc.write_blackboard.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_read_shared_state_allowed_for_project_agent(self):
+    async def test_read_blackboard_allowed_for_project_agent(self):
         """Project agents are NOT blocked by the standalone guard."""
-        from src.agent.builtins.mesh_tool import read_shared_state
+        from src.agent.builtins.mesh_tool import read_blackboard
         mc = self._project_client()
         mc.read_blackboard = AsyncMock(return_value={"key": "foo", "value": "bar"})
-        result = await read_shared_state(key="foo", mesh_client=mc)
+        result = await read_blackboard(key="foo", mesh_client=mc)
         assert "not assigned" not in result.get("error", "")
         mc.read_blackboard.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_write_shared_state_allowed_for_project_agent(self):
+    async def test_write_blackboard_allowed_for_project_agent(self):
         """Project agents can write to blackboard."""
-        from src.agent.builtins.mesh_tool import write_shared_state
+        from src.agent.builtins.mesh_tool import write_blackboard
         mc = self._project_client()
         mc.write_blackboard = AsyncMock(return_value=True)
-        result = await write_shared_state(key="k", value="v", mesh_client=mc)
+        result = await write_blackboard(key="k", value="v", mesh_client=mc)
         assert "not assigned" not in result.get("error", "")
         mc.write_blackboard.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_list_shared_state_allowed_for_project_agent(self):
+    async def test_list_blackboard_allowed_for_project_agent(self):
         """Project agents can list blackboard entries."""
-        from src.agent.builtins.mesh_tool import list_shared_state
+        from src.agent.builtins.mesh_tool import list_blackboard
         mc = self._project_client()
         mc.list_blackboard = AsyncMock(return_value=[])
-        result = await list_shared_state(prefix="", mesh_client=mc)
+        result = await list_blackboard(prefix="", mesh_client=mc)
         assert "not assigned" not in result.get("error", "")
         mc.list_blackboard.assert_awaited_once()
 
@@ -1973,44 +1973,44 @@ class TestBlackboardSanitization:
     @pytest.mark.asyncio
     async def test_read_sanitizes_nested_dict(self):
         """Strings inside nested dicts are sanitized."""
-        from src.agent.builtins.mesh_tool import read_shared_state
+        from src.agent.builtins.mesh_tool import read_blackboard
         mc = self._project_client()
         # \u200b is a zero-width space — should be stripped by sanitize_for_prompt
         mc.read_blackboard = AsyncMock(return_value={
             "key": "k",
             "value": {"nested": {"deep": "hello\u200bworld"}},
         })
-        result = await read_shared_state(key="k", mesh_client=mc)
+        result = await read_blackboard(key="k", mesh_client=mc)
         assert result["value"]["nested"]["deep"] == "helloworld"
 
     @pytest.mark.asyncio
     async def test_read_sanitizes_list_values(self):
         """Strings inside lists are sanitized."""
-        from src.agent.builtins.mesh_tool import read_shared_state
+        from src.agent.builtins.mesh_tool import read_blackboard
         mc = self._project_client()
         mc.read_blackboard = AsyncMock(return_value={
             "key": "k",
             "value": ["clean", "has\u200binvisible"],
         })
-        result = await read_shared_state(key="k", mesh_client=mc)
+        result = await read_blackboard(key="k", mesh_client=mc)
         assert result["value"] == ["clean", "hasinvisible"]
 
     @pytest.mark.asyncio
     async def test_read_sanitizes_plain_string(self):
         """Plain string values are sanitized (existing behavior)."""
-        from src.agent.builtins.mesh_tool import read_shared_state
+        from src.agent.builtins.mesh_tool import read_blackboard
         mc = self._project_client()
         mc.read_blackboard = AsyncMock(return_value={
             "key": "k",
             "value": "text\u200bhere",
         })
-        result = await read_shared_state(key="k", mesh_client=mc)
+        result = await read_blackboard(key="k", mesh_client=mc)
         assert result["value"] == "texthere"
 
     @pytest.mark.asyncio
     async def test_list_preview_sanitized(self):
         """List previews are sanitized."""
-        from src.agent.builtins.mesh_tool import list_shared_state
+        from src.agent.builtins.mesh_tool import list_blackboard
         mc = self._project_client()
         mc.list_blackboard = AsyncMock(return_value=[{
             "key": "k",
@@ -2018,20 +2018,20 @@ class TestBlackboardSanitization:
             "updated_at": "2026-01-01",
             "value": {"data": "has\u200binvisible"},
         }])
-        result = await list_shared_state(prefix="", mesh_client=mc)
+        result = await list_blackboard(prefix="", mesh_client=mc)
         preview = result["entries"][0]["value_preview"]
         assert "\u200b" not in preview
 
     @pytest.mark.asyncio
     async def test_read_sanitizes_dict_keys(self):
         """Dict keys with invisible chars are sanitized."""
-        from src.agent.builtins.mesh_tool import read_shared_state
+        from src.agent.builtins.mesh_tool import read_blackboard
         mc = self._project_client()
         mc.read_blackboard = AsyncMock(return_value={
             "key": "k",
             "value": {"inject\u200bed": "data"},
         })
-        result = await read_shared_state(key="k", mesh_client=mc)
+        result = await read_blackboard(key="k", mesh_client=mc)
         keys = list(result["value"].keys())
         assert keys == ["injected"]
 

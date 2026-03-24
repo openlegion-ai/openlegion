@@ -718,7 +718,7 @@ Teammates read your status to decide whether to wait or proceed.
 - `output/{agent_id}/{name}` — completed work products
 - `tasks/{agent_id}/{task_id}` — pending work inbox
 
-You can still use the lower-level tools (read_shared_state, write_shared_state,
+You can still use the lower-level tools (read_blackboard, write_blackboard,
 publish_event) for custom patterns, but prefer the coordination tools above
 for inter-agent workflows.
 """

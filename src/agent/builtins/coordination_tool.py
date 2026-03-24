@@ -23,8 +23,8 @@ logger = setup_logging("agent.builtins.coordination_tool")
 #   tasks/{agent_id}/{id}     — inbox (pending work)
 
 _STANDALONE_ERROR = (
-    "Coordination tools are not available — this agent is not assigned to "
-    "any project. Use memory_save/memory_search for private storage."
+    "Not available — this agent is not assigned to a project. "
+    "Use memory_save/memory_search for private storage."
 )
 
 _HANDOFF_TTL = 86_400  # 24 hours — safety net for unprocessed handoffs
@@ -145,7 +145,7 @@ async def hand_off(
         "- At the start of a session\n"
         "- During heartbeats\n"
         "- When you receive a coordination notification\n\n"
-        "After reading a task, use read_shared_state to fetch the full "
+        "After reading a task, use read_blackboard to fetch the full "
         "output data via the output_key. When done processing, call "
         "complete_task to mark it finished so it won't appear again."
     ),

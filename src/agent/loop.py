@@ -107,7 +107,7 @@ _heartbeat_mode: ContextVar[bool] = ContextVar("_heartbeat_mode", default=False)
 
 # Tools that require a project blackboard — excluded for standalone agents.
 _BLACKBOARD_TOOLS = frozenset({
-    "read_shared_state", "write_shared_state", "list_shared_state",
+    "read_blackboard", "write_blackboard", "list_blackboard",
     "publish_event", "subscribe_event", "watch_blackboard",
     "claim_task", "hand_off", "check_inbox", "update_status", "complete_task",
 })

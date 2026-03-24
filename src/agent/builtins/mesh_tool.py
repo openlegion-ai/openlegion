@@ -75,7 +75,7 @@ async def list_agents(*, mesh_client=None) -> dict:
 
 
 _STANDALONE_ERROR = (
-    "Blackboard is not available — this agent is not assigned to any project. "
+    "Not available — this agent is not assigned to a project. "
     "Use memory_save/memory_search for private storage."
 )
 
@@ -102,11 +102,11 @@ def _sanitize_value(value):
 
 
 @skill(
-    name="read_shared_state",
+    name="read_blackboard",
     description=(
         "Read a value from the shared blackboard. Returns the full value "
         "another agent wrote, or null if the key doesn't exist. Use "
-        "list_shared_state first if you don't know the exact key."
+        "list_blackboard first if you don't know the exact key."
     ),
     parameters={
         "key": {
@@ -118,7 +118,7 @@ def _sanitize_value(value):
         },
     },
 )
-async def read_shared_state(key: str, *, mesh_client=None) -> dict:
+async def read_blackboard(key: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     if mesh_client.is_standalone:
@@ -134,7 +134,7 @@ async def read_shared_state(key: str, *, mesh_client=None) -> dict:
 
 
 @skill(
-    name="write_shared_state",
+    name="write_blackboard",
     description=(
         "Write a value to the shared blackboard for OTHER AGENTS to read. "
         "The blackboard is persistent agent-to-agent storage — do NOT use "
@@ -143,7 +143,7 @@ async def read_shared_state(key: str, *, mesh_client=None) -> dict:
         "- hand_off() for sending work to a teammate (writes to tasks/ and output/)\n"
         "- update_status() for broadcasting your state (writes to status/)\n"
         "- complete_task() for marking tasks done\n\n"
-        "Use write_shared_state for custom data that doesn't fit the "
+        "Use write_blackboard for custom data that doesn't fit the "
         "coordination protocol (e.g. research/, drafts/, analysis/).\n"
         "- artifacts/ — managed by save_artifact, don't write directly\n\n"
         "Values must be JSON-serializable."
@@ -162,7 +162,7 @@ async def read_shared_state(key: str, *, mesh_client=None) -> dict:
         },
     },
 )
-async def write_shared_state(key: str, value: str, *, mesh_client=None) -> dict:
+async def write_blackboard(key: str, value: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     if mesh_client.is_standalone:
@@ -176,11 +176,11 @@ async def write_shared_state(key: str, value: str, *, mesh_client=None) -> dict:
 
 
 @skill(
-    name="list_shared_state",
+    name="list_blackboard",
     description=(
         "Discover what's on the shared blackboard by listing entries matching a key "
         "prefix. Returns key names, authors, timestamps, and value previews — but "
-        "NOT full values (use read_shared_state for that). Use prefix='' to see "
+        "NOT full values (use read_blackboard for that). Use prefix='' to see "
         "everything, or a domain prefix like 'research/' or 'status/' to filter."
     ),
     parameters={
@@ -193,7 +193,7 @@ async def write_shared_state(key: str, value: str, *, mesh_client=None) -> dict:
         },
     },
 )
-async def list_shared_state(prefix: str, *, mesh_client=None) -> dict:
+async def list_blackboard(prefix: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     if mesh_client.is_standalone:
@@ -222,7 +222,7 @@ async def list_shared_state(prefix: str, *, mesh_client=None) -> dict:
         "agents receive it immediately as a steer message — no polling needed. "
         "Use this for ephemeral notifications (e.g. 'research_complete', "
         "'build_failed'). The event is NOT stored — if no one is subscribed, "
-        "it's lost. For data that should persist, use write_shared_state instead."
+        "it's lost. For data that should persist, use write_blackboard instead."
     ),
     parameters={
         "topic": {

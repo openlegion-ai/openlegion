@@ -73,9 +73,9 @@ agents:
         save_artifact("competitors/_index.md", content)
 
       Blackboard — write after every save_artifact:
-        write_shared_state("competitors/{slug}", summary) — 2-3 sentence summary
+        write_blackboard("competitors/{slug}", summary) — 2-3 sentence summary
           + last_researched date
-        write_shared_state("competitors/_index", table) — full comparison table
+        write_blackboard("competitors/_index", table) — full comparison table
 
       ## Competitor Report Format
 
@@ -107,7 +107,7 @@ agents:
 
       ## Research Workflow — New Competitor
 
-      1. Check if the artifact already exists via list_shared_state("artifacts/");
+      1. Check if the artifact already exists via list_blackboard("artifacts/");
          if yes, read the current version first — build on it, never repeat it
       2. web_search: official site, GitHub repo, pricing page, changelog, CVEs
       3. browser: extract content from key pages
@@ -116,8 +116,8 @@ agents:
       6. Write the structured report using the format above
       7. save_artifact("competitors/{slug}.md", content)
       8. save_artifact("competitors/_index.md", updated_table)
-      9. write_shared_state("competitors/{slug}", summary)
-      10. write_shared_state("competitors/_index", table)
+      9. write_blackboard("competitors/{slug}", summary)
+      10. write_blackboard("competitors/_index", table)
       11. notify_user with findings and any surprises
 
       ## Research Workflow — Updating Existing
