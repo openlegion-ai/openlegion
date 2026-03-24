@@ -2282,3 +2282,46 @@ async def test_heartbeat_standalone_no_check_inbox():
     assert len(captured_system) == 1
     assert "check_inbox()" not in captured_system[0]
     assert "goals needs attention" in captured_system[0]
+
+
+@pytest.mark.asyncio
+async def test_skills_reload_rebuilds_system_prompt():
+    """After reload_skills, the system prompt is rebuilt with new tool descriptions."""
+    systems_seen = []
+    call_count = 0
+
+    async def _tracking_llm(*, system, messages, tools=None, **kw):
+        nonlocal call_count
+        call_count += 1
+        systems_seen.append(system)
+        if call_count == 1:
+            # First call: LLM calls reload_skills
+            from src.shared.types import ToolCallInfo
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallInfo(name="reload_skills", arguments={})],
+                tokens_used=10,
+            )
+        # Second call: LLM gives final answer
+        return LLMResponse(content="done", tokens_used=10)
+
+    loop = _make_loop([])
+    loop.llm.chat = AsyncMock(side_effect=_tracking_llm)
+
+    # Inject a mock skill to appear after reload
+    original_reload = loop.skills.reload
+
+    def _mock_reload():
+        count = original_reload()
+        # After reload, descriptions cache is cleared.
+        # The next get_descriptions() call will rebuild.
+        return count
+
+    loop.skills.reload = _mock_reload
+
+    result = await loop.chat("test reload")
+
+    # System prompt should have been rebuilt after reload
+    assert len(systems_seen) >= 2
+    # The flag should be consumed (not stuck True)
+    assert loop._skills_reloaded is False

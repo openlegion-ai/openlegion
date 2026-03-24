@@ -235,6 +235,7 @@ class AgentLoop:
         self._excluded_tools: frozenset[str] | None = (
             _BLACKBOARD_TOOLS if mesh_client.is_standalone else None
         )
+        self._skills_reloaded: bool = False
 
     async def _fetch_fleet_roster(self) -> list[dict]:
         """Fetch and cache the fleet roster from the mesh (TTL: 10 min)."""
@@ -532,6 +533,13 @@ class AgentLoop:
                             "content": result_str,
                         })
 
+                    # Rebuild system prompt after skill hot-reload
+                    if self._skills_reloaded:
+                        self._skills_reloaded = False
+                        system_prompt = self._build_system_prompt(
+                            assignment, introspect_data=introspect_data,
+                        )
+
                     if self.context_manager:
                         try:
                             messages, _ = await self.context_manager.maybe_compact(system_prompt, messages)
@@ -795,9 +803,14 @@ class AgentLoop:
         )
 
     def _maybe_reload_skills(self, result: Any) -> None:
-        """If a tool returned reload_requested, hot-reload the skill registry."""
+        """If a tool returned reload_requested, hot-reload the skill registry.
+
+        Sets ``_skills_reloaded`` so callers can rebuild system prompts
+        with updated tool descriptions.
+        """
         if isinstance(result, dict) and result.get("reload_requested"):
             count = self.skills.reload()
+            self._skills_reloaded = True
             logger.info(f"Hot-reloaded skills: {count} available")
 
     @staticmethod
@@ -1201,6 +1214,10 @@ class AgentLoop:
                         "tool_call_id": tool_call_entries[i]["id"],
                         "content": result_str,
                     })
+
+                # Clear reload flag if set (heartbeat rarely creates skills,
+                # but the flag must be consumed to avoid stale state).
+                self._skills_reloaded = False
 
                 # Trim if context grows large
                 messages = self._trim_context(messages, max_tokens=_FALLBACK_MAX_TOKENS)
@@ -1752,6 +1769,16 @@ class AgentLoop:
                             })
                 self._chat_total_rounds += 1
 
+                # If skills were hot-reloaded during tool execution,
+                # rebuild the system prompt so tool descriptions stay in sync.
+                if self._skills_reloaded:
+                    self._skills_reloaded = False
+                    system = self._build_chat_system_prompt(
+                        goals=self._goals_cache if self._goals_cache is not self._GOALS_NOT_FETCHED else None,
+                        fleet_roster=self._fleet_roster,
+                        introspect_data=self._introspect_cache,
+                    )
+
                 if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
                     if self._chat_auto_continues >= self._MAX_SESSION_CONTINUES:
                         logger.warning("Chat session hit absolute limit (%d continues)", self._MAX_SESSION_CONTINUES)
@@ -2178,6 +2205,15 @@ class AgentLoop:
                                 "output": {"error": str(tool_err)},
                             }
                 self._chat_total_rounds += 1
+
+                # Rebuild system prompt after skill hot-reload
+                if self._skills_reloaded:
+                    self._skills_reloaded = False
+                    system = self._build_chat_system_prompt(
+                        goals=self._goals_cache if self._goals_cache is not self._GOALS_NOT_FETCHED else None,
+                        fleet_roster=self._fleet_roster,
+                        introspect_data=self._introspect_cache,
+                    )
 
                 if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
                     if self._chat_auto_continues >= self._MAX_SESSION_CONTINUES:
