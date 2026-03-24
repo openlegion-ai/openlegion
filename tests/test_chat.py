@@ -33,6 +33,7 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None) -> AgentLoop:
 
     mesh_client = MagicMock()
     mesh_client.send_system_message = AsyncMock(return_value={})
+    mesh_client.register = AsyncMock(return_value=None)
 
     return AgentLoop(
         agent_id="test_agent",
