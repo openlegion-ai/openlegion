@@ -87,6 +87,103 @@ class TestHandOff:
         assert "not assigned" in result["error"]
 
 
+    @pytest.mark.asyncio
+    async def test_hand_off_invalid_json_data_falls_back(self):
+        """Invalid JSON in data param is wrapped as {"text": ...}."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+
+        result = await hand_off(
+            to="analyst",
+            summary="research done",
+            data="not valid json {{{",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        # Output should have been written with the fallback wrapper
+        output_call = mc.write_blackboard.call_args_list[0]
+        assert output_call[0][1] == {"text": "not valid json {{{"}
+
+    @pytest.mark.asyncio
+    async def test_hand_off_task_write_fails_reports_error(self):
+        """When task write fails after output write, error is returned."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        # First write (output) succeeds, second write (task) fails
+        mc.write_blackboard.side_effect = [
+            {"version": 1},
+            Exception("connection lost"),
+        ]
+
+        result = await hand_off(
+            to="analyst",
+            summary="research done",
+            data='{"sources": [1]}',
+            mesh_client=mc,
+        )
+
+        assert "error" in result
+        assert "Failed to create task" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_hand_off_invalid_agent_id_format(self):
+        """Agent IDs with path traversal characters are rejected."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client()
+
+        result = await hand_off(
+            to="../admin",
+            summary="malicious",
+            mesh_client=mc,
+        )
+
+        assert "error" in result
+        assert "Invalid agent ID" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_hand_off_sanitizes_summary(self):
+        """Summary is sanitized before writing to blackboard."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+
+        # Unicode zero-width chars should be stripped by sanitize_for_prompt
+        result = await hand_off(
+            to="analyst",
+            summary="clean\u200btext",  # zero-width space
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        # The task record should have sanitized summary
+        task_call = mc.write_blackboard.call_args_list[0]
+        written_summary = task_call[0][1]["summary"]
+        assert "\u200b" not in written_summary
+
+    @pytest.mark.asyncio
+    async def test_hand_off_list_agents_fails_proceeds(self):
+        """When list_agents fails but ID format is valid, hand_off proceeds."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.side_effect = Exception("mesh timeout")
+
+        result = await hand_off(
+            to="analyst",
+            summary="research done",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+
+
 class TestCheckInbox:
     @pytest.mark.asyncio
     async def test_check_inbox_with_tasks(self):
@@ -138,6 +235,35 @@ class TestCheckInbox:
         assert result["tasks"] == []
 
 
+    @pytest.mark.asyncio
+    async def test_check_inbox_list_blackboard_fails(self):
+        """check_inbox returns error when list_blackboard fails."""
+        from src.agent.builtins.coordination_tool import check_inbox
+
+        mc = _make_mesh_client(agent_id="analyst")
+        mc.list_blackboard.side_effect = Exception("mesh down")
+
+        result = await check_inbox(mesh_client=mc)
+
+        assert "error" in result
+        assert "Failed to check inbox" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_check_inbox_malformed_string_value(self):
+        """check_inbox handles entries with string values that aren't JSON."""
+        from src.agent.builtins.coordination_tool import check_inbox
+
+        mc = _make_mesh_client(agent_id="analyst")
+        mc.list_blackboard.return_value = [
+            {"key": "tasks/analyst/ho_1", "value": "just a string"},
+        ]
+
+        result = await check_inbox(mesh_client=mc)
+
+        assert result["count"] == 1
+        assert result["tasks"][0]["from"] == "unknown"
+
+
 class TestUpdateStatus:
     @pytest.mark.asyncio
     async def test_update_status(self):
@@ -162,6 +288,33 @@ class TestUpdateStatus:
         assert written_data["state"] == "working"
         assert written_data["summary"] == "implementing login"
         assert "ts" in written_data
+
+    @pytest.mark.asyncio
+    async def test_update_status_write_fails(self):
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="engineer")
+        mc.write_blackboard.side_effect = Exception("mesh down")
+
+        result = await update_status(state="working", summary="test", mesh_client=mc)
+
+        assert "error" in result
+        assert "Failed to update status" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_update_status_sanitizes_summary(self):
+        from src.agent.builtins.coordination_tool import update_status
+
+        mc = _make_mesh_client(agent_id="engineer")
+
+        await update_status(
+            state="working",
+            summary="doing\u200bthings",  # zero-width space
+            mesh_client=mc,
+        )
+
+        written_data = mc.write_blackboard.call_args[0][1]
+        assert "\u200b" not in written_data["summary"]
 
     @pytest.mark.asyncio
     async def test_update_status_standalone(self):

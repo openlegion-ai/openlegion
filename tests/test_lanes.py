@@ -210,6 +210,20 @@ async def test_steer_wakeup_rate_window_resets():
     assert dispatch.await_count == 11
 
 
+@pytest.mark.asyncio
+async def test_steer_fn_exception_falls_back_to_followup():
+    """When steer_fn raises an exception, falls back to followup dispatch."""
+    dispatch = AsyncMock(return_value="dispatched")
+    steer = AsyncMock(side_effect=Exception("connection refused"))
+    lm = LaneManager(dispatch_fn=dispatch, steer_fn=steer)
+
+    result = await lm.enqueue("agent1", "important msg", mode="steer")
+
+    steer.assert_awaited_once()
+    dispatch.assert_awaited_once()
+    assert result == "dispatched"
+
+
 # ── Collect mode ─────────────────────────────────────────────
 
 

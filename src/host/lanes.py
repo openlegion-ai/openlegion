@@ -196,8 +196,6 @@ class LaneManager:
 
     async def _worker(self, agent: str) -> None:
         """Worker loop: drains the queue for a single agent serially."""
-        import time
-
         from src.shared.trace import current_trace_id
 
         queue = self._queues[agent]

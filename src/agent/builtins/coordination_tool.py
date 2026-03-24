@@ -8,9 +8,11 @@ operations for inter-agent work handoffs.
 from __future__ import annotations
 
 import json
+import re
 import time
 
 from src.agent.skills import skill
+from src.shared.types import AGENT_ID_RE_PATTERN
 from src.shared.utils import generate_id, sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.builtins.coordination_tool")
@@ -71,6 +73,10 @@ async def hand_off(
     if mesh_client.is_standalone:
         return {"error": _STANDALONE_ERROR}
 
+    # Validate target agent ID format (defense-in-depth if list_agents fails)
+    if not re.fullmatch(AGENT_ID_RE_PATTERN, to):
+        return {"error": f"Invalid agent ID: '{to}'"}
+
     # Validate target agent exists
     try:
         registry = await mesh_client.list_agents()
@@ -78,10 +84,11 @@ async def hand_off(
             available = ", ".join(sorted(registry.keys()))
             return {"error": f"Agent '{to}' not found. Available: {available}"}
     except Exception as e:
-        logger.debug("Fleet roster check failed, proceeding anyway: %s", e)
+        logger.debug("Fleet roster check failed, proceeding with validated ID: %s", e)
 
     handoff_id = generate_id("ho")
     from_agent = mesh_client.agent_id
+    summary = sanitize_for_prompt(summary)
     output_key = None
 
     # Write output data if provided
@@ -110,6 +117,9 @@ async def hand_off(
     try:
         await mesh_client.write_blackboard(task_key, task_record)
     except Exception as e:
+        # Clean up orphaned output if task write fails
+        if output_key:
+            logger.warning("Task write failed, orphaned output at %s", output_key)
         return {"error": f"Failed to create task: {e}"}
 
     result = {
@@ -212,7 +222,7 @@ async def update_status(
     agent_id = mesh_client.agent_id
     status_data = {
         "state": state,
-        "summary": summary,
+        "summary": sanitize_for_prompt(summary),
         "ts": time.time(),
     }
 

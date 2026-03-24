@@ -772,13 +772,15 @@ def create_mesh_app(
         for topic in agent_perms.can_subscribe:
             scoped = f"projects/{reg_project}/{topic}" if reg_project else topic
             pubsub.subscribe(scoped, agent_id)
-        # Auto-watch task inbox (coordination protocol)
-        inbox_pattern = (
-            f"projects/{reg_project}/tasks/{agent_id}/*"
-            if reg_project
-            else f"tasks/{agent_id}/*"
-        )
-        blackboard.add_watch(agent_id, inbox_pattern)
+        # Auto-watch task inbox (coordination protocol).
+        # Only for agents with blackboard access (skip standalone agents).
+        if agent_perms.blackboard_read:
+            inbox_pattern = (
+                f"projects/{reg_project}/tasks/{agent_id}/*"
+                if reg_project
+                else f"tasks/{agent_id}/*"
+            )
+            blackboard.add_watch(agent_id, inbox_pattern)
         if event_bus is not None:
             event_bus.emit("agent_state", agent=agent_id, data={
                 "state": "registered", "capabilities": capabilities,
