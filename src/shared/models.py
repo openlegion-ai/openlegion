@@ -403,3 +403,19 @@ def get_known_provider_names() -> frozenset[str]:
     Used by credential resolution to identify system-tier credentials.
     """
     return frozenset(p["name"] for p in get_all_providers())
+
+
+def estimate_cost(
+    model: str,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    total_tokens: int = 0,
+) -> float:
+    """Estimate USD cost for an LLM call.
+
+    If input/output split is unavailable, falls back to 70/30 split of total_tokens.
+    """
+    ir, or_ = get_model_cost(model)
+    pt = input_tokens if input_tokens is not None and input_tokens > 0 else int(total_tokens * 0.7)
+    ct = output_tokens if output_tokens is not None and output_tokens > 0 else (total_tokens - pt)
+    return round((pt / 1000 * ir) + (ct / 1000 * or_), 6)

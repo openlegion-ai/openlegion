@@ -1422,18 +1422,16 @@ def create_dashboard_router(
 
     @api_router.get("/api/credentials/{name}/value")
     async def api_credential_value(name: str, request: Request) -> dict:
-        """Reveal a credential's value. Dashboard-auth gated."""
+        """Reveal a masked credential value. Dashboard-auth gated."""
         _verify_dashboard_auth(request)
         if credential_vault is None:
             raise HTTPException(status_code=503, detail="Credential vault not available")
-        # Check both tiers
+        # Check agent tier only — never expose system-tier credentials
         value = credential_vault.resolve_credential(name)
         if value is None:
-            # Try system tier
-            value = credential_vault.system_credentials.get(name.lower())
-        if value is None:
             raise HTTPException(status_code=404, detail=f"Credential '{name}' not found")
-        return {"name": name, "value": value}
+        masked = value[-4:].rjust(len(value), "*") if len(value) > 4 else "****"
+        return {"name": name, "value": masked}
 
     # ── External API key management ─────────────────────────
 
@@ -1515,7 +1513,11 @@ def create_dashboard_router(
         except Exception as e:
             logger.warning("WalletService init failed: %s", e)
 
-        return {"initialized": True, "seed": words, "sample_addresses": addresses}
+        from starlette.responses import JSONResponse
+        return JSONResponse(
+            content={"initialized": True, "seed": words, "sample_addresses": addresses},
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+        )
 
     @api_router.get("/api/wallet/seed")
     async def api_wallet_seed(request: Request) -> dict:

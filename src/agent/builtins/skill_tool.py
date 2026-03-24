@@ -22,6 +22,8 @@ _FORBIDDEN_IMPORTS = frozenset({
     "gc", "inspect", "pickle", "shelve",
     # Network and server
     "http", "asyncio", "resource",
+    # Builtin access (prevents aliasing eval/exec/open to bypass _FORBIDDEN_CALLS)
+    "builtins",
 })
 _FORBIDDEN_CALLS = frozenset({
     "eval", "exec", "__import__", "compile",
@@ -33,6 +35,7 @@ _FORBIDDEN_CALLS = frozenset({
 _FORBIDDEN_ATTRS = frozenset({
     "__builtins__", "__import__", "__subclasses__", "__class__",
     "__bases__", "__mro__", "__globals__", "__code__", "__reduce__",
+    "__dict__",
     "builtins",
 })
 _MAX_SKILL_SIZE = 10_000
