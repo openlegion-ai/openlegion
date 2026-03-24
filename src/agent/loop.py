@@ -109,7 +109,7 @@ _heartbeat_mode: ContextVar[bool] = ContextVar("_heartbeat_mode", default=False)
 _BLACKBOARD_TOOLS = frozenset({
     "read_shared_state", "write_shared_state", "list_shared_state",
     "publish_event", "subscribe_event", "watch_blackboard",
-    "claim_task", "hand_off", "check_inbox", "update_status",
+    "claim_task", "hand_off", "check_inbox", "update_status", "complete_task",
 })
 
 
@@ -949,6 +949,11 @@ class AgentLoop:
                     parts.append(bootstrap)  # pre-sanitized by workspace cache
 
             # 3. Core rules
+            inbox_line = (
+                f"- Call check_inbox() to see if teammates sent you tasks.\n"
+                if not is_standalone else ""
+            )
+            nothing_clause = "goals, or inbox" if not is_standalone else "goals"
             parts.append(
                 f"You are the '{self.role}' agent.\n\n"
                 f"## Available Tools\n\n{tools_desc}\n\n"
@@ -956,8 +961,8 @@ class AgentLoop:
                 f"- This is a HEARTBEAT wakeup. Check your HEARTBEAT.md rules and "
                 f"goals, then act on anything that needs attention.\n"
                 f"- Follow HEARTBEAT.md strictly. Do not infer tasks from prior sessions.\n"
-                f"- Call check_inbox() to see if teammates sent you tasks.\n"
-                f"- If nothing in HEARTBEAT.md, goals, or inbox needs attention, reply HEARTBEAT_OK immediately.\n"
+                f"{inbox_line}"
+                f"- If nothing in HEARTBEAT.md, {nothing_clause} needs attention, reply HEARTBEAT_OK immediately.\n"
                 f"- You have max {HEARTBEAT_MAX_ITERATIONS} iterations.\n"
                 f"- Use notify_user to report results to the user.\n"
             )

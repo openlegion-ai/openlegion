@@ -707,6 +707,7 @@ wakes them up. This is a single call — no separate publish needed.
 → `check_inbox()`
 Returns pending tasks from teammates with summaries and pointers to their
 output. Call this on startup, during heartbeats, and when notified.
+After processing a task, call `complete_task(task_key)` to mark it done.
 
 **Sharing your state:**
 → `update_status(state="working|idle|blocked|done", summary="...")`

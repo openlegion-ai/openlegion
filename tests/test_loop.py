@@ -2261,3 +2261,24 @@ async def test_heartbeat_check_inbox_in_system_prompt():
     assert len(captured_system) == 1
     assert "check_inbox()" in captured_system[0]
     assert "goals, or inbox needs attention" in captured_system[0]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_standalone_no_check_inbox():
+    """Standalone agents don't get check_inbox() in heartbeat prompt."""
+    captured_system = []
+
+    async def _capture_llm(*, system, messages, **kw):
+        captured_system.append(system)
+        return LLMResponse(content="HEARTBEAT_OK", tokens_used=10)
+
+    loop = _make_loop([])
+    loop.mesh_client.is_standalone = True
+    loop.llm.chat = AsyncMock(side_effect=_capture_llm)
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    await loop.execute_heartbeat("wakeup")
+
+    assert len(captured_system) == 1
+    assert "check_inbox()" not in captured_system[0]
+    assert "goals needs attention" in captured_system[0]

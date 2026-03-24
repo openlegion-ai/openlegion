@@ -329,3 +329,52 @@ class TestUpdateStatus:
 
         assert "error" in result
         assert "not assigned" in result["error"]
+
+
+class TestCompleteTask:
+    @pytest.mark.asyncio
+    async def test_complete_task_basic(self):
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="engineer")
+
+        result = await complete_task(
+            task_key="tasks/engineer/ho_abc123",
+            mesh_client=mc,
+        )
+
+        assert result["completed"] is True
+        assert result["task_key"] == "tasks/engineer/ho_abc123"
+        mc.write_blackboard.assert_called_once()
+        written = mc.write_blackboard.call_args[0][1]
+        assert written["status"] == "done"
+        assert "completed_at" in written
+
+    @pytest.mark.asyncio
+    async def test_complete_task_write_fails(self):
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="engineer")
+        mc.write_blackboard.side_effect = Exception("mesh down")
+
+        result = await complete_task(
+            task_key="tasks/engineer/ho_abc123",
+            mesh_client=mc,
+        )
+
+        assert "error" in result
+        assert "Failed to complete task" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_complete_task_standalone(self):
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(standalone=True)
+
+        result = await complete_task(
+            task_key="tasks/x/ho_1",
+            mesh_client=mc,
+        )
+
+        assert "error" in result
+        assert "not assigned" in result["error"]

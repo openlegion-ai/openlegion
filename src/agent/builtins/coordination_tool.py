@@ -144,7 +144,8 @@ async def hand_off(
         "- During heartbeats\n"
         "- When you receive a coordination notification\n\n"
         "After reading a task, use read_shared_state to fetch the full "
-        "output data via the output_key."
+        "output data via the output_key. When done processing, call "
+        "complete_task to mark it finished so it won't appear again."
     ),
     parameters={},
 )
@@ -232,3 +233,33 @@ async def update_status(
         return {"error": f"Failed to update status: {e}"}
 
     return {"updated": True, "state": state}
+
+
+@skill(
+    name="complete_task",
+    description=(
+        "Mark a task from your inbox as done so it won't appear in "
+        "check_inbox() again. Call this after you've finished processing "
+        "a task. Pass the task key from the check_inbox() result."
+    ),
+    parameters={
+        "task_key": {
+            "type": "string",
+            "description": "The task key from check_inbox() (e.g. 'tasks/you/ho_abc123')",
+        },
+    },
+)
+async def complete_task(task_key: str, *, mesh_client=None) -> dict:
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if mesh_client.is_standalone:
+        return {"error": _STANDALONE_ERROR}
+
+    try:
+        await mesh_client.write_blackboard(
+            task_key, {"status": "done", "completed_at": time.time()},
+        )
+    except Exception as e:
+        return {"error": f"Failed to complete task: {e}"}
+
+    return {"completed": True, "task_key": task_key}
