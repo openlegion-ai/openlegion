@@ -12,6 +12,7 @@ def _make_mesh_client(agent_id="scout", standalone=False):
     mc.is_standalone = standalone
     mc.list_agents = AsyncMock(return_value={})
     mc.write_blackboard = AsyncMock(return_value={"version": 1})
+    mc.read_blackboard = AsyncMock(return_value={"value": {"status": "pending"}})
     mc.list_blackboard = AsyncMock(return_value=[])
     return mc
 
@@ -333,10 +334,20 @@ class TestUpdateStatus:
 
 class TestCompleteTask:
     @pytest.mark.asyncio
-    async def test_complete_task_basic(self):
+    async def test_complete_task_preserves_original_fields(self):
         from src.agent.builtins.coordination_tool import complete_task
 
         mc = _make_mesh_client(agent_id="engineer")
+        # Simulate existing task record on blackboard
+        mc.read_blackboard = AsyncMock(return_value={
+            "value": {
+                "from": "pm",
+                "summary": "implement login",
+                "status": "pending",
+                "output_key": "output/pm/ho_abc123",
+                "ts": 1700000000.0,
+            },
+        })
 
         result = await complete_task(
             task_key="tasks/engineer/ho_abc123",
@@ -344,11 +355,30 @@ class TestCompleteTask:
         )
 
         assert result["completed"] is True
-        assert result["task_key"] == "tasks/engineer/ho_abc123"
         mc.write_blackboard.assert_called_once()
         written = mc.write_blackboard.call_args[0][1]
+        # Original fields preserved
+        assert written["from"] == "pm"
+        assert written["summary"] == "implement login"
+        assert written["output_key"] == "output/pm/ho_abc123"
+        # Completion fields added
         assert written["status"] == "done"
         assert "completed_at" in written
+
+    @pytest.mark.asyncio
+    async def test_complete_task_not_found(self):
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="engineer")
+        mc.read_blackboard = AsyncMock(return_value=None)
+
+        result = await complete_task(
+            task_key="tasks/engineer/ho_nonexistent",
+            mesh_client=mc,
+        )
+
+        assert "error" in result
+        assert "not found" in result["error"]
 
     @pytest.mark.asyncio
     async def test_complete_task_write_fails(self):
