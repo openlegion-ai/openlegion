@@ -759,6 +759,7 @@ function dashboard() {
     // ── Lifecycle ─────────────────────────────────────────
 
     init() {
+      this._initTs = Date.now();  // track page load time to skip replayed events
       const cfg = window.__config || {};
       this._ws = new DashboardWebSocket(cfg.wsUrl, {
         onEvent: (evt) => this.onWsEvent(evt),
@@ -1153,20 +1154,37 @@ function dashboard() {
         }
       }
 
-      // Surface agent notifications as toasts + inject into chat history
+      // Surface agent notifications as toasts + inject into chat history.
+      // Skip toast/unread for replayed events (sent before this page loaded) —
+      // _loadChatHistory already has them from the server transcript.
       if (evt.type === 'notification' && agent && evt.data && evt.data.message) {
         const msg = evt.data.message;
-        this.showToast(`${agent}: ${msg}`);
+        const evtTs = evt.timestamp
+          ? (typeof evt.timestamp === 'number' ? evt.timestamp * 1000 : evt.timestamp)
+          : Date.now();
+        const isReplay = evtTs < this._initTs - 5000;  // 5s grace for clock skew
+
+        if (!isReplay) {
+          this.showToast(`${agent}: ${msg}`);
+        }
+
+        // Push to chat history only if not already present (prevents duplicates
+        // when _loadChatHistory already fetched it from the server transcript).
         if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
-        this.chatHistories[agent].push({
-          role: 'notification',
-          content: msg,
-          ts: evt.timestamp ? (typeof evt.timestamp === 'number' ? evt.timestamp * 1000 : evt.timestamp) : Date.now(),
-        });
-        if (this.activeChatId === agent) {
-          this.$nextTick(() => this._scrollChat(agent));
-        } else {
-          this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
+        const isDup = this.chatHistories[agent].some(m =>
+          m.role === 'notification' && m.content === msg && Math.abs((m.ts || 0) - evtTs) < 2000
+        );
+        if (!isDup) {
+          this.chatHistories[agent].push({
+            role: 'notification',
+            content: msg,
+            ts: evtTs,
+          });
+          if (this.activeChatId === agent) {
+            this.$nextTick(() => this._scrollChat(agent));
+          } else if (!isReplay) {
+            this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
+          }
         }
       }
 
