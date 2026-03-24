@@ -51,14 +51,14 @@ class HealthMonitor:
         transport: Transport,
         router: MessageRouter,
         event_bus=None,
-        cleanup_rate_limits_fn=None,
+        cleanup_agent_fn=None,
         blackboard=None,
     ):
         self.runtime = runtime
         self.transport = transport
         self.router = router
         self._event_bus = event_bus
-        self._cleanup_rate_limits = cleanup_rate_limits_fn
+        self._cleanup_agent = cleanup_agent_fn
         self._blackboard = blackboard
         self.agents: dict[str, AgentHealth] = {}
         self._agent_lock = asyncio.Lock()
@@ -113,8 +113,8 @@ class HealthMonitor:
                 except Exception as e:
                     logger.warning("Error stopping ephemeral agent '%s': %s", agent_id, e)
                 self.router.unregister_agent(agent_id)
-                if self._cleanup_rate_limits:
-                    self._cleanup_rate_limits(agent_id)
+                if self._cleanup_agent:
+                    self._cleanup_agent(agent_id)
                 del self.agents[agent_id]
                 if self._event_bus:
                     self._event_bus.emit("agent_state", agent=agent_id, data={

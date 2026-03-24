@@ -1335,7 +1335,7 @@ def test_claim_endpoint_notifies_watchers(tmp_path):
 
 
 def test_cleanup_removes_watchers(tmp_path):
-    """cleanup_rate_limits removes blackboard watchers for the agent."""
+    """cleanup_agent removes blackboard watchers for the agent."""
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
     perms = PermissionMatrix.__new__(PermissionMatrix)
@@ -1348,7 +1348,7 @@ def test_cleanup_removes_watchers(tmp_path):
     assert "agent1" in bb.get_watchers_for_key("tasks/foo")
 
     # Trigger cleanup (as health monitor/dashboard would)
-    app.cleanup_rate_limits("agent1")
+    app.cleanup_agent("agent1")
 
     # Watcher should be gone
     assert "agent1" not in bb.get_watchers_for_key("tasks/foo")

@@ -264,6 +264,7 @@ class RuntimeContext:
         self.health_monitor = HealthMonitor(
             runtime=self.runtime, transport=self.transport, router=self.router,
             event_bus=self.event_bus,
+            blackboard=self.blackboard,
         )
 
     def _start_browser_service(self) -> None:
@@ -526,6 +527,7 @@ class RuntimeContext:
             api_key_manager=self._api_key_manager,
         )
         app.include_router(webhook_manager.create_router())
+        self.health_monitor._cleanup_agent = app.cleanup_agent  # type: ignore[attr-defined]
 
         self._init_channel_manager()
 

@@ -144,14 +144,29 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    async def write_blackboard(self, key: str, value: dict) -> dict:
+    async def write_blackboard(self, key: str, value: dict, ttl: int | None = None) -> dict:
         """Write a value to the shared blackboard."""
         scoped = self._scope_key(key)
         client = await self._get_client()
+        params: dict[str, str] = {"agent_id": self.agent_id}
+        if ttl is not None:
+            params["ttl"] = str(ttl)
         response = await client.put(
             f"{self.mesh_url}/mesh/blackboard/{scoped}",
-            params={"agent_id": self.agent_id},
+            params=params,
             json=value,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def delete_blackboard(self, key: str) -> dict:
+        """Delete an entry from the shared blackboard."""
+        scoped = self._scope_key(key)
+        client = await self._get_client()
+        response = await client.delete(
+            f"{self.mesh_url}/mesh/blackboard/{scoped}",
+            params={"agent_id": self.agent_id},
             headers=self._trace_headers(),
         )
         response.raise_for_status()

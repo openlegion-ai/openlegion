@@ -35,7 +35,7 @@ from src.shared.types import (
     MeshEvent,
     NotifyRequest,
 )
-from src.shared.utils import setup_logging
+from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("host.server")
 
@@ -98,8 +98,8 @@ def create_mesh_app(
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
     # Exposed for external callers (dashboard, health monitor) to clean up
-    # rate-limit state when agents are removed.
-    app.cleanup_rate_limits = lambda agent_id: None  # replaced below
+    # agent state when agents are removed.
+    app.cleanup_agent = lambda agent_id: None  # replaced below
 
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
     _agent_projects = agent_projects if agent_projects is not None else {}
@@ -157,6 +157,7 @@ def create_mesh_app(
         """Batch-notify watchers via a single cross-thread call."""
         if not watcher_ids or lane_manager is None or dispatch_loop is None:
             return
+        msg = sanitize_for_prompt(msg)
 
         async def _do_notify():
             results = await asyncio.gather(
@@ -172,12 +173,11 @@ def create_mesh_app(
         except Exception as e:
             logger.warning("Batch watch notification failed: %s", e)
 
-    def _cleanup_rate_limits(agent_id: str) -> None:
-        """Remove all rate-limit buckets for a deregistered agent.
+    def _cleanup_agent(agent_id: str) -> None:
+        """Clean up all per-agent state when an agent is deregistered.
 
-        Only clears timestamp lists (not locks) to avoid racing with
-        concurrent lock acquisitions on the defaultdict.  Also cleans up
-        per-agent budget locks in the credential vault and blackboard watchers.
+        Covers: rate-limit buckets, credential vault locks, blackboard
+        watches, pub/sub subscriptions, lane workers, and cron jobs.
         """
         stale = [k for k in _rate_ts if k.endswith(f":{agent_id}")]
         for k in stale:
@@ -185,8 +185,14 @@ def create_mesh_app(
         if credential_vault is not None:
             credential_vault.cleanup_agent(agent_id)
         blackboard.remove_agent_watches(agent_id)
+        if pubsub is not None:
+            pubsub.unsubscribe_agent(agent_id)
+        if lane_manager is not None:
+            lane_manager.remove_lane(agent_id)
+        if cron_scheduler is not None:
+            cron_scheduler.remove_agent_jobs(agent_id)
 
-    app.cleanup_rate_limits = _cleanup_rate_limits  # type: ignore[attr-defined]
+    app.cleanup_agent = _cleanup_agent  # type: ignore[attr-defined]
 
     def _extract_verified_agent_id(request: Request) -> str:
         """Extract and verify agent identity from a Bearer token.
@@ -283,7 +289,10 @@ def create_mesh_app(
         return entry.model_dump(mode="json")
 
     @app.put("/mesh/blackboard/{key:path}")
-    async def write_blackboard(key: str, agent_id: str, value: dict, request: Request) -> dict:
+    async def write_blackboard(
+        key: str, agent_id: str, value: dict, request: Request,
+        ttl: int | None = None,
+    ) -> dict:
         """Write to blackboard. Agent must have write permission."""
         agent_id = _resolve_agent_id(agent_id, request)
         await _check_rate_limit("blackboard_write", agent_id)
@@ -292,9 +301,11 @@ def create_mesh_app(
         value_size = len(json.dumps(value, default=str))
         if value_size > _MAX_BB_VALUE_BYTES:
             raise HTTPException(413, f"Value too large ({value_size} bytes, max {_MAX_BB_VALUE_BYTES})")
+        if ttl is not None and ttl <= 0:
+            raise HTTPException(400, "TTL must be positive")
         if not permissions.can_write_blackboard(agent_id, key):
             raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
-        entry = blackboard.write(key, value, written_by=agent_id)
+        entry = blackboard.write(key, value, written_by=agent_id, ttl=ttl)
         if trace_store:
             req_trace_id = request.headers.get("x-trace-id")
             if req_trace_id:
@@ -310,6 +321,19 @@ def create_mesh_app(
             )
             _notify_watchers_batch(watchers, notify_msg)
         return entry.model_dump(mode="json")
+
+    @app.delete("/mesh/blackboard/{key:path}")
+    async def delete_blackboard_entry(key: str, agent_id: str, request: Request) -> dict:
+        """Delete a blackboard entry. Agent must have write permission."""
+        agent_id = _resolve_agent_id(agent_id, request)
+        await _check_rate_limit("blackboard_write", agent_id)
+        if not permissions.can_write_blackboard(agent_id, key):
+            raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
+        try:
+            blackboard.delete(key, deleted_by=agent_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"deleted": True, "key": key}
 
     @app.post("/mesh/blackboard/watch")
     async def watch_blackboard(data: BlackboardWatchRequest, request: Request) -> dict:

@@ -14,6 +14,7 @@ def _make_mesh_client(agent_id="scout", standalone=False):
     mc.write_blackboard = AsyncMock(return_value={"version": 1})
     mc.read_blackboard = AsyncMock(return_value={"value": {"status": "pending"}})
     mc.list_blackboard = AsyncMock(return_value=[])
+    mc.delete_blackboard = AsyncMock(return_value={"deleted": True})
     return mc
 
 
@@ -184,6 +185,27 @@ class TestHandOff:
 
         assert result["handed_off"] is True
 
+    @pytest.mark.asyncio
+    async def test_hand_off_sets_ttl(self):
+        """Both output and task writes include a 24h TTL."""
+        from src.agent.builtins.coordination_tool import _HANDOFF_TTL, hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+
+        result = await hand_off(
+            to="analyst",
+            summary="research done",
+            data='{"sources": [1,2,3]}',
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        # Two writes: output data then task record
+        assert mc.write_blackboard.call_count == 2
+        for call in mc.write_blackboard.call_args_list:
+            assert call.kwargs.get("ttl") == _HANDOFF_TTL
+
 
 class TestCheckInbox:
     @pytest.mark.asyncio
@@ -349,7 +371,7 @@ class TestUpdateStatus:
 
 class TestCompleteTask:
     @pytest.mark.asyncio
-    async def test_complete_task_preserves_original_fields(self):
+    async def test_complete_task_deletes_and_cleans_output(self):
         from src.agent.builtins.coordination_tool import complete_task
 
         mc = _make_mesh_client(agent_id="engineer")
@@ -370,15 +392,11 @@ class TestCompleteTask:
         )
 
         assert result["completed"] is True
-        mc.write_blackboard.assert_called_once()
-        written = mc.write_blackboard.call_args[0][1]
-        # Original fields preserved
-        assert written["from"] == "pm"
-        assert written["summary"] == "implement login"
-        assert written["output_key"] == "output/pm/ho_abc123"
-        # Completion fields added
-        assert written["status"] == "done"
-        assert "completed_at" in written
+        # Task entry should be deleted
+        delete_calls = mc.delete_blackboard.call_args_list
+        assert any(c[0][0] == "tasks/engineer/ho_abc123" for c in delete_calls)
+        # Associated output should also be cleaned up
+        assert any(c[0][0] == "output/pm/ho_abc123" for c in delete_calls)
 
     @pytest.mark.asyncio
     async def test_complete_task_not_found(self):
@@ -397,12 +415,12 @@ class TestCompleteTask:
 
     @pytest.mark.asyncio
     async def test_complete_task_string_value_on_blackboard(self):
-        """complete_task handles string values stored on blackboard."""
+        """complete_task handles string values and extracts output_key."""
         from src.agent.builtins.coordination_tool import complete_task
 
         mc = _make_mesh_client(agent_id="engineer")
         mc.read_blackboard = AsyncMock(return_value={
-            "value": '{"from": "pm", "status": "pending"}',
+            "value": '{"from": "pm", "status": "pending", "output_key": "output/pm/ho_abc123"}',
         })
 
         result = await complete_task(
@@ -411,16 +429,18 @@ class TestCompleteTask:
         )
 
         assert result["completed"] is True
-        written = mc.write_blackboard.call_args[0][1]
-        assert written["from"] == "pm"
-        assert written["status"] == "done"
+        # Task deleted
+        delete_calls = mc.delete_blackboard.call_args_list
+        assert any(c[0][0] == "tasks/engineer/ho_abc123" for c in delete_calls)
+        # Output cleaned up from parsed string value
+        assert any(c[0][0] == "output/pm/ho_abc123" for c in delete_calls)
 
     @pytest.mark.asyncio
-    async def test_complete_task_write_fails(self):
+    async def test_complete_task_delete_fails(self):
         from src.agent.builtins.coordination_tool import complete_task
 
         mc = _make_mesh_client(agent_id="engineer")
-        mc.write_blackboard.side_effect = Exception("mesh down")
+        mc.delete_blackboard.side_effect = Exception("mesh down")
 
         result = await complete_task(
             task_key="tasks/engineer/ho_abc123",
@@ -443,3 +463,18 @@ class TestCompleteTask:
 
         assert "error" in result
         assert "not assigned" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_complete_task_wrong_agent(self):
+        """Agent can only complete tasks in their own inbox."""
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="engineer")
+
+        result = await complete_task(
+            task_key="tasks/other-agent/ho_123",
+            mesh_client=mc,
+        )
+
+        assert "error" in result
+        assert "Can only complete your own tasks" in result["error"]
