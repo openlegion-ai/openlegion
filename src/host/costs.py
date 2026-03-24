@@ -13,7 +13,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.shared.models import get_model_cost, estimate_cost  # noqa: F401 — re-export
+from src.shared.models import estimate_cost, get_model_cost  # noqa: F401 — re-export
 from src.shared.utils import setup_logging
 
 logger = setup_logging("host.costs")
