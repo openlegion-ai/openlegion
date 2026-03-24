@@ -25,13 +25,13 @@ if TYPE_CHECKING:
 
 logger = setup_logging("agent.context")
 
-_FLUSH_THRESHOLD = 0.60
-_COMPACT_THRESHOLD = 0.70
-_WARNING_THRESHOLD = 0.80
+_FLUSH_THRESHOLD = 0.60  # proactive fact extraction before compaction
+_COMPACT_THRESHOLD = 0.70  # summarize-and-replace conversation history
+_WARNING_THRESHOLD = 0.80  # warn agent to wrap up or save facts
 
 _encoding_cache: dict[str, object | None] = {}
 
-_SUMMARIZATION_INPUT_LIMIT = 20_000
+_SUMMARIZATION_INPUT_LIMIT = 20_000  # max chars fed to the summarization LLM call
 
 
 def _get_tiktoken_encoding(model: str):
@@ -298,10 +298,7 @@ class ContextManager:
                 lines = raw.split("\n", 1)
                 body = lines[1] if len(lines) > 1 else ""
                 # Remove only a trailing ``` fence, not arbitrary occurrences
-                if body.rstrip().endswith("```"):
-                    raw = body.rstrip()[:-3].strip()
-                else:
-                    raw = body.strip()
+                raw = body.rstrip()[:-3].strip() if body.rstrip().endswith("```") else body.strip()
 
             facts = json.loads(raw)
             if not isinstance(facts, list) or not facts:

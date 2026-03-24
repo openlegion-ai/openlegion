@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import json
 import logging
 import os
@@ -40,7 +41,7 @@ logger = logging.getLogger("cli.repl")
 class _REPLCompleter:
     """Tab completion for the REPL using readline."""
 
-    def __init__(self, session: "REPLSession"):
+    def __init__(self, session: REPLSession):
         self._session = session
         self._matches: list[str] = []
 
@@ -198,10 +199,8 @@ class REPLSession:
         from src.cli import config as cli_config
 
         self._history_file = cli_config.PROJECT_ROOT / ".openlegion_history"
-        try:
+        with contextlib.suppress(FileNotFoundError, OSError):
             readline.read_history_file(str(self._history_file))
-        except (FileNotFoundError, OSError):
-            pass
 
     def _inline_setup(self) -> None:
         """Show onboarding prompts for first-time users (no credentials, no agents)."""
@@ -348,10 +347,8 @@ class REPLSession:
 
     def _save_history(self) -> None:
         """Save readline history to disk."""
-        try:
+        with contextlib.suppress(OSError):
             readline.write_history_file(str(self._history_file))
-        except OSError:
-            pass
 
     def _parse_input(self, text: str) -> tuple[str | None, str]:
         """Parse @mentions, return (target_agent, message)."""

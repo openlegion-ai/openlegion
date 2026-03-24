@@ -110,7 +110,7 @@ def _resolve_and_pin(url: str) -> tuple[str, str, str]:
 
     # Validate ALL resolved IPs — block if any is private
     resolved_ips = []
-    for family, _, _, _, sockaddr in results:
+    for _family, _, _, _, sockaddr in results:
         ip = ipaddress.ip_address(sockaddr[0])
         if _is_blocked_ip(ip):
             raise ValueError("SSRF protection: requests to private/internal addresses are blocked")
@@ -121,16 +121,10 @@ def _resolve_and_pin(url: str) -> tuple[str, str, str]:
 
     # Build pinned URL: replace hostname with resolved IP
     # For IPv6, wrap in brackets
-    if ":" in pinned_ip:
-        netloc_ip = f"[{pinned_ip}]"
-    else:
-        netloc_ip = pinned_ip
+    netloc_ip = f"[{pinned_ip}]" if ":" in pinned_ip else pinned_ip
 
     # Reconstruct netloc with port if present
-    if port:
-        pinned_netloc = f"{netloc_ip}:{port}"
-    else:
-        pinned_netloc = netloc_ip
+    pinned_netloc = f"{netloc_ip}:{port}" if port else netloc_ip
 
     pinned_url = urlunparse((
         parsed.scheme, pinned_netloc, parsed.path,

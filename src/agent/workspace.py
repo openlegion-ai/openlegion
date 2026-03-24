@@ -23,6 +23,7 @@ files (SOUL.md, INSTRUCTIONS.md, USER.md) are per-agent.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import re
@@ -194,10 +195,7 @@ class WorkspaceManager:
 
     def _check_mtimes(self, filenames: tuple | list, cached_mtimes: dict) -> bool:
         """Return True if any file's mtime differs from the cached value."""
-        for filename in filenames:
-            if cached_mtimes.get(filename) != self._get_mtime(self.root / filename):
-                return True
-        return False
+        return any(cached_mtimes.get(filename) != self._get_mtime(self.root / filename) for filename in filenames)
 
     def _snapshot_mtimes(self, filenames: tuple | list, target: dict) -> None:
         """Record current mtimes for the given filenames."""
@@ -346,10 +344,8 @@ class WorkspaceManager:
         backups = sorted(backup_dir.glob(pattern))
         if len(backups) > self._MAX_BACKUPS_PER_FILE:
             for old in backups[: len(backups) - self._MAX_BACKUPS_PER_FILE]:
-                try:
+                with contextlib.suppress(OSError):
                     old.unlink()
-                except OSError:
-                    pass
 
     # ── Search ───────────────────────────────────────────────
 
@@ -386,7 +382,7 @@ class WorkspaceManager:
         scores = _bm25_score(query_terms, documents)
 
         ranked = sorted(
-            zip(scores, documents),
+            zip(scores, documents, strict=False),
             key=lambda x: x[0],
             reverse=True,
         )
@@ -767,7 +763,7 @@ def generate_system_md(
 # ── BM25 implementation (no external deps) ───────────────────
 
 _STOP_WORDS = frozenset(
-    "a an and are as at be by for from has have i in is it of on or that the to was with".split()
+    ["a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "i", "in", "is", "it", "of", "on", "or", "that", "the", "to", "was", "with"]
 )
 
 

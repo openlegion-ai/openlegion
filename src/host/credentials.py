@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import re
@@ -186,6 +187,33 @@ def is_system_credential(name: str) -> bool:
     return False
 
 
+def _load_oauth_config(env_var: str, label: str) -> dict | None:
+    """Load and parse an OAuth JSON config from an environment variable.
+
+    Returns the parsed dict if valid (must contain ``access_token``),
+    or ``None`` on missing/invalid data.
+    """
+    raw = os.environ.get(env_var, "")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and "access_token" in parsed:
+            logger.info("Loaded %s OAuth credentials", label)
+            return parsed
+        logger.warning(
+            "Failed to parse %s OAuth config from %s: "
+            "not a valid credentials object (missing access_token)",
+            label, env_var,
+        )
+    except (json.JSONDecodeError, ValueError):
+        logger.warning(
+            "Failed to parse %s OAuth config from %s: not valid JSON",
+            label, env_var,
+        )
+    return None
+
+
 class CredentialVault:
     """Stores API credentials and executes proxied API calls."""
 
@@ -264,37 +292,13 @@ class CredentialVault:
                 else:
                     self.credentials[cred_name] = value
 
-        # Load OpenAI OAuth credentials (JSON blob)
-        raw_oauth = os.environ.get("OPENLEGION_SYSTEM_OPENAI_OAUTH", "")
-        if raw_oauth:
-            try:
-                parsed_oauth = json.loads(raw_oauth)
-                if isinstance(parsed_oauth, dict) and "access_token" in parsed_oauth:
-                    self._openai_oauth = parsed_oauth
-                    logger.info("Loaded OpenAI OAuth credentials")
-                else:
-                    logger.warning(
-                        "OPENLEGION_SYSTEM_OPENAI_OAUTH is not a valid "
-                        "credentials object (missing access_token)"
-                    )
-            except (json.JSONDecodeError, ValueError):
-                logger.warning("OPENLEGION_SYSTEM_OPENAI_OAUTH is not valid JSON")
-
-        # Load Anthropic structured OAuth credentials (JSON blob)
-        raw_anthropic_oauth = os.environ.get("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", "")
-        if raw_anthropic_oauth:
-            try:
-                parsed_anth_oauth = json.loads(raw_anthropic_oauth)
-                if isinstance(parsed_anth_oauth, dict) and "access_token" in parsed_anth_oauth:
-                    self._anthropic_oauth = parsed_anth_oauth
-                    logger.info("Loaded Anthropic OAuth credentials")
-                else:
-                    logger.warning(
-                        "OPENLEGION_SYSTEM_ANTHROPIC_OAUTH is not a valid "
-                        "credentials object (missing access_token)"
-                    )
-            except (json.JSONDecodeError, ValueError):
-                logger.warning("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH is not valid JSON")
+        # Load OAuth credentials (JSON blobs from environment)
+        self._openai_oauth = _load_oauth_config(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH", "OpenAI",
+        )
+        self._anthropic_oauth = _load_oauth_config(
+            "OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", "Anthropic",
+        )
 
         loaded_system = list(self.system_credentials.keys())
         loaded_agent = list(self.credentials.keys())
@@ -2027,10 +2031,8 @@ class CredentialVault:
             finally:
                 if not next_chunk.done():
                     next_chunk.cancel()
-                    try:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
                         await next_chunk
-                    except (asyncio.CancelledError, Exception):
-                        pass
 
             # Emit final summary
             tokens_used = 0

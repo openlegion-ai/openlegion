@@ -10,7 +10,7 @@ import asyncio
 import json
 import os
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import uvicorn
@@ -172,10 +172,8 @@ def main() -> None:
                     # Force-cancel the stuck task to prevent asyncio task leak
                     if not handle.done():
                         handle.cancel()
-                        try:
+                        with suppress(asyncio.TimeoutError, asyncio.CancelledError):
                             await asyncio.wait_for(handle, timeout=2.0)
-                        except (asyncio.TimeoutError, asyncio.CancelledError):
-                            pass
         await close_client()
         if mcp_client:
             await mcp_client.stop()

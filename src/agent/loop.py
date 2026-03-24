@@ -60,10 +60,7 @@ def _is_heartbeat_empty(content: str | None) -> bool:
     """
     if not content:
         return True
-    for line in content.splitlines():
-        if not _HEADING_OR_EMPTY_RE.match(line):
-            return False
-    return True
+    return all(_HEADING_OR_EMPTY_RE.match(line) for line in content.splitlines())
 
 
 def _strip_think_tags(text: str) -> str:

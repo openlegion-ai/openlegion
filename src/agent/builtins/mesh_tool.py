@@ -204,11 +204,13 @@ async def list_shared_state(prefix: str, *, mesh_client=None) -> dict:
         entries = await mesh_client.list_blackboard(prefix)
         items = []
         for entry in entries:
+            raw = json.dumps(entry.get("value", {}), default=str)
+            preview = sanitize_for_prompt(raw[:200] + "..." if len(raw) > 200 else raw)
             items.append({
                 "key": sanitize_for_prompt(entry.get("key", "")),
                 "written_by": entry.get("written_by", ""),
                 "updated_at": entry.get("updated_at", ""),
-                "value_preview": _preview(entry.get("value", {})),
+                "value_preview": preview,
             })
         return {"prefix": prefix, "entries": items, "count": len(items)}
     except Exception as e:
@@ -670,7 +672,7 @@ async def update_workspace(
     # Notify the user with a meaningful summary of what changed
     if mesh_client:
         try:
-            agent_id = getattr(mesh_client, "agent_id", "agent")
+            agent_id = getattr(mesh_client, "agent_id", "unknown")
             old_stripped = old_content.strip()
             if old_stripped == content.strip():
                 summary = f"[{agent_id}] Re-saved {filename} (no changes)."
@@ -693,9 +695,3 @@ async def update_workspace(
         except Exception as e:
             logger.debug("Non-fatal: workspace notification failed: %s", e)
     return result
-
-
-def _preview(value: dict, max_len: int = 200) -> str:
-    text = json.dumps(value, default=str)
-    preview = text[:max_len] + "..." if len(text) > max_len else text
-    return sanitize_for_prompt(preview)

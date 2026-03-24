@@ -24,10 +24,11 @@ import re
 import shutil
 import tempfile
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from src.shared.utils import generate_id, setup_logging
 
@@ -171,7 +172,7 @@ class CronScheduler:
                     for f, c in zip(parts, [
                         candidate.minute, candidate.hour, candidate.day,
                         candidate.month, candidate.isoweekday() % 7,
-                    ])
+                    ], strict=False)
                 ):
                     job.next_run = candidate.isoformat()
                     return
@@ -624,10 +625,7 @@ class CronScheduler:
             (now.isoweekday() % 7, 0, 6),  # 0=Sun to match cron convention
         ]
 
-        for field_str, (current, _low, _high) in zip(parts, fields):
-            if not _match_cron_field(field_str, current):
-                return False
-        return True
+        return all(_match_cron_field(field_str, current) for field_str, (current, _low, _high) in zip(parts, fields, strict=False))
 
     def list_jobs(self) -> list[dict]:
         return [asdict(j) for j in self.jobs.values()]

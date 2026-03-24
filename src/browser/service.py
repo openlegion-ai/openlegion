@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import random
 import re
 import subprocess
@@ -470,10 +471,8 @@ class BrowserManager:
             for agent_id in list(self._instances.keys()):
                 await self._stop_instance(agent_id)
         if self._playwright:
-            try:
+            with contextlib.suppress(Exception):
                 await self._pw_context.__aexit__(None, None, None)
-            except Exception:
-                pass
             self._playwright = None
 
     async def reset(self, agent_id: str) -> None:
@@ -832,10 +831,7 @@ class BrowserManager:
         role = info["role"]
         name = info.get("name", "")
         idx = info.get("index", 0)
-        if inst.dialog_active:
-            base = inst.page.locator(_MODAL_SELECTOR)
-        else:
-            base = inst.page
+        base = inst.page.locator(_MODAL_SELECTOR) if inst.dialog_active else inst.page
         locator = base.get_by_role(role, name=name, exact=True) if name else base.get_by_role(role)
         return locator.nth(idx)
 

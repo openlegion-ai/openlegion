@@ -16,6 +16,7 @@ Config: TELEGRAM_BOT_TOKEN in .env, channels.telegram in mesh.yaml
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import time
 
@@ -208,7 +209,7 @@ class TelegramChannel(Channel):
             logger.debug("delete_webhook cleanup failed: %s", e)
         # Multiple rounds — each getUpdates(offset=-1) terminates whatever
         # long-poll is in flight, but the stale client may re-connect.
-        for i in range(3):
+        for _i in range(3):
             try:
                 await self._app.bot.get_updates(offset=-1, timeout=0)
             except Exception as e:
@@ -432,10 +433,8 @@ class TelegramChannel(Channel):
             response = f"Error: {e}"
         finally:
             typing_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await typing_task
-            except asyncio.CancelledError:
-                pass
         if response:
             await self._send_reply(chat_id, response)
 
@@ -492,10 +491,7 @@ class TelegramChannel(Channel):
                     output = event.get("output", {})
                     if tool_lines:
                         hint = ""
-                        if isinstance(output, dict) and output.get("error"):
-                            hint = " ✗"
-                        else:
-                            hint = " ✓"
+                        hint = " ✗" if isinstance(output, dict) and output.get("error") else " ✓"
                         tool_lines[-1] += hint
                         progress = "Working...\n" + "\n".join(tool_lines)
                         try:

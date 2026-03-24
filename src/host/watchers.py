@@ -8,8 +8,8 @@ configured glob patterns.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from src.shared.utils import sanitize_for_prompt, setup_logging
 

@@ -74,7 +74,7 @@ async def _browser_command(mesh_client, action: str, params: dict | None = None)
     """Send a browser command through mesh. Returns the result dict."""
     if not mesh_client:
         return {"error": "Browser requires mesh connectivity"}
-    agent_id = getattr(mesh_client, "agent_id", "")
+    agent_id = getattr(mesh_client, "agent_id", "unknown")
     try:
         result = await mesh_client.browser_command(action, params or {})
         return _deep_redact(result, agent_id)
@@ -224,7 +224,7 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
     """
     if not mesh_client:
         return {"error": "Browser requires mesh connectivity"}
-    agent_id = getattr(mesh_client, "agent_id", "")
+    agent_id = getattr(mesh_client, "agent_id", "unknown")
     try:
         raw = await mesh_client.browser_command("screenshot", {"full_page": full_page})
     except Exception as e:
@@ -371,7 +371,7 @@ async def browser_type(
     if cred_matches:
         if not mesh_client:
             return {"error": "$CRED{} handles require mesh connectivity for resolution"}
-        agent_id = getattr(mesh_client, "agent_id", "")
+        agent_id = getattr(mesh_client, "agent_id", "unknown")
         for cred_name in cred_matches:
             resolved = await mesh_client.vault_resolve(cred_name)
             if resolved is None:
@@ -479,7 +479,7 @@ async def browser_scroll(
 )
 async def browser_reset(*, mesh_client=None) -> dict:
     """Force-close the browser session so the next call gets a fresh one."""
-    agent_id = getattr(mesh_client, "agent_id", "") if mesh_client else ""
+    agent_id = getattr(mesh_client, "agent_id", "unknown") if mesh_client else ""
     _resolved_credential_values.pop(agent_id, None)
     return await _browser_command(mesh_client, "reset")
 
