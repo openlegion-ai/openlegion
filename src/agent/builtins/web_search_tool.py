@@ -12,6 +12,7 @@ from html import unescape
 import httpx
 
 from src.agent.skills import skill
+from src.shared.utils import sanitize_for_prompt
 
 _DEFAULT_MAX_RESULTS = 5
 _MAX_RESULTS = 10
@@ -48,7 +49,11 @@ def _parse_ddg_html(html: str, max_results: int) -> list[dict]:
         title = _strip_tags(raw_title)
         snippet = _strip_tags(snippets[i]) if i < len(snippets) else ""
         if title and url.startswith("http"):
-            results.append({"title": title, "url": url, "snippet": snippet})
+            results.append({
+                "title": sanitize_for_prompt(title),
+                "url": sanitize_for_prompt(url),
+                "snippet": sanitize_for_prompt(snippet),
+            })
 
     return results
 

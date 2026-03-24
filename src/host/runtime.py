@@ -498,6 +498,8 @@ class DockerBackend(RuntimeBackend):
             except Exception as e:
                 logger.warning(f"Error stopping agent '{agent_id}': {e}")
             del self.agents[agent_id]
+            if hasattr(self, "auth_tokens"):
+                self.auth_tokens.pop(agent_id, None)
 
     def health_check(self, agent_id: str) -> bool:
         if agent_id not in self.agents:
@@ -695,6 +697,7 @@ class SandboxBackend(RuntimeBackend):
         env_file.write_text(
             "\n".join(f"{k}={_sanitize_env_value(v)}" for k, v in env_cfg.items()) + "\n"
         )
+        env_file.chmod(0o600)
         return ws
 
     def start_agent(
@@ -774,6 +777,8 @@ class SandboxBackend(RuntimeBackend):
         except Exception as e:
             logger.warning(f"Error removing sandbox '{sandbox_name}': {e}")
         del self.agents[agent_id]
+        if hasattr(self, "auth_tokens"):
+            self.auth_tokens.pop(agent_id, None)
 
     def health_check(self, agent_id: str) -> bool:
         if agent_id not in self.agents:

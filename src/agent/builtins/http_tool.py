@@ -69,6 +69,22 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
             return True
         if mapped in _CGNAT_NETWORK:
             return True
+    # 6to4 addresses (2002::/16) — check the embedded IPv4 address
+    if isinstance(ip, ipaddress.IPv6Address) and ip.sixtofour:
+        embedded = ip.sixtofour
+        if (embedded.is_private or embedded.is_loopback or embedded.is_link_local
+                or embedded.is_reserved or embedded.is_unspecified or embedded.is_multicast):
+            return True
+        if embedded in _CGNAT_NETWORK:
+            return True
+    # Teredo addresses (2001::/32) — check the embedded client IPv4
+    if isinstance(ip, ipaddress.IPv6Address) and ip.teredo:
+        _, teredo_client = ip.teredo
+        if (teredo_client.is_private or teredo_client.is_loopback or teredo_client.is_link_local
+                or teredo_client.is_reserved or teredo_client.is_unspecified or teredo_client.is_multicast):
+            return True
+        if teredo_client in _CGNAT_NETWORK:
+            return True
     return False
 
 

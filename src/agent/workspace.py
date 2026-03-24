@@ -269,6 +269,9 @@ class WorkspaceManager:
 
     def _read_file(self, relative_path: str) -> str | None:
         path = self.root / relative_path
+        resolved = path.resolve()
+        if not resolved.is_relative_to(self.root.resolve()):
+            return None
         if not path.exists() or not path.is_file():
             return None
         try:

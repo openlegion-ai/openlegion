@@ -59,7 +59,7 @@ class TokenBudget(BaseModel):
 
     def record_usage(self, tokens: int, model: str = "") -> None:
         self.used_tokens += tokens
-        from src.host.costs import estimate_cost
+        from src.shared.models import estimate_cost
 
         self.estimated_cost_usd += estimate_cost(model, total_tokens=tokens)
 

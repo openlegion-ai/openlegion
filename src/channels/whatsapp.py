@@ -56,6 +56,11 @@ class WhatsAppChannel(Channel):
         self._pairing = PairingManager("config/whatsapp_paired.json")
 
     async def start(self) -> None:
+        if os.environ.get("MESH_AUTH_TOKEN") and not os.environ.get("WHATSAPP_APP_SECRET"):
+            raise RuntimeError(
+                "WHATSAPP_APP_SECRET is required in production (MESH_AUTH_TOKEN is set). "
+                "Without it, webhook signature verification is disabled."
+            )
         self._http = httpx.AsyncClient(
             base_url=_GRAPH_API_BASE,
             headers={"Authorization": f"Bearer {self.access_token}"},
