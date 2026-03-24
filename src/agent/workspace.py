@@ -762,9 +762,11 @@ def generate_system_md(
 
 # ── BM25 implementation (no external deps) ───────────────────
 
-_STOP_WORDS = frozenset(
-    ["a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "i", "in", "is", "it", "of", "on", "or", "that", "the", "to", "was", "with"]
-)
+_STOP_WORDS = frozenset([
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+    "has", "have", "i", "in", "is", "it", "of", "on", "or", "that",
+    "the", "to", "was", "with",
+])
 
 
 def _tokenize(text: str) -> list[str]:

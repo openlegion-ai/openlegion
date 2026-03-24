@@ -625,7 +625,10 @@ class CronScheduler:
             (now.isoweekday() % 7, 0, 6),  # 0=Sun to match cron convention
         ]
 
-        return all(_match_cron_field(field_str, current) for field_str, (current, _low, _high) in zip(parts, fields, strict=False))
+        return all(
+            _match_cron_field(field_str, current)
+            for field_str, (current, _low, _high) in zip(parts, fields, strict=False)
+        )
 
     def list_jobs(self) -> list[dict]:
         return [asdict(j) for j in self.jobs.values()]
