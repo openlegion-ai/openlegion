@@ -327,6 +327,8 @@ class DashboardEvent(BaseModel):
         "health_change",
         "notification",
         "workspace_updated",
+        "heartbeat_complete",
+        "cron_change",
     ]
     agent: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

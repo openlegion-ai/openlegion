@@ -68,6 +68,7 @@ function dashboard() {
       'agent_state', 'message_sent', 'message_received',
       'tool_start', 'tool_result', 'text_delta', 'llm_call',
       'blackboard_write', 'health_change', 'notification', 'workspace_updated',
+      'heartbeat_complete', 'cron_change',
     ],
 
     // Agent detail
@@ -386,7 +387,7 @@ function dashboard() {
     _refreshInterval: null,
     _fleetDebounce: null,
     _queuePollInterval: null,
-    _cronInterval: null,
+    _cronDebounce: null,
     _seenEventIds: new Set(),
 
 
@@ -876,7 +877,7 @@ function dashboard() {
         if (document.hidden) {
           if (this._refreshInterval) { clearInterval(this._refreshInterval); this._refreshInterval = null; }
           if (this._queuePollInterval) { clearInterval(this._queuePollInterval); this._queuePollInterval = null; }
-          if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
+          if (this._cronDebounce) { clearTimeout(this._cronDebounce); this._cronDebounce = null; }
           if (this._modelHealthInterval) { clearInterval(this._modelHealthInterval); this._modelHealthInterval = null; }
           this._stopActivityRefresh();
           // Snapshot which chats had active SSE streams before tab hides
@@ -893,7 +894,6 @@ function dashboard() {
           if (this.activeTab === 'system') {
             this.fetchCronJobs();
             this.fetchStorage();
-            this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
             if (this.systemTab === 'activity' && this.activityView === 'traces') {
               this.fetchTraces();
               this._startActivityRefresh();
@@ -928,7 +928,7 @@ function dashboard() {
       if (this._ws) this._ws.disconnect();
       if (this._refreshInterval) clearInterval(this._refreshInterval);
       if (this._queuePollInterval) clearInterval(this._queuePollInterval);
-      if (this._cronInterval) clearInterval(this._cronInterval);
+      if (this._cronDebounce) clearTimeout(this._cronDebounce);
       if (this._modelHealthInterval) clearInterval(this._modelHealthInterval);
       if (this._cookieRenewalInterval) clearInterval(this._cookieRenewalInterval);
       if (this._visibilityHandler) document.removeEventListener('visibilitychange', this._visibilityHandler);
@@ -953,7 +953,6 @@ function dashboard() {
       this.activeTab = tab;
       this.detailAgent = null;
       // Clear tab-specific auto-refresh intervals
-      if (this._cronInterval) { clearInterval(this._cronInterval); this._cronInterval = null; }
       this._stopActivityRefresh();
       if (tab === 'fleet') {
         this.fetchAgents();
@@ -985,7 +984,6 @@ function dashboard() {
             this.fetchSystemLogs();
           }
         }
-        this._cronInterval = setInterval(() => this.fetchCronJobs(), 10000);
       }
       if (!this._skipPush) this._pushUrl(false);
     },
@@ -1095,9 +1093,20 @@ function dashboard() {
         this._updateAgentState(agent, evt.type);
       }
 
-      // Live-update fleet on llm_call/health changes (debounced)
-      if (evt.type === 'llm_call' || evt.type === 'health_change') {
+      // Live-update fleet on llm_call/health/agent_state changes (debounced)
+      if (evt.type === 'llm_call' || evt.type === 'health_change' || evt.type === 'agent_state') {
         this._debouncedFleetRefresh();
+        // Refresh capabilities when an agent re-registers (e.g. new skill authored)
+        if (evt.type === 'agent_state' && agent && evt.data?.state === 'registered') {
+          const viewing = this.selectedAgent || this.detailAgent;
+          if (viewing === agent) this.fetchAgentCapabilities(agent);
+        }
+      }
+
+      // Refresh cron panel on cron changes (replaces polling)
+      if (evt.type === 'cron_change') {
+        if (this._cronDebounce) clearTimeout(this._cronDebounce);
+        this._cronDebounce = setTimeout(() => this.fetchCronJobs(), 500);
       }
 
       // Refresh model health on health_change events
@@ -1134,6 +1143,23 @@ function dashboard() {
         if (viewing === evt.agent && this.identityTab === 'activity') {
           if (this._activityDebounce) clearTimeout(this._activityDebounce);
           this._activityDebounce = setTimeout(() => this.fetchAgentActivity(viewing), 1000);
+        }
+      }
+
+      // Surface agent notifications as toasts + inject into chat history
+      if (evt.type === 'notification' && agent && evt.data && evt.data.message) {
+        const msg = evt.data.message;
+        this.showToast(`${agent}: ${msg}`);
+        if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
+        this.chatHistories[agent].push({
+          role: 'notification',
+          content: msg,
+          ts: evt.timestamp ? (typeof evt.timestamp === 'number' ? evt.timestamp * 1000 : evt.timestamp) : Date.now(),
+        });
+        if (this.activeChatId === agent) {
+          this.$nextTick(() => this._scrollChat(agent));
+        } else {
+          this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
         }
       }
 
@@ -4396,6 +4422,8 @@ function dashboard() {
         health_change: 'text-red-400',
         notification: 'text-amber-300',
         workspace_updated: 'text-teal-300',
+        heartbeat_complete: 'text-pink-300',
+        cron_change: 'text-pink-400',
         // Trace event types
         chat: 'text-green-400',
         chat_response: 'text-green-300',
@@ -4425,6 +4453,8 @@ function dashboard() {
         health_change: 'bg-red-400',
         notification: 'bg-amber-300',
         workspace_updated: 'bg-teal-300',
+        heartbeat_complete: 'bg-pink-300',
+        cron_change: 'bg-pink-400',
         chat: 'bg-green-400',
         chat_response: 'bg-green-300',
         message_route: 'bg-teal-400',
@@ -4527,6 +4557,19 @@ function dashboard() {
         case 'notification':
           add('Message', d.message);
           break;
+        case 'heartbeat_complete':
+          add('Summary', d.summary);
+          if (d.duration_ms) add('Duration', d.duration_ms + 'ms');
+          add('Tokens', d.tokens_used);
+          add('Tools', d.tools_used);
+          add('Outcome', d.outcome);
+          break;
+        case 'cron_change':
+          add('Action', d.action);
+          add('Job', d.job_id);
+          if (d.schedule) add('Schedule', d.schedule);
+          if (d.count) add('Count', d.count);
+          break;
         case 'agent_state':
           add('State', d.state);
           add('Role', d.role);
@@ -4577,6 +4620,10 @@ function dashboard() {
           return [d.key, d.version && `v${d.version}`, d.written_by && `by ${d.written_by}`].filter(Boolean).join(' \u00b7 ');
         case 'notification':
           return (d.message || '').substring(0, 80);
+        case 'heartbeat_complete':
+          return [d.outcome || 'done', (d.summary || '').substring(0, 60)].filter(Boolean).join(' \u00b7 ');
+        case 'cron_change':
+          return [d.action, d.job_id, d.schedule].filter(Boolean).join(' \u00b7 ');
         case 'agent_state': {
           const s = d.state || '?';
           if (s === 'registered' && d.capabilities) return `registered (${Array.isArray(d.capabilities) ? d.capabilities.length : '?'} tools)`;

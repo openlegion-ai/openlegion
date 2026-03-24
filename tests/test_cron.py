@@ -747,14 +747,21 @@ class TestHeartbeatDispatchFn:
         job = sched.add_job(
             agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
         )
+        event_bus.reset_mock()
         await sched._execute_job(job)
 
-        event_bus.emit.assert_called_once()
-        call_args = event_bus.emit.call_args
-        assert call_args[0][0] == "heartbeat_complete"
+        # Should emit cron_change(started) + heartbeat_complete + cron_change(executed)
+        hb_calls = [c for c in event_bus.emit.call_args_list if c[0][0] == "heartbeat_complete"]
+        assert len(hb_calls) == 1
+        call_args = hb_calls[0]
         assert call_args[1]["agent"] == "test"
         assert call_args[1]["data"]["summary"] == "Checked alerts"
         assert call_args[1]["data"]["outcome"] == "ok"
+        # cron_change should fire twice: started + executed
+        cron_calls = [c for c in event_bus.emit.call_args_list if c[0][0] == "cron_change"]
+        assert len(cron_calls) == 2
+        actions = [c[1]["data"]["action"] for c in cron_calls]
+        assert actions == ["started", "executed"]
 
     @pytest.mark.asyncio
     async def test_heartbeat_falls_back_to_dispatch_fn(self):
