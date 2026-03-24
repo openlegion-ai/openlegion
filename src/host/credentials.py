@@ -686,9 +686,7 @@ class CredentialVault:
         would silently mask bad config.
         """
         import litellm
-        if isinstance(error, (litellm.BadRequestError, litellm.NotFoundError)):
-            return True
-        return False
+        return isinstance(error, (litellm.BadRequestError, litellm.NotFoundError))
 
     @staticmethod
     def _get_status_code(error: Exception) -> int:
