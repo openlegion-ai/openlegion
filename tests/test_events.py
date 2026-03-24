@@ -13,11 +13,12 @@ from src.shared.types import DashboardEvent
 
 
 def test_dashboard_event_model():
-    """DashboardEvent creation with defaults and all 9 valid types."""
+    """DashboardEvent creation with defaults and all valid types."""
     valid_types = [
         "agent_state", "message_sent", "message_received",
         "tool_start", "tool_result", "llm_call",
         "blackboard_write", "health_change", "notification",
+        "workspace_updated", "heartbeat_complete", "cron_change",
     ]
     for t in valid_types:
         evt = DashboardEvent(type=t, agent="test", data={"key": "val"})

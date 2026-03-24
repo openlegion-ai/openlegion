@@ -210,6 +210,7 @@ class CronScheduler:
         else:
             kind = "message"
         logger.info(f"Added {kind} job {job.id}: agent={agent} schedule={schedule}")
+        self._emit_cron_change("created", job)
         return job
 
     def find_heartbeat_job(self, agent: str) -> CronJob | None:
@@ -246,13 +247,16 @@ class CronScheduler:
             if "schedule" in kwargs:
                 self._compute_next_run(job)
             self._save()
+            self._emit_cron_change("updated", job)
             return job
 
     def remove_job(self, job_id: str) -> bool:
-        if job_id not in self.jobs:
+        job = self.jobs.get(job_id)
+        if job is None:
             return False
         del self.jobs[job_id]
         self._save()
+        self._emit_cron_change("removed", job)
         return True
 
     def remove_agent_jobs(self, agent_id: str) -> int:
@@ -262,6 +266,10 @@ class CronScheduler:
             del self.jobs[jid]
         if to_remove:
             self._save()
+            if self._event_bus:
+                self._event_bus.emit("cron_change", agent=agent_id, data={
+                    "action": "removed_all", "count": len(to_remove),
+                })
         return len(to_remove)
 
     async def pause_job(self, job_id: str) -> bool:
@@ -270,6 +278,7 @@ class CronScheduler:
                 return False
             self.jobs[job_id].enabled = False
             self._save()
+            self._emit_cron_change("paused", self.jobs[job_id])
             return True
 
     async def resume_job(self, job_id: str) -> bool:
@@ -279,7 +288,19 @@ class CronScheduler:
             self.jobs[job_id].enabled = True
             self._compute_next_run(self.jobs[job_id])
             self._save()
+            self._emit_cron_change("resumed", self.jobs[job_id])
             return True
+
+    def _emit_cron_change(self, action: str, job: CronJob) -> None:
+        """Emit a cron_change event so the dashboard updates without polling."""
+        if self._event_bus:
+            try:
+                self._event_bus.emit("cron_change", agent=job.agent, data={
+                    "action": action, "job_id": job.id,
+                    "schedule": job.schedule,
+                })
+            except Exception:
+                logger.debug("Failed to emit cron_change event", exc_info=True)
 
     async def run_job(self, job_id: str) -> str | None:
         """Manually trigger a job. Returns the agent response."""
@@ -316,6 +337,7 @@ class CronScheduler:
                 job.run_count += 1
                 self._compute_next_run(job)
                 self._save()
+                self._emit_cron_change("started", job)
                 if self._trace_store:
                     from src.shared.trace import new_trace_id
                     self._trace_store.record(
@@ -483,11 +505,13 @@ class CronScheduler:
                         return response
                     logger.info(f"Cron {job.id} executed for agent '{job.agent}'")
 
+                self._emit_cron_change("executed", job)
                 return response
             except Exception as e:
                 job.error_count += 1
                 self._save()
                 logger.error(f"Cron {job.id} failed: {e}")
+                self._emit_cron_change("error", job)
                 return None
 
     def _run_heartbeat_probes(self, agent: str) -> list[HeartbeatProbeResult]:
