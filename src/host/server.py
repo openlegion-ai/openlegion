@@ -329,6 +329,10 @@ def create_mesh_app(
         await _check_rate_limit("blackboard_write", agent_id)
         if not permissions.can_write_blackboard(agent_id, key):
             raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
+        # Protect history namespace (including project-scoped keys)
+        bare = key.split("/", 2)[2] if key.startswith("projects/") and key.count("/") >= 2 else key
+        if bare.startswith("history/"):
+            raise HTTPException(400, "Cannot delete from history namespace")
         try:
             blackboard.delete(key, deleted_by=agent_id)
         except ValueError as e:

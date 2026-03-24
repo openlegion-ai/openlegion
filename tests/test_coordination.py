@@ -478,3 +478,32 @@ class TestCompleteTask:
 
         assert "error" in result
         assert "Can only complete your own tasks" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_complete_task_output_cleanup_failure_still_succeeds(self):
+        """Task completes successfully even if output cleanup fails."""
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="engineer")
+        mc.read_blackboard = AsyncMock(return_value={
+            "value": {
+                "from": "pm",
+                "summary": "implement login",
+                "status": "pending",
+                "output_key": "output/pm/ho_abc123",
+            },
+        })
+        # Task delete succeeds, but output delete fails
+        mc.delete_blackboard = AsyncMock(side_effect=[
+            {"deleted": True},           # task delete succeeds
+            Exception("output expired"),  # output delete fails
+        ])
+
+        result = await complete_task(
+            task_key="tasks/engineer/ho_abc123",
+            mesh_client=mc,
+        )
+
+        # Should still succeed — output cleanup is best-effort
+        assert result["completed"] is True
+        assert mc.delete_blackboard.call_count == 2
