@@ -27,6 +27,8 @@ _STANDALONE_ERROR = (
     "any project. Use memory_save/memory_search for private storage."
 )
 
+_HANDOFF_TTL = 86_400  # 24 hours — safety net for unprocessed handoffs
+
 
 @skill(
     name="hand_off",
@@ -99,7 +101,7 @@ async def hand_off(
             parsed_data = {"text": data}
         output_key = f"output/{from_agent}/{handoff_id}"
         try:
-            await mesh_client.write_blackboard(output_key, parsed_data)
+            await mesh_client.write_blackboard(output_key, parsed_data, ttl=_HANDOFF_TTL)
         except Exception as e:
             return {"error": f"Failed to write output: {e}"}
 
@@ -115,7 +117,7 @@ async def hand_off(
 
     task_key = f"tasks/{to}/{handoff_id}"
     try:
-        await mesh_client.write_blackboard(task_key, task_record)
+        await mesh_client.write_blackboard(task_key, task_record, ttl=_HANDOFF_TTL)
     except Exception as e:
         # Clean up orphaned output if task write fails
         if output_key:
@@ -258,22 +260,35 @@ async def complete_task(task_key: str, *, mesh_client=None) -> dict:
     if mesh_client.is_standalone:
         return {"error": _STANDALONE_ERROR}
 
+    # Ownership check — only complete tasks in your own inbox
+    agent_id = mesh_client.agent_id
+    expected_prefix = f"tasks/{agent_id}/"
+    if not task_key.startswith(expected_prefix):
+        return {"error": f"Can only complete your own tasks (expected prefix: tasks/{agent_id}/)"}
+
     try:
-        # Read-modify-write to preserve original task fields (from, summary, output_key)
+        # Read task to find associated output for cleanup
         existing = await mesh_client.read_blackboard(task_key)
         if existing is None:
             return {"error": f"Task '{task_key}' not found"}
+
+        # Delete the task entry
+        await mesh_client.delete_blackboard(task_key)
+
+        # Best-effort cleanup of associated output data
         value = existing.get("value", existing)
         if isinstance(value, str):
             try:
                 value = json.loads(value)
             except json.JSONDecodeError:
                 value = {}
-        if not isinstance(value, dict):
-            value = {}
-        value["status"] = "done"
-        value["completed_at"] = time.time()
-        await mesh_client.write_blackboard(task_key, value)
+        if isinstance(value, dict):
+            output_key = value.get("output_key")
+            if output_key:
+                try:
+                    await mesh_client.delete_blackboard(output_key)
+                except Exception:
+                    pass  # Output may already be expired or missing
     except Exception as e:
         return {"error": f"Failed to complete task: {e}"}
 

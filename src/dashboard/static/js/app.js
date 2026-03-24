@@ -1159,9 +1159,13 @@ function dashboard() {
       // _loadChatHistory already has them from the server transcript.
       if (evt.type === 'notification' && agent && evt.data && evt.data.message) {
         const msg = evt.data.message;
-        const evtTs = evt.timestamp
-          ? (typeof evt.timestamp === 'number' ? evt.timestamp * 1000 : evt.timestamp)
-          : Date.now();
+        // Normalize timestamp to milliseconds (server sends ISO strings via Pydantic)
+        const evtTs = (() => {
+          if (!evt.timestamp) return Date.now();
+          if (typeof evt.timestamp === 'number') return evt.timestamp < 1e12 ? evt.timestamp * 1000 : evt.timestamp;
+          const parsed = new Date(evt.timestamp).getTime();
+          return isNaN(parsed) ? Date.now() : parsed;
+        })();
         const isReplay = evtTs < this._initTs - 5000;  // 5s grace for clock skew
 
         if (!isReplay) {
@@ -1328,17 +1332,20 @@ function dashboard() {
           const entries = await statusResp.json();
           const coordStatus = {};
           for (const entry of entries) {
-            // key is "status/{agent_id}" — extract agent_id
-            const parts = entry.key.split('/');
-            if (parts.length >= 2) {
-              const agentId = parts[1];
-              const val = typeof entry.value === 'string' ? JSON.parse(entry.value) : entry.value;
-              coordStatus[agentId] = {
-                state: val.state || 'unknown',
-                summary: val.summary || '',
-                ts: val.ts || 0,
-              };
-            }
+            try {
+              const parts = entry.key.split('/');
+              if (parts.length >= 2) {
+                const agentId = parts[1];
+                const val = typeof entry.value === 'string' ? JSON.parse(entry.value) : entry.value;
+                if (val && typeof val === 'object') {
+                  coordStatus[agentId] = {
+                    state: val.state || 'unknown',
+                    summary: val.summary || '',
+                    ts: val.ts || 0,
+                  };
+                }
+              }
+            } catch (_) { /* skip malformed entry */ }
           }
           this.agentCoordStatus = coordStatus;
         }
@@ -1346,16 +1353,16 @@ function dashboard() {
           const entries = await tasksResp.json();
           const counts = {};
           for (const entry of entries) {
-            // key is "tasks/{agent_id}/{task_id}" — extract agent_id
-            const parts = entry.key.split('/');
-            if (parts.length >= 2) {
-              const agentId = parts[1];
-              const val = typeof entry.value === 'string' ? JSON.parse(entry.value) : entry.value;
-              // Only count pending tasks (not done)
-              if (!val || val.status !== 'done') {
-                counts[agentId] = (counts[agentId] || 0) + 1;
+            try {
+              const parts = entry.key.split('/');
+              if (parts.length >= 2) {
+                const agentId = parts[1];
+                const val = typeof entry.value === 'string' ? JSON.parse(entry.value) : entry.value;
+                if (!val || typeof val !== 'object' || val.status !== 'done') {
+                  counts[agentId] = (counts[agentId] || 0) + 1;
+                }
               }
-            }
+            } catch (_) { /* skip malformed entry */ }
           }
           this.agentInboxCounts = counts;
         }
