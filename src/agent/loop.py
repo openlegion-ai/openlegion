@@ -950,7 +950,7 @@ class AgentLoop:
 
             # 3. Core rules
             inbox_line = (
-                f"- Call check_inbox() to see if teammates sent you tasks.\n"
+                "- Call check_inbox() to see if teammates sent you tasks.\n"
                 if not is_standalone else ""
             )
             nothing_clause = "goals, or inbox" if not is_standalone else "goals"

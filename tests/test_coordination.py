@@ -1,6 +1,6 @@
 """Tests for coordination tools: hand_off, check_inbox, update_status."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 

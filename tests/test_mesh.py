@@ -948,7 +948,7 @@ def test_registration_inbox_watch_standalone(tmp_path):
     assert agent_id in watchers
 
     # Should NOT match another agent's inbox
-    watchers_other = bb.get_watchers_for_key(f"tasks/otheragent/ho_abc")
+    watchers_other = bb.get_watchers_for_key("tasks/otheragent/ho_abc")
     assert agent_id not in watchers_other
     bb.close()
 

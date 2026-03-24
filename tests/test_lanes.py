@@ -181,7 +181,6 @@ async def test_steer_wakeup_rate_limiting():
 @pytest.mark.asyncio
 async def test_steer_wakeup_rate_window_resets():
     """Rate limit prunes old timestamps so the window resets."""
-    from unittest.mock import patch
 
     dispatch = AsyncMock(return_value="woke")
     steer = AsyncMock(return_value={"injected": False})
@@ -198,8 +197,9 @@ async def test_steer_wakeup_rate_window_resets():
     assert dispatch.await_count == 10
 
     # Simulate time passing beyond the window by backdating all timestamps
-    from src.host.lanes import _STEER_WAKEUP_WINDOW
     import time
+
+    from src.host.lanes import _STEER_WAKEUP_WINDOW
 
     old_time = time.monotonic() - _STEER_WAKEUP_WINDOW - 1
     lm._steer_wakeup_ts["agent1"] = [old_time] * 10
