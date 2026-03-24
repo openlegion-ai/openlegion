@@ -30,7 +30,7 @@ agents:
       You receive companies to enrich as:
       - A direct user message: "enrich Acme Corp (acme.com)"
       - A batch message: "enrich these companies: [list]"
-      - A blackboard key: read_shared_state("leads/queue") for a list
+      - A blackboard key: read_blackboard("leads/queue") for a list
 
       ## Data to collect per company
 

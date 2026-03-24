@@ -1546,12 +1546,12 @@ class TestStandaloneBlackboardIsolation:
         # Use a real SkillRegistry-like mock that respects exclude
         loop.skills.list_skills = MagicMock(
             side_effect=lambda exclude=None: (
-                [n for n in ["memory_save", "read_shared_state", "notify_user"]
+                [n for n in ["memory_save", "read_blackboard", "notify_user"]
                  if not exclude or n not in exclude]
             ),
         )
         status = loop.get_status()
-        assert "read_shared_state" not in status.capabilities
+        assert "read_blackboard" not in status.capabilities
         assert "notify_user" in status.capabilities
         assert "memory_save" in status.capabilities
 
