@@ -163,7 +163,7 @@ def create_mesh_app(
                 *(lane_manager.enqueue(wid, msg, mode="steer") for wid in watcher_ids),
                 return_exceptions=True,
             )
-            for wid, result in zip(watcher_ids, results, strict=False):
+            for wid, result in zip(watcher_ids, results, strict=True):
                 if isinstance(result, Exception):
                     logger.warning("Watch notification to %s failed: %s", wid, result)
 

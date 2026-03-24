@@ -172,7 +172,7 @@ class CronScheduler:
                     for f, c in zip(parts, [
                         candidate.minute, candidate.hour, candidate.day,
                         candidate.month, candidate.isoweekday() % 7,
-                    ], strict=False)
+                    ], strict=True)
                 ):
                     job.next_run = candidate.isoformat()
                     return
@@ -627,7 +627,7 @@ class CronScheduler:
 
         return all(
             _match_cron_field(field_str, current)
-            for field_str, (current, _low, _high) in zip(parts, fields, strict=False)
+            for field_str, (current, _low, _high) in zip(parts, fields, strict=True)
         )
 
     def list_jobs(self) -> list[dict]:

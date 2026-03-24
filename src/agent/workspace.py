@@ -382,7 +382,7 @@ class WorkspaceManager:
         scores = _bm25_score(query_terms, documents)
 
         ranked = sorted(
-            zip(scores, documents, strict=False),
+            zip(scores, documents, strict=True),
             key=lambda x: x[0],
             reverse=True,
         )
