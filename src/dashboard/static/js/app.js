@@ -57,6 +57,8 @@ function dashboard() {
     // Fleet
     agents: [],
     agentStates: {},
+    agentCoordStatus: {},
+    agentInboxCounts: {},
     _stateTimers: {},
     _heartbeatCountdowns: {},
     _heartbeatTimer: null,
@@ -1126,6 +1128,11 @@ function dashboard() {
             if (evt.data.key.includes('artifacts/')) this.fetchArtifacts();
           }, 1000);
         }
+        // Refresh coordination data when status/ or tasks/ keys change
+        if (evt.data.key.startsWith('status/') || evt.data.key.startsWith('tasks/')) {
+          if (this._coordDebounce) clearTimeout(this._coordDebounce);
+          this._coordDebounce = setTimeout(() => this._fetchCoordination(), 1000);
+        }
       }
 
       // Re-fetch identity/memory content when workspace files change (debounced, skip if editing)
@@ -1279,12 +1286,62 @@ function dashboard() {
             }
             this._saveChatToSession();
           }
+          // Fetch coordination status from blackboard
+          this._fetchCoordination();
         }
       } catch (e) {
         console.warn('fetchAgents failed:', e);
         this.connectionError = true;
       }
       this.loading = false;
+    },
+
+    async _fetchCoordination() {
+      // Only fetch when we have a project with agents
+      const proj = this.activeProject;
+      if (!proj || !this.agents.length) return;
+      try {
+        // Fetch status/ and tasks/ entries in parallel
+        const [statusResp, tasksResp] = await Promise.all([
+          fetch(`${window.__config.apiBase}/blackboard?prefix=status/`),
+          fetch(`${window.__config.apiBase}/blackboard?prefix=tasks/`),
+        ]);
+        if (statusResp.ok) {
+          const entries = await statusResp.json();
+          const coordStatus = {};
+          for (const entry of entries) {
+            // key is "status/{agent_id}" — extract agent_id
+            const parts = entry.key.split('/');
+            if (parts.length >= 2) {
+              const agentId = parts[1];
+              const val = typeof entry.value === 'string' ? JSON.parse(entry.value) : entry.value;
+              coordStatus[agentId] = {
+                state: val.state || 'unknown',
+                summary: val.summary || '',
+                ts: val.ts || 0,
+              };
+            }
+          }
+          this.agentCoordStatus = coordStatus;
+        }
+        if (tasksResp.ok) {
+          const entries = await tasksResp.json();
+          const counts = {};
+          for (const entry of entries) {
+            // key is "tasks/{agent_id}/{task_id}" — extract agent_id
+            const parts = entry.key.split('/');
+            if (parts.length >= 2) {
+              const agentId = parts[1];
+              const val = typeof entry.value === 'string' ? JSON.parse(entry.value) : entry.value;
+              // Only count pending tasks (not done)
+              if (!val || val.status !== 'done') {
+                counts[agentId] = (counts[agentId] || 0) + 1;
+              }
+            }
+          }
+          this.agentInboxCounts = counts;
+        }
+      } catch (e) { /* coordination data is supplementary — don't break the dashboard */ }
     },
 
     async fetchAgentDetail(agentId) {
@@ -4734,6 +4791,7 @@ function dashboard() {
     _bbNsMap: {
       'status/': 'status',
       'tasks/': 'tasks',
+      'output/': 'output',
       'research/': 'research',
       'drafts/': 'drafts',
       'artifacts/': 'artifacts',
@@ -4771,11 +4829,28 @@ function dashboard() {
       if (item.source === 'pubsub') return 'published';
       if (item.action === 'delete') return 'deleted';
       if (item.action === 'cas_write') return 'claimed';
+      // Coordination-aware verbs
+      if (item.key) {
+        if (item.key.startsWith('tasks/')) return 'handed off to';
+        if (item.key.startsWith('status/')) return 'updated status';
+        if (item.key.startsWith('output/')) return 'shared output';
+      }
       return 'wrote';
     },
 
     commsActionTarget(item) {
       if (item.source === 'pubsub') return item.topic || '?';
+      // Coordination-aware targets: show agent name instead of raw key
+      if (item.key) {
+        if (item.key.startsWith('tasks/')) {
+          const parts = item.key.split('/');
+          return parts.length >= 2 ? parts[1] : item.key;
+        }
+        if (item.key.startsWith('status/')) {
+          const parts = item.key.split('/');
+          return parts.length >= 2 ? parts[1] : item.key;
+        }
+      }
       return item.key || '?';
     },
 
@@ -4783,6 +4858,12 @@ function dashboard() {
       if (item.source === 'pubsub') return 'text-purple-400';
       if (item.action === 'delete') return 'text-red-400';
       if (item.action === 'cas_write') return 'text-amber-400';
+      // Coordination-aware colors
+      if (item.key) {
+        if (item.key.startsWith('tasks/')) return 'text-blue-400';
+        if (item.key.startsWith('status/')) return 'text-green-400';
+        if (item.key.startsWith('output/')) return 'text-indigo-400';
+      }
       return 'text-cyan-400';
     },
 

@@ -623,6 +623,7 @@ select:focus-visible,
 .ns-research  { background: rgba(59, 130, 246, 0.12); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.25); }
 .ns-drafts    { background: rgba(168, 85, 247, 0.12); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.25); }
 .ns-artifacts { background: rgba(139, 92, 246, 0.12); color: #a78bfa; border: 1px solid rgba(139, 92, 246, 0.25); }
+.ns-output    { background: rgba(99, 102, 241, 0.15); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.3); }
 .ns-alerts    { background: rgba(239, 68, 68, 0.12);  color: #f87171; border: 1px solid rgba(239, 68, 68, 0.25); }
 .ns-default   { background: rgba(107, 114, 128, 0.08); color: #6b7280; border: 1px solid rgba(107, 114, 128, 0.2); }
 
@@ -668,6 +669,7 @@ select:focus-visible,
 .bb-entry-row.bb-expanded.ns-accent-research  { border-left-color: rgba(59, 130, 246, 0.5); }
 .bb-entry-row.bb-expanded.ns-accent-drafts    { border-left-color: rgba(168, 85, 247, 0.5); }
 .bb-entry-row.bb-expanded.ns-accent-artifacts { border-left-color: rgba(139, 92, 246, 0.5); }
+.bb-entry-row.bb-expanded.ns-accent-output    { border-left-color: rgba(99, 102, 241, 0.5); }
 .bb-entry-row.bb-expanded.ns-accent-alerts    { border-left-color: rgba(239, 68, 68, 0.5); }
 .bb-entry-row.bb-expanded.ns-accent-default   { border-left-color: rgba(107, 114, 128, 0.3); }
 
