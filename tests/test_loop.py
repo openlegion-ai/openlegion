@@ -2216,3 +2216,48 @@ async def test_heartbeat_includes_self_evolution():
     assert len(captured_system) == 1
     assert "Self-Evolution" in captured_system[0]
     assert "INSTRUCTIONS.md" in captured_system[0]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_drains_steer_queue():
+    """Heartbeat drains pending steer messages into the user message."""
+    captured_messages = []
+
+    async def _capture_llm(*, system, messages, **kw):
+        captured_messages.append(messages)
+        return LLMResponse(content="HEARTBEAT_OK", tokens_used=10)
+
+    loop = _make_loop([])
+    loop.llm.chat = AsyncMock(side_effect=_capture_llm)
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    # Inject a steer message before heartbeat runs
+    await loop.inject_steer("coordination signal from writer")
+
+    result = await loop.execute_heartbeat("heartbeat check")
+
+    assert not result.get("skipped", False)
+    assert len(captured_messages) >= 1
+    user_content = captured_messages[0][0]["content"]
+    assert "Pending Coordination Signals" in user_content
+    assert "coordination signal from writer" in user_content
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_check_inbox_in_system_prompt():
+    """Heartbeat system prompt tells agent to call check_inbox()."""
+    captured_system = []
+
+    async def _capture_llm(*, system, messages, **kw):
+        captured_system.append(system)
+        return LLMResponse(content="HEARTBEAT_OK", tokens_used=10)
+
+    loop = _make_loop([])
+    loop.llm.chat = AsyncMock(side_effect=_capture_llm)
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    await loop.execute_heartbeat("wakeup")
+
+    assert len(captured_system) == 1
+    assert "check_inbox()" in captured_system[0]
+    assert "goals, or inbox needs attention" in captured_system[0]

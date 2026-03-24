@@ -772,6 +772,13 @@ def create_mesh_app(
         for topic in agent_perms.can_subscribe:
             scoped = f"projects/{reg_project}/{topic}" if reg_project else topic
             pubsub.subscribe(scoped, agent_id)
+        # Auto-watch task inbox (coordination protocol)
+        inbox_pattern = (
+            f"projects/{reg_project}/tasks/{agent_id}/*"
+            if reg_project
+            else f"tasks/{agent_id}/*"
+        )
+        blackboard.add_watch(agent_id, inbox_pattern)
         if event_bus is not None:
             event_bus.emit("agent_state", agent=agent_id, data={
                 "state": "registered", "capabilities": capabilities,
@@ -791,19 +798,19 @@ def create_mesh_app(
         if notify_fn is None:
             raise HTTPException(503, "Notifications not available")
         message = body.message[:_NOTIFY_MAX_LEN]
+        # Emit to dashboard first — users should see notifications even if
+        # channel delivery (Telegram/Discord/etc.) fails below.
+        if event_bus:
+            event_bus.emit("notification", agent=body.agent_id,
+                           data={"message": message})
+            if any(f in message for f in _WS_FILE_NAMES):
+                event_bus.emit("workspace_updated", agent=body.agent_id,
+                               data={"message": message})
         try:
             await notify_fn(body.agent_id, message)
         except Exception as e:
             logger.warning("notify_user failed: %s", e)
             raise HTTPException(500, f"Notification failed: {e}")
-        # Emit to dashboard event bus so WebSocket clients see notifications
-        if event_bus:
-            event_bus.emit("notification", agent=body.agent_id,
-                           data={"message": message})
-            # Emit workspace_updated when the notification is about identity file changes
-            if any(f in message for f in _WS_FILE_NAMES):
-                event_bus.emit("workspace_updated", agent=body.agent_id,
-                               data={"message": message})
         return {"sent": True}
 
     @app.get("/mesh/agents")

@@ -693,6 +693,33 @@ conversations (large context), vision/screenshot tools, embedding calls.
   Promote facts to the blackboard only when another agent needs them.
 - **User-facing vs agent-facing**: report to the user via chat or
   `notify_user`. The blackboard is for agent-to-agent data only.
+
+## Coordination Protocol
+
+Use these tools to coordinate with teammates:
+
+**Handing off work:**
+→ `hand_off(to="agent_id", summary="what to do next", data="optional JSON")`
+Writes your output to the blackboard, creates a task in their inbox, and
+wakes them up. This is a single call — no separate publish needed.
+
+**Checking for work:**
+→ `check_inbox()`
+Returns pending tasks from teammates with summaries and pointers to their
+output. Call this on startup, during heartbeats, and when notified.
+
+**Sharing your state:**
+→ `update_status(state="working|idle|blocked|done", summary="...")`
+Teammates read your status to decide whether to wait or proceed.
+
+**Three standard blackboard sections:**
+- `status/{agent_id}` — each agent's current state
+- `output/{agent_id}/{name}` — completed work products
+- `tasks/{agent_id}/{task_id}` — pending work inbox
+
+You can still use the lower-level tools (read_shared_state, write_shared_state,
+publish_event) for custom patterns, but prefer the coordination tools above
+for inter-agent workflows.
 """
 
 

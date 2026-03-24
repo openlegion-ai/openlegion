@@ -102,14 +102,17 @@ async def test_steer_falls_back_without_steer_fn():
 
 
 @pytest.mark.asyncio
-async def test_steer_to_idle_agent():
-    """Steer to idle agent returns queued message and calls steer_fn."""
+async def test_steer_to_idle_agent_falls_back_to_followup():
+    """Steer to idle agent (injected=False) dispatches via followup to wake it."""
+    dispatch = AsyncMock(return_value="woke up")
     steer = AsyncMock(return_value={"injected": False})
-    lm = LaneManager(dispatch_fn=AsyncMock(return_value="ok"), steer_fn=steer)
+    lm = LaneManager(dispatch_fn=dispatch, steer_fn=steer)
 
     result = await lm.enqueue("agent1", "hey", mode="steer")
-    assert "idle" in result.lower() or "queued" in result.lower()
+    # Should have called steer_fn first, then fallen back to dispatch
     steer.assert_awaited_once_with("agent1", "hey")
+    dispatch.assert_awaited_once_with("agent1", "hey")
+    assert result == "woke up"
 
 
 @pytest.mark.asyncio
@@ -138,6 +141,73 @@ async def test_steer_busy_agent_returns_injected_message():
 
     dispatch_done.set()
     await task1
+
+
+@pytest.mark.asyncio
+async def test_steer_active_agent_does_not_dispatch():
+    """Steer to an active agent (injected=True) does NOT call dispatch_fn."""
+    dispatch = AsyncMock(return_value="normal")
+    steer = AsyncMock(return_value={"injected": True})
+    lm = LaneManager(dispatch_fn=dispatch, steer_fn=steer)
+
+    result = await lm.enqueue("agent1", "redirect", mode="steer")
+    steer.assert_awaited_once_with("agent1", "redirect")
+    dispatch.assert_not_awaited()
+    assert "injected" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_steer_wakeup_rate_limiting():
+    """Rate limiting prevents excess followup wakeups from idle steers."""
+    dispatch = AsyncMock(return_value="woke")
+    steer = AsyncMock(return_value={"injected": False})
+    lm = LaneManager(dispatch_fn=dispatch, steer_fn=steer)
+
+    results = []
+    for i in range(15):
+        r = await lm.enqueue("agent1", f"msg{i}", mode="steer")
+        results.append(r)
+
+    # First 10 should dispatch (followup wakeup)
+    woke_count = sum(1 for r in results if r == "woke")
+    assert woke_count == 10
+    assert dispatch.await_count == 10
+
+    # Remaining 5 should be rate-limited (SILENT_REPLY_TOKEN)
+    silent_count = sum(1 for r in results if r == SILENT_REPLY_TOKEN)
+    assert silent_count == 5
+
+
+@pytest.mark.asyncio
+async def test_steer_wakeup_rate_window_resets():
+    """Rate limit prunes old timestamps so the window resets."""
+    from unittest.mock import patch
+
+    dispatch = AsyncMock(return_value="woke")
+    steer = AsyncMock(return_value={"injected": False})
+    lm = LaneManager(dispatch_fn=dispatch, steer_fn=steer)
+
+    # Use up all 10 wakeups
+    for i in range(10):
+        await lm.enqueue("agent1", f"msg{i}", mode="steer")
+    assert dispatch.await_count == 10
+
+    # Next one should be rate-limited
+    r = await lm.enqueue("agent1", "blocked", mode="steer")
+    assert r == SILENT_REPLY_TOKEN
+    assert dispatch.await_count == 10
+
+    # Simulate time passing beyond the window by backdating all timestamps
+    from src.host.lanes import _STEER_WAKEUP_WINDOW
+    import time
+
+    old_time = time.monotonic() - _STEER_WAKEUP_WINDOW - 1
+    lm._steer_wakeup_ts["agent1"] = [old_time] * 10
+
+    # Now it should allow again
+    r = await lm.enqueue("agent1", "allowed", mode="steer")
+    assert r == "woke"
+    assert dispatch.await_count == 11
 
 
 # ── Collect mode ─────────────────────────────────────────────

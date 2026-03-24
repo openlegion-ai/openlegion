@@ -82,17 +82,16 @@ agents:
           "found_at": "timestamp"
         }
 
-      ## Event publishing
-
-      For every new review regardless of rating:
-        publish_event "new_review"
+      ## Handing off to the responder
 
       For reviews rated 1 or 2 stars with no existing vendor response:
-        publish_event "negative_review" with { review_id, platform, rating, url }
-        — This is URGENT and triggers the responder immediately
+        hand_off(to="responder", summary="negative review: {platform} {rating}/5",
+                 data="review JSON with review_id, platform, rating, url, body")
+        — This is URGENT and wakes the responder immediately
 
       For reviews rated 3 stars with no vendor response and a specific complaint:
-        publish_event "negative_review" (3-star with explicit complaint deserves response)
+        hand_off(to="responder", summary="negative review: {platform} 3/5", data="review JSON")
+        (3-star with explicit complaint deserves response)
 
       ## Batch notification
       At end of each heartbeat cycle, notify_user with a summary:
@@ -105,10 +104,12 @@ agents:
 
     heartbeat: |
       On each heartbeat, check all configured review platforms for new reviews.
+      Call check_inbox() for requests from teammates.
       Stop extracting when you reach reviews older than your last check date.
-      Save all new reviews to blackboard. Publish "negative_review" for 1-3 star
-      reviews without vendor responses. Update last_check date in memory.
+      Save all new reviews to blackboard. Use hand_off(to="responder") for 1-3
+      star reviews without vendor responses. Update last_check date in memory.
       If no new reviews: respond HEARTBEAT_OK.
+      Call update_status() with your current state.
 
       ## Configured products
       Add your products here. Format:
@@ -158,10 +159,9 @@ agents:
       and actionable. You deliver drafts for human review — never post directly.
 
       ## Trigger
-      You activate on "negative_review" events. Each event includes:
-        review_id, platform, rating, url
-
-      Read the full review from: reviews/{platform}/{review_id}
+      You activate when the monitor hands off a negative review.
+      Call check_inbox() to receive review details from the monitor.
+      Read the review data from the output_key in each task.
 
       ## Pre-draft checks
       Before drafting:
@@ -275,6 +275,12 @@ agents:
 
       After saving: write draft metadata to blackboard reviews/{platform}/{review_id}/draft
       Save review_id to memory "drafted_reviews" to prevent re-drafting.
+      Call update_status() when starting and finishing work.
+
+    heartbeat: |
+      - Call check_inbox() for negative reviews from the monitor
+      - If reviews are pending, draft responses
+      - Call update_status() with your current state
 
     permissions:
       blackboard_read: ["reviews/*"]

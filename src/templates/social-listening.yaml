@@ -75,19 +75,20 @@ agents:
       to memory under key "processed_posts" so you never re-surface it.
 
       ## Your workflow (on each heartbeat)
-      1. Load processed post IDs from memory (key: "processed_posts")
-      2. Choose 3-5 search queries from the list above — vary them each cycle
-      3. For each search result: check if URL is in processed_posts; if yes, skip
-      4. Use browser to read the full post + top comments for promising results
-      5. Score each unprocessed post using the scoring criteria above
-      6. For posts scoring 6+:
-         a. Write signal to blackboard: signals/{platform}/{post_slug}
+      1. Call check_inbox() for requests from teammates
+      2. Load processed post IDs from memory (key: "processed_posts")
+      3. Choose 3-5 search queries from the list above — vary them each cycle
+      4. For each search result: check if URL is in processed_posts; if yes, skip
+      5. Use browser to read the full post + top comments for promising results
+      6. Score each unprocessed post using the scoring criteria above
+      7. For posts scoring 6+:
+         a. Save post URL to memory under "processed_posts"
+         b. hand_off(to="writer", summary="signal found: {platform}/{post_slug}", data="signal JSON")
             Include: url, title, platform, score, signal_type, post_content
             (first 500 chars), top_comments (first 3), posted_at, upvotes
-         b. Save post URL to memory under "processed_posts"
-         c. Publish "signal_found" event
-      7. If nothing scores 6+: respond HEARTBEAT_OK
-      8. Only notify_user if 3+ signals found in one cycle (batch summary)
+      8. If nothing scores 6+: respond HEARTBEAT_OK
+      9. Only notify_user if 3+ signals found in one cycle (batch summary)
+      10. Call update_status() with your current state
 
       ## Signal types to record
       migration_intent | documented_pain | comparison_request | question
@@ -99,9 +100,11 @@ agents:
 
     heartbeat: |
       On each heartbeat, search for competitor pain points on social platforms.
+      Call check_inbox() for requests from teammates.
       Track processed post IDs in memory to avoid duplicates.
       Only surface signals scoring 6+ (see scoring criteria in INSTRUCTIONS.md).
       If nothing qualifies, respond HEARTBEAT_OK immediately.
+      Call update_status() with your current state.
 
       Rotate through different competitors and query types each cycle — don't
       always search for the same competitor or the same query. Prioritize
@@ -146,20 +149,16 @@ agents:
       a human can review, refine, and choose to post.
 
       ## Your workflow
-      1. Receive a "signal_found" event (or be asked directly)
-      2. Read all new signals from signals/* on the blackboard that have no
-         corresponding draft yet (check drafts/* to avoid re-drafting)
+      1. Call check_inbox() for signals from the monitor
+      2. Read signal details from the output_key in each task
       3. For each unprocessed signal:
          a. Use browser to read the full post and all comments
             — understand the specific complaint, the context, the audience
          b. Check if OP has already found a solution (if yes, skip — too late)
          c. Draft a response using the platform guidelines below
          d. Save the draft as an artifact: drafts/{platform}/{post_slug}.md
-         e. Write draft metadata to blackboard: drafts/{platform}/{post_slug}
-            Include: signal_url, draft_status: "pending_review", platform,
-            signal_type, relevance_summary (1 sentence why this is worth engaging)
-         f. notify_user with the full draft + context (see notification format)
-      4. Publish "draft_complete"
+         e. notify_user with the full draft + context (see notification format)
+      4. Call update_status() when starting and finishing work
 
       ## Response drafting principles
 
@@ -230,6 +229,11 @@ agents:
       - Posts in communities that ban tool promotion (check subreddit rules first)
       - Posts with <5 upvotes on Reddit or <2 HN points (too low reach)
       - Any post where OpenLegion is not relevant and there's no genuine value to add
+
+    heartbeat: |
+      - Call check_inbox() for new signals from the monitor
+      - If signals are pending, draft responses
+      - Call update_status() with your current state
 
     permissions:
       blackboard_read: ["signals/*", "drafts/*"]

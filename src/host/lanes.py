@@ -14,6 +14,7 @@ Three queue modes control how incoming messages interact with busy agents:
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,6 +23,9 @@ from src.shared.types import SILENT_REPLY_TOKEN
 from src.shared.utils import generate_id, setup_logging
 
 logger = setup_logging("host.lanes")
+
+_STEER_WAKEUP_MAX = 10  # max wakeups per window
+_STEER_WAKEUP_WINDOW = 3600  # 1 hour window
 
 
 @dataclass
@@ -52,6 +56,7 @@ class LaneManager:
         self._collect_buffers: dict[str, list[str]] = {}
         self._busy: dict[str, bool] = {}
         self._state_locks: dict[str, asyncio.Lock] = {}
+        self._steer_wakeup_ts: dict[str, list[float]] = {}
 
     def _ensure_lane(self, agent: str) -> None:
         """Lazily create queue, worker, and tracking structures for an agent."""
@@ -114,10 +119,28 @@ class LaneManager:
             if injected:
                 return f"Steered: message injected into {agent}'s active conversation"
             else:
-                return f"Steered: message queued for {agent} (agent is idle, will see it next turn)"
+                # Agent is idle — dispatch as followup to wake it up.
+                # Rate-limited to prevent event storms from draining budget.
+                if self._check_steer_wakeup_rate(agent):
+                    logger.debug(f"Waking idle agent '{agent}' via followup (steer not injected)")
+                    return await self._handle_followup(agent, message)
+                logger.debug(f"Steer wakeup rate-limited for idle agent '{agent}', dropping")
+                return SILENT_REPLY_TOKEN
         except Exception as e:
             logger.warning(f"Steer to '{agent}' failed, falling back to followup: {e}")
             return await self._handle_followup(agent, message)
+
+    def _check_steer_wakeup_rate(self, agent: str) -> bool:
+        """Return True if the agent hasn't exceeded the steer-wakeup rate limit."""
+        now = time.monotonic()
+        ts = self._steer_wakeup_ts.get(agent, [])
+        # Prune old timestamps
+        ts = [t for t in ts if now - t < _STEER_WAKEUP_WINDOW]
+        if len(ts) >= _STEER_WAKEUP_MAX:
+            return False
+        ts.append(now)
+        self._steer_wakeup_ts[agent] = ts
+        return True
 
     async def _handle_collect(self, agent: str, message: str) -> str:
         """Batch messages when agent is busy, dispatch immediately when idle."""
@@ -240,6 +263,7 @@ class LaneManager:
         self._collect_buffers.pop(agent, None)
         self._busy.pop(agent, None)
         self._state_locks.pop(agent, None)
+        self._steer_wakeup_ts.pop(agent, None)
 
     async def stop(self) -> None:
         """Cancel all worker tasks."""

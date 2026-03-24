@@ -109,7 +109,7 @@ _heartbeat_mode: ContextVar[bool] = ContextVar("_heartbeat_mode", default=False)
 _BLACKBOARD_TOOLS = frozenset({
     "read_shared_state", "write_shared_state", "list_shared_state",
     "publish_event", "subscribe_event", "watch_blackboard",
-    "claim_task",
+    "claim_task", "hand_off", "check_inbox", "update_status",
 })
 
 
@@ -271,8 +271,9 @@ class AgentLoop:
             else:
                 lines.append(f"- **{agent['name']}**")
         lines.append(
-            "\nCoordinate via blackboard — write your progress to status/{your_id} "
-            "and work output under your domain prefix (e.g. research/, drafts/).\n"
+            "\nUse `hand_off(to=\"agent_id\", summary=\"...\")` to send work to a teammate.\n"
+            "Use `check_inbox()` to see tasks sent to you.\n"
+            "Use `update_status(state, summary)` so teammates know what you're doing.\n"
             "Report results to the user via chat or notify_user, not the blackboard."
         )
         return "\n".join(lines)
@@ -955,7 +956,8 @@ class AgentLoop:
                 f"- This is a HEARTBEAT wakeup. Check your HEARTBEAT.md rules and "
                 f"goals, then act on anything that needs attention.\n"
                 f"- Follow HEARTBEAT.md strictly. Do not infer tasks from prior sessions.\n"
-                f"- If nothing in HEARTBEAT.md or goals needs attention, reply HEARTBEAT_OK immediately.\n"
+                f"- Call check_inbox() to see if teammates sent you tasks.\n"
+                f"- If nothing in HEARTBEAT.md, goals, or inbox needs attention, reply HEARTBEAT_OK immediately.\n"
                 f"- You have max {HEARTBEAT_MAX_ITERATIONS} iterations.\n"
                 f"- Use notify_user to report results to the user.\n"
             )
@@ -990,6 +992,15 @@ class AgentLoop:
                     parts.append(runtime_ctx)
 
             system_prompt = "\n\n".join(parts)
+
+            # Drain any pending coordination signals into the heartbeat
+            steered = self._drain_steer_messages()
+            if steered:
+                steer_context = "\n".join(f"- {s}" for s in steered)
+                message = (
+                    f"{message}\n\n"
+                    f"## Pending Coordination Signals\n\n{steer_context}"
+                )
 
             # Stateless message list — fresh each heartbeat
             messages: list[dict] = [{"role": "user", "content": message}]
