@@ -78,6 +78,8 @@ function dashboard() {
     selectedAgent: null,
     agentDetail: null,
     showBrowserViewer: false,
+    _browserFocusDone: false,
+    _browserPendingAgent: null,
 
     // Agent config
     agentConfigs: {},
@@ -3775,20 +3777,27 @@ function dashboard() {
       this._browserToggling = true;
       try {
         const agentId = this.selectedAgent;
-        // Show the iframe immediately so the user sees the loading spinner
-        // while the focus call runs in parallel. The VNC connection and
-        // browser focus happen concurrently — by the time VNC connects,
-        // focus is usually already done.
+        // Show loading overlay before the focus call so the user gets
+        // immediate feedback, but do NOT set the iframe src yet —
+        // otherwise KasmVNC connects and renders whatever window
+        // happens to be on top *before* focus completes.
+        this._browserPendingAgent = agentId;
         this.showBrowserViewer = true;
+        this._browserFocusDone = false;
         this.$nextTick(() => {
           if (this.$refs.vncLoading) {
             this.$refs.vncLoading.style.opacity = '1';
           }
         });
-        // Fire focus in background — don't block the UI
+        // Await focus so the correct agent's window is raised before
+        // the iframe connects to KasmVNC.
         if (agentId) {
-          this.focusBrowser(agentId);
+          await this.focusBrowser(agentId);
         }
+        // Staleness guard: if the user switched agents while we were
+        // awaiting, abandon — the new agent's toggle will handle it.
+        if (this.selectedAgent !== agentId) return;
+        this._browserFocusDone = true;
       } finally {
         this._browserToggling = false;
       }
@@ -4372,6 +4381,8 @@ function dashboard() {
       this.selectedAgent = agentId;
       this.detailAgent = agentId;
       this.showBrowserViewer = false;
+      this._browserFocusDone = false;
+      this._browserPendingAgent = null;
       this.identityTab = 'config';
       this.identityFiles = [];
       this.identityContent = {};

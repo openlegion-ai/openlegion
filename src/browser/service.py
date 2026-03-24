@@ -343,14 +343,16 @@ class BrowserManager:
             else:
                 target = max(self._instances.values(), key=lambda i: i.last_activity)
             wid = target.x11_wid
+        if not wid:
+            # No WID known — skip xdotool entirely.  The fallback
+            # `search --class firefox` matches ALL Firefox windows and
+            # raises whichever it finds first, breaking multi-agent
+            # browser switching.
+            return
         try:
-            if wid:
-                wid_s = str(wid)
-                cmd = ["xdotool", "windowmap", "--sync", wid_s,
-                       "windowraise", wid_s, "windowfocus", wid_s]
-            else:
-                cmd = ["xdotool", "search", "--class", "firefox",
-                       "windowmap", "--sync", "windowraise", "windowfocus"]
+            wid_s = str(wid)
+            cmd = ["xdotool", "windowmap", "--sync", wid_s,
+                   "windowraise", wid_s, "windowfocus", wid_s]
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None,
@@ -560,14 +562,21 @@ class BrowserManager:
                     wid_s = str(wid)
                     cmd = ["xdotool", "windowmap", "--sync", wid_s,
                            "windowraise", wid_s, "windowfocus", wid_s]
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(
+                        None,
+                        lambda: subprocess.run(cmd, capture_output=True, timeout=3),
+                    )
                 else:
-                    cmd = ["xdotool", "search", "--class", "firefox",
-                           "windowmap", "--sync", "windowraise", "windowfocus"]
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(
-                    None,
-                    lambda: subprocess.run(cmd, capture_output=True, timeout=3),
-                )
+                    # No WID known — skip xdotool entirely.  The fallback
+                    # `search --class firefox` matches ALL Firefox windows
+                    # and raises whichever it finds first, which is wrong
+                    # in multi-agent scenarios.  bring_to_front() above
+                    # already activated the correct tab at the browser-
+                    # protocol level.
+                    logger.debug(
+                        "No X11 WID for '%s'; skipping xdotool raise", agent_id,
+                    )
             except Exception as e:
                 logger.debug("xdotool raise skipped for '%s': %s", agent_id, e)
             return True
