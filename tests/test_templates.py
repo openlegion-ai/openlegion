@@ -489,7 +489,7 @@ class TestLoadSkillTemplates:
         eng = next(t for t in templates if t["id"] == "devteam/engineer")
         assert eng["has_instructions"] is True
         assert eng["has_soul"] is True
-        assert eng["has_heartbeat"] is False
+        assert eng["has_heartbeat"] is True
 
     def test_monitor_watcher_has_heartbeat(self):
         templates = _load_skill_templates()

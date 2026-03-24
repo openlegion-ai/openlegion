@@ -912,3 +912,64 @@ def test_blackboard_cas_failure_no_event_bus_emission(tmp_path):
     assert result is None
     bus.emit.assert_not_called()
     bb.close()
+
+
+# === Registration Auto-Watch Tests ===
+
+
+def test_registration_creates_inbox_watch(tmp_path):
+    """Registration auto-watch creates task inbox watch scoped to project."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    agent_id = "testagent"
+    project = "testproject"
+
+    # Simulate what /mesh/register does after auto-subscription
+    inbox_pattern = f"projects/{project}/tasks/{agent_id}/*"
+    bb.add_watch(agent_id, inbox_pattern)
+
+    # Verify the agent is watching its inbox
+    watchers = bb.get_watchers_for_key(
+        f"projects/{project}/tasks/{agent_id}/some_task"
+    )
+    assert agent_id in watchers
+    bb.close()
+
+
+def test_registration_inbox_watch_standalone(tmp_path):
+    """Registration auto-watch without a project uses unscoped pattern."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    agent_id = "testagent"
+
+    # No project — pattern is unscoped
+    inbox_pattern = f"tasks/{agent_id}/*"
+    bb.add_watch(agent_id, inbox_pattern)
+
+    watchers = bb.get_watchers_for_key(f"tasks/{agent_id}/ho_abc")
+    assert agent_id in watchers
+
+    # Should NOT match another agent's inbox
+    watchers_other = bb.get_watchers_for_key("tasks/otheragent/ho_abc")
+    assert agent_id not in watchers_other
+    bb.close()
+
+
+def test_inbox_watch_fires_on_handoff_write(tmp_path):
+    """Auto-watched agent is returned by get_watchers_for_key on handoff write."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    agent_id = "testagent"
+    writer_id = "sender"
+    project = "testproject"
+
+    # Register watcher (simulates /mesh/register auto-watch)
+    inbox_pattern = f"projects/{project}/tasks/{agent_id}/*"
+    bb.add_watch(agent_id, inbox_pattern)
+
+    # Simulate a hand_off write to the agent's inbox
+    task_key = f"projects/{project}/tasks/{agent_id}/ho_123"
+    bb.write(task_key, {"task": "do something"}, written_by=writer_id)
+
+    # get_watchers_for_key should return the agent (excluding the writer)
+    watchers = bb.get_watchers_for_key(task_key, exclude=writer_id)
+    assert agent_id in watchers
+    assert writer_id not in watchers
+    bb.close()

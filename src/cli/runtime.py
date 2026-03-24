@@ -738,7 +738,7 @@ class RuntimeContext:
         def _channel_steer(agent: str, msg: str) -> None:
             if self.lane_manager:
                 asyncio.run_coroutine_threadsafe(
-                    self.lane_manager.steer(agent, msg), self._dispatch_loop
+                    self.lane_manager.enqueue(agent, msg, mode="steer"), self._dispatch_loop
                 ).result(timeout=5)
 
         def _channel_debug(trace_id: str | None = None) -> list[dict]:

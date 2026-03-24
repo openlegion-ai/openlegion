@@ -91,8 +91,8 @@ agents:
       Always update memory price/{slug} with the current snapshot.
 
       If changes detected: write prices/{slug}/change with the diff, then
-      publish_event "price_change" with payload:
-        { "slug": slug, "change_types": [...], "old": {...}, "new": {...} }
+      hand_off(to="analyst", summary="price change: {slug}", data="change JSON")
+        Include: { "slug": slug, "change_types": [...], "old": {...}, "new": {...} }
 
       If no changes: respond HEARTBEAT_OK (don't bother the analyst)
 
@@ -121,9 +121,11 @@ agents:
 
     heartbeat: |
       On each heartbeat, check all configured pricing targets below.
+      Call check_inbox() for requests from teammates.
       For each URL: navigate, extract, compare against last snapshot.
-      Publish "price_change" only if something actually changed.
+      Use hand_off(to="analyst") only if something actually changed.
       If nothing changed across all URLs: respond HEARTBEAT_OK.
+      Call update_status() with your current state.
 
       ## Configured targets
       Add your targets here. Format:
@@ -164,12 +166,13 @@ agents:
 
     instructions: |
       You interpret price changes detected by the crawler and deliver actionable
-      competitive reports. You are event-driven — you only run when the crawler
-      publishes a "price_change" event.
+      competitive reports. You are event-driven — you activate when the crawler
+      hands off a price change.
 
       ## Workflow
 
-      1. Read all new price change entries from the blackboard: prices/*/change
+      1. Call check_inbox() for price changes from the crawler
+         Read change details from the output_key
          (check memory "last_analyzed_changes" for already-processed slugs)
 
       2. For each unprocessed change:
@@ -186,6 +189,7 @@ agents:
 
       3. notify_user with a combined summary if multiple changes occurred,
          or a single report if only one change
+      4. Call update_status() when starting and finishing work
 
       ## Report format
 
@@ -228,6 +232,11 @@ agents:
       Promotion ADDED by competitor:
         → They may be struggling with conversion — watch for a permanent drop
         → Consider a counter-promotion if the segment overlaps
+
+    heartbeat: |
+      - Call check_inbox() for price changes from the crawler
+      - If changes are pending, analyze them
+      - Call update_status() with your current state
 
     permissions:
       blackboard_read: ["prices/*"]

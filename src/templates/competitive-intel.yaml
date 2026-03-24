@@ -149,6 +149,8 @@ agents:
     heartbeat: |
       On each heartbeat, run the checks below based on elapsed time.
       Track last run times in memory so you don't repeat work.
+      Call check_inbox() for requests from teammates.
+      Call update_status() with your current state.
 
       ## Every 24 hours — CVE watch
       For each primary competitor (langgraph, crewai, autogen, semantic-kernel,
