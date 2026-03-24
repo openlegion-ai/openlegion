@@ -171,8 +171,11 @@ async def check_inbox(*, mesh_client=None) -> dict:
                 value = json.loads(value)
             except json.JSONDecodeError:
                 value = {"text": value}
+        # Ensure value is a dict (guard against corrupted entries)
+        if not isinstance(value, dict):
+            value = {"text": str(value)}
         # Skip completed tasks
-        if isinstance(value, dict) and value.get("status") == "done":
+        if value.get("status") == "done":
             continue
         task = {
             "key": sanitize_for_prompt(entry.get("key", "")),
