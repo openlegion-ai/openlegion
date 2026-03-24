@@ -267,9 +267,12 @@ class CronScheduler:
         if to_remove:
             self._save()
             if self._event_bus:
-                self._event_bus.emit("cron_change", agent=agent_id, data={
-                    "action": "removed_all", "count": len(to_remove),
-                })
+                try:
+                    self._event_bus.emit("cron_change", agent=agent_id, data={
+                        "action": "removed_all", "count": len(to_remove),
+                    })
+                except Exception:
+                    logger.debug("Failed to emit cron_change event", exc_info=True)
         return len(to_remove)
 
     async def pause_job(self, job_id: str) -> bool:
@@ -502,6 +505,7 @@ class CronScheduler:
 
                     if job.suppress_empty and _is_empty_response(response):
                         logger.debug(f"Cron {job.id}: suppressed empty response")
+                        self._emit_cron_change("executed", job)
                         return response
                     logger.info(f"Cron {job.id} executed for agent '{job.agent}'")
 
