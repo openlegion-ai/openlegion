@@ -3771,6 +3771,8 @@ function dashboard() {
     async toggleBrowser() {
       if (this.showBrowserViewer) {
         this.showBrowserViewer = false;
+        this._browserFocusDone = false;
+        this._browserToggling = false;
         return;
       }
       if (this._browserToggling) return;
@@ -4383,6 +4385,7 @@ function dashboard() {
       this.showBrowserViewer = false;
       this._browserFocusDone = false;
       this._browserPendingAgent = null;
+      this._browserToggling = false;
       this.identityTab = 'config';
       this.identityFiles = [];
       this.identityContent = {};
