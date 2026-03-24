@@ -1287,7 +1287,7 @@
                     @click="focusBrowser(selectedAgent)"
                     class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
                     title="Open in new tab">&#x2197; Pop out</a>
-                  <button @click="showBrowserViewer = false"
+                  <button @click="showBrowserViewer = false; _browserFocusDone = false; _browserToggling = false"
                     class="text-gray-500 hover:text-gray-300 transition-colors text-sm"
                     title="Close" aria-label="Close">&times;</button>
                 </div>
@@ -1304,10 +1304,10 @@
                   <span class="text-sm text-gray-400">Connecting to browser...</span>
                 </div>
                 <iframe
-                  :src="showBrowserViewer ? agentDetail?.vnc_url : ''"
+                  :src="(showBrowserViewer && _browserFocusDone) ? agentDetail?.vnc_url : ''"
                   class="w-full h-full border-0"
                   allow="clipboard-read; clipboard-write"
-                  @load="$refs.vncLoading && ($refs.vncLoading.style.opacity = '0')"
+                  @load="_browserFocusDone && $refs.vncLoading && ($refs.vncLoading.style.opacity = '0')"
                 ></iframe>
               </div>
             </div>

@@ -208,8 +208,8 @@ class TestX11WindowTracking:
             assert "search" not in cmd
 
     @pytest.mark.asyncio
-    async def test_focus_falls_back_without_wid(self):
-        """focus() should fall back to search --class when no WID is stored."""
+    async def test_focus_skips_xdotool_without_wid(self):
+        """focus() should skip xdotool entirely when no WID is stored."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
         mock_page = AsyncMock()
@@ -218,11 +218,10 @@ class TestX11WindowTracking:
         inst.x11_wid = None
         mgr.get_or_start = AsyncMock(return_value=inst)
         with patch("src.browser.service.subprocess.run") as mock_run:
-            await mgr.focus("agent1")
-            cmd = mock_run.call_args[0][0]
-            assert "search" in cmd
-            assert "--class" in cmd
-            assert "firefox" in cmd
+            result = await mgr.focus("agent1")
+            assert result is True
+            mock_page.bring_to_front.assert_awaited_once()
+            mock_run.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_refocus_active_targets_mru_wid(self):
@@ -243,7 +242,8 @@ class TestX11WindowTracking:
             assert "111" not in cmd
 
     @pytest.mark.asyncio
-    async def test_refocus_active_falls_back_without_wid(self):
+    async def test_refocus_active_skips_xdotool_without_wid(self):
+        """refocus_active() should skip xdotool entirely when no WID is stored."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
         inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
@@ -251,8 +251,7 @@ class TestX11WindowTracking:
         mgr._instances = {"a": inst}
         with patch("src.browser.service.subprocess.run") as mock_run:
             await mgr.refocus_active()
-            cmd = mock_run.call_args[0][0]
-            assert "search" in cmd
+            mock_run.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_instance_has_x11_wid_attribute(self):
