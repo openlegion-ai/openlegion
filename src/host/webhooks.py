@@ -12,9 +12,9 @@ import hashlib
 import hmac
 import json
 import secrets
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
 
 from fastapi import APIRouter, HTTPException, Request
 

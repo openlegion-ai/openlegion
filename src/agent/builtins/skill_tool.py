@@ -64,9 +64,8 @@ def _validate_skill_code(code: str) -> str | None:
                 parts = module.split(".")
                 if any(p in _FORBIDDEN_IMPORTS for p in parts) or module in _FORBIDDEN_IMPORTS:
                     return f"Forbidden import: {module}"
-        if isinstance(node, ast.Attribute):
-            if node.attr in _FORBIDDEN_ATTRS:
-                return f"Forbidden attribute access: {node.attr}"
+        if isinstance(node, ast.Attribute) and node.attr in _FORBIDDEN_ATTRS:
+            return f"Forbidden attribute access: {node.attr}"
         if isinstance(node, ast.Call):
             func_name = ""
             if isinstance(node.func, ast.Name):

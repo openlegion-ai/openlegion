@@ -759,7 +759,7 @@ def wallet_show(agent_id):
         loop = asyncio.new_event_loop()
         if agent_id:
             click.echo(f"Wallet addresses for {agent_id}:")
-            for chain_name, cfg in ws.chains.items():
+            for chain_name, _cfg in ws.chains.items():
                 try:
                     addr = loop.run_until_complete(ws.get_address(agent_id, chain_name))
                     click.echo(f"  {chain_name:20s} {addr}")

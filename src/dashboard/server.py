@@ -7,6 +7,7 @@ objects — no HTTP round-trips through mesh endpoints.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -389,9 +390,8 @@ def create_dashboard_router(
             except (ValueError, TypeError):
                 raise HTTPException(status_code=400, detail="Color must be an integer between 0 and 15")
 
-        if template:
-            if not re.match(r"^[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]*$", template):
-                raise HTTPException(status_code=400, detail="Invalid template id format")
+        if template and not re.match(r"^[a-z][a-z0-9_-]*/[a-z][a-z0-9_-]*$", template):
+            raise HTTPException(status_code=400, detail="Invalid template id format")
 
         if not model:
             from src.cli.config import _load_config
@@ -2249,10 +2249,8 @@ def create_dashboard_router(
             with os.fdopen(fd, "w") as f:
                 f.write(content)
         except BaseException:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
             Path(tmp_path).unlink(missing_ok=True)
             raise
         try:
@@ -2712,10 +2710,8 @@ def create_dashboard_router(
 
         def _rollback_credentials() -> None:
             for env_name in persisted_env_names:
-                try:
+                with contextlib.suppress(Exception):
                     credential_vault.remove_credential(env_name)
-                except Exception:
-                    pass
 
         try:
             routers = channel_manager.start_channel(channel_type, tokens)
@@ -2744,10 +2740,8 @@ def create_dashboard_router(
         # Remove tokens from credential vault
         if credential_vault is not None:
             for _token_key, env_name in _CHANNEL_TOKEN_KEYS[channel_type]:
-                try:
+                with contextlib.suppress(Exception):
                     credential_vault.remove_credential(env_name)
-                except Exception:
-                    pass
         return {"disconnected": True, "type": channel_type}
 
     # ── Agent Workspace (proxy to agent) ─────────────────────
@@ -2999,10 +2993,7 @@ def create_dashboard_router(
         # When served with a versioned URL (?v=<hash>), cache aggressively —
         # the URL changes whenever file content changes.  Without a version
         # param (direct access, bookmarks), prevent caching entirely.
-        if v:
-            cache = "public, max-age=86400, immutable"
-        else:
-            cache = "no-store"
+        cache = "public, max-age=86400, immutable" if v else "no-store"
         return FileResponse(
             str(full),
             media_type=_MEDIA_TYPES.get(suffix),

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json as json_module
 import mimetypes
 import re
@@ -221,10 +222,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             finally:
                 if not next_event.done():
                     next_event.cancel()
-                    try:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
                         await next_event
-                    except (asyncio.CancelledError, Exception):
-                        pass
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @app.post("/chat/reset")

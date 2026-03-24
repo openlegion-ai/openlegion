@@ -11,6 +11,7 @@ Provides endpoints for:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import json
 import re
@@ -36,11 +37,11 @@ from src.shared.types import (
 )
 from src.shared.utils import setup_logging
 
-_server_logger = setup_logging("host.server")
+logger = setup_logging("host.server")
 
-_MAX_SYSTEM_PROMPT = 10_000
-_MAX_BB_KEY_LEN = 512
-_MAX_BB_VALUE_BYTES = 262_144  # 256 KB
+_MAX_SYSTEM_PROMPT = 10_000  # chars — caps agent-supplied system prompt to limit context cost
+_MAX_BB_KEY_LEN = 512  # chars — prevents abusive key lengths in blackboard
+_MAX_BB_VALUE_BYTES = 262_144  # 256 KB — bounds per-key storage to keep SQLite WAL manageable
 
 
 def _extract_prompt_preview(params: dict, max_len: int = 500) -> str:
@@ -162,14 +163,14 @@ def create_mesh_app(
                 *(lane_manager.enqueue(wid, msg, mode="steer") for wid in watcher_ids),
                 return_exceptions=True,
             )
-            for wid, result in zip(watcher_ids, results):
+            for wid, result in zip(watcher_ids, results, strict=True):
                 if isinstance(result, Exception):
-                    _server_logger.warning("Watch notification to %s failed: %s", wid, result)
+                    logger.warning("Watch notification to %s failed: %s", wid, result)
 
         try:
             asyncio.run_coroutine_threadsafe(_do_notify(), dispatch_loop)
         except Exception as e:
-            _server_logger.warning("Batch watch notification failed: %s", e)
+            logger.warning("Batch watch notification failed: %s", e)
 
     def _cleanup_rate_limits(agent_id: str) -> None:
         """Remove all rate-limit buckets for a deregistered agent.
@@ -614,7 +615,7 @@ def create_mesh_app(
         await _check_rate_limit("vault_resolve", agent_id)
 
         # Audit log every resolve
-        _server_logger.info(
+        logger.info(
             "Vault credential resolved",
             extra={"extra_data": {"agent_id": agent_id, "credential": name}},
         )
@@ -695,7 +696,7 @@ def create_mesh_app(
         if _ws_ref[0] is None:
             raise HTTPException(503, "Wallet service not configured")
         await _check_rate_limit("wallet_transfer", agent_id)
-        _server_logger.info(
+        logger.info(
             "Wallet transfer",
             extra={"extra_data": {
                 "agent_id": agent_id, "chain": chain,
@@ -728,7 +729,7 @@ def create_mesh_app(
         if _ws_ref[0] is None:
             raise HTTPException(503, "Wallet service not configured")
         await _check_rate_limit("wallet_execute", agent_id)
-        _server_logger.info(
+        logger.info(
             "Wallet execute",
             extra={"extra_data": {
                 "agent_id": agent_id, "chain": chain,
@@ -793,7 +794,7 @@ def create_mesh_app(
         try:
             await notify_fn(body.agent_id, message)
         except Exception as e:
-            _server_logger.warning("notify_user failed: %s", e)
+            logger.warning("notify_user failed: %s", e)
             raise HTTPException(500, f"Notification failed: {e}")
         # Emit to dashboard event bus so WebSocket clients see notifications
         if event_bus:
@@ -825,7 +826,7 @@ def create_mesh_app(
             projects = _load_projects()
             pdata = projects.get(project)
             if pdata is None:
-                _server_logger.warning("list_agents: unknown project %r", project)
+                logger.warning("list_agents: unknown project %r", project)
                 return {}
             members = set(pdata.get("members", []))
             return {
@@ -1084,7 +1085,7 @@ def create_mesh_app(
         else:
             # Internal/dashboard callers: require any valid auth token.
             _require_any_auth(request)
-            _server_logger.debug("History access for %s without requesting_agent (mesh-internal)", agent_id)
+            logger.debug("History access for %s without requesting_agent (mesh-internal)", agent_id)
         agent_entry = router.agent_registry.get(agent_id)
         if not agent_entry:
             raise HTTPException(404, f"Agent not found: {agent_id}")
@@ -1300,7 +1301,7 @@ def create_mesh_app(
         except _httpx.HTTPStatusError as e:
             raise HTTPException(e.response.status_code, e.response.text)
         except Exception as e:
-            _server_logger.warning("Browser proxy error: %s", e)
+            logger.warning("Browser proxy error: %s", e)
             raise HTTPException(502, f"Browser service error: {e}")
 
     # === Event Bus ===
@@ -1345,7 +1346,7 @@ def create_mesh_app(
             while True:
                 await websocket.receive_text()  # keep-alive
         except Exception as e:
-            _server_logger.debug("WebSocket disconnected: %s", e)
+            logger.debug("WebSocket disconnected: %s", e)
         finally:
             event_bus.unsubscribe(websocket)
 
@@ -1408,7 +1409,7 @@ def create_mesh_app(
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(target)
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
-            _server_logger.warning("VNC HTTP proxy failed to reach %s: %s", target, exc)
+            logger.warning("VNC HTTP proxy failed to reach %s: %s", target, exc)
             raise HTTPException(502, "Browser VNC not reachable")
         headers = {}
         ct = resp.headers.get("content-type")
@@ -1474,7 +1475,7 @@ def create_mesh_app(
                             elif "text" in msg and msg["text"]:
                                 await upstream.send(msg["text"])
                     except Exception as e:
-                        _server_logger.warning("VNC client→upstream error: %s", e)
+                        logger.warning("VNC client→upstream error: %s", e)
 
                 async def upstream_to_client():
                     try:
@@ -1484,7 +1485,7 @@ def create_mesh_app(
                             else:
                                 await websocket.send_text(msg)
                     except Exception as e:
-                        _server_logger.warning("VNC upstream→client error: %s", e)
+                        logger.warning("VNC upstream→client error: %s", e)
 
                 async def browser_keepalive():
                     """Touch all browser instances every 5 min while VNC is open.
@@ -1501,13 +1502,11 @@ def create_mesh_app(
                         async with _httpx.AsyncClient(timeout=5) as _client:
                             while True:
                                 await asyncio.sleep(30)
-                                try:
+                                with contextlib.suppress(Exception):
                                     await _client.post(
                                         f"{svc_url}/browser/keepalive",
                                         headers={"Authorization": f"Bearer {svc_token}"},
                                     )
-                                except Exception:
-                                    pass
                     except asyncio.CancelledError:
                         pass
 
@@ -1522,11 +1521,9 @@ def create_mesh_app(
                 for task in pending:
                     task.cancel()
         except Exception as exc:
-            _server_logger.warning("VNC WebSocket proxy error: %s", exc)
+            logger.warning("VNC WebSocket proxy error: %s", exc)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 await websocket.close()
-            except Exception:
-                pass
 
     return app

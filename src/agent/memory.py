@@ -21,8 +21,9 @@ import re
 import sqlite3
 import struct
 import threading
+from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
-from typing import Any, Callable, Coroutine, TypeVar
+from typing import Any, TypeVar
 
 import sqlite_vec
 from sqlite_vec import serialize_float32

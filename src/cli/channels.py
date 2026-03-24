@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import secrets
@@ -189,10 +190,8 @@ class ChannelManager:
                         # run_until_complete().  The handler exists so the
                         # connection succeeded — proceed to run_forever().
                         break
-                    try:
+                    with contextlib.suppress(Exception):
                         loop.close()
-                    except Exception:
-                        pass
                     if attempt < max_retries - 1:
                         delay = 5 * (attempt + 1)
                         logger.warning(
@@ -208,10 +207,8 @@ class ChannelManager:
                         )
                         return
                 except Exception as e:
-                    try:
+                    with contextlib.suppress(Exception):
                         loop.close()
-                    except Exception:
-                        pass
                     if attempt < max_retries - 1:
                         delay = 5 * (attempt + 1)
                         logger.warning(

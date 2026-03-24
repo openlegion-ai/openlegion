@@ -270,7 +270,7 @@ class Channel(abc.ABC):
             results = [
                 f"[{name}] {resp}" if not isinstance(resp, BaseException)
                 else f"[{name}] Error: {resp}"
-                for name, resp in zip(agents, responses)
+                for name, resp in zip(agents, responses, strict=True)
             ]
             return f"Broadcast to {len(agents)} agent(s):\n\n" + "\n\n".join(results)
 

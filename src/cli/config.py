@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -566,10 +567,8 @@ def _ensure_pairing_code(pairing_path: Path) -> str | None:
     """Ensure a pairing file exists with a code. Returns code if unpaired, None if already paired."""
     data: dict = {}
     if pairing_path.exists():
-        try:
+        with contextlib.suppress(json.JSONDecodeError, OSError):
             data = json.loads(pairing_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
     if data.get("owner"):
         return None
     code = data.get("pairing_code")
@@ -793,10 +792,8 @@ def _remove_agent(name: str, stop_container: bool = False) -> None:
     # Remove from project if member
     project = _get_agent_project(name)
     if project:
-        try:
+        with contextlib.suppress(ValueError):
             _remove_agent_from_project(project, name)
-        except ValueError:
-            pass
 
     # Remove from agents.yaml
     if AGENTS_FILE.exists():
