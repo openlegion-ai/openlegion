@@ -49,6 +49,7 @@ def _make_loop_with_workspace(
 
     mesh_client = MagicMock()
     mesh_client.send_system_message = AsyncMock(return_value={})
+    mesh_client.register = AsyncMock(return_value=None)
 
     workspace = WorkspaceManager(workspace_dir=tmpdir)
     context_mgr = ContextManager(max_tokens=context_max_tokens, llm=llm, workspace=workspace)

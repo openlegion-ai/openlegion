@@ -802,16 +802,24 @@ class AgentLoop:
             success=False,
         )
 
-    def _maybe_reload_skills(self, result: Any) -> None:
+    async def _maybe_reload_skills(self, result: Any) -> None:
         """If a tool returned reload_requested, hot-reload the skill registry.
 
         Sets ``_skills_reloaded`` so callers can rebuild system prompts
-        with updated tool descriptions.
+        with updated tool descriptions.  Also re-registers with the mesh
+        so the dashboard receives an ``agent_state``/``registered`` event
+        and can refresh the capabilities panel immediately.
         """
         if isinstance(result, dict) and result.get("reload_requested"):
             count = self.skills.reload()
             self._skills_reloaded = True
             logger.info(f"Hot-reloaded skills: {count} available")
+            try:
+                await self.mesh_client.register(
+                    capabilities=self.skills.list_skills(),
+                )
+            except Exception as e:
+                logger.warning("Post-reload mesh re-registration failed: %s", e)
 
     @staticmethod
     def _collect_tool_names(messages: list[dict]) -> list[str]:
@@ -1505,7 +1513,7 @@ class AgentLoop:
                 )
             try:
                 await self._learn(tool_call.name, tool_call.arguments, result)
-                self._maybe_reload_skills(result)
+                await self._maybe_reload_skills(result)
             except Exception as learn_err:
                 logger.warning("Post-tool learning failed for %s: %s", tool_call.name, learn_err)
 
