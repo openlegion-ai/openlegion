@@ -264,6 +264,21 @@ class TestCheckInbox:
         assert result["count"] == 1
         assert result["tasks"][0]["from"] == "unknown"
 
+    @pytest.mark.asyncio
+    async def test_check_inbox_non_dict_value(self):
+        """check_inbox handles entries with non-dict values (e.g. list)."""
+        from src.agent.builtins.coordination_tool import check_inbox
+
+        mc = _make_mesh_client(agent_id="analyst")
+        mc.list_blackboard.return_value = [
+            {"key": "tasks/analyst/ho_1", "value": [1, 2, 3]},
+        ]
+
+        result = await check_inbox(mesh_client=mc)
+
+        assert result["count"] == 1
+        assert result["tasks"][0]["from"] == "unknown"
+
 
 class TestUpdateStatus:
     @pytest.mark.asyncio
@@ -379,6 +394,26 @@ class TestCompleteTask:
 
         assert "error" in result
         assert "not found" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_complete_task_string_value_on_blackboard(self):
+        """complete_task handles string values stored on blackboard."""
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="engineer")
+        mc.read_blackboard = AsyncMock(return_value={
+            "value": '{"from": "pm", "status": "pending"}',
+        })
+
+        result = await complete_task(
+            task_key="tasks/engineer/ho_abc123",
+            mesh_client=mc,
+        )
+
+        assert result["completed"] is True
+        written = mc.write_blackboard.call_args[0][1]
+        assert written["from"] == "pm"
+        assert written["status"] == "done"
 
     @pytest.mark.asyncio
     async def test_complete_task_write_fails(self):
