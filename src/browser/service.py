@@ -281,6 +281,7 @@ class BrowserManager:
         self._cleanup_task: asyncio.Task | None = None
         self._playwright = None
         self._js_snapshot_mode: bool = False  # True after page.accessibility fails
+        self._user_focused_agent: str | None = None  # set by explicit focus() call
         self.redactor = CredentialRedactor()
 
     async def start_cleanup_loop(self):
@@ -319,20 +320,29 @@ class BrowserManager:
             return len(self._instances)
 
     async def refocus_active(self) -> None:
-        """Re-assert X11 focus on the most recently active browser window.
+        """Re-assert X11 focus on the user's viewed browser window.
 
         Called periodically by the VNC keepalive.  When a modal, popup, or
         internal Firefox dialog steals X11 focus, subsequent VNC mouse clicks
         go to the wrong window and appear to do nothing.
 
-        Targets the most recently active agent's specific X11 window when
-        available, so we don't accidentally raise a different agent's browser.
+        Prefers the agent the user explicitly focused (via the dashboard
+        Browser button) over the most recently active instance.  This
+        prevents background agent browser operations from stealing the
+        VNC display away from what the user is watching.
         """
         async with self._lock:
             if not self._instances:
                 return
-            mru = max(self._instances.values(), key=lambda i: i.last_activity)
-            wid = mru.x11_wid
+            # Prefer user's explicit focus over MRU
+            if (
+                self._user_focused_agent
+                and self._user_focused_agent in self._instances
+            ):
+                target = self._instances[self._user_focused_agent]
+            else:
+                target = max(self._instances.values(), key=lambda i: i.last_activity)
+            wid = target.x11_wid
         try:
             if wid:
                 wid_s = str(wid)
@@ -456,6 +466,8 @@ class BrowserManager:
         inst = self._instances.pop(agent_id, None)
         if inst is None:
             return
+        if self._user_focused_agent == agent_id:
+            self._user_focused_agent = None
         try:
             await inst.context.close()
         except Exception as e:
@@ -508,11 +520,16 @@ class BrowserManager:
         Auto-starts the browser if it isn't running yet, so the user
         always sees a window when they click "Browser" in the dashboard.
 
+        Also records this as the user's explicitly focused agent so
+        ``refocus_active()`` keeps this window visible even when other
+        agents are using their browsers in the background.
+
         Two-layer raise:
         1. bring_to_front() — browser-protocol level (activates the tab)
         2. xdotool windowmap + windowraise — X11 level (unmaps if iconic,
            then raises in the stacking order so VNC actually sees it)
         """
+        self._user_focused_agent = agent_id
         try:
             inst = await self.get_or_start(agent_id)
         except Exception as e:
