@@ -2319,7 +2319,7 @@ async def test_skills_reload_rebuilds_system_prompt():
 
     loop.skills.reload = _mock_reload
 
-    result = await loop.chat("test reload")
+    await loop.chat("test reload")
 
     # System prompt should have been rebuilt after reload
     assert len(systems_seen) >= 2

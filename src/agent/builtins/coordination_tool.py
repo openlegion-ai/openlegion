@@ -256,9 +256,21 @@ async def complete_task(task_key: str, *, mesh_client=None) -> dict:
         return {"error": _STANDALONE_ERROR}
 
     try:
-        await mesh_client.write_blackboard(
-            task_key, {"status": "done", "completed_at": time.time()},
-        )
+        # Read-modify-write to preserve original task fields (from, summary, output_key)
+        existing = await mesh_client.read_blackboard(task_key)
+        if existing is None:
+            return {"error": f"Task '{task_key}' not found"}
+        value = existing.get("value", existing)
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                value = {}
+        if not isinstance(value, dict):
+            value = {}
+        value["status"] = "done"
+        value["completed_at"] = time.time()
+        await mesh_client.write_blackboard(task_key, value)
     except Exception as e:
         return {"error": f"Failed to complete task: {e}"}
 
