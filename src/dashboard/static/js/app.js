@@ -375,6 +375,10 @@ function dashboard() {
     onboardKey: '',
     onboardBaseUrl: '',
     onboardAuthType: 'api_key',
+    onboardCustomService: '',
+    onboardIsLlmProvider: false,
+    onboardCustomModels: '',
+    onboardCustomLabel: '',
 
     // WebSocket reconnect countdown (Alpine-reactive mirror)
     wsReconnectIn: 0,
@@ -4118,9 +4122,15 @@ function dashboard() {
       try {
         const baseUrl = isOAuth ? '' : this.onboardBaseUrl.trim();
         const isOnboardOAuth = this.onboardAuthType === 'oauth' && (this.onboardProvider === 'anthropic' || this.onboardProvider === 'openai');
-        if (!isOnboardOAuth && !await this._validateCredential(this.onboardProvider, this.onboardKey.trim(), baseUrl)) return;
-        const body = { service: this.onboardProvider, key: this.onboardKey.trim() };
+        const service = this.onboardProvider === '__custom__' ? this.onboardCustomService.trim() : this.onboardProvider;
+        if (!isOnboardOAuth && this.onboardProvider !== '__custom__' && !await this._validateCredential(service, this.onboardKey.trim(), baseUrl)) return;
+        const body = { service, key: this.onboardKey.trim() };
+        if (this.onboardProvider === '__custom__') body.tier = 'system';
         if (baseUrl) body.base_url = baseUrl;
+        if (this.onboardProvider === '__custom__' && this.onboardIsLlmProvider && this.onboardCustomModels.trim()) {
+          body.custom_llm_models = this.onboardCustomModels;
+          if (this.onboardCustomLabel.trim()) body.custom_llm_label = this.onboardCustomLabel;
+        }
         const resp = await fetch(`${window.__config.apiBase}/credentials`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(body),
@@ -4132,6 +4142,10 @@ function dashboard() {
           this.onboardKey = '';
           this.onboardBaseUrl = '';
           this.onboardAuthType = 'api_key';
+          this.onboardCustomService = '';
+          this.onboardIsLlmProvider = false;
+          this.onboardCustomModels = '';
+          this.onboardCustomLabel = '';
           this.fetchSettings();
         } else {
           const err = await resp.json();
