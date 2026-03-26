@@ -676,6 +676,24 @@ class CredentialVault:
             return self.api_bases.get(f"{provider}_api_base")
         return None
 
+    def _rewrite_model_for_litellm(self, model: str, api_base: str | None) -> str:
+        """Rewrite custom provider model strings for litellm compatibility.
+
+        LiteLLM requires a recognized provider prefix to route API calls.
+        Custom OpenAI-compatible providers (those with a custom ``api_base``
+        and an unrecognized prefix) are rewritten to ``openai/<model_name>``
+        so litellm uses its OpenAI-compatible code path.
+        """
+        if not api_base:
+            return model
+        provider = self._resolve_provider(model)
+        if not provider or provider in SYSTEM_CREDENTIAL_PROVIDERS:
+            return model
+        # Unknown provider with custom api_base → OpenAI-compatible
+        if "/" in model:
+            return f"openai/{model.split('/', 1)[1]}"
+        return f"openai/{model}"
+
     @staticmethod
     def _is_permanent_error(error: Exception) -> bool:
         """Return True if the error should NOT cascade to fallback models.
@@ -1820,7 +1838,7 @@ class CredentialVault:
                     request, model, api_base, auth_headers,
                 )
                 llm_kwargs: dict = {
-                    "model": model,
+                    "model": self._rewrite_model_for_litellm(model, api_base),
                     "messages": sanitized,
                     **extra,
                 }
@@ -1871,8 +1889,11 @@ class CredentialVault:
                 embed_kwargs["extra_headers"] = auth_headers
             if api_key:
                 embed_kwargs["api_key"] = api_key
+            embed_model = self._rewrite_model_for_litellm(
+                request.params["model"], api_base,
+            )
             response = await litellm.aembedding(
-                model=request.params["model"],
+                model=embed_model,
                 input=request.params.get("text", ""),
                 **embed_kwargs,
             )
@@ -1938,7 +1959,7 @@ class CredentialVault:
                     request, model, api_base, auth_headers,
                 )
                 llm_kwargs: dict = {
-                    "model": model,
+                    "model": self._rewrite_model_for_litellm(model, api_base),
                     "messages": sanitized,
                     "stream": True,
                     **extra,

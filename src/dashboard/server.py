@@ -1257,6 +1257,33 @@ def create_dashboard_router(
         from src.setup_wizard import _VALIDATION_MODELS
         validation_model = _VALIDATION_MODELS.get(provider)
         if not validation_model:
+            if base_url:
+                # Custom provider with base URL — attempt OpenAI-compatible validation
+                try:
+                    import litellm
+                    custom_kwargs: dict = {
+                        "model": "openai/test",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1,
+                        "api_key": key,
+                        "api_base": base_url,
+                    }
+                    await litellm.acompletion(**custom_kwargs)
+                    return {"valid": True, "skipped": False}
+                except ImportError:
+                    return {"valid": True, "skipped": True, "reason": "litellm not installed"}
+                except Exception as e:
+                    import litellm as _ltm
+                    if isinstance(e, _ltm.AuthenticationError):
+                        return {"valid": False, "skipped": False, "reason": "Invalid API key"}
+                    if isinstance(e, getattr(_ltm, "PermissionDeniedError", type(None))):
+                        return {"valid": False, "skipped": False, "reason": "Permission denied — check API key"}
+                    emsg = str(e).lower()
+                    _auth_kw = ("invalid api key", "invalid key", "unauthorized", "authentication fail")
+                    if any(k in emsg for k in _auth_kw):
+                        return {"valid": False, "skipped": False, "reason": "Invalid API key"}
+                    # Non-auth errors (model not found, etc.) suggest key is probably valid
+                    return {"valid": True, "skipped": False}
             return {"valid": True, "skipped": True, "reason": "unknown provider"}
         try:
             import litellm

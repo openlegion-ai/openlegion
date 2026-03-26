@@ -3128,3 +3128,125 @@ class TestAnthropicOAuth:
         # Budget should NOT have been checked (OAuth = subscription-based)
         cost_tracker.preflight_check.assert_not_called()
         cost_tracker.check_budget.assert_not_called()
+
+
+# ── Custom provider model rewrite tests ────────────────────────
+
+
+def test_rewrite_known_provider_with_api_base(monkeypatch):
+    """Known provider with api_base → no rewrite."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+    v = CredentialVault()
+    result = v._rewrite_model_for_litellm("openai/gpt-4o", "https://gateway.example.com/v1")
+    assert result == "openai/gpt-4o"
+
+
+def test_rewrite_unknown_provider_with_api_base():
+    """Unknown provider with api_base → rewrite to openai/ prefix."""
+    v = CredentialVault()
+    result = v._rewrite_model_for_litellm(
+        "chatrhino/Chatrhino-750B", "http://api.customprovider.com/api/v1",
+    )
+    assert result == "openai/Chatrhino-750B"
+
+
+def test_rewrite_unknown_provider_without_api_base():
+    """Unknown provider without api_base → no rewrite."""
+    v = CredentialVault()
+    result = v._rewrite_model_for_litellm("chatrhino/Chatrhino-750B", None)
+    assert result == "chatrhino/Chatrhino-750B"
+
+
+def test_rewrite_no_slash_with_api_base():
+    """Model with no slash and api_base → openai/{model}."""
+    v = CredentialVault()
+    result = v._rewrite_model_for_litellm("mymodel", "http://localhost:8000/v1")
+    # No slash → _resolve_provider returns None → no provider → no rewrite
+    assert result == "mymodel"
+
+
+def test_rewrite_no_api_base():
+    """No api_base → always returns model unchanged."""
+    v = CredentialVault()
+    assert v._rewrite_model_for_litellm("chatrhino/model", None) == "chatrhino/model"
+    assert v._rewrite_model_for_litellm("openai/gpt-4o", None) == "openai/gpt-4o"
+    assert v._rewrite_model_for_litellm("mymodel", None) == "mymodel"
+
+
+def test_rewrite_empty_api_base():
+    """Empty string api_base → treated as no api_base."""
+    v = CredentialVault()
+    assert v._rewrite_model_for_litellm("chatrhino/model", "") == "chatrhino/model"
+
+
+async def test_chat_uses_rewritten_model_for_custom_provider(monkeypatch):
+    """Non-streaming chat rewrites custom provider model for litellm."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_CHATRHINO_API_KEY", "sk-rhino")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_CHATRHINO_API_BASE", "http://api.chatrhino.com/v1")
+    v = CredentialVault()
+
+    captured = {}
+
+    async def mock_acompletion(**kwargs):
+        captured.update(kwargs)
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = "hello"
+        resp.choices[0].message.tool_calls = None
+        resp.usage = MagicMock()
+        resp.usage.total_tokens = 10
+        resp.usage.prompt_tokens = 5
+        resp.usage.completion_tokens = 5
+        return resp
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "chatrhino/Chatrhino-750B",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        result = await v.execute_api_call(req)
+
+    assert result.success
+    # litellm should receive the rewritten model
+    assert captured["model"] == "openai/Chatrhino-750B"
+    # Response data should use original model for cost tracking
+    assert result.data["model"] == "chatrhino/Chatrhino-750B"
+
+
+async def test_stream_uses_rewritten_model_for_custom_provider(monkeypatch):
+    """Streaming chat rewrites custom provider model for litellm."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_CHATRHINO_API_KEY", "sk-rhino")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_CHATRHINO_API_BASE", "http://api.chatrhino.com/v1")
+    v = CredentialVault()
+
+    captured = {}
+
+    async def mock_chunk_generator():
+        chunk = MagicMock()
+        chunk.choices = [MagicMock()]
+        chunk.choices[0].delta.content = "streamed"
+        chunk.choices[0].delta.tool_calls = None
+        yield chunk
+
+    async def mock_acompletion(**kwargs):
+        captured.update(kwargs)
+        return mock_chunk_generator()
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "chatrhino/Chatrhino-750B",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        events = []
+        async for event in v.stream_llm(req):
+            events.append(event)
+
+    # litellm should receive the rewritten model
+    assert captured["model"] == "openai/Chatrhino-750B"
+    assert any("streamed" in e for e in events)
