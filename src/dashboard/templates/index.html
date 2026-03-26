@@ -1150,7 +1150,7 @@
                         <div class="space-y-1.5">
                           <input type="text" x-model="onboardCustomLabel" :disabled="onboardSaving" class="dash-input w-full text-xs" placeholder="Display name (e.g. My Provider)">
                           <textarea x-model="onboardCustomModels" :disabled="onboardSaving" class="dash-input w-full text-xs" rows="2" placeholder="Model names, comma-separated (e.g. model-7b, model-70b)"></textarea>
-                          <div class="text-[10px] text-gray-500">Models will be available as <code class="bg-gray-800 px-0.5 rounded" x-text="(onboardCustomService || 'provider') + '/model-name'"></code></div>
+                          <div class="text-[10px] text-gray-500">Models will be available as <code class="bg-gray-800 px-0.5 rounded" x-text="(onboardCustomService || 'provider') + '/model-name'"></code>. Must be OpenAI-compatible.</div>
                         </div>
                       </template>
                     </div>
@@ -2977,7 +2977,7 @@
                       <div class="space-y-1.5">
                         <input type="text" x-model="credCustomLabel" :disabled="credSaving" class="dash-input w-full text-xs" placeholder="Display name (e.g. My Provider)">
                         <textarea x-model="credCustomModels" :disabled="credSaving" class="dash-input w-full text-xs" rows="2" placeholder="Model names, comma-separated (e.g. model-7b, model-70b)"></textarea>
-                        <div class="text-[10px] text-gray-500">Models will be available as <code class="bg-gray-800 px-0.5 rounded" x-text="(credCustomService || 'provider') + '/model-name'"></code> in the agent model selector.</div>
+                        <div class="text-[10px] text-gray-500">Models will be available as <code class="bg-gray-800 px-0.5 rounded" x-text="(credCustomService || 'provider') + '/model-name'"></code> in the agent model selector. Must be OpenAI-compatible.</div>
                       </div>
                     </template>
                   </div>
