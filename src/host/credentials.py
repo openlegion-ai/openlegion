@@ -1148,13 +1148,10 @@ class CredentialVault:
                 "oauth": True,
                 "tool_calls": [
                     {
-                        "id": tc.get("id", f"call_{i}"),
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": tc["arguments"],
-                        },
+                        "name": tc["name"],
+                        "arguments": tc["arguments"],
                     }
-                    for i, tc in enumerate(collected_tool_calls)
+                    for tc in collected_tool_calls
                 ],
             }
             if collected_thinking:

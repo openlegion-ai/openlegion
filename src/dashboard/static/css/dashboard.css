@@ -128,7 +128,7 @@
   left: 0;
   right: 0;
   height: 2px;
-  border-radius: 0.75rem 0.75rem 0 0;
+  border-radius: calc(0.75rem - 1px) calc(0.75rem - 1px) 0 0;
   opacity: 0.7;
   transition: opacity 0.25s;
 }
