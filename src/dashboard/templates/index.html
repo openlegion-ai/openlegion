@@ -1108,12 +1108,16 @@
                 <div class="text-sm font-medium text-gray-200 mb-2">Add an API key</div>
                 <div x-show="!settingsData?.has_llm_credentials" class="space-y-2">
                   <div class="flex flex-wrap gap-2">
-                    <select x-model="onboardProvider" :disabled="onboardSaving" class="dash-select text-xs w-40" @change="onboardAuthType = 'api_key'">
+                    <select x-model="onboardProvider" :disabled="onboardSaving" class="dash-select text-xs w-40" @change="onboardAuthType = 'api_key'; if ($event.target.value !== '__custom__') { onboardCustomService = ''; onboardIsLlmProvider = false; onboardCustomModels = ''; onboardCustomLabel = ''; }">
                       <option value="">Provider...</option>
                       {% for p in providers %}
                       <option value="{{ p.name }}">{{ p.label }}</option>
                       {% endfor %}
+                      <option value="__custom__">Custom...</option>
                     </select>
+                    <template x-if="onboardProvider === '__custom__'">
+                      <input type="text" x-model="onboardCustomService" :disabled="onboardSaving" class="dash-input text-xs w-40" placeholder="Provider name">
+                    </template>
                     <template x-if="onboardProvider === 'anthropic' || onboardProvider === 'openai'">
                       <select x-model="onboardAuthType" :disabled="onboardSaving" class="dash-select text-xs w-48">
                         <option value="api_key">API Key (recommended)</option>
@@ -1136,8 +1140,23 @@
                   <div x-show="onboardAuthType !== 'oauth'" class="flex flex-wrap gap-2 items-center">
                     <input type="text" x-model="onboardBaseUrl" :disabled="onboardSaving" class="dash-input flex-1 min-w-0 sm:min-w-[200px]" placeholder="Custom API base URL (optional)">
                   </div>
+                  <template x-if="onboardProvider === '__custom__'">
+                    <div class="space-y-1.5">
+                      <label class="inline-flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
+                        <input type="checkbox" x-model="onboardIsLlmProvider" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
+                        This is an LLM provider
+                      </label>
+                      <template x-if="onboardIsLlmProvider">
+                        <div class="space-y-1.5">
+                          <input type="text" x-model="onboardCustomLabel" :disabled="onboardSaving" class="dash-input w-full text-xs" placeholder="Display name (e.g. My Provider)">
+                          <textarea x-model="onboardCustomModels" :disabled="onboardSaving" class="dash-input w-full text-xs" rows="2" placeholder="Model names, comma-separated (e.g. model-7b, model-70b)"></textarea>
+                          <div class="text-[10px] text-gray-500">Models will be available as <code class="bg-gray-800 px-0.5 rounded" x-text="(onboardCustomService || 'provider') + '/model-name'"></code></div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
                   <div class="flex flex-wrap gap-2 items-center">
-                    <button @click="submitOnboardCredential()" :disabled="onboardSaving || !onboardProvider || !onboardKey"
+                    <button @click="submitOnboardCredential()" :disabled="onboardSaving || !onboardProvider || !onboardKey || (onboardProvider === '__custom__' && !onboardCustomService.trim())"
                       class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors inline-flex items-center gap-1.5">
                       <svg x-show="onboardSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                       <span x-text="onboardSaving ? 'Saving...' : 'Save'"></span>
