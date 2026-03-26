@@ -180,6 +180,8 @@ function dashboard() {
     systemSettingsLoading: false,
     _systemSettingsDebounce: null,
     _restartingAll: false,
+    _defaultModelSearch: '',
+    _defaultModelDropdownOpen: false,
 
     // Storage
     storageData: null,
@@ -2160,6 +2162,8 @@ function dashboard() {
         _showAvatarPicker: false,
         color: cfg.color ?? null,
         _showColorPicker: false,
+        _modelSearch: '',
+        _modelDropdownOpen: false,
         budget_daily: cfg.budget?.daily_usd || '',
         budget_monthly: cfg.budget?.monthly_usd || '',
         thinking: cfg.thinking || 'off',
