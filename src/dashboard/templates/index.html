@@ -2858,6 +2858,21 @@
                     <strong class="text-gray-400">System tier</strong>: held only by the mesh host. No agent can read or reference it. Use this for infrastructure tokens or secrets that agents should never touch.
                   </div>
                 </template>
+                <template x-if="credService === '__custom__' && credTier === 'system'">
+                  <div class="space-y-2 mb-2">
+                    <label class="inline-flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
+                      <input type="checkbox" x-model="credIsLlmProvider" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
+                      This is an LLM provider
+                    </label>
+                    <template x-if="credIsLlmProvider">
+                      <div class="space-y-1.5">
+                        <input type="text" x-model="credCustomLabel" :disabled="credSaving" class="dash-input w-full text-xs" placeholder="Display name (e.g. My Provider)">
+                        <textarea x-model="credCustomModels" :disabled="credSaving" class="dash-input w-full text-xs" rows="2" placeholder="Model names, comma-separated (e.g. model-7b, model-70b)"></textarea>
+                        <div class="text-[10px] text-gray-500">Models will be available as <code class="bg-gray-800 px-0.5 rounded" x-text="(credCustomService || 'provider') + '/model-name'"></code> in the agent model selector.</div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
                 <template x-if="credAuthType === 'oauth' && credService === 'anthropic'">
                   <div class="text-[10px] text-amber-400/80 leading-snug mb-2">
                     Experimental — uses unofficial OAuth that may break without notice. Generate with: <code class="font-mono bg-gray-800 px-1 rounded">claude setup-token</code>
@@ -2876,7 +2891,7 @@
                 </template>
                 <input x-show="credService !== 'ollama' && credAuthType !== 'oauth'" type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
                 <div class="flex justify-between">
-                  <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'; credAuthType = 'api_key'" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'; credAuthType = 'api_key'; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
                   <button @click="addCredential()" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
                     <svg x-show="credSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                     <span x-text="credSaving ? 'Saving...' : 'Save'"></span>

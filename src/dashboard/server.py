@@ -183,10 +183,15 @@ def create_dashboard_router(
         """Check if a model is known (from litellm or featured lists).
 
         Ollama models are always accepted since they're user-installed locally.
+        Custom LLM providers registered via settings.json are also accepted.
         """
         provider = model.split("/")[0] if "/" in model else ""
         if provider in ("ollama", "ollama_chat"):
             return True
+        settings = _load_settings()
+        custom_providers = settings.get("custom_llm_providers", {})
+        if provider in custom_providers:
+            return model in custom_providers[provider].get("models", [])
         if provider:
             return model in get_provider_models(provider)
         return any(model in models for models in _PROVIDER_MODELS.values())
@@ -1332,12 +1337,31 @@ def create_dashboard_router(
         # Explicit tier override from request body, then auto-detect
         tier_field = body.get("tier", "").strip().lower()
         is_system = tier_field == "system" or is_system_credential(service)
+        # Normalize custom LLM provider names to end with _api_key so
+        # credential resolution and provider detection work correctly
+        if body.get("custom_llm_models", "").strip() and not service.lower().endswith("_api_key"):
+            service = f"{service}_api_key"
+            is_system = True  # LLM provider keys are always system-tier
         credential_vault.add_credential(service, key, system=is_system)
         # Store optional custom API base URL alongside the key
         base_url = body.get("base_url", "").strip()
         if base_url:
             provider = service.replace("_api_key", "")
             credential_vault.add_credential(f"{provider}_api_base", base_url, system=is_system)
+        # Store custom LLM provider models alongside the credential
+        custom_models_raw = body.get("custom_llm_models", "").strip()
+        if custom_models_raw and is_system:
+            provider_name = service.replace("_api_key", "")
+            models = [m.strip() for m in custom_models_raw.split(",") if m.strip()]
+            models = [m if "/" in m else f"{provider_name}/{m}" for m in models]
+            if models:
+                settings = _load_settings()
+                custom_providers = settings.setdefault("custom_llm_providers", {})
+                custom_providers[provider_name] = {
+                    "label": body.get("custom_llm_label", "").strip() or provider_name.replace("_", " ").title(),
+                    "models": models,
+                }
+                _save_settings(settings)
         tier = "system" if is_system else "agent"
         return {"stored": True, "service": service, "tier": tier}
 
@@ -1418,6 +1442,15 @@ def create_dashboard_router(
         existed = credential_vault.remove_credential(name)
         if not existed:
             raise HTTPException(status_code=404, detail=f"Credential '{name}' not found")
+        # Clean up custom LLM provider config and paired api_base
+        if name.endswith("_api_key"):
+            provider_name = name[: -len("_api_key")]
+            credential_vault.remove_credential(f"{provider_name}_api_base")
+            settings = _load_settings()
+            custom_providers = settings.get("custom_llm_providers", {})
+            if provider_name in custom_providers:
+                del custom_providers[provider_name]
+                _save_settings(settings)
         return {"removed": True, "service": name}
 
     @api_router.get("/api/credentials/{name}/value")
@@ -2198,6 +2231,13 @@ def create_dashboard_router(
                 p: models for p, models in _PROVIDER_MODELS.items()
                 if p in active_providers
             }
+
+            # Merge custom LLM providers from settings
+            settings = _load_settings()
+            for prov, info in settings.get("custom_llm_providers", {}).items():
+                if prov in active_providers:
+                    available_provider_models[prov] = info.get("models", [])
+                    has_llm = True
 
             # Discover locally-installed Ollama models and merge them in.
             # Only adds Ollama to the dropdown if it's actually reachable.
