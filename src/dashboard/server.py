@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1340,7 +1341,7 @@ def create_dashboard_router(
         # Normalize custom LLM provider names to end with _api_key so
         # credential resolution and provider detection work correctly
         if body.get("custom_llm_models", "").strip() and not service.lower().endswith("_api_key"):
-            service = f"{service}_api_key"
+            service = f"{service.lower()}_api_key"
             is_system = True  # LLM provider keys are always system-tier
         credential_vault.add_credential(service, key, system=is_system)
         # Store optional custom API base URL alongside the key
@@ -1355,13 +1356,14 @@ def create_dashboard_router(
             models = [m.strip() for m in custom_models_raw.split(",") if m.strip()]
             models = [m if "/" in m else f"{provider_name}/{m}" for m in models]
             if models:
-                settings = _load_settings()
-                custom_providers = settings.setdefault("custom_llm_providers", {})
-                custom_providers[provider_name] = {
-                    "label": body.get("custom_llm_label", "").strip() or provider_name.replace("_", " ").title(),
-                    "models": models,
-                }
-                _save_settings(settings)
+                with _settings_lock:
+                    settings = _load_settings()
+                    custom_providers = settings.setdefault("custom_llm_providers", {})
+                    custom_providers[provider_name] = {
+                        "label": body.get("custom_llm_label", "").strip() or provider_name.replace("_", " ").title(),
+                        "models": models,
+                    }
+                    _save_settings(settings)
         tier = "system" if is_system else "agent"
         return {"stored": True, "service": service, "tier": tier}
 
@@ -1446,11 +1448,12 @@ def create_dashboard_router(
         if name.endswith("_api_key"):
             provider_name = name[: -len("_api_key")]
             credential_vault.remove_credential(f"{provider_name}_api_base")
-            settings = _load_settings()
-            custom_providers = settings.get("custom_llm_providers", {})
-            if provider_name in custom_providers:
-                del custom_providers[provider_name]
-                _save_settings(settings)
+            with _settings_lock:
+                settings = _load_settings()
+                custom_providers = settings.get("custom_llm_providers", {})
+                if provider_name in custom_providers:
+                    del custom_providers[provider_name]
+                    _save_settings(settings)
         return {"removed": True, "service": name}
 
     @api_router.get("/api/credentials/{name}/value")
@@ -2273,6 +2276,7 @@ def create_dashboard_router(
     # ── Browser settings ─────────────────────────────────────────
 
     _SETTINGS_PATH = Path("config/settings.json")
+    _settings_lock = threading.Lock()
 
     def _load_settings() -> dict:
         """Load persisted settings from config/settings.json."""
