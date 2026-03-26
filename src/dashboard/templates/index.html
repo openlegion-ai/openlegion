@@ -3012,9 +3012,9 @@
                 <div class="space-y-2">
                   <template x-for="a in walletData.all_agents || []" :key="a.agent_id">
                     <div class="flex flex-wrap items-center justify-between gap-y-1 text-xs">
-                      <div class="flex items-center gap-2">
-                        <span class="w-1.5 h-1.5 rounded-full" :class="a.wallet_enabled ? 'bg-green-500' : 'bg-gray-600'"></span>
-                        <span class="text-gray-300" x-text="a.agent_id"></span>
+                      <div class="flex items-center gap-2 min-w-0">
+                        <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="a.wallet_enabled ? 'bg-green-500' : 'bg-gray-600'"></span>
+                        <span class="text-gray-300 truncate" x-text="a.agent_id"></span>
                       </div>
                       <div class="flex items-center gap-2">
                         <template x-if="a.wallet_enabled">
