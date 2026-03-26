@@ -37,7 +37,7 @@ logger = setup_logging("host.credentials")
 # Anthropic's unofficial OAuth path for Claude Pro/Max subscriptions.
 # Tokens from `claude setup-token` use Bearer auth instead of x-api-key.
 _OAUTH_TOKEN_PREFIX = "sk-ant-oat01-"
-_CLAUDE_CLI_VERSION = "2.1.75"
+_CLAUDE_CLI_VERSION = "2.1.84"
 _ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 # OpenAI Codex Responses API — uses ChatGPT subscription via OAuth.
@@ -1079,12 +1079,18 @@ class CredentialVault:
             sdk_kwargs["thinking"] = body["thinking"]
 
         client = anthropic.AsyncAnthropic(
-            api_key=None,  # Omit X-Api-Key header; auth_token provides Bearer auth
+            api_key=None,
             auth_token=api_key,
             default_headers={
+                "accept": "application/json",
                 "anthropic-dangerous-direct-browser-access": "true",
+                "anthropic-beta": (
+                    "claude-code-20250219,"
+                    "oauth-2025-04-20,"
+                    "fine-grained-tool-streaming-2025-05-14"
+                ),
+                "User-Agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
                 "x-app": "cli",
-                "user-agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
             },
             max_retries=0,
             timeout=120.0,
@@ -1098,14 +1104,7 @@ class CredentialVault:
         current_tool_idx = -1
 
         try:
-            stream = await client.beta.messages.create(
-                betas=[
-                    "claude-code-20250219",
-                    "oauth-2025-04-20",
-                    "fine-grained-tool-streaming-2025-05-14",
-                ],
-                **sdk_kwargs,
-            )
+            stream = await client.messages.create(**sdk_kwargs)
 
             async for event in stream:
                 if event.type == "message_start":
