@@ -59,6 +59,26 @@ class TestCostTracking:
         names = {a["agent"] for a in agents}
         assert names == {"agent1", "agent2"}
 
+    def test_get_spend_by_model(self):
+        self.tracker.track("agent1", "openai/gpt-4o", 1000, 500)
+        self.tracker.track("agent2", "openai/gpt-4o", 500, 200)
+        self.tracker.track("agent1", "anthropic/claude-sonnet-4-6", 800, 400)
+        models = self.tracker.get_spend_by_model("today")
+        assert len(models) == 2
+        names = {m["model"] for m in models}
+        assert names == {"openai/gpt-4o", "anthropic/claude-sonnet-4-6"}
+        # Sorted by cost descending
+        assert models[0]["cost"] >= models[1]["cost"]
+        # Cross-agent aggregation: gpt-4o tokens = 1000+500+500+200 = 2200
+        gpt = next(m for m in models if m["model"] == "openai/gpt-4o")
+        assert gpt["tokens"] == 2200
+        assert gpt["prompt_tokens"] == 1500
+        assert gpt["completion_tokens"] == 700
+
+    def test_get_spend_by_model_empty(self):
+        models = self.tracker.get_spend_by_model("today")
+        assert models == []
+
 
 class TestBudgetEnforcement:
     def setup_method(self):

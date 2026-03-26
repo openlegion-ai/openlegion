@@ -956,7 +956,7 @@ function dashboard() {
       if (this._fleetDebounce) clearTimeout(this._fleetDebounce);
       if (this._activityRefresh) clearInterval(this._activityRefresh);
       if (this._tracesDebounce) clearTimeout(this._tracesDebounce);
-      if (this.costChart) this.costChart.destroy();
+      if (this.costChart) { this.costChart.destroy(); this.costChart = null; }
       Object.values(this._stateTimers).forEach(clearTimeout);
       Object.values(this._scrollTimers).forEach(clearTimeout);
       Object.values(this._chatAborts).forEach(c => c?.abort());
@@ -4546,16 +4546,8 @@ function dashboard() {
       const costs = models.map(m => m.cost);
       const colors = models.map((_, i) => this._MODEL_CHART_COLORS[i % this._MODEL_CHART_COLORS.length]);
 
-      if (this.modelChart) {
-        this.modelChart.data.labels = labels;
-        this.modelChart.data.datasets[0].data = costs;
-        this.modelChart.data.datasets[0].backgroundColor = colors;
-        this.modelChart.data.datasets[0].borderColor = colors.map(c => c + '40');
-        this.modelChart.update();
-        return;
-      }
-
-      const totalCost = costs.reduce((s, c) => s + c, 0);
+      // Always recreate — closures in legend/tooltip/centerText must reflect current totals
+      if (this.modelChart) { this.modelChart.destroy(); this.modelChart = null; }
 
       this.modelChart = new Chart(canvas, {
         type: 'doughnut',
@@ -4583,13 +4575,13 @@ function dashboard() {
                 font: { size: 11 },
                 padding: 12,
                 generateLabels(chart) {
-                  const data = chart.data;
-                  return data.labels.map((label, i) => {
-                    const value = data.datasets[0].data[i];
-                    const pct = totalCost > 0 ? Math.round((value / totalCost) * 100) : 0;
+                  const ds = chart.data.datasets[0].data;
+                  const total = ds.reduce((s, v) => s + v, 0);
+                  return chart.data.labels.map((label, i) => {
+                    const pct = total > 0 ? Math.round((ds[i] / total) * 100) : 0;
                     return {
                       text: `${label}  ${pct}%`,
-                      fillStyle: data.datasets[0].backgroundColor[i],
+                      fillStyle: chart.data.datasets[0].backgroundColor[i],
                       strokeStyle: 'transparent',
                       pointStyle: 'rectRounded',
                       index: i,
@@ -4603,7 +4595,8 @@ function dashboard() {
               callbacks: {
                 label(ctx) {
                   const cost = ctx.parsed;
-                  const pct = totalCost > 0 ? ((cost / totalCost) * 100).toFixed(1) : '0';
+                  const total = ctx.chart.data.datasets[0].data.reduce((s, v) => s + v, 0);
+                  const pct = total > 0 ? ((cost / total) * 100).toFixed(1) : '0';
                   return ` $${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}  (${pct}%)`;
                 },
               },
@@ -4614,6 +4607,7 @@ function dashboard() {
           id: 'centerText',
           afterDraw(chart) {
             const { ctx, chartArea } = chart;
+            const total = chart.data.datasets[0].data.reduce((s, v) => s + v, 0);
             const cx = (chartArea.left + chartArea.right) / 2;
             const cy = (chartArea.top + chartArea.bottom) / 2;
             ctx.save();
@@ -4624,7 +4618,7 @@ function dashboard() {
             ctx.fillText('total', cx, cy - 10);
             ctx.fillStyle = '#f3f4f6';
             ctx.font = '600 16px ui-monospace, monospace';
-            ctx.fillText('$' + (totalCost < 0.01 ? totalCost.toFixed(4) : totalCost.toFixed(2)), cx, cy + 8);
+            ctx.fillText('$' + (total < 0.01 ? total.toFixed(4) : total.toFixed(2)), cx, cy + 8);
             ctx.restore();
           },
         }],
