@@ -37,7 +37,7 @@ logger = setup_logging("host.credentials")
 # Anthropic's unofficial OAuth path for Claude Pro/Max subscriptions.
 # Tokens from `claude setup-token` use Bearer auth instead of x-api-key.
 _OAUTH_TOKEN_PREFIX = "sk-ant-oat01-"
-_CLAUDE_CLI_VERSION = "2.1.75"
+_CLAUDE_CLI_VERSION = "2.1.84"
 _ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 # OpenAI Codex Responses API — uses ChatGPT subscription via OAuth.
@@ -813,14 +813,12 @@ class CredentialVault:
     def _oauth_headers(token: str) -> dict[str, str]:
         """Build Anthropic API headers for OAuth bearer auth.
 
-        Headers match what pi-ai (openclaw's underlying library) sends:
+        Headers match what the Claude CLI (2.1.84) sends for OAuth calls:
           - ``anthropic-dangerous-direct-browser-access`` — required for
             OAuth tokens that bypass the standard x-api-key path.
           - ``x-app: cli`` — identifies the client type.
-          - ``fine-grained-tool-streaming`` — always included by pi-ai.
-          - ``interleaved-thinking`` is NOT included — pi-ai skips it
-            for adaptive-thinking models (Opus 4.6 / Sonnet 4.6).
-          - ``context-1m`` is excluded per openclaw's behavior.
+          - ``files-api-2025-04-14`` — files API beta flag.
+          - ``oauth-2025-04-20`` — OAuth beta flag.
         """
         return {
             "Content-Type": "application/json",
@@ -828,9 +826,8 @@ class CredentialVault:
             "Authorization": f"Bearer {token}",
             "anthropic-version": "2023-06-01",
             "anthropic-beta": (
-                "claude-code-20250219,"
-                "oauth-2025-04-20,"
-                "fine-grained-tool-streaming-2025-05-14"
+                "files-api-2025-04-14,"
+                "oauth-2025-04-20"
             ),
             "anthropic-dangerous-direct-browser-access": "true",
             "x-app": "cli",
