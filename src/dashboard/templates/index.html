@@ -2560,7 +2560,7 @@
         </div>
         </div><!-- /automation sub-tab -->
 
-        <!-- Integrations sub-tab (Channels + Webhooks) -->
+        <!-- Integrations sub-tab (Channels + API Endpoints) -->
         <div x-show="systemTab === 'integrations'">
 
         <!-- API Reference -->
@@ -2570,7 +2570,7 @@
             API Reference
           </summary>
           <div class="px-4 pb-4 space-y-3">
-            <div class="text-[11px] text-gray-500 mb-2">All endpoints below require an <code class="bg-gray-800 px-1 rounded">X-API-Key</code> header. Webhook triggers use <code class="bg-gray-800 px-1 rounded">X-Webhook-Signature</code> instead (HMAC-SHA256 of the raw body).</div>
+            <div class="text-[11px] text-gray-500 mb-2">All endpoints below require an <code class="bg-gray-800 px-1 rounded">X-API-Key</code> header. Inbound API endpoints use <code class="bg-gray-800 px-1 rounded">X-Signature</code> instead (HMAC-SHA256 of the raw body).</div>
             <div class="space-y-2">
               <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">Credential Vault</div>
               <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
@@ -2587,9 +2587,9 @@
               </div>
             </div>
             <div class="space-y-2">
-              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">Webhooks</div>
+              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">API Endpoints</div>
               <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
-                <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/webhook/hook/{hook_id}</code><span class="text-gray-500">Trigger an agent workflow. Requires <code class="bg-gray-800 px-0.5 rounded">X-Webhook-Signature</code> header (no API key needed)</span>
+                <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/api/inbound/{endpoint_id}</code><span class="text-gray-500">Trigger an agent workflow. Requires <code class="bg-gray-800 px-0.5 rounded">X-Signature</code> header (no API key needed)</span>
               </div>
             </div>
           </div>
@@ -2712,16 +2712,16 @@
         </div>
         <div x-show="channels.length === 0" class="text-sm text-gray-500 py-4 mb-6">No channel data available</div>
 
-        <!-- Webhooks -->
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Webhooks<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Named HTTP endpoints that accept POST requests and route them to agents. Enable "Require HMAC signature" to secure the webhook — your app signs the raw request body with HMAC-SHA256(body, secret) and sends it as the X-Webhook-Signature header. The secret is shown once at creation time; use Regenerate Secret if you missed it.</span></span></div>
+        <!-- API Endpoints -->
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">API Endpoints<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Named HTTP endpoints that accept POST requests and route them to agents. Enable "Require HMAC signature" to secure the endpoint — your app signs the raw request body with HMAC-SHA256(body, secret) and sends it as the X-Signature header. The secret is shown once at creation time; use Regenerate Secret if you missed it.</span></span></div>
         <div class="mb-6">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
             <div class="mb-3 pb-3 border-b border-gray-800">
-              <div class="text-sm text-gray-200 font-medium mb-1">Incoming Webhooks</div>
+              <div class="text-sm text-gray-200 font-medium mb-1">API Endpoints</div>
               <div class="text-[12px] text-gray-500 leading-relaxed">Named HTTP endpoints that accept <code class="bg-gray-800 px-1 rounded text-gray-400">POST</code> requests and route payloads to agents. Optionally secure each endpoint with HMAC-SHA256 signature verification.</div>
             </div>
             <div class="space-y-2 mb-3">
-              <template x-for="wh in webhooks" :key="wh.id">
+              <template x-for="wh in apiEndpoints" :key="wh.id">
                 <div>
                   <div class="flex items-center gap-3 text-xs group py-2 px-2 -mx-2 rounded-md hover:bg-gray-800/40 transition-colors border-b border-gray-800/30 last:border-0">
                     <span class="w-2 h-2 rounded-full bg-green-400/70 shrink-0"></span>
@@ -2730,83 +2730,83 @@
                     <span class="text-gray-400 shrink-0" x-text="wh.agent"></span>
                     <span class="text-indigo-300/80 text-[10px] font-mono flex-1 truncate bg-indigo-950/30 px-2 py-0.5 rounded border border-indigo-900/50" x-text="wh.url || ''" :title="wh.url || ''"></span>
                     <button x-show="wh.url" @click.stop="copyToClipboard(wh.url)"
-                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0" title="Copy URL" aria-label="Copy webhook URL">
+                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0" title="Copy URL" aria-label="Copy endpoint URL">
                       <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                     </button>
-                    <button @click="editWebhook(wh)"
+                    <button @click="editEndpoint(wh)"
                       class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0">Edit</button>
-                    <button @click="testWebhook(wh.id)" :disabled="webhookTesting[wh.id] === true"
-                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-all disabled:opacity-50 shrink-0" x-text="webhookTesting[wh.id] === true ? '...' : 'Test'"></button>
-                    <button @click="deleteWebhook(wh.id, wh.name)"
+                    <button @click="testEndpoint(wh.id)" :disabled="endpointTesting[wh.id] === true"
+                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-all disabled:opacity-50 shrink-0" x-text="endpointTesting[wh.id] === true ? '...' : 'Test'"></button>
+                    <button @click="deleteEndpoint(wh.id, wh.name)"
                       class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all shrink-0">Delete</button>
                   </div>
                   <!-- Inline edit form -->
-                  <div x-show="editingWebhookId === wh.id" x-transition class="bg-gray-800/30 border border-gray-800 rounded-lg p-3 mt-1 mb-2">
-                    <div class="text-xs text-gray-500 mb-2">Edit webhook</div>
+                  <div x-show="editingEndpointId === wh.id" x-transition class="bg-gray-800/30 border border-gray-800 rounded-lg p-3 mt-1 mb-2">
+                    <div class="text-xs text-gray-500 mb-2">Edit endpoint</div>
                     <div class="flex gap-2 mb-2">
-                      <input type="text" x-model="webhookEditName" :disabled="webhookSaving" class="dash-input text-xs flex-1" placeholder="Webhook name">
-                      <select x-model="webhookEditAgent" :disabled="webhookSaving" class="dash-select text-xs w-40">
+                      <input type="text" x-model="endpointEditName" :disabled="endpointSaving" class="dash-input text-xs flex-1" placeholder="Endpoint name">
+                      <select x-model="endpointEditAgent" :disabled="endpointSaving" class="dash-select text-xs w-40">
                         <option value="">Agent...</option>
                         <template x-for="a in agents" :key="a.id">
                           <option :value="a.id" x-text="a.id"></option>
                         </template>
                       </select>
                     </div>
-                    <textarea x-model="webhookEditInstructions" :disabled="webhookSaving" class="dash-input w-full text-xs mb-2" rows="2" placeholder="Instructions for the agent (optional)"></textarea>
+                    <textarea x-model="endpointEditInstructions" :disabled="endpointSaving" class="dash-input w-full text-xs mb-2" rows="2" placeholder="Instructions for the agent (optional)"></textarea>
                     <label class="flex items-center gap-2 text-xs text-gray-400 mb-3 cursor-pointer select-none">
-                      <input type="checkbox" x-model="webhookEditRequireSig" :disabled="webhookSaving" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
+                      <input type="checkbox" x-model="endpointEditRequireSig" :disabled="endpointSaving" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
                       Require HMAC signature
                     </label>
                     <div class="flex justify-between items-center">
                       <div class="flex gap-2">
-                        <button @click="cancelWebhookEdit()" :disabled="webhookSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
-                        <button x-show="wh.has_secret" @click="regenerateWebhookSecret(wh.id, wh.name)" :disabled="webhookSaving" class="text-xs px-3 py-1.5 rounded border border-yellow-900/50 hover:border-yellow-700/50 text-yellow-600 hover:text-yellow-500 transition-colors disabled:opacity-50">Regenerate Secret</button>
+                        <button @click="cancelEndpointEdit()" :disabled="endpointSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                        <button x-show="wh.has_secret" @click="regenerateEndpointSecret(wh.id, wh.name)" :disabled="endpointSaving" class="text-xs px-3 py-1.5 rounded border border-yellow-900/50 hover:border-yellow-700/50 text-yellow-600 hover:text-yellow-500 transition-colors disabled:opacity-50">Regenerate Secret</button>
                       </div>
-                      <button @click="saveWebhookEdit()" :disabled="webhookSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
-                        <svg x-show="webhookSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                        <span x-text="webhookSaving ? 'Saving...' : 'Save'"></span>
+                      <button @click="saveEndpointEdit()" :disabled="endpointSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                        <svg x-show="endpointSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        <span x-text="endpointSaving ? 'Saving...' : 'Save'"></span>
                       </button>
                     </div>
                   </div>
                   <!-- One-time secret display -->
-                  <div x-show="webhookRevealedSecret && webhookRevealedSecretHookId === wh.id" x-transition class="mt-2 mb-2 p-3 bg-amber-950 border border-amber-700/60 rounded-lg">
+                  <div x-show="endpointRevealedSecret && endpointRevealedSecretId === wh.id" x-transition class="mt-2 mb-2 p-3 bg-amber-950 border border-amber-700/60 rounded-lg">
                     <div class="flex items-center gap-1.5 text-[11px] text-amber-300 font-semibold mb-2.5">
                       <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/></svg>
                       HMAC Secret — copy this now, it won't be shown again
                     </div>
                     <div class="flex items-center gap-2">
-                      <code class="text-[12px] text-amber-100 bg-black/40 px-3 py-2 rounded font-mono flex-1 break-all select-all tracking-wide border border-amber-900/60" x-text="webhookRevealedSecret"></code>
-                      <button @click="copyToClipboard(webhookRevealedSecret)" class="text-[10px] px-3 py-1.5 rounded bg-amber-800/60 hover:bg-amber-700/60 text-amber-200 hover:text-white border border-amber-700/50 transition-colors shrink-0 font-medium">Copy</button>
-                      <button @click="webhookRevealedSecret = null; webhookRevealedSecretHookId = null" class="text-[10px] px-2.5 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors shrink-0">Dismiss</button>
+                      <code class="text-[12px] text-amber-100 bg-black/40 px-3 py-2 rounded font-mono flex-1 break-all select-all tracking-wide border border-amber-900/60" x-text="endpointRevealedSecret"></code>
+                      <button @click="copyToClipboard(endpointRevealedSecret)" class="text-[10px] px-3 py-1.5 rounded bg-amber-800/60 hover:bg-amber-700/60 text-amber-200 hover:text-white border border-amber-700/50 transition-colors shrink-0 font-medium">Copy</button>
+                      <button @click="endpointRevealedSecret = null; endpointRevealedSecretId = null" class="text-[10px] px-2.5 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors shrink-0">Dismiss</button>
                     </div>
                   </div>
                 </div>
               </template>
-              <div x-show="webhooks.length === 0" class="text-gray-600 text-sm py-2 text-center">No webhooks configured</div>
+              <div x-show="apiEndpoints.length === 0" class="text-gray-600 text-sm py-2 text-center">No API endpoints configured</div>
             </div>
             <div class="border-t border-gray-800 pt-3">
-              <button x-show="!showWebhookForm" @click="showWebhookForm = true; cancelWebhookEdit()" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Webhook</button>
-              <div x-show="showWebhookForm" x-transition>
-                <div class="text-xs text-gray-500 mb-2">New webhook</div>
+              <button x-show="!showEndpointForm" @click="showEndpointForm = true; cancelEndpointEdit()" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Endpoint</button>
+              <div x-show="showEndpointForm" x-transition>
+                <div class="text-xs text-gray-500 mb-2">New endpoint</div>
                 <div class="flex gap-2 mb-2">
-                  <input type="text" x-model="webhookFormName" :disabled="webhookCreating" class="dash-input text-xs flex-1" placeholder="Webhook name">
-                  <select x-model="webhookFormAgent" :disabled="webhookCreating" class="dash-select text-xs w-40">
+                  <input type="text" x-model="endpointFormName" :disabled="endpointCreating" class="dash-input text-xs flex-1" placeholder="Endpoint name">
+                  <select x-model="endpointFormAgent" :disabled="endpointCreating" class="dash-select text-xs w-40">
                     <option value="">Agent...</option>
                     <template x-for="a in agents" :key="a.id">
                       <option :value="a.id" x-text="a.id"></option>
                     </template>
                   </select>
                 </div>
-                <textarea x-model="webhookFormInstructions" :disabled="webhookCreating" class="dash-input w-full text-xs mb-2" rows="2" placeholder="Instructions for the agent (optional) — e.g. 'Extract the event type and update the CRM'"></textarea>
+                <textarea x-model="endpointFormInstructions" :disabled="endpointCreating" class="dash-input w-full text-xs mb-2" rows="2" placeholder="Instructions for the agent (optional) — e.g. 'Extract the event type and update the CRM'"></textarea>
                 <label class="flex items-center gap-2 text-xs text-gray-400 mb-3 cursor-pointer select-none">
-                  <input type="checkbox" x-model="webhookFormRequireSig" :disabled="webhookCreating" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
+                  <input type="checkbox" x-model="endpointFormRequireSig" :disabled="endpointCreating" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
                   Require HMAC signature
                 </label>
                 <div class="flex justify-between">
-                  <button @click="showWebhookForm = false; webhookFormName = ''; webhookFormAgent = ''; webhookFormInstructions = ''; webhookFormRequireSig = false" :disabled="webhookCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
-                  <button @click="createWebhook()" :disabled="webhookCreating" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
-                    <svg x-show="webhookCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                    <span x-text="webhookCreating ? 'Creating...' : 'Create Webhook'"></span>
+                  <button @click="showEndpointForm = false; endpointFormName = ''; endpointFormAgent = ''; endpointFormInstructions = ''; endpointFormRequireSig = false" :disabled="endpointCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="createEndpoint()" :disabled="endpointCreating" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                    <svg x-show="endpointCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                    <span x-text="endpointCreating ? 'Creating...' : 'Create Endpoint'"></span>
                   </button>
                 </div>
               </div>
