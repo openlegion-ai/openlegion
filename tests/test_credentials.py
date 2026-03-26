@@ -1577,7 +1577,7 @@ class TestOAuthTokenHandling:
         headers = CredentialVault._oauth_headers("sk-ant-oat01-test")
         assert headers["Authorization"] == "Bearer sk-ant-oat01-test"
         assert headers["anthropic-version"] == "2023-06-01"
-        assert "claude-code-20250219" in headers["anthropic-beta"]
+        assert "files-api-2025-04-14" in headers["anthropic-beta"]
         assert "oauth-2025-04-20" in headers["anthropic-beta"]
         assert headers["user-agent"].startswith("claude-cli/")
         assert headers["Content-Type"] == "application/json"
