@@ -1078,6 +1078,13 @@ class CredentialVault:
         if "thinking" in body:
             sdk_kwargs["thinking"] = body["thinking"]
 
+        # Debug: log token info to diagnose deployed instance issues
+        token_preview = f"{api_key[:15]}...{api_key[-4:]}" if len(api_key) > 20 else "***"
+        logger.info(
+            "OAuth stream: model=%s, token=%s, token_len=%d",
+            body["model"], token_preview, len(api_key),
+        )
+
         client = anthropic.AsyncAnthropic(
             api_key=None,
             auth_token=api_key,
@@ -1163,6 +1170,7 @@ class CredentialVault:
             msg = "Auth failed"
             if hasattr(e, "body") and isinstance(e.body, dict):
                 msg = e.body.get("error", {}).get("message", msg)
+            logger.error("OAuth AuthenticationError: token=%s, msg=%s", token_preview, msg)
             yield f"data: {json.dumps({'error': f'OAuth auth failed (token may have expired): {msg}'})}\n\n"
 
         except anthropic.APIStatusError as e:
@@ -1173,6 +1181,7 @@ class CredentialVault:
             msg = f"Anthropic API error (HTTP {e.status_code})"
             if detail:
                 msg += f": {detail}"
+            logger.error("OAuth APIStatusError (%d): token=%s, detail=%s", e.status_code, token_preview, detail)
             yield f"data: {json.dumps({'error': msg})}\n\n"
 
         except Exception as e:
@@ -1248,6 +1257,10 @@ class CredentialVault:
         """
         if self._anthropic_oauth is None:
             raise RuntimeError("No Anthropic OAuth credentials configured")
+
+        token = self._anthropic_oauth["access_token"]
+        token_preview = f"{token[:15]}...{token[-4:]}" if len(token) > 20 else "***"
+        logger.info("OAuth token resolved: %s (len=%d)", token_preview, len(token))
 
         now = int(time.time())
         expires_at = self._anthropic_oauth.get("expires_at", 0)
