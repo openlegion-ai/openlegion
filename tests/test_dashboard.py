@@ -595,6 +595,13 @@ class TestDashboardCosts:
         assert data["agents"][0]["agent"] == "alpha"
         assert data["agents"][0]["cost"] > 0
         assert data["agents"][0]["tokens"] > 0
+        # Model breakdown and month totals
+        assert "by_model" in data
+        assert len(data["by_model"]) >= 1
+        assert data["by_model"][0]["model"] == "openai/gpt-4.1-mini"
+        assert "month_total" in data
+        assert data["month_total"] >= data["agents"][0]["cost"]
+        assert "month_tokens" in data
 
     def test_api_costs_week(self):
         self.components["cost_tracker"].track("beta", "openai/gpt-4.1", 500, 100)
@@ -627,6 +634,9 @@ class TestDashboardCosts:
         assert resp.status_code == 200
         data = resp.json()
         assert data["agents"] == []
+        assert data["by_model"] == []
+        assert data["month_total"] == 0
+        assert data["month_tokens"] == 0
 
 
 class TestDashboardBlackboard:

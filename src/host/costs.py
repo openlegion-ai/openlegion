@@ -269,6 +269,26 @@ class CostTracker:
             for r in rows
         ]
 
+    def get_spend_by_model(self, period: str = "today") -> list[dict]:
+        """Get cost breakdown by model across all agents."""
+        since = _period_to_since(period)
+        rows = self.db.execute(
+            "SELECT model, SUM(prompt_tokens), SUM(completion_tokens), "
+            "SUM(total_tokens), SUM(cost_usd) FROM usage WHERE timestamp >= ? "
+            "GROUP BY model ORDER BY SUM(cost_usd) DESC",
+            (since,),
+        ).fetchall()
+        return [
+            {
+                "model": r[0],
+                "prompt_tokens": r[1] or 0,
+                "completion_tokens": r[2] or 0,
+                "tokens": r[3] or 0,
+                "cost": round(r[4] or 0, 4),
+            }
+            for r in rows
+        ]
+
 
 def _period_to_since(period: str) -> str:
     now = datetime.now(timezone.utc)
