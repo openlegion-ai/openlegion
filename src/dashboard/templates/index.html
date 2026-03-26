@@ -2592,6 +2592,13 @@
                 <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/api/inbound/{endpoint_id}</code><span class="text-gray-500">Trigger an agent workflow. Requires <code class="bg-gray-800 px-0.5 rounded">X-Signature</code> header (no API key needed)</span>
               </div>
             </div>
+            <div class="space-y-2">
+              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">Outbound Webhook Payload</div>
+              <div class="text-[11px] text-gray-500 leading-relaxed">
+                Events POST to your URL with <code class="bg-gray-800 px-0.5 rounded">X-OpenLegion-Signature: sha256=HMAC</code> and <code class="bg-gray-800 px-0.5 rounded">X-OpenLegion-Event</code> headers.
+                Body: <code class="bg-gray-800 px-1 rounded text-gray-400">{"event", "agent", "data", "timestamp", "delivery_id"}</code>
+              </div>
+            </div>
           </div>
         </details>
 
@@ -2808,6 +2815,129 @@
                     <svg x-show="endpointCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                     <span x-text="endpointCreating ? 'Creating...' : 'Create Endpoint'"></span>
                   </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Outbound Webhooks -->
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5 mt-6">Webhooks<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Send events to external URLs when things happen. OpenLegion POSTs signed JSON payloads with HMAC-SHA256 verification. Events: notification, task_complete, task_failed, agent_state, cron_complete, custom.</span></span></div>
+        <div class="mb-6">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="mb-3 pb-3 border-b border-gray-800">
+              <div class="text-sm text-gray-200 font-medium mb-1">Webhooks</div>
+              <div class="text-[12px] text-gray-500 leading-relaxed">Send events to external URLs. Each delivery includes an <code class="bg-gray-800 px-1 rounded text-gray-400">X-OpenLegion-Signature</code> HMAC-SHA256 header for verification.</div>
+            </div>
+            <div class="space-y-2 mb-3">
+              <template x-for="wh in outboundWebhooks" :key="wh.id">
+                <div>
+                  <div x-show="editingOutboundId !== wh.id" class="flex items-center gap-3 text-xs group py-2 px-2 -mx-2 rounded-md hover:bg-gray-800/40 transition-colors border-b border-gray-800/30 last:border-0">
+                    <span class="w-2 h-2 rounded-full shrink-0" :class="wh.enabled !== false ? 'bg-green-400/70' : 'bg-gray-600'"></span>
+                    <span class="text-gray-200 font-medium shrink-0" x-text="wh.name"></span>
+                    <span class="text-indigo-300/80 text-[10px] font-mono flex-1 truncate bg-indigo-950/30 px-2 py-0.5 rounded border border-indigo-900/50" x-text="wh.url" :title="wh.url"></span>
+                    <template x-for="ev in (wh.events || [])" :key="ev">
+                      <span class="text-[9px] px-1.5 py-0.5 rounded-full bg-cyan-900/40 text-cyan-400 border border-cyan-800/30" x-text="ev"></span>
+                    </template>
+                    <span x-show="wh.enabled === false" class="text-[9px] px-1.5 py-0.5 rounded-full bg-gray-800 text-gray-500">disabled</span>
+                    <button @click="editOutboundWebhook(wh)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0">Edit</button>
+                    <button @click="testOutboundWebhook(wh.id)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-all shrink-0">Test</button>
+                    <button @click="deleteOutboundWebhook(wh.id, wh.name)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all shrink-0">Delete</button>
+                  </div>
+                  <!-- Inline edit form -->
+                  <div x-show="editingOutboundId === wh.id" x-transition class="bg-gray-800/30 border border-gray-800 rounded-lg p-3 mt-1 mb-2">
+                    <div class="text-xs text-gray-500 mb-2">Edit webhook</div>
+                    <div class="flex gap-2 mb-2">
+                      <input type="text" x-model="outboundEditName" :disabled="outboundSaving" class="dash-input text-xs flex-1" placeholder="Webhook name">
+                      <input type="url" x-model="outboundEditUrl" :disabled="outboundSaving" class="dash-input text-xs flex-1" placeholder="https://example.com/hook">
+                    </div>
+                    <div class="text-[10px] text-gray-500 mb-1">Event types:</div>
+                    <div class="flex flex-wrap gap-2 mb-2">
+                      <template x-for="et in ['notification','task_complete','task_failed','agent_state','cron_complete','custom']" :key="et">
+                        <label class="flex items-center gap-1 text-[11px] text-gray-400 cursor-pointer select-none">
+                          <input type="checkbox" :value="et" x-model="outboundEditEvents" :disabled="outboundSaving" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30 w-3 h-3">
+                          <span x-text="et"></span>
+                        </label>
+                      </template>
+                    </div>
+                    <div class="text-[10px] text-gray-500 mb-1">Agent filter (empty = all agents):</div>
+                    <div class="flex flex-wrap gap-2 mb-2">
+                      <template x-for="a in agents" :key="a.id">
+                        <label class="flex items-center gap-1 text-[11px] text-gray-400 cursor-pointer select-none">
+                          <input type="checkbox" :value="a.id" x-model="outboundEditAgentFilter" :disabled="outboundSaving" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30 w-3 h-3">
+                          <span x-text="a.id"></span>
+                        </label>
+                      </template>
+                    </div>
+                    <label class="flex items-center gap-2 text-xs text-gray-400 mb-3 cursor-pointer select-none">
+                      <input type="checkbox" x-model="outboundEditEnabled" :disabled="outboundSaving" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
+                      Enabled
+                    </label>
+                    <div class="flex justify-end gap-2">
+                      <button @click="cancelOutboundEdit()" :disabled="outboundSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                      <button @click="saveOutboundEdit()" :disabled="outboundSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                        <svg x-show="outboundSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        <span x-text="outboundSaving ? 'Saving...' : 'Save'"></span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </template>
+              <div x-show="outboundWebhooks.length === 0" class="text-gray-600 text-sm py-2 text-center">No outbound webhooks configured</div>
+            </div>
+            <div class="border-t border-gray-800 pt-3">
+              <div class="flex gap-2">
+                <button x-show="!showOutboundForm" @click="showOutboundForm = true; cancelOutboundEdit()" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Webhook</button>
+                <button @click="showDeliveries = !showDeliveries; if (showDeliveries) fetchDeliveries()" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors" x-text="showDeliveries ? 'Hide Deliveries' : 'Recent Deliveries'"></button>
+              </div>
+              <div x-show="showOutboundForm" x-transition class="mt-3">
+                <div class="text-xs text-gray-500 mb-2">New webhook</div>
+                <div class="flex gap-2 mb-2">
+                  <input type="text" x-model="outboundFormName" :disabled="outboundCreating" class="dash-input text-xs flex-1" placeholder="Webhook name">
+                  <input type="url" x-model="outboundFormUrl" :disabled="outboundCreating" class="dash-input text-xs flex-1" placeholder="https://example.com/hook">
+                </div>
+                <div class="text-[10px] text-gray-500 mb-1">Event types:</div>
+                <div class="flex flex-wrap gap-2 mb-2">
+                  <template x-for="et in ['notification','task_complete','task_failed','agent_state','cron_complete','custom']" :key="et">
+                    <label class="flex items-center gap-1 text-[11px] text-gray-400 cursor-pointer select-none">
+                      <input type="checkbox" :value="et" x-model="outboundFormEvents" :disabled="outboundCreating" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30 w-3 h-3">
+                      <span x-text="et"></span>
+                    </label>
+                  </template>
+                </div>
+                <div class="text-[10px] text-gray-500 mb-1">Agent filter (empty = all agents):</div>
+                <div class="flex flex-wrap gap-2 mb-3">
+                  <template x-for="a in agents" :key="a.id">
+                    <label class="flex items-center gap-1 text-[11px] text-gray-400 cursor-pointer select-none">
+                      <input type="checkbox" :value="a.id" x-model="outboundFormAgentFilter" :disabled="outboundCreating" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30 w-3 h-3">
+                      <span x-text="a.id"></span>
+                    </label>
+                  </template>
+                </div>
+                <div class="flex justify-between">
+                  <button @click="showOutboundForm = false; outboundFormName = ''; outboundFormUrl = ''; outboundFormEvents = []; outboundFormAgentFilter = []" :disabled="outboundCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="createOutboundWebhook()" :disabled="outboundCreating" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                    <svg x-show="outboundCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                    <span x-text="outboundCreating ? 'Creating...' : 'Create Webhook'"></span>
+                  </button>
+                </div>
+              </div>
+              <!-- Recent Deliveries -->
+              <div x-show="showDeliveries" x-transition class="mt-3">
+                <div class="text-xs text-gray-500 mb-2">Recent Deliveries</div>
+                <div class="max-h-48 overflow-y-auto space-y-1">
+                  <template x-for="d in outboundDeliveries.slice().reverse()" :key="d.delivery_id">
+                    <div class="flex items-center gap-2 text-[11px] py-1 px-2 rounded hover:bg-gray-800/30">
+                      <span class="shrink-0" :class="d.status === 'delivered' ? 'text-green-400' : 'text-red-400'" x-text="d.status === 'delivered' ? '&#10003;' : '&#10007;'"></span>
+                      <span class="text-gray-500 shrink-0" x-text="d.timestamp ? d.timestamp.split('T')[1]?.slice(0,8) : ''"></span>
+                      <span class="text-cyan-400/80 shrink-0" x-text="d.event"></span>
+                      <span class="text-gray-400 shrink-0" x-text="d.agent"></span>
+                      <span class="text-gray-600 flex-1 truncate" x-text="d.subscription_id"></span>
+                      <span x-show="d.response_code" class="text-gray-500 text-[10px]" x-text="d.response_code"></span>
+                      <span x-show="d.error" class="text-red-400/70 text-[10px] truncate max-w-[200px]" :title="d.error" x-text="d.error"></span>
+                    </div>
+                  </template>
+                  <div x-show="outboundDeliveries.length === 0" class="text-gray-600 text-sm py-2 text-center">No recent deliveries</div>
                 </div>
               </div>
             </div>

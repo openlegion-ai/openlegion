@@ -11,6 +11,7 @@ import asyncio
 import json
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -52,6 +53,11 @@ class EventBus:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._seq: int = 0  # monotonic sequence counter
         self._lock = threading.Lock()
+        self._listeners: list[Callable] = []
+
+    def add_listener(self, fn: Callable) -> None:
+        """Register a callback fn(event_type, agent, data) for all events."""
+        self._listeners.append(fn)
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind to the mesh server's event loop. Idempotent."""
@@ -72,6 +78,12 @@ class EventBus:
             self._seq += 1
             evt_dict["_seq"] = self._seq
             self._buffer.append(evt_dict)
+
+        for listener in self._listeners:
+            try:
+                listener(event_type, agent, data or {})
+            except Exception:
+                logger.warning("Event listener failed", exc_info=True)
 
         if not self._clients:
             return

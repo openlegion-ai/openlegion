@@ -45,6 +45,34 @@ async def notify_user(message: str, *, mesh_client=None, workspace_manager=None)
 
 
 @skill(
+    name="emit_event",
+    description="Emit a custom event to outbound webhooks. Use this to notify external systems about specific occurrences.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "event_name": {
+                "type": "string",
+                "description": "Name of the custom event (e.g. 'order_processed', 'report_ready')",
+            },
+            "data": {
+                "type": "object",
+                "description": "Event payload data to include in the webhook delivery",
+            },
+        },
+        "required": ["event_name"],
+    },
+)
+async def emit_event(event_name: str, data: dict | None = None, *, mesh_client=None) -> dict:
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    try:
+        await mesh_client.emit_event(event_name, data or {})
+        return {"emitted": True, "event_name": event_name}
+    except Exception as e:
+        return {"error": f"Failed to emit event: {e}"}
+
+
+@skill(
     name="list_agents",
     description=(
         "List agents in your project (or just yourself if standalone). Returns "

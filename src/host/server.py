@@ -843,6 +843,24 @@ def create_mesh_app(
             raise HTTPException(500, f"Notification failed: {e}")
         return {"sent": True}
 
+    # === Custom Event Emission ===
+
+    _RATE_LIMITS["emit_event"] = (30, 60)
+
+    @app.post("/mesh/emit-event")
+    async def emit_event(request: Request) -> dict:
+        body = await request.json()
+        agent_id = _resolve_agent_id(body.get("agent_id", ""), request)
+        await _check_rate_limit("emit_event", agent_id)
+        event_name = (body.get("event_name") or "").strip()
+        if not event_name:
+            raise HTTPException(400, "event_name is required")
+        data = body.get("data", {})
+        if event_bus:
+            event_bus.emit("custom", agent=agent_id,
+                data={"event_name": event_name, "payload": data})
+        return {"emitted": True}
+
     @app.get("/mesh/agents")
     async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:
         """List registered agents, optionally scoped by project or agent_id.

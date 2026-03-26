@@ -367,6 +367,24 @@ function dashboard() {
     endpointSaving: false,
     endpointRevealedSecret: null,
     endpointRevealedSecretId: null,
+    // Outbound webhooks
+    outboundWebhooks: [],
+    outboundFormName: '',
+    outboundFormUrl: '',
+    outboundFormEvents: [],
+    outboundFormAgentFilter: [],
+    outboundEditName: '',
+    outboundEditUrl: '',
+    outboundEditEvents: [],
+    outboundEditAgentFilter: [],
+    outboundEditEnabled: true,
+    editingOutboundId: null,
+    outboundCreating: false,
+    outboundSaving: false,
+    outboundDeliveries: [],
+    showOutboundForm: false,
+    showDeliveries: false,
+
     apiKeys: [],
     apiKeysLegacy: false,
     apiKeyNewValue: null,
@@ -528,7 +546,7 @@ function dashboard() {
               if (this.systemTab === 'activity') this._stopActivityRefresh();
               this.systemTab = route.systemTab;
               if (route.systemTab === 'integrations') {
-                this.fetchChannels(); this.fetchEndpoints(); this.fetchApiKeys();
+                this.fetchChannels(); this.fetchEndpoints(); this.fetchApiKeys(); this.fetchOutboundWebhooks();
               }
               if (route.systemTab === 'apikeys') {
                 this.fetchSettings();
@@ -1094,6 +1112,7 @@ function dashboard() {
           this.fetchEndpoints();
           this.fetchChannels();
           this.fetchApiKeys();
+          this.fetchOutboundWebhooks();
         }
         if (this.systemTab === 'settings') {
           this.fetchBrowserSettings();
@@ -1115,7 +1134,7 @@ function dashboard() {
       if (this.systemTab === 'activity' && tabId !== 'activity') this._stopActivityRefresh();
       this.systemTab = tabId;
       this._pushUrl(false);
-      if (tabId === 'integrations') { this.fetchChannels(); this.fetchEndpoints(); this.fetchApiKeys(); }
+      if (tabId === 'integrations') { this.fetchChannels(); this.fetchEndpoints(); this.fetchApiKeys(); this.fetchOutboundWebhooks(); }
       if (tabId === 'apikeys') { this.fetchSettings(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
@@ -3992,6 +4011,7 @@ function dashboard() {
         { label: 'View Logs', desc: 'Open runtime logs', keywords: ['logs', 'runtime', 'debug'], action: () => { this.systemTab = 'activity'; this.switchTab('system'); this.setActivityView('logs'); } },
         { label: 'Add API Key', desc: 'Add new API key or credential', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.systemTab = 'apikeys'; this.switchTab('system'); this.showCredForm = true; } },
         { label: 'Manage API Endpoints', desc: 'View and create API endpoints', keywords: ['api', 'endpoint', 'webhook', 'hook'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchEndpoints(); } },
+        { label: 'Manage Webhooks', desc: 'View outbound webhook subscriptions', keywords: ['webhook', 'outbound', 'notify'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchOutboundWebhooks(); } },
         { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchChannels(); } },
         { label: 'Model Pricing', desc: 'Token costs by model', keywords: ['model', 'pricing', 'tokens'], action: () => { this.systemTab = 'costs'; this.switchTab('system'); } },
         { label: 'Browser Settings', desc: 'Browser speed and timing', keywords: ['browser', 'speed', 'settings', 'timing', 'stealth'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchBrowserSettings(); } },
@@ -4628,6 +4648,94 @@ function dashboard() {
           }
         } catch (e) { this.showToast(`Error: ${e.message}`); }
       }, true);
+    },
+
+    // ── Outbound Webhooks ──────────────────────────────────
+
+    async fetchOutboundWebhooks() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/webhooks`);
+        if (resp.ok) this.outboundWebhooks = (await resp.json()).webhooks || [];
+      } catch (e) { console.error('Failed to fetch webhooks', e); }
+    },
+
+    async createOutboundWebhook() {
+      if (this.outboundCreating) return;
+      const name = this.outboundFormName.trim();
+      const url = this.outboundFormUrl.trim();
+      const events = this.outboundFormEvents;
+      if (!name || !url || !events.length) { this.showToast('Name, URL, and at least one event required'); return; }
+      this.outboundCreating = true;
+      try {
+        const body = { name, url, events, agent_filter: this.outboundFormAgentFilter };
+        const resp = await fetch(`${window.__config.apiBase}/webhooks`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(body) });
+        const data = await resp.json();
+        if (resp.ok) {
+          this.showToast('Webhook created');
+          this.outboundFormName = ''; this.outboundFormUrl = ''; this.outboundFormEvents = []; this.outboundFormAgentFilter = [];
+          this.showOutboundForm = false;
+          await this.fetchOutboundWebhooks();
+        } else { this.showToast(`Error: ${data.detail || 'Failed to create webhook'}`); }
+      } catch (e) { this.showToast('Failed to create webhook'); }
+      finally { this.outboundCreating = false; }
+    },
+
+    async deleteOutboundWebhook(subId, name) {
+      this.showConfirm('Delete Webhook', `Delete webhook "${name}"?`, async () => {
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(subId)}`, { method: 'DELETE', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+          if (resp.ok) { this.showToast('Webhook deleted'); await this.fetchOutboundWebhooks(); }
+        } catch (e) { this.showToast('Failed to delete webhook'); }
+      });
+    },
+
+    async testOutboundWebhook(subId) {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(subId)}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: '{}' });
+        if (resp.ok) this.showToast('Test event sent');
+        else this.showToast('Test failed');
+      } catch (e) { this.showToast('Test failed'); }
+    },
+
+    async fetchDeliveries() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/webhooks/deliveries`);
+        if (resp.ok) this.outboundDeliveries = (await resp.json()).deliveries || [];
+      } catch (e) { console.error('Failed to fetch deliveries', e); }
+    },
+
+    editOutboundWebhook(wh) {
+      this.editingOutboundId = wh.id;
+      this.outboundEditName = wh.name;
+      this.outboundEditUrl = wh.url;
+      this.outboundEditEvents = [...(wh.events || [])];
+      this.outboundEditAgentFilter = [...(wh.agent_filter || [])];
+      this.outboundEditEnabled = wh.enabled !== false;
+    },
+
+    cancelOutboundEdit() {
+      this.editingOutboundId = null;
+    },
+
+    async saveOutboundEdit() {
+      if (this.outboundSaving) return;
+      const id = this.editingOutboundId;
+      const body = {};
+      const wh = this.outboundWebhooks.find(w => w.id === id);
+      if (!wh) return;
+      if (this.outboundEditName.trim() !== wh.name) body.name = this.outboundEditName.trim();
+      if (this.outboundEditUrl.trim() !== wh.url) body.url = this.outboundEditUrl.trim();
+      if (JSON.stringify(this.outboundEditEvents) !== JSON.stringify(wh.events)) body.events = this.outboundEditEvents;
+      if (JSON.stringify(this.outboundEditAgentFilter) !== JSON.stringify(wh.agent_filter || [])) body.agent_filter = this.outboundEditAgentFilter;
+      if (this.outboundEditEnabled !== (wh.enabled !== false)) body.enabled = this.outboundEditEnabled;
+      if (!Object.keys(body).length) { this.editingOutboundId = null; return; }
+      this.outboundSaving = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(body) });
+        if (resp.ok) { this.showToast('Webhook updated'); this.editingOutboundId = null; await this.fetchOutboundWebhooks(); }
+        else { const data = await resp.json(); this.showToast(`Error: ${data.detail || 'Failed'}`); }
+      } catch (e) { this.showToast('Failed to update webhook'); }
+      finally { this.outboundSaving = false; }
     },
 
     // ── External API key ──────────────────────────────────
