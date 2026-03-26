@@ -561,9 +561,25 @@ class SetupWizard:
         """Test an Anthropic OAuth token with a minimal API call."""
         import httpx as _httpx
 
-        from src.host.credentials import _ANTHROPIC_API_URL, CredentialVault
+        from src.host.credentials import (
+            _ANTHROPIC_API_URL,
+            _CLAUDE_CLI_VERSION,
+        )
 
-        headers = CredentialVault._oauth_headers(token)
+        headers = {
+            "Content-Type": "application/json",
+            "accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": (
+                "claude-code-20250219,"
+                "oauth-2025-04-20,"
+                "fine-grained-tool-streaming-2025-05-14"
+            ),
+            "anthropic-dangerous-direct-browser-access": "true",
+            "x-app": "cli",
+            "user-agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
+        }
         body = {
             "model": "claude-haiku-4-5-20251001",
             "max_tokens": 1,
