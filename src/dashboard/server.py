@@ -1273,10 +1273,9 @@ def create_dashboard_router(
                 except ImportError:
                     return {"valid": True, "skipped": True, "reason": "litellm not installed"}
                 except Exception as e:
-                    import litellm as _ltm
-                    if isinstance(e, _ltm.AuthenticationError):
+                    if isinstance(e, litellm.AuthenticationError):
                         return {"valid": False, "skipped": False, "reason": "Invalid API key"}
-                    if isinstance(e, getattr(_ltm, "PermissionDeniedError", type(None))):
+                    if isinstance(e, getattr(litellm, "PermissionDeniedError", type(None))):
                         return {"valid": False, "skipped": False, "reason": "Permission denied — check API key"}
                     emsg = str(e).lower()
                     _auth_kw = ("invalid api key", "invalid key", "unauthorized", "authentication fail")

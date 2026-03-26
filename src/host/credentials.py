@@ -711,12 +711,15 @@ class CredentialVault:
         if not api_base:
             return model
         provider = self._resolve_provider(model)
-        if not provider or provider in SYSTEM_CREDENTIAL_PROVIDERS:
+        if provider and provider in SYSTEM_CREDENTIAL_PROVIDERS:
             return model
         # Unknown provider with custom api_base → OpenAI-compatible
         if "/" in model:
-            return f"openai/{model.split('/', 1)[1]}"
-        return f"openai/{model}"
+            rewritten = f"openai/{model.split('/', 1)[1]}"
+        else:
+            rewritten = f"openai/{model}"
+        logger.debug("Rewrote custom model '%s' → '%s' for litellm", model, rewritten)
+        return rewritten
 
     @staticmethod
     def _is_permanent_error(error: Exception) -> bool:

@@ -3158,11 +3158,10 @@ def test_rewrite_unknown_provider_without_api_base():
 
 
 def test_rewrite_no_slash_with_api_base():
-    """Model with no slash and api_base → openai/{model}."""
+    """Bare model name with api_base → openai/{model}."""
     v = CredentialVault()
     result = v._rewrite_model_for_litellm("mymodel", "http://localhost:8000/v1")
-    # No slash → _resolve_provider returns None → no provider → no rewrite
-    assert result == "mymodel"
+    assert result == "openai/mymodel"
 
 
 def test_rewrite_no_api_base():
@@ -3250,3 +3249,31 @@ async def test_stream_uses_rewritten_model_for_custom_provider(monkeypatch):
     # litellm should receive the rewritten model
     assert captured["model"] == "openai/Chatrhino-750B"
     assert any("streamed" in e for e in events)
+
+
+async def test_embed_uses_rewritten_model_for_custom_provider(monkeypatch):
+    """Embedding rewrites custom provider model for litellm."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_CHATRHINO_API_KEY", "sk-rhino")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_CHATRHINO_API_BASE", "http://api.chatrhino.com/v1")
+    v = CredentialVault()
+
+    captured = {}
+
+    async def mock_aembedding(**kwargs):
+        captured.update(kwargs)
+        resp = MagicMock()
+        resp.data = [{"embedding": [0.1, 0.2, 0.3]}]
+        return resp
+
+    with patch("litellm.aembedding", side_effect=mock_aembedding):
+        req = APIProxyRequest(
+            service="llm", action="embed",
+            params={
+                "model": "chatrhino/Chatrhino-750B",
+                "text": "hello world",
+            },
+        )
+        result = await v.execute_api_call(req)
+
+    assert result.success
+    assert captured["model"] == "openai/Chatrhino-750B"
