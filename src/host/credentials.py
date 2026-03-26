@@ -1079,7 +1079,7 @@ class CredentialVault:
             sdk_kwargs["thinking"] = body["thinking"]
 
         client = anthropic.AsyncAnthropic(
-            api_key="placeholder",  # Required by SDK but overridden by auth_token
+            api_key=None,  # Omit X-Api-Key header; auth_token provides Bearer auth
             auth_token=api_key,
             default_headers={
                 "anthropic-dangerous-direct-browser-access": "true",
