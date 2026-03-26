@@ -1318,7 +1318,7 @@
                 <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
                   <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Settings</div>
                   <!-- Tab bar (4 tabs, no access badges) -->
-                  <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-3 overflow-x-auto">
+                  <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-3">
                     <template x-for="tab in identityTabs" :key="tab.id">
                       <button
                         @click="switchIdentityTab(selectedAgent, tab.id)"
@@ -2157,7 +2157,7 @@
       <!-- System (Activity + Costs + Automation + Integrations + API Keys + Wallet + Storage + Settings) -->
       <div x-show="activeTab === 'system'" x-cloak>
         <!-- System sub-tab bar -->
-        <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4 overflow-x-auto hide-scrollbar">
+        <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
           <template x-for="st in systemTabs" :key="st.id">
             <button @click="switchSystemTab(st.id)"
               class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative whitespace-nowrap"
