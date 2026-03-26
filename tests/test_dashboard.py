@@ -1420,7 +1420,7 @@ class TestDashboardCredentialRemove:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_delete_credential(self):
-        """DELETE /api/credentials/{name} removes the credential."""
+        """DELETE /api/credentials/{name} removes the credential and paired api_base."""
         vault = self.components["credential_vault"]
         vault.remove_credential = MagicMock(return_value=True)
         resp = self.client.delete("/dashboard/api/credentials/anthropic_api_key")
@@ -1428,7 +1428,9 @@ class TestDashboardCredentialRemove:
         data = resp.json()
         assert data["removed"] is True
         assert data["service"] == "anthropic_api_key"
-        vault.remove_credential.assert_called_once_with("anthropic_api_key")
+        assert vault.remove_credential.call_count == 2
+        vault.remove_credential.assert_any_call("anthropic_api_key")
+        vault.remove_credential.assert_any_call("anthropic_api_base")
 
     def test_delete_credential_not_found(self):
         """DELETE /api/credentials/{name} returns 404 when credential doesn't exist."""

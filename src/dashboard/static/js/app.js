@@ -280,6 +280,9 @@ function dashboard() {
     credBaseUrl: '',
     credTier: 'agent',
     credAuthType: 'api_key',
+    credIsLlmProvider: false,
+    credCustomModels: '',
+    credCustomLabel: '',
 
     // Channels
     channels: [],
@@ -3847,6 +3850,10 @@ function dashboard() {
         if (!isKeyless && !await this._validateCredential(service, key, baseUrl)) return;
         const body = { service, key };
         if (this.credService === '__custom__' && this.credTier === 'system') body.tier = 'system';
+        if (this.credService === '__custom__' && this.credTier === 'system' && this.credIsLlmProvider && this.credCustomModels.trim()) {
+          body.custom_llm_models = this.credCustomModels;
+          if (this.credCustomLabel.trim()) body.custom_llm_label = this.credCustomLabel;
+        }
         if (baseUrl) body.base_url = baseUrl;
         const resp = await fetch(`${window.__config.apiBase}/credentials`, {
           method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -3861,6 +3868,9 @@ function dashboard() {
           this.credBaseUrl = '';
           this.credTier = 'agent';
           this.credAuthType = 'api_key';
+          this.credIsLlmProvider = false;
+          this.credCustomModels = '';
+          this.credCustomLabel = '';
           this.showCredForm = false;
           this.fetchSettings();
         } else {
