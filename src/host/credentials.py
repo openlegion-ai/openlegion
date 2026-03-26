@@ -132,8 +132,21 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     if not found:
         lines.append(formatted)
 
-    env_path.write_text("\n".join(lines) + "\n")
-    os.chmod(env_file, 0o600)
+    content = "\n".join(lines) + "\n"
+    # Atomic write: temp file + fsync + rename ensures data survives
+    # immediate process restarts (e.g., from update-all).
+    # Resolve symlinks so the rename targets the real file's directory.
+    real_path = env_path.resolve()
+    tmp_path = real_path.with_suffix(".tmp")
+    tmp_path.write_text(content)
+    os.chmod(str(tmp_path), 0o600)
+    # fsync to ensure data hits disk before rename
+    fd = os.open(str(tmp_path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    tmp_path.replace(real_path)
     os.environ[env_key] = value
 
 
@@ -148,8 +161,19 @@ def _remove_from_env(env_key: str, env_file: str = "") -> None:
             line for line in env_path.read_text().splitlines()
             if not line.startswith(f"{env_key}=")
         ]
-        env_path.write_text("\n".join(lines) + "\n")
-        os.chmod(env_file, 0o600)
+        content = "\n".join(lines) + "\n"
+        # Atomic write: temp file + fsync + rename ensures data survives
+        # immediate process restarts (e.g., from update-all).
+        real_path = env_path.resolve()
+        tmp_path = real_path.with_suffix(".tmp")
+        tmp_path.write_text(content)
+        os.chmod(str(tmp_path), 0o600)
+        fd = os.open(str(tmp_path), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        tmp_path.replace(real_path)
 
     os.environ.pop(env_key, None)
 
