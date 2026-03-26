@@ -3844,7 +3844,7 @@ function dashboard() {
       try {
         const baseUrl = isOAuth ? '' : this.credBaseUrl.trim();
         const key = isKeyless ? 'ollama' : this.credKey.trim();
-        if (!isKeyless && !await this._validateCredential(service, key, baseUrl)) return;
+        if (!isKeyless && !isOAuth && !await this._validateCredential(service, key, baseUrl)) return;
         const body = { service, key };
         if (this.credService === '__custom__' && this.credTier === 'system') body.tier = 'system';
         if (baseUrl) body.base_url = baseUrl;
@@ -4043,7 +4043,8 @@ function dashboard() {
       this.showToast(isOAuth ? 'Validating token...' : 'Validating API key...');
       try {
         const baseUrl = isOAuth ? '' : this.onboardBaseUrl.trim();
-        if (!await this._validateCredential(this.onboardProvider, this.onboardKey.trim(), baseUrl)) return;
+        const isOnboardOAuth = this.onboardAuthType === 'oauth' && (this.onboardProvider === 'anthropic' || this.onboardProvider === 'openai');
+        if (!isOnboardOAuth && !await this._validateCredential(this.onboardProvider, this.onboardKey.trim(), baseUrl)) return;
         const body = { service: this.onboardProvider, key: this.onboardKey.trim() };
         if (baseUrl) body.base_url = baseUrl;
         const resp = await fetch(`${window.__config.apiBase}/credentials`, {

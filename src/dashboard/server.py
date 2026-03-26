@@ -1426,8 +1426,12 @@ def create_dashboard_router(
         _verify_dashboard_auth(request)
         if credential_vault is None:
             raise HTTPException(status_code=503, detail="Credential vault not available")
-        # Check agent tier only — never expose system-tier credentials
+        # Check agent tier first, then system tier
         value = credential_vault.resolve_credential(name)
+        if value is None:
+            value = credential_vault.system_credentials.get(name.lower())
+        if value is None:
+            value = credential_vault.api_bases.get(name.lower())
         if value is None:
             raise HTTPException(status_code=404, detail=f"Credential '{name}' not found")
         masked = value[-4:].rjust(len(value), "*") if len(value) > 4 else "****"
