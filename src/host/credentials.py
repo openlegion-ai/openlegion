@@ -1108,7 +1108,16 @@ class CredentialVault:
                         model, "HTTPError", resp.status_code,
                     )
                     await resp.aread()
-                    yield f"data: {json.dumps({'error': f'Anthropic API error (HTTP {resp.status_code})'})}\n\n"
+                    detail = ""
+                    try:
+                        error_data = resp.json()
+                        detail = error_data.get("error", {}).get("message", resp.text[:500])
+                    except (json.JSONDecodeError, ValueError):
+                        detail = resp.text[:500] if resp.text else ""
+                    msg = f"Anthropic API error (HTTP {resp.status_code})"
+                    if detail:
+                        msg += f": {detail}"
+                    yield f"data: {json.dumps({'error': msg})}\n\n"
                     return
 
                 async for line in resp.aiter_lines():
