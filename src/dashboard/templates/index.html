@@ -3011,14 +3011,14 @@
                 <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Wallet Access</div>
                 <div class="space-y-2">
                   <template x-for="a in walletData.all_agents || []" :key="a.agent_id">
-                    <div class="flex items-center justify-between text-xs">
+                    <div class="flex flex-wrap items-center justify-between gap-y-1 text-xs">
                       <div class="flex items-center gap-2">
                         <span class="w-1.5 h-1.5 rounded-full" :class="a.wallet_enabled ? 'bg-green-500' : 'bg-gray-600'"></span>
                         <span class="text-gray-300" x-text="a.agent_id"></span>
                       </div>
                       <div class="flex items-center gap-2">
                         <template x-if="a.wallet_enabled">
-                          <div class="flex items-center gap-1.5">
+                          <div class="flex flex-wrap items-center gap-1.5">
                             <template x-for="ch in a.wallet_chains || []" :key="ch">
                               <span class="text-[11px] px-1.5 py-0.5 rounded bg-indigo-900/20 text-indigo-400/70 border border-indigo-800/30" x-text="ch"></span>
                             </template>
