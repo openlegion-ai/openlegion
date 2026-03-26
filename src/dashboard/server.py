@@ -1736,7 +1736,27 @@ def create_dashboard_router(
         budgets = {}
         for item in agents_spend:
             budgets[item["agent"]] = cost_tracker.check_budget(item["agent"])
-        return {"period": period, "agents": agents_spend, "budgets": budgets}
+        # Include budgets for registered agents with zero spend in this period
+        for aid in agent_registry:
+            if aid not in budgets:
+                budgets[aid] = cost_tracker.check_budget(aid)
+        by_model = cost_tracker.get_spend_by_model(period)
+        # Always include month-to-date totals for the stat card
+        if period != "month":
+            month = cost_tracker.get_spend(period="month")
+            month_total = month["total_cost"]
+            month_tokens = month["total_tokens"]
+        else:
+            month_total = sum(a["cost"] for a in agents_spend)
+            month_tokens = sum(a["tokens"] for a in agents_spend)
+        return {
+            "period": period,
+            "agents": agents_spend,
+            "budgets": budgets,
+            "by_model": by_model,
+            "month_total": month_total,
+            "month_tokens": month_tokens,
+        }
 
     # ── Projects ──────────────────────────────────────────────
 

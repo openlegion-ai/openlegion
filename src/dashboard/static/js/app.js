@@ -138,6 +138,7 @@ function dashboard() {
     costData: {},
     costPeriod: 'today',
     costChart: null,
+    modelChart: null,
     _costDebounce: null,
 
     // Traces
@@ -661,6 +662,16 @@ function dashboard() {
       return (this.costData.agents || []).reduce((sum, a) => sum + (a.cost || 0), 0);
     },
 
+    get costBudgetSummary() {
+      const budgets = this.costData.budgets || {};
+      let total = 0, overBudget = 0;
+      for (const [, b] of Object.entries(budgets)) {
+        total++;
+        if (!b.allowed) overBudget++;
+      }
+      return { total, overBudget };
+    },
+
     get identityCurrentTab() {
       return _IDENTITY_TABS.find(t => t.id === this.identityTab) || _IDENTITY_TABS[0];
     },
@@ -941,6 +952,7 @@ function dashboard() {
       if (this._cookieRenewalInterval) clearInterval(this._cookieRenewalInterval);
       if (this._visibilityHandler) document.removeEventListener('visibilitychange', this._visibilityHandler);
       if (this._costDebounce) clearTimeout(this._costDebounce);
+      if (this.modelChart) { this.modelChart.destroy(); this.modelChart = null; }
       if (this._fleetDebounce) clearTimeout(this._fleetDebounce);
       if (this._activityRefresh) clearInterval(this._activityRefresh);
       if (this._tracesDebounce) clearTimeout(this._tracesDebounce);
@@ -2079,7 +2091,7 @@ function dashboard() {
         const resp = await fetch(`${window.__config.apiBase}/costs?period=${this.costPeriod}`);
         if (resp.ok) {
           this.costData = await resp.json();
-          this.$nextTick(() => this.renderCostChart());
+          this.$nextTick(() => { this.renderCostChart(); this.renderModelChart(); });
         }
       } catch (e) { console.warn('fetchCosts failed:', e); }
     },
@@ -4511,6 +4523,111 @@ function dashboard() {
             },
           },
         },
+      });
+    },
+
+    _MODEL_CHART_COLORS: [
+      '#8b5cf6', '#10b981', '#3b82f6', '#f59e0b',
+      '#ef4444', '#06b6d4', '#ec4899', '#14b8a6',
+      '#f97316', '#84cc16', '#d946ef', '#64748b',
+    ],
+
+    renderModelChart() {
+      const canvas = document.getElementById('modelChart');
+      if (!canvas) return;
+
+      const models = (this.costData.by_model || []);
+      if (models.length === 0) {
+        if (this.modelChart) { this.modelChart.destroy(); this.modelChart = null; }
+        return;
+      }
+
+      const labels = models.map(m => this.formatModelName(m.model));
+      const costs = models.map(m => m.cost);
+      const colors = models.map((_, i) => this._MODEL_CHART_COLORS[i % this._MODEL_CHART_COLORS.length]);
+
+      if (this.modelChart) {
+        this.modelChart.data.labels = labels;
+        this.modelChart.data.datasets[0].data = costs;
+        this.modelChart.data.datasets[0].backgroundColor = colors;
+        this.modelChart.data.datasets[0].borderColor = colors.map(c => c + '40');
+        this.modelChart.update();
+        return;
+      }
+
+      const totalCost = costs.reduce((s, c) => s + c, 0);
+
+      this.modelChart = new Chart(canvas, {
+        type: 'doughnut',
+        data: {
+          labels,
+          datasets: [{
+            data: costs,
+            backgroundColor: colors,
+            borderColor: colors.map(c => c + '40'),
+            borderWidth: 2,
+            hoverOffset: 4,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          cutout: '65%',
+          plugins: {
+            legend: {
+              position: 'right',
+              labels: {
+                color: '#9ca3af',
+                usePointStyle: true,
+                pointStyleWidth: 8,
+                font: { size: 11 },
+                padding: 12,
+                generateLabels(chart) {
+                  const data = chart.data;
+                  return data.labels.map((label, i) => {
+                    const value = data.datasets[0].data[i];
+                    const pct = totalCost > 0 ? Math.round((value / totalCost) * 100) : 0;
+                    return {
+                      text: `${label}  ${pct}%`,
+                      fillStyle: data.datasets[0].backgroundColor[i],
+                      strokeStyle: 'transparent',
+                      pointStyle: 'rectRounded',
+                      index: i,
+                      hidden: false,
+                    };
+                  });
+                },
+              },
+            },
+            tooltip: {
+              callbacks: {
+                label(ctx) {
+                  const cost = ctx.parsed;
+                  const pct = totalCost > 0 ? ((cost / totalCost) * 100).toFixed(1) : '0';
+                  return ` $${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}  (${pct}%)`;
+                },
+              },
+            },
+          },
+        },
+        plugins: [{
+          id: 'centerText',
+          afterDraw(chart) {
+            const { ctx, chartArea } = chart;
+            const cx = (chartArea.left + chartArea.right) / 2;
+            const cy = (chartArea.top + chartArea.bottom) / 2;
+            ctx.save();
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#9ca3af';
+            ctx.font = '500 11px ui-monospace, monospace';
+            ctx.fillText('total', cx, cy - 10);
+            ctx.fillStyle = '#f3f4f6';
+            ctx.font = '600 16px ui-monospace, monospace';
+            ctx.fillText('$' + (totalCost < 0.01 ? totalCost.toFixed(4) : totalCost.toFixed(2)), cx, cy + 8);
+            ctx.restore();
+          },
+        }],
       });
     },
 
