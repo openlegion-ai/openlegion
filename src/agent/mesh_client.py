@@ -221,6 +221,16 @@ class MeshClient:
         )
         response.raise_for_status()
 
+    async def emit_event(self, event_name: str, data: dict) -> None:
+        """Emit a custom event to outbound webhooks."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/emit-event",
+            json={"agent_id": self.agent_id, "event_name": event_name, "data": data},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+
     async def publish_event(self, topic: str, payload: dict | None = None) -> dict:
         """Publish an event to the mesh pub/sub."""
         scoped = self._scope_topic(topic)

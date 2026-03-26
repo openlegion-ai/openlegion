@@ -145,6 +145,7 @@ def create_dashboard_router(
     channel_manager: Any = None,
     wallet_service_ref: list | None = None,
     api_key_manager: Any = None,
+    outbound_webhook_manager: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     # Plan limits — read once at startup; provisioner restarts engine after updating .env
@@ -931,8 +932,14 @@ def create_dashboard_router(
             result = await transport.request(
                 agent_id, "POST", "/chat", json={"message": message}, timeout=120,
             )
+            if event_bus:
+                event_bus.emit("task_complete", agent=agent_id,
+                    data={"task": message[:200], "status": "complete"})
             return {"response": result.get("response", "(no response)")}
         except Exception as e:
+            if event_bus:
+                event_bus.emit("task_failed", agent=agent_id,
+                    data={"error": str(e)[:500], "status": "failed"})
             raise HTTPException(status_code=502, detail=str(e))
 
     @api_router.post("/api/agents/{agent_id}/chat/stream")
@@ -2672,6 +2679,84 @@ def create_dashboard_router(
         if result is None:
             raise HTTPException(status_code=404, detail=f"Endpoint '{endpoint_id}' not found")
         return {"tested": True, "id": endpoint_id, "result": result}
+
+    # ── Webhooks (Outbound) ──────────────────────────────────────────────
+
+    @api_router.get("/api/webhooks")
+    async def api_webhooks_list() -> dict:
+        if outbound_webhook_manager is None:
+            return {"webhooks": []}
+        subs = outbound_webhook_manager.list_subscriptions()
+        # Strip secrets from response
+        result = [{k: v for k, v in s.items() if k != "secret"} for s in subs]
+        for r in result:
+            r["has_secret"] = True  # all subscriptions have secrets
+        return {"webhooks": result}
+
+    @api_router.post("/api/webhooks")
+    async def api_webhooks_create(request: Request) -> dict:
+        if outbound_webhook_manager is None:
+            raise HTTPException(503, "Outbound webhooks not available")
+        body = await request.json()
+        name = body.get("name", "").strip()
+        url = body.get("url", "").strip()
+        events = body.get("events", [])
+        agent_filter = body.get("agent_filter", [])
+        if not name or not url:
+            raise HTTPException(400, "name and url are required")
+        if not events:
+            raise HTTPException(400, "At least one event type is required")
+        try:
+            sub = outbound_webhook_manager.add_subscription(name, url, events, agent_filter)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"created": True, "webhook": sub}  # includes secret on creation
+
+    @api_router.delete("/api/webhooks/{sub_id}")
+    async def api_webhooks_delete(sub_id: str) -> dict:
+        if outbound_webhook_manager is None:
+            raise HTTPException(503, "Outbound webhooks not available")
+        removed = outbound_webhook_manager.remove_subscription(sub_id)
+        if not removed:
+            raise HTTPException(404, f"Webhook '{sub_id}' not found")
+        return {"removed": True, "id": sub_id}
+
+    @api_router.patch("/api/webhooks/{sub_id}")
+    async def api_webhooks_update(sub_id: str, request: Request) -> dict:
+        if outbound_webhook_manager is None:
+            raise HTTPException(503, "Outbound webhooks not available")
+        body = await request.json()
+        fields = {}
+        for key in ("name", "url", "events", "agent_filter"):
+            if key in body:
+                fields[key] = body[key]
+        if "enabled" in body:
+            fields["enabled"] = bool(body["enabled"])
+        if not fields:
+            raise HTTPException(400, "No valid fields provided")
+        try:
+            updated = outbound_webhook_manager.update_subscription(sub_id, **fields)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if updated is None:
+            raise HTTPException(404, f"Webhook '{sub_id}' not found")
+        result = {k: v for k, v in updated.items() if k != "secret"}
+        return {"updated": True, "webhook": result}
+
+    @api_router.post("/api/webhooks/{sub_id}/test")
+    async def api_webhooks_test(sub_id: str) -> dict:
+        if outbound_webhook_manager is None:
+            raise HTTPException(503, "Outbound webhooks not available")
+        result = await outbound_webhook_manager.test_subscription(sub_id)
+        if result is None:
+            raise HTTPException(404, f"Webhook '{sub_id}' not found")
+        return {"tested": True, "id": sub_id, "result": result}
+
+    @api_router.get("/api/webhooks/deliveries")
+    async def api_webhooks_deliveries() -> dict:
+        if outbound_webhook_manager is None:
+            return {"deliveries": []}
+        return {"deliveries": outbound_webhook_manager.recent_deliveries()}
 
     # ── Channels ──────────────────────────────────────────────
 

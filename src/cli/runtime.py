@@ -120,6 +120,16 @@ class RuntimeContext:
         if self.blackboard:
             self.blackboard.close()
 
+        # Stop outbound webhook delivery worker
+        if hasattr(self, '_outbound_webhook_manager') and self._dispatch_loop:
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._outbound_webhook_manager.stop(), self._dispatch_loop,
+                )
+                future.result(timeout=10)
+            except Exception as e:
+                logger.debug("Outbound webhook shutdown error: %s", e)
+
         # Close shared httpx clients on the dispatch loop — close all
         # concurrently so one slow close doesn't block the others.
         if self._dispatch_loop:
@@ -438,6 +448,8 @@ class RuntimeContext:
                     self.event_bus.emit("message_sent", agent=agent_name,
                         data={"message": message[:200], "response_length": len(response),
                               "source": "dispatch"})
+                    self.event_bus.emit("task_complete", agent=agent_name,
+                        data={"task": message[:200], "status": "complete"})
                 return response
             except Exception as e:
                 duration_ms = int((_time.time() - t0) * 1000)
@@ -447,6 +459,9 @@ class RuntimeContext:
                         event_type="chat_response", duration_ms=duration_ms,
                         status="error", error=str(e),
                     )
+                if self.event_bus:
+                    self.event_bus.emit("task_failed", agent=agent_name,
+                        data={"error": str(e)[:500], "status": "failed"})
                 return f"Error: {e}"
 
         async def _direct_steer(agent_name: str, message: str) -> dict:
@@ -510,6 +525,9 @@ class RuntimeContext:
         from src.host.api_keys import ApiKeyManager
         self._api_key_manager = ApiKeyManager()
 
+        from src.host.outbound_webhooks import OutboundWebhookManager
+        self._outbound_webhook_manager = OutboundWebhookManager()
+
         app = create_mesh_app(
             self.blackboard, self.pubsub, self.router, self.permissions,
             self.credential_vault, self.cron_scheduler, self.runtime,
@@ -553,10 +571,15 @@ class RuntimeContext:
             channel_manager=self.channel_manager,
             wallet_service_ref=wallet_ref,
             api_key_manager=self._api_key_manager,
+            outbound_webhook_manager=self._outbound_webhook_manager,
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking
         self._app = app
+
+        # Register outbound webhook manager as EventBus listener
+        if self.event_bus:
+            self.event_bus.add_listener(self._outbound_webhook_manager.enqueue)
 
         server_config = uvicorn.Config(app, host="0.0.0.0", port=mesh_port, log_level="warning")
         self._server = uvicorn.Server(server_config)
@@ -681,6 +704,12 @@ class RuntimeContext:
 
         health_thread = threading.Thread(target=run_health, daemon=True)
         health_thread.start()
+
+        # Start outbound webhook delivery worker
+        if hasattr(self, '_outbound_webhook_manager') and self._dispatch_loop:
+            self._dispatch_loop.call_soon_threadsafe(
+                self._outbound_webhook_manager.start,
+            )
 
     def _init_channel_manager(self) -> None:
         """Create the ChannelManager with callbacks (but don't start channels yet)."""
