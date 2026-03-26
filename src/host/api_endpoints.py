@@ -1,9 +1,9 @@
-"""Named webhook endpoints that dispatch to agents.
+"""Named API endpoints that dispatch to agents.
 
-Each webhook gets a unique URL. External services POST payloads to it,
+Each endpoint gets a unique URL. External services POST payloads to it,
 and the mesh routes the content to the configured agent as a chat message.
 
-State persisted to config/webhooks.json.
+State persisted to config/api_endpoints.json.
 """
 
 from __future__ import annotations
@@ -17,27 +17,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from src.shared.utils import generate_id, sanitize_for_prompt, setup_logging
 
-logger = setup_logging("host.webhooks")
+logger = setup_logging("host.api_endpoints")
 
 
 def _build_message(hook: dict, body_json: str, *, test: bool = False) -> str:
     """Build the dispatch message from hook config and payload."""
-    label = f"Webhook '{hook['name']}'" + (" (test)" if test else "") + " received:"
+    label = f"API endpoint '{hook['name']}'" + (" (test)" if test else "") + " received:"
     instructions = hook.get("instructions", "").strip()
     suffix = instructions if instructions else "Process this webhook payload."
     message = f"{label}\n```json\n{body_json[:3000]}\n```\n{suffix}"
     return sanitize_for_prompt(message)
 
 
-class WebhookManager:
-    """Manages named webhook endpoints that trigger agent actions."""
+class ApiEndpointManager:
+    """Manages named API endpoints that trigger agent actions."""
 
     def __init__(
         self,
-        config_path: str = "config/webhooks.json",
+        config_path: str = "config/api_endpoints.json",
         dispatch_fn: Callable | None = None,
     ):
         self.config_path = Path(config_path)
@@ -47,17 +48,26 @@ class WebhookManager:
 
     def _load(self) -> None:
         if not self.config_path.exists():
+            # Auto-migrate from old config path
+            old_path = self.config_path.parent / "webhooks.json"
+            if old_path.exists():
+                try:
+                    self.hooks = json.loads(old_path.read_text()).get("hooks", {})
+                    self._save()
+                    logger.info("Migrated config from %s to %s", old_path, self.config_path)
+                except Exception as e:
+                    logger.warning(f"Failed to migrate webhook config: {e}")
             return
         try:
             self.hooks = json.loads(self.config_path.read_text()).get("hooks", {})
         except Exception as e:
-            logger.warning(f"Failed to load webhook config: {e}")
+            logger.warning(f"Failed to load API endpoint config: {e}")
 
     def _save(self) -> None:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(json.dumps({"hooks": self.hooks}, indent=2) + "\n")
 
-    def add_hook(
+    def add_endpoint(
         self,
         agent: str,
         name: str,
@@ -79,17 +89,17 @@ class WebhookManager:
             hook["instructions"] = instructions.strip()
         self.hooks[hook_id] = hook
         self._save()
-        logger.info(f"Added webhook {hook_id}: agent={agent} name={name}")
+        logger.info(f"Added API endpoint {hook_id}: agent={agent} name={name}")
         return hook
 
-    def remove_hook(self, hook_id: str) -> bool:
+    def remove_endpoint(self, hook_id: str) -> bool:
         if hook_id not in self.hooks:
             return False
         del self.hooks[hook_id]
         self._save()
         return True
 
-    def update_hook(
+    def update_endpoint(
         self,
         hook_id: str,
         *,
@@ -99,7 +109,7 @@ class WebhookManager:
         require_signature: bool | None = None,
         regenerate_secret: bool = False,
     ) -> dict | None:
-        """Update an existing webhook's configuration.
+        """Update an existing endpoint's configuration.
 
         Only provided fields are changed. Returns updated hook dict with
         secret included only when a new secret was generated, or None if
@@ -138,44 +148,44 @@ class WebhookManager:
             new_secret = True
 
         self._save()
-        logger.info("Updated webhook %s", hook_id)
+        logger.info("Updated API endpoint %s", hook_id)
 
         result = dict(hook)
         if not new_secret:
             result.pop("secret", None)
         return result
 
-    def list_hooks(self) -> list[dict]:
+    def list_endpoints(self) -> list[dict]:
         return [dict(h) for h in self.hooks.values()]
 
     def create_router(self) -> APIRouter:
-        """Create a FastAPI router for webhook endpoints."""
-        router = APIRouter(prefix="/webhook")
+        """Create a FastAPI router for API inbound endpoints."""
+        router = APIRouter()
         manager = self
 
-        _MAX_WEBHOOK_BODY = 1_048_576  # 1 MB
+        _MAX_BODY = 1_048_576  # 1 MB
 
-        @router.post("/hook/{hook_id}")
-        async def receive_webhook(hook_id: str, request: Request) -> dict:
-            hook = manager.hooks.get(hook_id)
+        async def _handle_inbound(endpoint_id: str, request: Request) -> dict:
+            hook = manager.hooks.get(endpoint_id)
             if not hook:
-                raise HTTPException(status_code=404, detail="Unknown webhook")
+                raise HTTPException(status_code=404, detail="Unknown endpoint")
 
             content_length = request.headers.get("content-length")
             if content_length:
                 try:
-                    if int(content_length) > _MAX_WEBHOOK_BODY:
+                    if int(content_length) > _MAX_BODY:
                         raise HTTPException(status_code=413, detail="Payload too large")
                 except ValueError:
                     pass  # Malformed header; body-length check below is authoritative
             raw_body = await request.body()
-            if len(raw_body) > _MAX_WEBHOOK_BODY:
+            if len(raw_body) > _MAX_BODY:
                 raise HTTPException(status_code=413, detail="Payload too large")
 
             # HMAC-SHA256 signature verification (when hook has a secret)
             hook_secret = hook.get("secret")
             if hook_secret:
-                sig_header = request.headers.get("x-webhook-signature", "")
+                # Accept x-signature first, fall back to x-webhook-signature
+                sig_header = request.headers.get("x-signature") or request.headers.get("x-webhook-signature", "")
                 expected = hmac.new(
                     hook_secret.encode(), raw_body, hashlib.sha256,
                 ).hexdigest()
@@ -185,7 +195,7 @@ class WebhookManager:
             try:
                 body = json.loads(raw_body)
             except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                logger.debug("Webhook body is not valid JSON, using raw: %s", e)
+                logger.debug("API endpoint body is not valid JSON, using raw: %s", e)
                 body = {"raw": raw_body.decode(errors="replace")[:5000]}
 
             hook["call_count"] = hook.get("call_count", 0) + 1
@@ -198,10 +208,20 @@ class WebhookManager:
 
             return {"status": "processed", "hook": hook["name"]}
 
+        @router.post("/api/inbound/{endpoint_id}")
+        async def receive_inbound(endpoint_id: str, request: Request) -> dict:
+            return await _handle_inbound(endpoint_id, request)
+
+        @router.post("/webhook/hook/{endpoint_id}")
+        async def receive_webhook_compat(endpoint_id: str, request: Request) -> JSONResponse:
+            """Deprecated: use /api/inbound/{endpoint_id} instead."""
+            result = await _handle_inbound(endpoint_id, request)
+            return JSONResponse(content=result, headers={"Deprecation": "true"})
+
         return router
 
-    async def test_hook(self, hook_id: str, payload: dict) -> dict | None:
-        """Manually fire a webhook for testing."""
+    async def test_endpoint(self, hook_id: str, payload: dict) -> dict | None:
+        """Manually fire an endpoint for testing."""
         hook = self.hooks.get(hook_id)
         if not hook:
             return None

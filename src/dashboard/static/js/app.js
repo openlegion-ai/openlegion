@@ -287,24 +287,24 @@ function dashboard() {
     channelTokens: {},
 
 
-    // Webhooks
-    webhooks: [],
-    showWebhookForm: false,
-    webhookFormName: '',
-    webhookFormAgent: '',
-    webhookFormInstructions: '',
-    webhookFormRequireSig: false,
-    editingWebhookId: null,
-    webhookEditName: '',
-    webhookEditAgent: '',
-    webhookEditInstructions: '',
-    webhookEditRequireSig: false,
+    // API Endpoints
+    apiEndpoints: [],
+    showEndpointForm: false,
+    endpointFormName: '',
+    endpointFormAgent: '',
+    endpointFormInstructions: '',
+    endpointFormRequireSig: false,
+    editingEndpointId: null,
+    endpointEditName: '',
+    endpointEditAgent: '',
+    endpointEditInstructions: '',
+    endpointEditRequireSig: false,
 
-    // Webhook inline edit
-    editingWebhookId: null,
-    webhookEditName: '',
-    webhookEditAgent: '',
-    webhookEditInstructions: '',
+    // Endpoint inline edit
+    editingEndpointId: null,
+    endpointEditName: '',
+    endpointEditAgent: '',
+    endpointEditInstructions: '',
 
     // Model health
     modelHealth: [],
@@ -349,11 +349,11 @@ function dashboard() {
     credSaving: false,
     onboardSaving: false,
     channelConnecting: false,
-    webhookCreating: false,
-    webhookTesting: {},
-    webhookSaving: false,
-    webhookRevealedSecret: null,
-    webhookRevealedSecretHookId: null,
+    endpointCreating: false,
+    endpointTesting: {},
+    endpointSaving: false,
+    endpointRevealedSecret: null,
+    endpointRevealedSecretId: null,
     apiKeys: [],
     apiKeysLegacy: false,
     apiKeyNewValue: null,
@@ -511,7 +511,7 @@ function dashboard() {
               if (this.systemTab === 'activity') this._stopActivityRefresh();
               this.systemTab = route.systemTab;
               if (route.systemTab === 'integrations') {
-                this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys();
+                this.fetchChannels(); this.fetchEndpoints(); this.fetchApiKeys();
               }
               if (route.systemTab === 'apikeys') {
                 this.fetchSettings();
@@ -973,7 +973,7 @@ function dashboard() {
         this.fetchCronJobs();
         this.fetchWorkflows();
         if (this.systemTab === 'integrations') {
-          this.fetchWebhooks();
+          this.fetchEndpoints();
           this.fetchChannels();
           this.fetchApiKeys();
         }
@@ -997,7 +997,7 @@ function dashboard() {
       if (this.systemTab === 'activity' && tabId !== 'activity') this._stopActivityRefresh();
       this.systemTab = tabId;
       this._pushUrl(false);
-      if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); }
+      if (tabId === 'integrations') { this.fetchChannels(); this.fetchEndpoints(); this.fetchApiKeys(); }
       if (tabId === 'apikeys') { this.fetchSettings(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); }
@@ -3711,7 +3711,7 @@ function dashboard() {
         { label: 'Activity', desc: 'Traces, live feed, and logs', keywords: ['activity', 'traces', 'events', 'live'], action: () => { this.systemTab = 'activity'; this.switchTab('system'); } },
         { label: 'View Logs', desc: 'Open runtime logs', keywords: ['logs', 'runtime', 'debug'], action: () => { this.systemTab = 'activity'; this.switchTab('system'); this.setActivityView('logs'); } },
         { label: 'Add API Key', desc: 'Add new API key or credential', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.systemTab = 'apikeys'; this.switchTab('system'); this.showCredForm = true; } },
-        { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchWebhooks(); } },
+        { label: 'Manage API Endpoints', desc: 'View and create API endpoints', keywords: ['api', 'endpoint', 'webhook', 'hook'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchEndpoints(); } },
         { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchChannels(); } },
         { label: 'Model Pricing', desc: 'Token costs by model', keywords: ['model', 'pricing', 'tokens'], action: () => { this.systemTab = 'costs'; this.switchTab('system'); } },
         { label: 'Browser Settings', desc: 'Browser speed and timing', keywords: ['browser', 'speed', 'settings', 'timing', 'stealth'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchBrowserSettings(); } },
@@ -4149,26 +4149,26 @@ function dashboard() {
       }, true);
     },
 
-    // ── Webhooks ──────────────────────────────────────────
+    // ── API Endpoints ──────────────────────────────────────────
 
-    async fetchWebhooks() {
+    async fetchEndpoints() {
       try {
-        const resp = await fetch(`${window.__config.apiBase}/webhooks`);
-        if (resp.ok) this.webhooks = (await resp.json()).webhooks || [];
-      } catch (e) { console.warn('fetchWebhooks failed:', e); }
+        const resp = await fetch(`${window.__config.apiBase}/endpoints`);
+        if (resp.ok) this.apiEndpoints = (await resp.json()).endpoints || [];
+      } catch (e) { console.warn('fetchEndpoints failed:', e); }
     },
 
-    async createWebhook() {
-      if (this.webhookCreating) return;
-      const name = this.webhookFormName.trim();
-      const agent = this.webhookFormAgent;
+    async createEndpoint() {
+      if (this.endpointCreating) return;
+      const name = this.endpointFormName.trim();
+      const agent = this.endpointFormAgent;
       if (!name || !agent) { this.showToast('Name and agent are required'); return; }
-      this.webhookCreating = true;
+      this.endpointCreating = true;
       try {
         const body = { name, agent };
-        if (this.webhookFormInstructions.trim()) body.instructions = this.webhookFormInstructions.trim();
-        if (this.webhookFormRequireSig) body.secret = true;
-        const resp = await fetch(`${window.__config.apiBase}/webhooks`, {
+        if (this.endpointFormInstructions.trim()) body.instructions = this.endpointFormInstructions.trim();
+        if (this.endpointFormRequireSig) body.secret = true;
+        const resp = await fetch(`${window.__config.apiBase}/endpoints`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
@@ -4176,37 +4176,37 @@ function dashboard() {
           const data = await resp.json();
           const hook = data.hook || {};
           if (hook.secret) {
-            this.webhookRevealedSecret = hook.secret;
-            this.webhookRevealedSecretHookId = hook.id;
+            this.endpointRevealedSecret = hook.secret;
+            this.endpointRevealedSecretId = hook.id;
             if (navigator.clipboard) navigator.clipboard.writeText(hook.secret).catch(() => {});
-            this.showToast(`Webhook "${name}" created — copy the secret below`, 8000);
+            this.showToast(`Endpoint "${name}" created — copy the secret below`, 8000);
           } else if (hook.url && navigator.clipboard) {
             navigator.clipboard.writeText(hook.url).catch(() => {});
-            this.showToast(`Webhook "${name}" created — URL copied`);
+            this.showToast(`Endpoint "${name}" created — URL copied`);
           } else {
-            this.showToast(`Webhook "${name}" created`);
+            this.showToast(`Endpoint "${name}" created`);
           }
-          this.webhookFormName = '';
-          this.webhookFormAgent = '';
-          this.webhookFormInstructions = '';
-          this.webhookFormRequireSig = false;
-          this.showWebhookForm = false;
-          this.fetchWebhooks();
+          this.endpointFormName = '';
+          this.endpointFormAgent = '';
+          this.endpointFormInstructions = '';
+          this.endpointFormRequireSig = false;
+          this.showEndpointForm = false;
+          this.fetchEndpoints();
         } else {
           const err = await resp.json().catch(() => ({}));
-          this.showToast(`Error: ${err.detail || 'Failed to create webhook'}`);
+          this.showToast(`Error: ${err.detail || 'Failed to create endpoint'}`);
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
-      finally { this.webhookCreating = false; }
+      finally { this.endpointCreating = false; }
     },
 
-    async deleteWebhook(hookId, name) {
-      this.showConfirm('Delete Webhook', `Delete webhook "${name}"?`, async () => {
+    async deleteEndpoint(hookId, name) {
+      this.showConfirm('Delete Endpoint', `Delete endpoint "${name}"?`, async () => {
         try {
-          const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(hookId)}`, { method: 'DELETE' });
+          const resp = await fetch(`${window.__config.apiBase}/endpoints/${encodeURIComponent(hookId)}`, { method: 'DELETE' });
           if (resp.ok) {
-            this.showToast(`Webhook "${name}" deleted`);
-            this.fetchWebhooks();
+            this.showToast(`Endpoint "${name}" deleted`);
+            this.fetchEndpoints();
           } else {
             const err = await resp.json().catch(() => ({}));
             this.showToast(`Error: ${err.detail || 'Delete failed'}`);
@@ -4215,62 +4215,62 @@ function dashboard() {
       }, true);
     },
 
-    async testWebhook(hookId) {
-      if (this.webhookTesting[hookId]) return;
-      this.webhookTesting = { ...this.webhookTesting, [hookId]: true };
+    async testEndpoint(hookId) {
+      if (this.endpointTesting[hookId]) return;
+      this.endpointTesting = { ...this.endpointTesting, [hookId]: true };
       try {
-        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(hookId)}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const resp = await fetch(`${window.__config.apiBase}/endpoints/${encodeURIComponent(hookId)}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         if (resp.ok) {
-          this.showToast('Webhook test sent');
+          this.showToast('Endpoint test sent');
         } else {
           const err = await resp.json().catch(() => ({}));
           this.showToast(`Test failed: ${err.detail || 'Unknown error'}`);
         }
       } catch (e) { this.showToast(`Test failed: ${e.message}`); }
-      finally { this.webhookTesting = { ...this.webhookTesting, [hookId]: false }; }
+      finally { this.endpointTesting = { ...this.endpointTesting, [hookId]: false }; }
     },
 
-    editWebhook(wh) {
-      this.showWebhookForm = false;
-      this.editingWebhookId = wh.id;
-      this.webhookEditName = wh.name;
-      this.webhookEditAgent = wh.agent;
-      this.webhookEditInstructions = wh.instructions || '';
-      this.webhookEditRequireSig = !!wh.has_secret;
+    editEndpoint(wh) {
+      this.showEndpointForm = false;
+      this.editingEndpointId = wh.id;
+      this.endpointEditName = wh.name;
+      this.endpointEditAgent = wh.agent;
+      this.endpointEditInstructions = wh.instructions || '';
+      this.endpointEditRequireSig = !!wh.has_secret;
     },
 
-    cancelWebhookEdit() {
-      this.editingWebhookId = null;
-      this.webhookEditName = '';
-      this.webhookEditAgent = '';
-      this.webhookEditInstructions = '';
-      this.webhookEditRequireSig = false;
+    cancelEndpointEdit() {
+      this.editingEndpointId = null;
+      this.endpointEditName = '';
+      this.endpointEditAgent = '';
+      this.endpointEditInstructions = '';
+      this.endpointEditRequireSig = false;
     },
 
-    async saveWebhookEdit() {
-      if (this.webhookSaving) return;
-      const id = this.editingWebhookId;
+    async saveEndpointEdit() {
+      if (this.endpointSaving) return;
+      const id = this.editingEndpointId;
       if (!id) return;
-      const wh = this.webhooks.find(w => w.id === id);
+      const wh = this.apiEndpoints.find(w => w.id === id);
       if (!wh) return;
-      const name = this.webhookEditName.trim();
-      const agent = this.webhookEditAgent;
+      const name = this.endpointEditName.trim();
+      const agent = this.endpointEditAgent;
       if (!name || !agent) { this.showToast('Name and agent are required'); return; }
 
       const body = {};
       if (name !== wh.name) body.name = name;
       if (agent !== wh.agent) body.agent = agent;
-      const newInstr = this.webhookEditInstructions.trim();
+      const newInstr = this.endpointEditInstructions.trim();
       const oldInstr = (wh.instructions || '').trim();
       if (newInstr !== oldInstr) body.instructions = newInstr;
       const hadSecret = !!wh.has_secret;
-      if (this.webhookEditRequireSig !== hadSecret) body.require_signature = this.webhookEditRequireSig;
+      if (this.endpointEditRequireSig !== hadSecret) body.require_signature = this.endpointEditRequireSig;
 
       if (Object.keys(body).length === 0) { this.showToast('No changes to save'); return; }
 
-      this.webhookSaving = true;
+      this.endpointSaving = true;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(id)}`, {
+        const resp = await fetch(`${window.__config.apiBase}/endpoints/${encodeURIComponent(id)}`, {
           method: 'PATCH', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
@@ -4278,27 +4278,27 @@ function dashboard() {
           const data = await resp.json();
           const hook = data.hook || {};
           if (hook.secret) {
-            this.webhookRevealedSecret = hook.secret;
-            this.webhookRevealedSecretHookId = hook.id || this.editingWebhookId;
+            this.endpointRevealedSecret = hook.secret;
+            this.endpointRevealedSecretId = hook.id || this.editingEndpointId;
             if (navigator.clipboard) navigator.clipboard.writeText(hook.secret).catch(() => {});
-            this.showToast(`Webhook updated — copy the secret below`, 8000);
+            this.showToast(`Endpoint updated — copy the secret below`, 8000);
           } else {
-            this.showToast(`Webhook "${name}" updated`);
+            this.showToast(`Endpoint "${name}" updated`);
           }
-          this.cancelWebhookEdit();
-          this.fetchWebhooks();
+          this.cancelEndpointEdit();
+          this.fetchEndpoints();
         } else {
           const err = await resp.json().catch(() => ({}));
           this.showToast(`Error: ${err.detail || 'Update failed'}`);
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
-      finally { this.webhookSaving = false; }
+      finally { this.endpointSaving = false; }
     },
 
-    regenerateWebhookSecret(hookId, name) {
+    regenerateEndpointSecret(hookId, name) {
       this.showConfirm('Regenerate Secret', `Regenerate HMAC secret for "${name}"? The old secret will stop working immediately.`, async () => {
         try {
-          const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(hookId)}`, {
+          const resp = await fetch(`${window.__config.apiBase}/endpoints/${encodeURIComponent(hookId)}`, {
             method: 'PATCH', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ regenerate_secret: true }),
           });
@@ -4306,15 +4306,15 @@ function dashboard() {
             const data = await resp.json();
             const hook = data.hook || {};
             if (hook.secret) {
-              this.webhookRevealedSecret = hook.secret;
-              this.webhookRevealedSecretHookId = hook.id || hookId;
+              this.endpointRevealedSecret = hook.secret;
+              this.endpointRevealedSecretId = hook.id || hookId;
               if (navigator.clipboard) navigator.clipboard.writeText(hook.secret).catch(() => {});
               this.showToast('New secret shown below — copy it now', 8000);
             } else {
               this.showToast('Secret regenerated');
             }
-            this.cancelWebhookEdit();
-            this.fetchWebhooks();
+            this.cancelEndpointEdit();
+            this.fetchEndpoints();
           } else {
             const err = await resp.json().catch(() => ({}));
             this.showToast(`Error: ${err.detail || 'Regeneration failed'}`);

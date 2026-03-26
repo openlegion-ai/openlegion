@@ -486,11 +486,11 @@ class RuntimeContext:
         import uvicorn
 
         from src.host.server import create_mesh_app
-        from src.host.webhooks import WebhookManager
+        from src.host.api_endpoints import ApiEndpointManager
 
         mesh_port = self.cfg["mesh"]["port"]
 
-        webhook_manager = WebhookManager(dispatch_fn=self.async_dispatch)
+        api_endpoint_manager = ApiEndpointManager(dispatch_fn=self.async_dispatch)
 
         # Wallet signing service (only if master seed is configured).
         # Wrapped in a single-item list so both mesh and dashboard closures
@@ -526,7 +526,7 @@ class RuntimeContext:
             wallet_service_ref=wallet_ref,
             api_key_manager=self._api_key_manager,
         )
-        app.include_router(webhook_manager.create_router())
+        app.include_router(api_endpoint_manager.create_router())
         self.health_monitor._cleanup_agent = app.cleanup_agent  # type: ignore[attr-defined]
 
         self._init_channel_manager()
@@ -549,7 +549,7 @@ class RuntimeContext:
             transport=self.transport,
             runtime=self.runtime,
             router=self.router,
-            webhook_manager=webhook_manager,
+            api_endpoint_manager=api_endpoint_manager,
             channel_manager=self.channel_manager,
             wallet_service_ref=wallet_ref,
             api_key_manager=self._api_key_manager,
