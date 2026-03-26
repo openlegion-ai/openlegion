@@ -3129,7 +3129,7 @@
         </div><!-- /wallet sub-tab -->
 
         <!-- ═══ STORAGE SUB-TAB ═══ -->
-        <div x-show="systemTab === 'storage'" x-init="if (systemTab === 'storage') { fetchUploads(); fetchStorage(); }">
+        <div x-show="systemTab === 'storage'" x-init="if (systemTab === 'storage') { fetchUploads(); fetchStorage(); fetchDatabaseDetails(); }">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
             <div class="flex items-center justify-between mb-1">
               <div class="text-xs text-gray-500 uppercase tracking-wider flex items-center gap-1.5">Shared Uploads<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Files uploaded here are read-only and accessible to all agents. Useful for reference documents, datasets, or configuration files.</span></span></div>
@@ -3188,6 +3188,96 @@
               </template>
             </div>
           </div>
+        <!-- Databases -->
+        <div class="mt-6">
+          <div class="flex items-center justify-between mb-3">
+            <div class="text-xs text-gray-500 uppercase tracking-wider flex items-center gap-1.5">Databases<span class="setting-hint setting-hint-sm" tabindex="0">?<span class="setting-hint-text">Engine databases store coordination state, execution traces, cost history, and wallet transactions. Purge old records to reclaim disk space.</span></span></div>
+            <button @click="fetchDatabaseDetails()" class="text-gray-600 hover:text-gray-400 transition-colors" title="Refresh" aria-label="Refresh database details">
+              <svg class="w-3.5 h-3.5" :class="dbDetailsLoading && 'animate-spin'" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+            </button>
+          </div>
+
+          <!-- Loading state -->
+          <div x-show="dbDetailsLoading && !dbDetails" class="py-4 text-center text-gray-600 text-sm">
+            <svg class="animate-spin h-4 w-4 inline mr-1" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            Loading&hellip;
+          </div>
+
+          <!-- Database list -->
+          <div x-show="dbDetails && dbDetails.length > 0" class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden divide-y divide-gray-800/50">
+            <template x-for="db in dbDetails" :key="db.id">
+              <div class="px-4 py-3 group">
+                <div class="flex items-center justify-between">
+                  <!-- Left: info -->
+                  <div class="flex items-center gap-3 min-w-0">
+                    <div class="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                      :class="{
+                        'bg-indigo-400': db.id === 'blackboard',
+                        'bg-emerald-400': db.id === 'traces',
+                        'bg-amber-400': db.id === 'costs',
+                        'bg-purple-400': db.id === 'wallet'
+                      }"></div>
+                    <div class="min-w-0">
+                      <div class="text-sm text-gray-200 leading-tight" x-text="db.label"></div>
+                      <div class="text-[10px] text-gray-600 leading-tight mt-0.5" x-text="db.description"></div>
+                    </div>
+                  </div>
+                  <!-- Right: stats + action -->
+                  <div class="flex items-center gap-4 flex-shrink-0">
+                    <!-- Record count -->
+                    <div class="text-right hidden sm:block">
+                      <div class="text-xs text-gray-300 font-mono" x-text="formatNumber(db.total_records) + ' records'"></div>
+                      <div class="text-[10px] text-gray-600 font-mono" x-text="formatBytes(db.size_bytes)"></div>
+                    </div>
+                    <!-- Age badge -->
+                    <div class="text-right hidden md:block w-16">
+                      <template x-if="db.oldest">
+                        <div class="text-[10px] text-gray-600 font-mono" x-text="(() => { const days = Math.floor((Date.now()/1000 - db.oldest) / 86400); return days < 1 ? '< 1d old' : days + 'd old'; })()"></div>
+                      </template>
+                      <template x-if="!db.oldest">
+                        <div class="text-[10px] text-gray-700">&mdash;</div>
+                      </template>
+                    </div>
+                    <!-- Purge dropdown -->
+                    <div x-show="db.purgeable" class="relative" x-data="{ purgeOpen: false }">
+                      <button @click="purgeOpen = !purgeOpen"
+                        :disabled="dbPurging[db.id]"
+                        class="text-[10px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-50 flex items-center gap-1">
+                        <template x-if="dbPurging[db.id]">
+                          <svg class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        </template>
+                        <span x-text="dbPurging[db.id] ? 'Purging&hellip;' : 'Purge'"></span>
+                        <svg x-show="!dbPurging[db.id]" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                      </button>
+                      <div x-show="purgeOpen" @click.outside="purgeOpen = false" x-transition
+                        class="absolute right-0 mt-1.5 w-44 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-20 py-1 overflow-hidden">
+                        <button @click="purgeOpen = false; purgeDatabase(db.id, 7)"
+                          class="w-full text-left px-3 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-gray-700/60 transition-colors">Older than 7 days</button>
+                        <button @click="purgeOpen = false; purgeDatabase(db.id, 30)"
+                          class="w-full text-left px-3 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-gray-700/60 transition-colors">Older than 30 days</button>
+                        <button @click="purgeOpen = false; purgeDatabase(db.id, 90)"
+                          class="w-full text-left px-3 py-1.5 text-xs text-gray-400 hover:text-white hover:bg-gray-700/60 transition-colors">Older than 90 days</button>
+                        <div class="border-t border-gray-700 my-1"></div>
+                        <button @click="purgeOpen = false; purgeDatabase(db.id, null)"
+                          class="w-full text-left px-3 py-1.5 text-xs text-red-400 hover:text-red-300 hover:bg-red-900/20 transition-colors">Purge all records</button>
+                      </div>
+                    </div>
+                    <!-- Not purgeable indicator -->
+                    <div x-show="!db.purgeable" class="w-[60px]"></div>
+                  </div>
+                </div>
+                <!-- Table breakdown (shown when there are multiple tables) -->
+                <div x-show="db.tables && db.tables.length > 1" class="mt-2 ml-[18px] flex flex-wrap gap-x-4 gap-y-0.5">
+                  <template x-for="t in db.tables" :key="t.name">
+                    <span class="text-[10px] text-gray-600 font-mono">
+                      <span x-text="t.name"></span>: <span class="text-gray-500" x-text="formatNumber(t.count)"></span>
+                    </span>
+                  </template>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
         <!-- Disk & Engine Data -->
         <div class="mt-6" x-show="storageData">
           <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Disk Usage<span class="setting-hint setting-hint-sm ml-1" tabindex="0">?<span class="setting-hint-text">Storage utilization across the server. Includes agent workspaces, uploaded files, and engine databases.</span></span></div>

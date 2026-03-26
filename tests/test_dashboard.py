@@ -3534,3 +3534,252 @@ class TestExternalApiKeys:
         monkeypatch.setenv("OPENLEGION_API_KEY", "old-key")
         resp = self.client.get("/dashboard/api/external-api-keys")
         assert resp.json()["legacy"] is True
+
+
+# ── Database Details & Purge ────────────────────────────────
+
+
+class TestDashboardDatabaseDetails:
+    """Tests for /api/storage/databases and /api/storage/databases/{id}/purge."""
+
+    def setup_method(self):
+        self._tmp = tempfile.mkdtemp()
+        components = _make_components(self._tmp, include_v2=True)
+        components["runtime"].project_root = Path(self._tmp)
+        self.client = _make_client(components)
+        self._components = components
+        self._root = Path(self._tmp)
+
+    def teardown_method(self):
+        _teardown(self._components)
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    # ── GET /api/storage/databases ──────────────────────────
+
+    def test_storage_databases_endpoint(self):
+        """GET returns a list with 4 database entries matching the registry."""
+        resp = self.client.get("/dashboard/api/storage/databases")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "databases" in data
+        dbs = data["databases"]
+        assert len(dbs) == 4
+
+        ids = [d["id"] for d in dbs]
+        assert ids == ["blackboard", "traces", "costs", "wallet"]
+
+        for db in dbs:
+            for key in ("id", "label", "description", "purgeable",
+                        "size_bytes", "tables", "total_records", "oldest"):
+                assert key in db, f"Missing key '{key}' in database '{db['id']}'"
+            assert isinstance(db["tables"], list)
+            assert isinstance(db["size_bytes"], int)
+            assert isinstance(db["total_records"], int)
+
+        # Verify purgeable flags
+        by_id = {d["id"]: d for d in dbs}
+        assert by_id["blackboard"]["purgeable"] is True
+        assert by_id["traces"]["purgeable"] is True
+        assert by_id["costs"]["purgeable"] is True
+        assert by_id["wallet"]["purgeable"] is False
+
+    def test_storage_databases_with_data(self):
+        """Databases with actual data return correct counts and sizes."""
+        import sqlite3
+        import time
+
+        # Create traces.db with data
+        data_dir = self._root / "data"
+        data_dir.mkdir(exist_ok=True)
+        traces_path = data_dir / "traces.db"
+        conn = sqlite3.connect(str(traces_path))
+        conn.execute(
+            "CREATE TABLE traces "
+            "(id TEXT, agent_id TEXT, timestamp REAL, kind TEXT, data TEXT)"
+        )
+        now = time.time()
+        for i in range(5):
+            conn.execute(
+                "INSERT INTO traces VALUES (?, ?, ?, ?, ?)",
+                (f"t{i}", "alpha", now - i * 3600, "test", "{}"),
+            )
+        conn.commit()
+        conn.close()
+
+        # Create blackboard.db
+        bb_path = self._root / "blackboard.db"
+        conn = sqlite3.connect(str(bb_path))
+        conn.execute(
+            "CREATE TABLE entries "
+            "(key TEXT, value TEXT, created_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE event_log "
+            "(id INTEGER PRIMARY KEY, event TEXT, timestamp TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO entries VALUES (?, ?, datetime('now'))",
+            ("k1", "v1"),
+        )
+        conn.execute(
+            "INSERT INTO entries VALUES (?, ?, datetime('now'))",
+            ("k2", "v2"),
+        )
+        conn.commit()
+        conn.close()
+
+        resp = self.client.get("/dashboard/api/storage/databases")
+        assert resp.status_code == 200
+        dbs = {d["id"]: d for d in resp.json()["databases"]}
+
+        # Traces: 5 records in one table
+        assert dbs["traces"]["total_records"] == 5
+        assert dbs["traces"]["size_bytes"] > 0
+        assert dbs["traces"]["oldest"] is not None
+
+        # Blackboard: 2 records in entries, 0 in event_log
+        assert dbs["blackboard"]["total_records"] == 2
+        assert dbs["blackboard"]["size_bytes"] > 0
+
+    # ── POST /api/storage/databases/{id}/purge ──────────────
+
+    def test_purge_database_traces(self):
+        """Purge traces older than 7 days keeps recent ones."""
+        import sqlite3
+        import time
+
+        data_dir = self._root / "data"
+        data_dir.mkdir(exist_ok=True)
+        traces_path = data_dir / "traces.db"
+        conn = sqlite3.connect(str(traces_path))
+        conn.execute(
+            "CREATE TABLE traces "
+            "(id TEXT, agent_id TEXT, timestamp REAL, kind TEXT, data TEXT)"
+        )
+        now = time.time()
+        # 3 old records (30 days ago)
+        for i in range(3):
+            conn.execute(
+                "INSERT INTO traces VALUES (?, ?, ?, ?, ?)",
+                (f"old{i}", "alpha", now - 30 * 86400, "test", "{}"),
+            )
+        # 2 recent records (1 day ago)
+        for i in range(2):
+            conn.execute(
+                "INSERT INTO traces VALUES (?, ?, ?, ?, ?)",
+                (f"new{i}", "alpha", now - 86400, "test", "{}"),
+            )
+        conn.commit()
+        conn.close()
+
+        resp = self.client.post(
+            "/dashboard/api/storage/databases/traces/purge",
+            json={"older_than_days": 7},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["purged"] is True
+        assert data["deleted_records"] == 3
+
+        # Verify remaining records
+        conn = sqlite3.connect(str(traces_path))
+        remaining = conn.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+        conn.close()
+        assert remaining == 2
+
+    def test_purge_database_all(self):
+        """Purge with null older_than_days deletes everything."""
+        import sqlite3
+        import time
+
+        data_dir = self._root / "data"
+        data_dir.mkdir(exist_ok=True)
+        traces_path = data_dir / "traces.db"
+        conn = sqlite3.connect(str(traces_path))
+        conn.execute(
+            "CREATE TABLE traces "
+            "(id TEXT, agent_id TEXT, timestamp REAL, kind TEXT, data TEXT)"
+        )
+        now = time.time()
+        for i in range(10):
+            conn.execute(
+                "INSERT INTO traces VALUES (?, ?, ?, ?, ?)",
+                (f"t{i}", "alpha", now - i * 3600, "test", "{}"),
+            )
+        conn.commit()
+        conn.close()
+
+        # Empty body means older_than_days=None → purge all
+        resp = self.client.post(
+            "/dashboard/api/storage/databases/traces/purge",
+            json={},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["purged"] is True
+        assert data["deleted_records"] == 10
+
+        conn = sqlite3.connect(str(traces_path))
+        remaining = conn.execute("SELECT COUNT(*) FROM traces").fetchone()[0]
+        conn.close()
+        assert remaining == 0
+
+    def test_purge_unknown_database(self):
+        """Purge on an unknown database ID returns 404."""
+        resp = self.client.post(
+            "/dashboard/api/storage/databases/unknown/purge",
+            json={},
+        )
+        assert resp.status_code == 404
+
+    def test_purge_non_purgeable_database(self):
+        """Purge on a non-purgeable database returns 400."""
+        resp = self.client.post(
+            "/dashboard/api/storage/databases/wallet/purge",
+            json={},
+        )
+        assert resp.status_code == 400
+
+    def test_purge_invalid_older_than_days(self):
+        """Negative, zero, and non-numeric older_than_days return 400."""
+        for payload in [
+            {"older_than_days": -5},
+            {"older_than_days": 0},
+            {"older_than_days": "abc"},
+        ]:
+            resp = self.client.post(
+                "/dashboard/api/storage/databases/traces/purge",
+                json=payload,
+            )
+            assert resp.status_code == 400, f"Expected 400 for {payload}, got {resp.status_code}"
+
+    def test_purge_empty_body(self):
+        """POST with completely empty body purges all (older_than_days defaults to None)."""
+        import sqlite3
+        import time
+
+        data_dir = self._root / "data"
+        data_dir.mkdir(exist_ok=True)
+        traces_path = data_dir / "traces.db"
+        conn = sqlite3.connect(str(traces_path))
+        conn.execute(
+            "CREATE TABLE traces "
+            "(id TEXT, agent_id TEXT, timestamp REAL, kind TEXT, data TEXT)"
+        )
+        now = time.time()
+        for i in range(3):
+            conn.execute(
+                "INSERT INTO traces VALUES (?, ?, ?, ?, ?)",
+                (f"t{i}", "alpha", now - i * 3600, "test", "{}"),
+            )
+        conn.commit()
+        conn.close()
+
+        # Send request with no body at all
+        resp = self.client.post(
+            "/dashboard/api/storage/databases/traces/purge",
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["purged"] is True
+        assert data["deleted_records"] == 3

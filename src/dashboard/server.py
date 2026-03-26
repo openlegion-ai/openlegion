@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -2648,6 +2649,223 @@ def create_dashboard_router(
         return await asyncio.get_running_loop().run_in_executor(
             None, _scan_storage, project_root,
         )
+
+    # ── Database details ─────────────────────────────────────
+
+    _DB_REGISTRY = [
+        {
+            "id": "blackboard",
+            "label": "Blackboard",
+            "description": "Shared agent coordination state",
+            "path": "blackboard.db",
+            "tables": {
+                "entries": {"ts_col": "created_at", "ts_type": "text"},
+                "event_log": {"ts_col": "timestamp", "ts_type": "text"},
+            },
+            "purgeable": True,
+        },
+        {
+            "id": "traces",
+            "label": "Traces",
+            "description": "Request execution traces and events",
+            "path": "data/traces.db",
+            "tables": {
+                "traces": {"ts_col": "timestamp", "ts_type": "real"},
+            },
+            "purgeable": True,
+        },
+        {
+            "id": "costs",
+            "label": "Cost History",
+            "description": "LLM token usage and spend tracking",
+            "path": "data/costs.db",
+            "tables": {
+                "usage": {"ts_col": "timestamp", "ts_type": "text"},
+            },
+            "purgeable": True,
+        },
+        {
+            "id": "wallet",
+            "label": "Wallet",
+            "description": "Transaction history and key indexes",
+            "path": "data/wallet.db",
+            "tables": {
+                "transactions": {"ts_col": "timestamp", "ts_type": "text"},
+                "agent_index": {"ts_col": "created_at", "ts_type": "text"},
+            },
+            "purgeable": False,
+        },
+    ]
+
+    def _scan_database_details(root: Path) -> list[dict]:
+        """Scan engine databases for record counts and metadata (blocking I/O)."""
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        results = []
+        for entry in _DB_REGISTRY:
+            db_path = root / entry["path"]
+            info: dict = {
+                "id": entry["id"],
+                "label": entry["label"],
+                "description": entry["description"],
+                "purgeable": entry["purgeable"],
+                "size_bytes": 0,
+                "tables": [],
+                "total_records": 0,
+                "oldest": None,
+            }
+
+            # Sum file sizes (.db + .db-wal + .db-shm)
+            for suffix in ("", "-wal", "-shm"):
+                p = db_path.parent / (db_path.name + suffix)
+                try:
+                    info["size_bytes"] += p.stat().st_size
+                except OSError:
+                    pass
+
+            if not db_path.exists():
+                results.append(info)
+                continue
+
+            try:
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                try:
+                    conn.execute("PRAGMA busy_timeout=2000")
+                    oldest_ts = None
+                    for table_name, meta in entry["tables"].items():
+                        try:
+                            row = conn.execute(
+                                f"SELECT COUNT(*) FROM [{table_name}]"  # noqa: S608
+                            ).fetchone()
+                            count = row[0] if row else 0
+                        except sqlite3.OperationalError:
+                            count = 0
+                        info["tables"].append({"name": table_name, "count": count})
+                        info["total_records"] += count
+
+                        # Find oldest timestamp
+                        if count > 0:
+                            ts_col = meta["ts_col"]
+                            ts_type = meta["ts_type"]
+                            try:
+                                row = conn.execute(
+                                    f"SELECT MIN([{ts_col}]) FROM [{table_name}]"  # noqa: S608
+                                ).fetchone()
+                                if row and row[0] is not None:
+                                    if ts_type == "real":
+                                        val = float(row[0])
+                                        if oldest_ts is None or val < oldest_ts:
+                                            oldest_ts = val
+                                    else:
+                                        try:
+                                            dt = _dt.fromisoformat(
+                                                str(row[0]).replace(" ", "T")
+                                            )
+                                            val = dt.replace(tzinfo=_tz.utc).timestamp()
+                                            if oldest_ts is None or val < oldest_ts:
+                                                oldest_ts = val
+                                        except (ValueError, TypeError):
+                                            pass
+                            except sqlite3.OperationalError:
+                                pass
+                finally:
+                    conn.close()
+
+                if oldest_ts is not None:
+                    info["oldest"] = oldest_ts
+            except (sqlite3.Error, OSError) as exc:
+                logger.debug("Failed to scan database %s: %s", db_path, exc)
+
+            results.append(info)
+        return results
+
+    @api_router.get("/api/storage/databases")
+    async def api_storage_databases() -> dict:
+        """Return detailed per-database stats."""
+        import asyncio
+
+        project_root = (
+            runtime.project_root if runtime and hasattr(runtime, "project_root")
+            else Path(__file__).resolve().parent.parent.parent
+        )
+        databases = await asyncio.get_running_loop().run_in_executor(
+            None, _scan_database_details, project_root,
+        )
+        return {"databases": databases}
+
+    @api_router.post("/api/storage/databases/{db_id}/purge")
+    async def api_purge_database(db_id: str, request: Request) -> dict:
+        """Purge old records from a database."""
+        import asyncio
+        import time as _time
+
+        # Find the database entry
+        entry = next((e for e in _DB_REGISTRY if e["id"] == db_id), None)
+        if entry is None:
+            raise HTTPException(404, f"Unknown database: {db_id}")
+        if not entry["purgeable"]:
+            raise HTTPException(400, f"Database '{db_id}' cannot be purged")
+
+        body = await request.json() if await request.body() else {}
+        older_than_days = body.get("older_than_days")  # None means purge all
+        if older_than_days is not None:
+            if not isinstance(older_than_days, (int, float)) or older_than_days <= 0:
+                raise HTTPException(400, "older_than_days must be a positive number")
+            older_than_days = int(older_than_days)
+
+        project_root = (
+            runtime.project_root if runtime and hasattr(runtime, "project_root")
+            else Path(__file__).resolve().parent.parent.parent
+        )
+
+        def _do_purge() -> dict:
+            db_path = project_root / entry["path"]
+            if not db_path.exists():
+                return {"purged": True, "deleted_records": 0}
+
+            conn = sqlite3.connect(str(db_path))
+            try:
+                conn.execute("PRAGMA busy_timeout=5000")
+                total_deleted = 0
+
+                for table_name, meta in entry["tables"].items():
+                    ts_col = meta["ts_col"]
+                    ts_type = meta["ts_type"]
+
+                    try:
+                        if older_than_days is None:
+                            cur = conn.execute(
+                                f"DELETE FROM [{table_name}]"  # noqa: S608
+                            )
+                        elif ts_type == "real":
+                            cutoff = _time.time() - (older_than_days * 86400)
+                            cur = conn.execute(
+                                f"DELETE FROM [{table_name}] WHERE [{ts_col}] < ?",  # noqa: S608
+                                (cutoff,),
+                            )
+                        else:
+                            cur = conn.execute(
+                                f"DELETE FROM [{table_name}] WHERE [{ts_col}] < datetime('now', ?)",  # noqa: S608
+                                (f"-{older_than_days} days",),
+                            )
+                        total_deleted += cur.rowcount
+                    except sqlite3.OperationalError as exc:
+                        logger.warning("Purge %s.%s failed: %s", db_id, table_name, exc)
+
+                conn.commit()
+
+                # Best-effort VACUUM to reclaim disk space
+                try:
+                    conn.execute("VACUUM")
+                except sqlite3.OperationalError:
+                    pass
+            finally:
+                conn.close()
+
+            return {"purged": True, "deleted_records": total_deleted}
+
+        return await asyncio.get_running_loop().run_in_executor(None, _do_purge)
 
     # ── Messages log ─────────────────────────────────────────
 

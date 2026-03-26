@@ -183,6 +183,9 @@ function dashboard() {
 
     // Storage
     storageData: null,
+    dbDetails: null,
+    dbDetailsLoading: false,
+    dbPurging: {},  // { dbId: true } while purging
 
     // Messenger-style chat panel
     openChats: [],             // Array of agent IDs with open chat panels
@@ -522,6 +525,9 @@ function dashboard() {
               }
               if (route.systemTab === 'settings') {
                 this.fetchBrowserSettings();
+              }
+              if (route.systemTab === 'storage') {
+                this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails();
               }
               if (route.systemTab === 'activity') {
                 this.activityView = route.activityView;
@@ -1014,7 +1020,7 @@ function dashboard() {
       this._pushUrl(false);
       if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); }
       if (tabId === 'apikeys') { this.fetchSettings(); }
-      if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); }
+      if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); }
       if (tabId === 'activity') {
         if (this.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
@@ -2993,6 +2999,52 @@ function dashboard() {
       const units = ['B', 'KB', 'MB', 'GB', 'TB'];
       const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
       return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+    },
+
+    formatNumber(n) {
+      if (n == null) return '0';
+      return Number(n).toLocaleString();
+    },
+
+    async fetchDatabaseDetails() {
+      this.dbDetailsLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/storage/databases`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.dbDetails = data.databases || [];
+        }
+      } catch (e) { console.warn('fetchDatabaseDetails failed:', e); }
+      this.dbDetailsLoading = false;
+    },
+
+    async purgeDatabase(dbId, olderThanDays) {
+      const db = (this.dbDetails || []).find(d => d.id === dbId);
+      const label = db ? db.label : dbId;
+      const desc = olderThanDays
+        ? `Delete records older than ${olderThanDays} days from ${label}. This cannot be undone.`
+        : `Delete ALL records from ${label}. This cannot be undone.`;
+
+      this.showConfirm(`Purge ${label}?`, desc, async () => {
+        this.dbPurging[dbId] = true;
+        try {
+          const body = olderThanDays ? { older_than_days: olderThanDays } : {};
+          const resp = await fetch(`${window.__config.apiBase}/storage/databases/${dbId}/purge`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'dashboard' },
+            body: JSON.stringify(body),
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            this.showToast(`Purged ${data.deleted_records.toLocaleString()} records from ${label}`);
+            await Promise.all([this.fetchDatabaseDetails(), this.fetchStorage()]);
+          } else {
+            const err = await resp.json().catch(() => ({}));
+            this.showToast(`Purge failed: ${err.detail || resp.status}`);
+          }
+        } catch (e) { this.showToast(`Purge failed: ${e.message}`); }
+        delete this.dbPurging[dbId];
+      }, true);
     },
 
     // ── Chat slide-over panel ──────────────────────────
