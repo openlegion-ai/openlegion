@@ -2157,7 +2157,7 @@
       <!-- System (Activity + Costs + Automation + Integrations + API Keys + Wallet + Storage + Settings) -->
       <div x-show="activeTab === 'system'" x-cloak>
         <!-- System sub-tab bar -->
-        <div class="flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4 overflow-x-auto hide-scrollbar">
+        <div class="flex flex-wrap gap-1 bg-gray-800/50 rounded-lg p-1 mb-4">
           <template x-for="st in systemTabs" :key="st.id">
             <button @click="switchSystemTab(st.id)"
               class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative whitespace-nowrap"
