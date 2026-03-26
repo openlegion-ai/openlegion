@@ -2699,6 +2699,9 @@ def create_dashboard_router(
 
     def _scan_database_details(root: Path) -> list[dict]:
         """Scan engine databases for record counts and metadata (blocking I/O)."""
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
         results = []
         for entry in _DB_REGISTRY:
             db_path = root / entry["path"]
@@ -2727,47 +2730,47 @@ def create_dashboard_router(
 
             try:
                 conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-                conn.execute("PRAGMA busy_timeout=2000")
-                oldest_ts = None
-                for table_name, meta in entry["tables"].items():
-                    try:
-                        row = conn.execute(
-                            f"SELECT COUNT(*) FROM [{table_name}]"  # noqa: S608
-                        ).fetchone()
-                        count = row[0] if row else 0
-                    except sqlite3.OperationalError:
-                        count = 0
-                    info["tables"].append({"name": table_name, "count": count})
-                    info["total_records"] += count
-
-                    # Find oldest timestamp
-                    if count > 0:
-                        ts_col = meta["ts_col"]
-                        ts_type = meta["ts_type"]
+                try:
+                    conn.execute("PRAGMA busy_timeout=2000")
+                    oldest_ts = None
+                    for table_name, meta in entry["tables"].items():
                         try:
                             row = conn.execute(
-                                f"SELECT MIN([{ts_col}]) FROM [{table_name}]"  # noqa: S608
+                                f"SELECT COUNT(*) FROM [{table_name}]"  # noqa: S608
                             ).fetchone()
-                            if row and row[0] is not None:
-                                if ts_type == "real":
-                                    val = float(row[0])
-                                    if oldest_ts is None or val < oldest_ts:
-                                        oldest_ts = val
-                                else:
-                                    from datetime import datetime as _dt, timezone as _tz
+                            count = row[0] if row else 0
+                        except sqlite3.OperationalError:
+                            count = 0
+                        info["tables"].append({"name": table_name, "count": count})
+                        info["total_records"] += count
 
-                                    try:
-                                        dt = _dt.fromisoformat(
-                                            str(row[0]).replace(" ", "T")
-                                        )
-                                        val = dt.replace(tzinfo=_tz.utc).timestamp()
+                        # Find oldest timestamp
+                        if count > 0:
+                            ts_col = meta["ts_col"]
+                            ts_type = meta["ts_type"]
+                            try:
+                                row = conn.execute(
+                                    f"SELECT MIN([{ts_col}]) FROM [{table_name}]"  # noqa: S608
+                                ).fetchone()
+                                if row and row[0] is not None:
+                                    if ts_type == "real":
+                                        val = float(row[0])
                                         if oldest_ts is None or val < oldest_ts:
                                             oldest_ts = val
-                                    except (ValueError, TypeError):
-                                        pass
-                        except sqlite3.OperationalError:
-                            pass
-                conn.close()
+                                    else:
+                                        try:
+                                            dt = _dt.fromisoformat(
+                                                str(row[0]).replace(" ", "T")
+                                            )
+                                            val = dt.replace(tzinfo=_tz.utc).timestamp()
+                                            if oldest_ts is None or val < oldest_ts:
+                                                oldest_ts = val
+                                        except (ValueError, TypeError):
+                                            pass
+                            except sqlite3.OperationalError:
+                                pass
+                finally:
+                    conn.close()
 
                 if oldest_ts is not None:
                     info["oldest"] = oldest_ts
@@ -2806,6 +2809,10 @@ def create_dashboard_router(
 
         body = await request.json() if await request.body() else {}
         older_than_days = body.get("older_than_days")  # None means purge all
+        if older_than_days is not None:
+            if not isinstance(older_than_days, (int, float)) or older_than_days <= 0:
+                raise HTTPException(400, "older_than_days must be a positive number")
+            older_than_days = int(older_than_days)
 
         project_root = (
             runtime.project_root if runtime and hasattr(runtime, "project_root")
@@ -2818,42 +2825,44 @@ def create_dashboard_router(
                 return {"purged": True, "deleted_records": 0}
 
             conn = sqlite3.connect(str(db_path))
-            conn.execute("PRAGMA busy_timeout=5000")
-            total_deleted = 0
-
-            for table_name, meta in entry["tables"].items():
-                ts_col = meta["ts_col"]
-                ts_type = meta["ts_type"]
-
-                try:
-                    if older_than_days is None:
-                        cur = conn.execute(
-                            f"DELETE FROM [{table_name}]"  # noqa: S608
-                        )
-                    elif ts_type == "real":
-                        cutoff = _time.time() - (older_than_days * 86400)
-                        cur = conn.execute(
-                            f"DELETE FROM [{table_name}] WHERE [{ts_col}] < ?",  # noqa: S608
-                            (cutoff,),
-                        )
-                    else:
-                        cur = conn.execute(
-                            f"DELETE FROM [{table_name}] WHERE [{ts_col}] < datetime('now', ?)",  # noqa: S608
-                            (f"-{older_than_days} days",),
-                        )
-                    total_deleted += cur.rowcount
-                except sqlite3.OperationalError as exc:
-                    logger.warning("Purge %s.%s failed: %s", db_id, table_name, exc)
-
-            conn.commit()
-
-            # Best-effort VACUUM to reclaim disk space
             try:
-                conn.execute("VACUUM")
-            except sqlite3.OperationalError:
-                pass
+                conn.execute("PRAGMA busy_timeout=5000")
+                total_deleted = 0
 
-            conn.close()
+                for table_name, meta in entry["tables"].items():
+                    ts_col = meta["ts_col"]
+                    ts_type = meta["ts_type"]
+
+                    try:
+                        if older_than_days is None:
+                            cur = conn.execute(
+                                f"DELETE FROM [{table_name}]"  # noqa: S608
+                            )
+                        elif ts_type == "real":
+                            cutoff = _time.time() - (older_than_days * 86400)
+                            cur = conn.execute(
+                                f"DELETE FROM [{table_name}] WHERE [{ts_col}] < ?",  # noqa: S608
+                                (cutoff,),
+                            )
+                        else:
+                            cur = conn.execute(
+                                f"DELETE FROM [{table_name}] WHERE [{ts_col}] < datetime('now', ?)",  # noqa: S608
+                                (f"-{older_than_days} days",),
+                            )
+                        total_deleted += cur.rowcount
+                    except sqlite3.OperationalError as exc:
+                        logger.warning("Purge %s.%s failed: %s", db_id, table_name, exc)
+
+                conn.commit()
+
+                # Best-effort VACUUM to reclaim disk space
+                try:
+                    conn.execute("VACUUM")
+                except sqlite3.OperationalError:
+                    pass
+            finally:
+                conn.close()
+
             return {"purged": True, "deleted_records": total_deleted}
 
         return await asyncio.get_running_loop().run_in_executor(None, _do_purge)
