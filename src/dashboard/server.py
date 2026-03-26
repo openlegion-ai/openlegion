@@ -192,8 +192,10 @@ def create_dashboard_router(
             return True
         settings = _load_settings()
         custom_providers = settings.get("custom_llm_providers", {})
-        if provider in custom_providers:
-            return model in custom_providers[provider].get("models", [])
+        provider_lower = provider.lower()
+        if provider_lower in custom_providers:
+            custom_models = custom_providers[provider_lower].get("models", [])
+            return model.lower() in [m.lower() for m in custom_models]
         if provider:
             return model in get_provider_models(provider)
         return any(model in models for models in _PROVIDER_MODELS.values())
@@ -2391,9 +2393,10 @@ def create_dashboard_router(
             raise HTTPException(400, "speed must be between 0.25 and 4.0")
 
         # Persist to config file
-        settings = _load_settings()
-        settings["browser_speed"] = speed
-        _save_settings(settings)
+        with _settings_lock:
+            settings = _load_settings()
+            settings["browser_speed"] = speed
+            _save_settings(settings)
 
         # Push to browser service immediately
         if runtime and hasattr(runtime, 'browser_service_url') and runtime.browser_service_url:
@@ -2462,24 +2465,26 @@ def create_dashboard_router(
         if not isinstance(body, dict):
             raise HTTPException(400, "Request body must be a JSON object")
 
-        settings = _load_settings()
         updated = []
 
-        for key, value in body.items():
-            if key not in _SYSTEM_SETTINGS_VALIDATORS:
-                continue
-            typ, min_val, max_val = _SYSTEM_SETTINGS_VALIDATORS[key]
-            try:
-                coerced = typ(value)
-            except (ValueError, TypeError):
-                raise HTTPException(400, f"{key} must be a {typ.__name__}")
-            if coerced < min_val or coerced > max_val:
-                raise HTTPException(400, f"{key} must be between {min_val} and {max_val}")
-            settings[key] = coerced
-            updated.append(key)
+        with _settings_lock:
+            settings = _load_settings()
 
-        if updated:
-            _save_settings(settings)
+            for key, value in body.items():
+                if key not in _SYSTEM_SETTINGS_VALIDATORS:
+                    continue
+                typ, min_val, max_val = _SYSTEM_SETTINGS_VALIDATORS[key]
+                try:
+                    coerced = typ(value)
+                except (ValueError, TypeError):
+                    raise HTTPException(400, f"{key} must be a {typ.__name__}")
+                if coerced < min_val or coerced > max_val:
+                    raise HTTPException(400, f"{key} must be between {min_val} and {max_val}")
+                settings[key] = coerced
+                updated.append(key)
+
+            if updated:
+                _save_settings(settings)
 
         # Apply health settings at runtime
         if health_monitor:
