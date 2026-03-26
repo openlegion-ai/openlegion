@@ -1329,6 +1329,14 @@ def create_dashboard_router(
         # Non-OAuth keys must not contain newlines
         if "\n" in key or "\r" in key:
             raise HTTPException(status_code=400, detail="Key value must not contain newline characters")
+        # Detect bare Anthropic OAuth setup tokens (sk-ant-oat01-...)
+        # Store as structured OAuth so they use the primary OAuth path
+        from src.host.credentials import is_oauth_token
+        if is_oauth_token(key):
+            credential_vault.store_anthropic_oauth({"access_token": key})
+            # Clear any stale api_key credential to avoid confusion
+            credential_vault.remove_credential("anthropic_api_key")
+            return {"stored": True, "service": "anthropic_oauth", "tier": "system"}
         # Normalize bare provider names
         from src.host.credentials import (
             SYSTEM_CREDENTIAL_PROVIDERS,
@@ -1345,6 +1353,11 @@ def create_dashboard_router(
             service = f"{service.lower()}_api_key"
             is_system = True  # LLM provider keys are always system-tier
         credential_vault.add_credential(service, key, system=is_system)
+        # If storing a regular Anthropic API key, clear any stale OAuth
+        # credential so the API key path is used at runtime
+        if service.lower() == "anthropic_api_key" and not is_oauth_token(key):
+            if credential_vault._has_anthropic_oauth():
+                credential_vault.remove_credential("anthropic_oauth")
         # Store optional custom API base URL alongside the key
         base_url = body.get("base_url", "").strip()
         if base_url:
