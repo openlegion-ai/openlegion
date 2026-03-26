@@ -1440,6 +1440,132 @@ class TestDashboardCredentialRemove:
         assert resp.status_code == 404
 
 
+class TestCustomLlmProviders:
+    """Tests for custom LLM provider support."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+        # Backup/restore settings.json (relative path used by dashboard)
+        self._settings_path = Path("config/settings.json")
+        self._had_settings = self._settings_path.exists()
+        if self._had_settings:
+            self._backup = self._settings_path.read_text()
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+        # Restore or remove settings file
+        if self._had_settings:
+            self._settings_path.write_text(self._backup)
+        elif self._settings_path.exists():
+            self._settings_path.unlink()
+
+    def test_add_custom_llm_provider_normalizes_name(self):
+        """Custom LLM credential name gets _api_key suffix."""
+        vault = self.components["credential_vault"]
+        vault.add_credential = MagicMock()
+        resp = self.client.post("/dashboard/api/credentials", json={
+            "service": "myhost",
+            "key": "sk-test-key",
+            "tier": "system",
+            "custom_llm_models": "model-a, model-b",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["service"] == "myhost_api_key"
+        assert data["tier"] == "system"
+        # Verify credential stored with normalized name
+        vault.add_credential.assert_any_call("myhost_api_key", "sk-test-key", system=True)
+
+    def test_add_custom_llm_provider_already_suffixed(self):
+        """If user enters name with _api_key suffix, it's not doubled."""
+        vault = self.components["credential_vault"]
+        vault.add_credential = MagicMock()
+        resp = self.client.post("/dashboard/api/credentials", json={
+            "service": "myhost_api_key",
+            "key": "sk-test-key",
+            "tier": "system",
+            "custom_llm_models": "model-a",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["service"] == "myhost_api_key"
+
+    def test_add_custom_llm_provider_saves_settings(self):
+        """Custom LLM provider config is saved to settings.json."""
+        import json
+        vault = self.components["credential_vault"]
+        vault.add_credential = MagicMock()
+        resp = self.client.post("/dashboard/api/credentials", json={
+            "service": "myhost",
+            "key": "sk-test-key",
+            "tier": "system",
+            "custom_llm_models": "model-a, model-b",
+            "custom_llm_label": "My Host",
+        })
+        assert resp.status_code == 200
+        settings = json.loads(self._settings_path.read_text())
+        custom = settings.get("custom_llm_providers", {})
+        assert "myhost" in custom
+        assert custom["myhost"]["label"] == "My Host"
+        assert "myhost/model-a" in custom["myhost"]["models"]
+        assert "myhost/model-b" in custom["myhost"]["models"]
+
+    def test_add_custom_llm_prefixes_bare_model_names(self):
+        """Bare model names get provider/ prefix."""
+        import json
+        vault = self.components["credential_vault"]
+        vault.add_credential = MagicMock()
+        resp = self.client.post("/dashboard/api/credentials", json={
+            "service": "myhost",
+            "key": "sk-test-key",
+            "tier": "system",
+            "custom_llm_models": "model-a, myhost/model-b",
+        })
+        assert resp.status_code == 200
+        settings = json.loads(self._settings_path.read_text())
+        models = settings["custom_llm_providers"]["myhost"]["models"]
+        assert "myhost/model-a" in models  # bare name got prefixed
+        assert "myhost/model-b" in models  # already prefixed, kept as-is
+
+    def test_custom_llm_without_models_is_not_llm(self):
+        """Custom credential without custom_llm_models doesn't create provider config."""
+        vault = self.components["credential_vault"]
+        vault.add_credential = MagicMock()
+        resp = self.client.post("/dashboard/api/credentials", json={
+            "service": "my_infra_token",
+            "key": "tok-xxx",
+            "tier": "system",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["service"] == "my_infra_token"  # no _api_key suffix added
+
+    def test_delete_custom_llm_cleans_up_settings(self):
+        """Deleting a custom LLM credential removes provider config from settings."""
+        import json
+        vault = self.components["credential_vault"]
+        vault.add_credential = MagicMock()
+        vault.remove_credential = MagicMock(return_value=True)
+        # First create the custom provider
+        self.client.post("/dashboard/api/credentials", json={
+            "service": "myhost",
+            "key": "sk-test-key",
+            "tier": "system",
+            "custom_llm_models": "model-a",
+        })
+        # Verify it was saved
+        assert "myhost" in json.loads(self._settings_path.read_text()).get("custom_llm_providers", {})
+        # Now delete it
+        resp = self.client.delete("/dashboard/api/credentials/myhost_api_key")
+        assert resp.status_code == 200
+        # Verify settings cleaned up
+        settings = json.loads(self._settings_path.read_text())
+        assert "myhost" not in settings.get("custom_llm_providers", {})
+
+
 class TestDashboardCredentialValidate:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()

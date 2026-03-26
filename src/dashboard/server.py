@@ -1337,6 +1337,11 @@ def create_dashboard_router(
         # Explicit tier override from request body, then auto-detect
         tier_field = body.get("tier", "").strip().lower()
         is_system = tier_field == "system" or is_system_credential(service)
+        # Normalize custom LLM provider names to end with _api_key so
+        # credential resolution and provider detection work correctly
+        if body.get("custom_llm_models", "").strip() and not service.lower().endswith("_api_key"):
+            service = f"{service}_api_key"
+            is_system = True  # LLM provider keys are always system-tier
         credential_vault.add_credential(service, key, system=is_system)
         # Store optional custom API base URL alongside the key
         base_url = body.get("base_url", "").strip()
