@@ -137,16 +137,20 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     # immediate process restarts (e.g., from update-all).
     # Resolve symlinks so the rename targets the real file's directory.
     real_path = env_path.resolve()
-    tmp_path = real_path.with_suffix(".tmp")
-    tmp_path.write_text(content)
-    os.chmod(str(tmp_path), 0o600)
-    # fsync to ensure data hits disk before rename
-    fd = os.open(str(tmp_path), os.O_RDONLY)
+    tmp_path = real_path.parent / f"{real_path.name}.tmp"
     try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    tmp_path.replace(real_path)
+        tmp_path.write_text(content)
+        os.chmod(str(tmp_path), 0o600)
+        # fsync to ensure data hits disk before rename
+        fd = os.open(str(tmp_path), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        tmp_path.replace(real_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
     os.environ[env_key] = value
 
 
@@ -165,15 +169,19 @@ def _remove_from_env(env_key: str, env_file: str = "") -> None:
         # Atomic write: temp file + fsync + rename ensures data survives
         # immediate process restarts (e.g., from update-all).
         real_path = env_path.resolve()
-        tmp_path = real_path.with_suffix(".tmp")
-        tmp_path.write_text(content)
-        os.chmod(str(tmp_path), 0o600)
-        fd = os.open(str(tmp_path), os.O_RDONLY)
+        tmp_path = real_path.parent / f"{real_path.name}.tmp"
         try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        tmp_path.replace(real_path)
+            tmp_path.write_text(content)
+            os.chmod(str(tmp_path), 0o600)
+            fd = os.open(str(tmp_path), os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            tmp_path.replace(real_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
     os.environ.pop(env_key, None)
 
