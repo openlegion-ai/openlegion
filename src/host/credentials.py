@@ -809,33 +809,9 @@ class CredentialVault:
 
     # ── OAuth direct-call helpers ────────────────────────────
 
-    @staticmethod
-    def _oauth_headers(token: str) -> dict[str, str]:
-        """Build Anthropic API headers for OAuth bearer auth.
-
-        Headers match what pi-ai (openclaw's underlying library) sends:
-          - ``anthropic-dangerous-direct-browser-access`` — required for
-            OAuth tokens that bypass the standard x-api-key path.
-          - ``x-app: cli`` — identifies the client type.
-          - ``fine-grained-tool-streaming`` — always included by pi-ai.
-          - ``interleaved-thinking`` is NOT included — pi-ai skips it
-            for adaptive-thinking models (Opus 4.6 / Sonnet 4.6).
-          - ``context-1m`` is excluded per openclaw's behavior.
-        """
-        return {
-            "Content-Type": "application/json",
-            "accept": "application/json",
-            "Authorization": f"Bearer {token}",
-            "anthropic-version": "2023-06-01",
-            "anthropic-beta": (
-                "claude-code-20250219,"
-                "oauth-2025-04-20,"
-                "fine-grained-tool-streaming-2025-05-14"
-            ),
-            "anthropic-dangerous-direct-browser-access": "true",
-            "x-app": "cli",
-            "user-agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
-        }
+    # _oauth_headers has been removed — the Anthropic SDK handles auth
+    # headers natively. For non-SDK callers (e.g. setup_wizard validation),
+    # construct headers inline.
 
     @staticmethod
     def _build_anthropic_body(params: dict) -> dict:
@@ -1018,7 +994,6 @@ class CredentialVault:
            blocks with the Claude Code identity as the mandatory first block.
         2. Add an override so the model follows the agent's actual instructions
            instead of defaulting to Claude Code behavior.
-        3. Always set ``stream: true``.
         """
         identity = CredentialVault._CLAUDE_CODE_IDENTITY
         system_blocks: list[dict] = [{"type": "text", "text": identity}]
@@ -1031,7 +1006,6 @@ class CredentialVault:
             elif isinstance(existing, list):
                 system_blocks.extend(existing)
         body["system"] = system_blocks
-        body["stream"] = True
 
     async def _oauth_chat(
         self, request: APIProxyRequest, api_key: str, model: str,
@@ -1068,19 +1042,54 @@ class CredentialVault:
     async def _oauth_chat_stream(
         self, request: APIProxyRequest, api_key: str, model: str,
     ):
-        """Streaming Anthropic API call using OAuth bearer auth.
+        """Streaming Anthropic API call using OAuth bearer auth via SDK.
 
-        Yields SSE-formatted strings matching the ``stream_llm`` protocol.
+        Uses ``anthropic.AsyncAnthropic`` with ``auth_token`` for Bearer
+        auth instead of raw httpx.  Yields SSE-formatted strings matching
+        the ``stream_llm`` protocol.
         """
+        import anthropic
+
         sanitized = sanitize_for_provider(
             request.params.get("messages", []), model,
         )
         params = {**request.params, "messages": sanitized}
         body = self._build_anthropic_body(params)
         self._patch_anthropic_oauth_body(body)
-        headers = self._oauth_headers(api_key)
 
-        client = await self._get_http_client()
+        # Extract SDK parameters from the converted body
+        sdk_kwargs: dict = {
+            "model": body["model"],
+            "messages": body["messages"],
+            "max_tokens": body.get("max_tokens", 4096),
+            "stream": True,
+        }
+        if "system" in body:
+            sdk_kwargs["system"] = body["system"]
+        if "temperature" in body:
+            sdk_kwargs["temperature"] = body["temperature"]
+        if "top_p" in body:
+            sdk_kwargs["top_p"] = body["top_p"]
+        if body.get("tools"):
+            sdk_kwargs["tools"] = body["tools"]
+        if "tool_choice" in body:
+            sdk_kwargs["tool_choice"] = body["tool_choice"]
+        # Thinking/extended thinking support
+        if "thinking" in body:
+            sdk_kwargs["thinking"] = body["thinking"]
+
+        client = anthropic.AsyncAnthropic(
+            api_key="placeholder",  # Required by SDK but overridden by auth_token
+            auth_token=api_key,
+            default_headers={
+                "anthropic-dangerous-direct-browser-access": "true",
+                "x-app": "cli",
+                "user-agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
+            },
+            max_retries=0,
+            timeout=120.0,
+        )
+
         collected_content = ""
         collected_thinking = ""
         collected_tool_calls: list[dict] = []
@@ -1089,85 +1098,94 @@ class CredentialVault:
         current_tool_idx = -1
 
         try:
-            async with client.stream(
-                "POST", _ANTHROPIC_API_URL, headers=headers,
-                json=body, timeout=120,
-            ) as resp:
-                if resp.status_code == 401:
-                    self._health_tracker.record_failure(model, "AuthError", 401)
-                    await resp.aread()
-                    try:
-                        error_data = resp.json()
-                        msg = error_data.get("error", {}).get("message", "Auth failed")
-                    except (json.JSONDecodeError, ValueError):
-                        msg = resp.text[:200] or "Auth failed"
-                    yield f"data: {json.dumps({'error': f'OAuth auth failed (token may have expired): {msg}'})}\n\n"
-                    return
-                if not resp.is_success:
-                    self._health_tracker.record_failure(
-                        model, "HTTPError", resp.status_code,
-                    )
-                    await resp.aread()
-                    yield f"data: {json.dumps({'error': f'Anthropic API error (HTTP {resp.status_code})'})}\n\n"
-                    return
+            stream = await client.beta.messages.create(
+                betas=[
+                    "claude-code-20250219",
+                    "oauth-2025-04-20",
+                    "fine-grained-tool-streaming-2025-05-14",
+                ],
+                **sdk_kwargs,
+            )
 
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    payload = line[6:]
-                    try:
-                        event = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
+            async for event in stream:
+                if event.type == "message_start":
+                    if hasattr(event, "message") and hasattr(event.message, "usage"):
+                        input_tokens = event.message.usage.input_tokens
+                elif event.type == "content_block_start":
+                    cb = event.content_block
+                    if cb.type == "tool_use":
+                        current_tool_idx += 1
+                        collected_tool_calls.append({
+                            "id": cb.id,
+                            "name": cb.name,
+                            "arguments": "",
+                        })
+                    elif cb.type == "thinking":
+                        pass  # thinking block started
+                elif event.type == "content_block_delta":
+                    delta = event.delta
+                    if delta.type == "text_delta":
+                        collected_content += delta.text
+                        yield f"data: {json.dumps({'type': 'text_delta', 'content': delta.text})}\n\n"
+                    elif delta.type == "thinking_delta":
+                        collected_thinking += delta.thinking
+                    elif delta.type == "input_json_delta":
+                        if current_tool_idx >= 0:
+                            collected_tool_calls[current_tool_idx]["arguments"] += delta.partial_json
+                elif event.type == "message_delta":
+                    if hasattr(event, "usage"):
+                        output_tokens = event.usage.output_tokens
 
-                    etype = event.get("type", "")
-
-                    if etype == "content_block_start":
-                        block = event.get("content_block", {})
-                        if block.get("type") == "tool_use":
-                            current_tool_idx += 1
-                            collected_tool_calls.append({
-                                "name": block.get("name", ""),
-                                "arguments": "",
-                            })
-
-                    elif etype == "content_block_delta":
-                        delta = event.get("delta", {})
-                        dtype = delta.get("type", "")
-                        if dtype == "text_delta":
-                            text = delta.get("text", "")
-                            collected_content += text
-                            yield f"data: {json.dumps({'type': 'text_delta', 'content': text})}\n\n"
-                        elif dtype == "thinking_delta":
-                            collected_thinking += delta.get("thinking", "")
-                        elif dtype == "input_json_delta":
-                            if current_tool_idx >= 0:
-                                collected_tool_calls[current_tool_idx]["arguments"] += delta.get("partial_json", "")
-
-                    elif etype == "message_delta":
-                        usage = event.get("usage", {})
-                        output_tokens = usage.get("output_tokens", output_tokens)
-
-                    elif etype == "message_start":
-                        usage = event.get("message", {}).get("usage", {})
-                        input_tokens = usage.get("input_tokens", input_tokens)
-
+            # Emit final done event
             tokens_used = input_tokens + output_tokens
             self._health_tracker.record_success(model)
-
             done_data: dict = {
-                "type": "done", "content": collected_content,
-                "tool_calls": collected_tool_calls,
-                "tokens_used": tokens_used, "model": model,
+                "type": "done",
+                "content": collected_content,
+                "tokens_used": tokens_used,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "model": f"anthropic/{body['model']}",
+                "oauth": True,
+                "tool_calls": [
+                    {
+                        "id": tc.get("id", f"call_{i}"),
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"],
+                        },
+                    }
+                    for i, tc in enumerate(collected_tool_calls)
+                ],
             }
             if collected_thinking:
                 done_data["thinking_content"] = collected_thinking
             yield f"data: {json.dumps(done_data)}\n\n"
 
+        except anthropic.AuthenticationError as e:
+            self._health_tracker.record_failure(model, "AuthError", 401)
+            msg = "Auth failed"
+            if hasattr(e, "body") and isinstance(e.body, dict):
+                msg = e.body.get("error", {}).get("message", msg)
+            yield f"data: {json.dumps({'error': f'OAuth auth failed (token may have expired): {msg}'})}\n\n"
+
+        except anthropic.APIStatusError as e:
+            self._health_tracker.record_failure(model, "HTTPError", e.status_code)
+            detail = ""
+            if hasattr(e, "body") and isinstance(e.body, dict):
+                detail = e.body.get("error", {}).get("message", "")
+            msg = f"Anthropic API error (HTTP {e.status_code})"
+            if detail:
+                msg += f": {detail}"
+            yield f"data: {json.dumps({'error': msg})}\n\n"
+
         except Exception as e:
             logger.error(f"OAuth streaming call failed: {e}")
             self._health_tracker.record_failure(model, type(e).__name__, 0)
             yield f"data: {json.dumps({'error': friendly_streaming_error(e)})}\n\n"
+
+        finally:
+            await client.close()
 
     # ── OpenAI Codex Responses API helpers ─────────────────
 

@@ -1345,7 +1345,7 @@ class TestGetAuthForModel:
         v = CredentialVault()
         api_key, headers = v._get_auth_for_model("anthropic/claude-sonnet-4-6")
         assert api_key.startswith("sk-ant-oat01-")
-        # OAuth tokens bypass LiteLLM — headers built in _oauth_headers() instead
+        # OAuth tokens bypass LiteLLM — SDK handles auth headers natively
         assert headers == {}
 
 
@@ -1571,16 +1571,6 @@ class TestOAuthTokenHandling:
         result = CredentialVault._parse_anthropic_response(data, "anthropic/test")
         assert result["content"] == "Answer"
         assert result["thinking_content"] == "reasoning here"
-
-    def test_oauth_headers_structure(self):
-        """OAuth headers include all required fields."""
-        headers = CredentialVault._oauth_headers("sk-ant-oat01-test")
-        assert headers["Authorization"] == "Bearer sk-ant-oat01-test"
-        assert headers["anthropic-version"] == "2023-06-01"
-        assert "claude-code-20250219" in headers["anthropic-beta"]
-        assert "oauth-2025-04-20" in headers["anthropic-beta"]
-        assert headers["user-agent"].startswith("claude-cli/")
-        assert headers["Content-Type"] == "application/json"
 
     def test_build_anthropic_body_tool_choice_auto(self):
         """tool_choice='auto' converts to Anthropic format."""
