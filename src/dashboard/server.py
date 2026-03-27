@@ -1218,7 +1218,7 @@ def create_dashboard_router(
         """Validate an API key by making a minimal LLM call."""
         body = await request.json()
         service = body.get("service", "").strip().lower()
-        key = body.get("key", "").strip()
+        key = body.get("key", "").strip().replace("\r", "")
         base_url = body.get("base_url", "").strip() or None
         if not service or not key:
             raise HTTPException(status_code=400, detail="service and key are required")
@@ -1326,7 +1326,7 @@ def create_dashboard_router(
             raise HTTPException(status_code=503, detail="Credential vault not available")
         body = await request.json()
         service = body.get("service", "").strip()
-        key = body.get("key", "").strip()
+        key = body.get("key", "").strip().replace("\r", "")
         if not service or not key:
             raise HTTPException(status_code=400, detail="service and key are required")
         if not re.match(r"^[a-zA-Z0-9_.-]{1,128}$", service):
