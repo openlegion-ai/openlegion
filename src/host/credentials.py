@@ -351,9 +351,9 @@ class CredentialVault:
 
         Returns a ``$CRED{name}`` handle.
         """
-        # Strip whitespace and carriage returns — terminal paste can include
-        # \r\n line breaks; browsers strip \n but keep \r, silently corrupting tokens.
-        value = value.strip().replace("\r", "")
+        # Strip ALL whitespace — terminal paste can include line breaks which
+        # browsers convert to spaces, silently corrupting tokens and API keys.
+        value = "".join(value.split())
         cred_key = name.lower()
         prefix = SYSTEM_PREFIX if system else AGENT_PREFIX
         if cred_key.endswith("_api_base"):
