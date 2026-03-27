@@ -1355,7 +1355,7 @@ def create_dashboard_router(
         except (_json.JSONDecodeError, ValueError):
             pass
         # Non-OAuth keys must not contain newlines
-        if "\n" in key or "\r" in key:
+        if "\n" in key:
             raise HTTPException(status_code=400, detail="Key value must not contain newline characters")
         # Detect bare Anthropic OAuth setup tokens (sk-ant-oat01-...)
         # Store as structured OAuth so they use the primary OAuth path

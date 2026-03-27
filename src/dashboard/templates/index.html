@@ -2932,7 +2932,7 @@
               <div x-show="showCredForm" x-transition>
                 <div class="text-xs text-gray-500 mb-2">New API key</div>
                 <div class="flex gap-2 mb-2">
-                  <select x-model="credService" :disabled="credSaving" class="dash-select text-xs w-40" @change="credAuthType = 'api_key'; if ($event.target.value === 'ollama') credBaseUrl = credBaseUrl || 'http://localhost:11434'">
+                  <select x-model="credService" :disabled="credSaving" class="dash-select text-xs w-40" @change="credAuthType = 'api_key'; if ($event.target.value === 'ollama') credBaseUrl = credBaseUrl || 'http://localhost:11434'; if ($event.target.value !== '__custom__') { credCustomService = ''; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''; }">
                     <option value="">Service...</option>
                     <optgroup label="LLM Providers (system tier)">
                       {% for p in all_providers %}
