@@ -351,9 +351,9 @@ class CredentialVault:
 
         Returns a ``$CRED{name}`` handle.
         """
-        # Strip whitespace — trailing spaces/tabs from terminal paste or
-        # form submission silently corrupt tokens and cause auth failures.
-        value = value.strip()
+        # Strip whitespace and carriage returns — terminal paste can include
+        # \r\n line breaks; browsers strip \n but keep \r, silently corrupting tokens.
+        value = value.strip().replace("\r", "")
         cred_key = name.lower()
         prefix = SYSTEM_PREFIX if system else AGENT_PREFIX
         if cred_key.endswith("_api_base"):

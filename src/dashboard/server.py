@@ -1326,7 +1326,7 @@ def create_dashboard_router(
             raise HTTPException(status_code=503, detail="Credential vault not available")
         body = await request.json()
         service = body.get("service", "").strip()
-        key = body.get("key", "").strip()
+        key = body.get("key", "").strip().replace("\r", "")
         if not service or not key:
             raise HTTPException(status_code=400, detail="service and key are required")
         if not re.match(r"^[a-zA-Z0-9_.-]{1,128}$", service):
@@ -1355,7 +1355,7 @@ def create_dashboard_router(
         except (_json.JSONDecodeError, ValueError):
             pass
         # Non-OAuth keys must not contain newlines
-        if "\n" in key or "\r" in key:
+        if "\n" in key:
             raise HTTPException(status_code=400, detail="Key value must not contain newline characters")
         # Detect bare Anthropic OAuth setup tokens (sk-ant-oat01-...)
         # Store as structured OAuth so they use the primary OAuth path
