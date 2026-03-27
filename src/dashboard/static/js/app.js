@@ -531,6 +531,7 @@ function dashboard() {
               }
               if (route.systemTab === 'settings') {
                 this.fetchBrowserSettings();
+                this.fetchSystemSettings();
               }
               if (route.systemTab === 'storage') {
                 this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails();
@@ -1027,7 +1028,7 @@ function dashboard() {
       if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); }
       if (tabId === 'apikeys') { this.fetchSettings(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
-      if (tabId === 'settings') { this.fetchBrowserSettings(); }
+      if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
       if (tabId === 'activity') {
         if (this.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
         else if (this.activityView === 'logs') { this.fetchSystemLogs(); }
