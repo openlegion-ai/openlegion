@@ -1218,7 +1218,7 @@ def create_dashboard_router(
         """Validate an API key by making a minimal LLM call."""
         body = await request.json()
         service = body.get("service", "").strip().lower()
-        key = body.get("key", "").strip().replace("\r", "")
+        key = "".join(body.get("key", "").split())
         base_url = body.get("base_url", "").strip() or None
         if not service or not key:
             raise HTTPException(status_code=400, detail="service and key are required")
@@ -1326,7 +1326,7 @@ def create_dashboard_router(
             raise HTTPException(status_code=503, detail="Credential vault not available")
         body = await request.json()
         service = body.get("service", "").strip()
-        key = body.get("key", "").strip().replace("\r", "")
+        key = "".join(body.get("key", "").split())
         if not service or not key:
             raise HTTPException(status_code=400, detail="service and key are required")
         if not re.match(r"^[a-zA-Z0-9_.-]{1,128}$", service):
@@ -1336,7 +1336,7 @@ def create_dashboard_router(
             )
         if len(key) > 10_000:
             raise HTTPException(status_code=400, detail="Key value too long (max 10000 chars)")
-        # Detect OAuth JSON blobs BEFORE newline check (JSON blobs have newlines)
+        # Detect OAuth JSON blobs (compact JSON after whitespace strip is still valid)
         import json as _json
 
         from src.host.credentials import CredentialVault as _CV
@@ -1354,9 +1354,6 @@ def create_dashboard_router(
                     return {"stored": True, "service": "openai_oauth", "tier": "system"}
         except (_json.JSONDecodeError, ValueError):
             pass
-        # Non-OAuth keys must not contain newlines
-        if "\n" in key:
-            raise HTTPException(status_code=400, detail="Key value must not contain newline characters")
         # Detect bare Anthropic OAuth setup tokens (sk-ant-oat01-...)
         # Store as structured OAuth so they use the primary OAuth path
         from src.host.credentials import is_oauth_token
