@@ -4295,7 +4295,7 @@
                 <path d="M3 3v5h5"/>
               </svg>
             </button>
-            <button @click="chatFullScreen = !chatFullScreen; _saveChatToSession()"
+            <button @click="chatFullScreen = !chatFullScreen"
               class="text-gray-500 hover:text-white transition-colors p-1.5 rounded"
               :title="chatFullScreen ? 'Half screen' : 'Full screen'"
               :aria-label="chatFullScreen ? 'Exit full screen' : 'Full screen'">
@@ -4314,8 +4314,8 @@
             </button>
           </div>
         </div>
-        <!-- Mobile: horizontal agent tab strip (shown only when multiple chats) -->
-        <div x-show="openChats.length > 1" x-cloak class="md:hidden flex overflow-x-auto border-b border-gray-800/60 shrink-0 bg-gray-950/60">
+        <!-- Horizontal agent tab strip — visible until sidebar expands with names at xl (1280px) -->
+        <div x-show="openChats.length > 1" x-cloak class="xl:hidden flex overflow-x-auto border-b border-gray-800/60 shrink-0 bg-gray-950/60">
           <template x-for="chatId in openChats" :key="chatId">
             <button @click="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId))"
               class="flex items-center gap-1.5 px-3 py-2 text-xs whitespace-nowrap transition-all border-b-2 shrink-0"
