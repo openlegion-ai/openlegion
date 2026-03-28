@@ -21,11 +21,14 @@ from src.browser.redaction import CredentialRedactor
 from src.browser.stealth import build_launch_options
 from src.browser.timing import (
     action_delay,
+    click_dwell,
     keystroke_delay,
     navigation_jitter,
     scroll_increment,
     scroll_pause,
     think_pause,
+    x11_settle_delay,
+    x11_step_delay,
 )
 from src.shared.types import AGENT_ID_RE_PATTERN
 from src.shared.utils import setup_logging
@@ -1008,7 +1011,7 @@ class BrowserManager:
                 raise RuntimeError(
                     f"xdotool mousemove failed (rc={mv_result.returncode})"
                 )
-            await asyncio.sleep(random.uniform(0.004, 0.012))
+            await asyncio.sleep(x11_step_delay())
 
     async def _x11_click(self, inst: CamoufoxInstance, locator) -> None:
         """Click via xdotool for isTrusted=true events.
@@ -1029,7 +1032,7 @@ class BrowserManager:
         """
         # 1. Scroll into view — no mouse events, just DOM scroll
         await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
-        await asyncio.sleep(random.uniform(0.02, 0.06))
+        await asyncio.sleep(x11_settle_delay())
 
         # 2. Get element center in viewport coords
         box = await locator.bounding_box()
@@ -1048,7 +1051,7 @@ class BrowserManager:
         # 4. Click with human-like dwell time (mousedown -> hold -> mouseup)
         wid_s = str(wid)
         loop = asyncio.get_running_loop()
-        await asyncio.sleep(random.uniform(0.01, 0.03))
+        await asyncio.sleep(x11_settle_delay())
         await loop.run_in_executor(
             None,
             lambda: subprocess.run(
@@ -1056,7 +1059,7 @@ class BrowserManager:
                 capture_output=True, timeout=3,
             ),
         )
-        await asyncio.sleep(random.uniform(0.05, 0.14))
+        await asyncio.sleep(click_dwell())
         await loop.run_in_executor(
             None,
             lambda: subprocess.run(
@@ -1068,7 +1071,7 @@ class BrowserManager:
     async def _x11_hover(self, inst: CamoufoxInstance, locator) -> None:
         """Move mouse to element via xdotool for isTrusted=true mousemove events."""
         await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
-        await asyncio.sleep(random.uniform(0.02, 0.06))
+        await asyncio.sleep(x11_settle_delay())
 
         box = await locator.bounding_box()
         if not box:
