@@ -1,8 +1,8 @@
 """Core browser manager — per-agent Camoufox instance lifecycle.
 
 Manages lazy-started Camoufox browser instances, one per agent.
-Each agent gets its own persistent profile, fingerprint, and
-browser context on a shared Xvnc display.
+Each agent gets its own persistent profile, BrowserForge fingerprint,
+and browser context on a shared Xvnc display.
 """
 
 from __future__ import annotations
