@@ -24,6 +24,7 @@
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border-radius: 0.75rem;
+  overflow: hidden;
   transition: border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1),
               box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1),
               transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
@@ -807,7 +808,7 @@ select:focus-visible,
   display: none;
 }
 
-.messenger-sidebar > div:first-child span {
+.messenger-sidebar > div:first-child {
   display: none;
 }
 
@@ -820,8 +821,8 @@ select:focus-visible,
   .messenger-sidebar .messenger-contact > div.flex-1 {
     display: block;
   }
-  .messenger-sidebar > div:first-child span {
-    display: inline;
+  .messenger-sidebar > div:first-child {
+    display: flex;
   }
 }
 
