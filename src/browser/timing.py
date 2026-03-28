@@ -102,6 +102,33 @@ def scroll_pause() -> float:
     return _scaled(0.08, 0.03, 0.03, 0.15)
 
 
+def x11_step_delay() -> float:
+    """Inter-step delay for X11 mouse trajectory (seconds).
+
+    Base: μ=0.008, σ=0.003, range 0.003–0.014.
+    Scaled by speed — at 3x this is ~1-5ms per step.
+    """
+    return _scaled(0.008, 0.003, 0.003, 0.014)
+
+
+def x11_settle_delay() -> float:
+    """Brief settle before/after X11 actions (seconds).
+
+    Base: μ=0.035, σ=0.012, range 0.015–0.060.
+    Scaled by speed — at 3x this is ~5-20ms.
+    """
+    return _scaled(0.035, 0.012, 0.015, 0.060)
+
+
+def click_dwell() -> float:
+    """Mousedown-to-mouseup hold time (seconds).
+
+    Base: μ=0.085, σ=0.025, range 0.045–0.140.
+    Scaled by speed — at 3x this is ~15-47ms.
+    """
+    return _scaled(0.085, 0.025, 0.045, 0.140)
+
+
 def scroll_increment() -> int:
     """Per-step scroll distance (pixels). μ=140, σ=30, range 80–200.
 
