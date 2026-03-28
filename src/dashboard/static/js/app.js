@@ -203,6 +203,7 @@ function dashboard() {
     chatPanelMinimized: false, // Whether the chat panel is minimized to pill
     chatFullScreen: false,     // Whether the chat panel is expanded to full screen
     chatUnread: {},            // { agentId: count } — unread notifications while minimized
+    _chatSessionId: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2),
 
     // Identity panel
     identityTabs: _IDENTITY_TABS,
@@ -805,7 +806,19 @@ function dashboard() {
 
       this._ws = new DashboardWebSocket(cfg.wsUrl, {
         onEvent: (evt) => this.onWsEvent(evt),
-        onConnect: () => { this.connected = true; },
+        onConnect: () => {
+          const isReconnect = this._wsConnectedOnce;
+          this._wsConnectedOnce = true;
+          this.connected = true;
+          // On reconnect, refresh chat histories to catch messages from other sessions.
+          // Skip on initial connect — init() already fetches them.
+          if (isReconnect) {
+            for (const agentId of this.openChats) {
+              delete this._chatFetchedAt[agentId];
+              this._loadChatHistory(agentId);
+            }
+          }
+        },
         onDisconnect: () => { this.connected = false; },
         onReconnectTick: (secs) => { this.wsReconnectIn = secs; },
       });
@@ -1202,13 +1215,7 @@ function dashboard() {
       // _loadChatHistory already has them from the server transcript.
       if (evt.type === 'notification' && agent && evt.data && evt.data.message) {
         const msg = evt.data.message;
-        // Normalize timestamp to milliseconds (server sends ISO strings via Pydantic)
-        const evtTs = (() => {
-          if (!evt.timestamp) return Date.now();
-          if (typeof evt.timestamp === 'number') return evt.timestamp < 1e12 ? evt.timestamp * 1000 : evt.timestamp;
-          const parsed = new Date(evt.timestamp).getTime();
-          return isNaN(parsed) ? Date.now() : parsed;
-        })();
+        const evtTs = this._normalizeEventTs(evt);
         const isReplay = evtTs < this._initTs - 5000;  // 5s grace for clock skew
 
         if (!isReplay) {
@@ -1233,6 +1240,100 @@ function dashboard() {
             this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
           }
         }
+      }
+
+      // ── Cross-session chat synchronization ──
+      // These events let other tabs/devices see chat activity in real-time.
+      // Skip events from our own session (already handled by SSE stream).
+      if (evt.data?.session === this._chatSessionId) {
+        // Own session — already handled via SSE, skip
+      } else if (evt.type === 'chat_user_message' && agent && evt.data?.message) {
+        // Another session sent a message — add to our history.
+        // Skip replayed events from before page load (stale buffer entries
+        // would create phantom thinking bubbles with stuck streaming flags).
+        if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
+        const msg = evt.data.message;
+        const evtTs = this._normalizeEventTs(evt);
+        const isReplay = evtTs < this._initTs - 5000;
+        const isDup = isReplay || this.chatHistories[agent].some(m =>
+          m.role === 'user' && m.content === msg && Math.abs((m.ts || 0) - evtTs) < 5000
+        );
+        if (!isDup) {
+          this.chatHistories[agent].push({ role: 'user', content: msg, ts: evtTs });
+          // Show thinking indicator
+          this.chatStreamingAgents[agent] = true;
+          this.chatLoadingAgents[agent] = true;
+          // Add a thinking bubble
+          this.chatHistories[agent].push({
+            role: 'agent', content: '', streaming: true,
+            phase: 'thinking', tools: [], timeline: [],
+            _sawTextDelta: false, _remoteStream: true, ts: Date.now(),
+          });
+          if (this.activeChatId === agent) {
+            this.$nextTick(() => this._scrollChat(agent));
+          } else {
+            this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
+          }
+          this._saveChatToSession();
+        }
+      } else if (evt.type === 'text_delta' && agent && evt.data?.session && evt.data?.content) {
+        // Another session's agent is streaming text
+        const hist = this.chatHistories[agent] || [];
+        const last = hist[hist.length - 1];
+        if (last && last._remoteStream && last.streaming) {
+          last.content += evt.data.content;
+          last.phase = 'responding';
+          last._sawTextDelta = true;
+          this.chatLoadingAgents[agent] = false;
+          if (this.activeChatId === agent) this._scrollChat(agent);
+        }
+      } else if (evt.type === 'tool_start' && agent && evt.data?.session && evt.data.session !== this._chatSessionId) {
+        // Another session's agent is using a tool — update remote stream bubble
+        const hist = this.chatHistories[agent] || [];
+        const last = hist[hist.length - 1];
+        if (last && last._remoteStream && last.streaming) {
+          last.phase = 'tool';
+          this.chatLoadingAgents[agent] = false;
+          const toolEntry = {
+            id: `${Date.now()}-${(last.tools || []).length}`,
+            name: evt.data.name || 'tool',
+            status: 'running',
+            inputPreview: '', outputPreview: '',
+          };
+          if (!last.tools) last.tools = [];
+          last.tools.push(toolEntry);
+          if (this.activeChatId === agent) this._scrollChat(agent);
+        }
+      } else if (evt.type === 'tool_result' && agent && evt.data?.session && evt.data.session !== this._chatSessionId) {
+        const hist = this.chatHistories[agent] || [];
+        const last = hist[hist.length - 1];
+        if (last && last._remoteStream && last.streaming && Array.isArray(last.tools)) {
+          const ti = this._findRunningToolIndex(last.tools, evt.data.name);
+          if (ti >= 0) {
+            last.tools[ti].status = 'done';
+            last.tools[ti].outputPreview = this.chatToolPreview(evt.data.output);
+          }
+          last.phase = 'thinking';
+        }
+      } else if (evt.type === 'chat_done' && agent) {
+        // Another session's chat completed — finalize bubble
+        const hist = this.chatHistories[agent] || [];
+        const last = hist[hist.length - 1];
+        if (last && last._remoteStream && last.streaming) {
+          last.content = evt.data?.response || last.content;
+          last.streaming = false;
+          last.phase = 'done';
+          delete last._remoteStream;
+          if (Array.isArray(last.tools)) {
+            last.tools.forEach(t => { if (t.status === 'running') t.status = 'done'; });
+          }
+        }
+        this.chatStreamingAgents[agent] = false;
+        this.chatLoadingAgents[agent] = false;
+        // Refresh from server to ensure consistency
+        delete this._chatFetchedAt[agent];
+        this._loadChatHistory(agent);
+        this._saveChatToSession();
       }
 
       // Debounced cost panel refresh on llm_call events
@@ -3107,9 +3208,11 @@ function dashboard() {
           const t = m.ts || 0;
           return t < 1e12 ? t * 1000 : t;
         }));
-        const trailing = localMsgs.filter(m =>
-          (m.ts || 0) > lastServerTs && m.role === 'user'
-        );
+        const trailing = localMsgs.filter(m => {
+          if (m.role !== 'user' || (m.ts || 0) <= lastServerTs) return false;
+          // Skip if server already has a message with matching content
+          return !serverMsgs.some(s => s.role === 'user' && s.content === m.content && Math.abs((s.ts || 0) - (m.ts || 0)) < 10000);
+        });
         this.chatHistories[agentId] = trailing.length > 0
           ? [...serverMsgs, ...trailing]
           : serverMsgs;
@@ -3365,6 +3468,13 @@ function dashboard() {
       }
     },
 
+    _normalizeEventTs(evt) {
+      if (!evt.timestamp) return Date.now();
+      if (typeof evt.timestamp === 'number') return evt.timestamp < 1e12 ? evt.timestamp * 1000 : evt.timestamp;
+      const parsed = new Date(evt.timestamp).getTime();
+      return isNaN(parsed) ? Date.now() : parsed;
+    },
+
     _findRunningToolIndex(tools, name) {
       for (let i = tools.length - 1; i >= 0; i -= 1) {
         if (tools[i].name === name && tools[i].status === 'running') return i;
@@ -3455,10 +3565,14 @@ function dashboard() {
 
       const controller = new AbortController();
       this._chatAborts[agentId] = controller;
+      // Safety timeout: if stream doesn't complete in 120s, abort and recover
+      const streamTimeout = setTimeout(() => {
+        if (this.chatStreamingAgents[agentId]) controller.abort();
+      }, 120000);
 
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/chat/stream`, {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
+          method: 'POST', headers: {'Content-Type': 'application/json', 'X-Chat-Session': this._chatSessionId},
           body: JSON.stringify({ message: msg }),
           signal: controller.signal,
         });
@@ -3559,7 +3673,7 @@ function dashboard() {
           this.chatHistories[agentId][finalIdx].phase = 'done';
         }
       } catch (e) {
-        if (e.name === 'AbortError') return;
+        if (e.name === 'AbortError') { clearTimeout(streamTimeout); return; }
         const entry = this.chatHistories[agentId][this._chatStreamTarget[agentId]];
         const hadContent = !!(entry.content || (entry.tools && entry.tools.length > 0));
         if (hadContent) {
@@ -3582,6 +3696,7 @@ function dashboard() {
           this._pushChatTimelinePhase(entry, 'error');
         }
       }
+      clearTimeout(streamTimeout);
       delete this._chatAborts[agentId];
       delete this._chatStreamTarget[agentId];
       this.chatLoadingAgents[agentId] = false;
@@ -3640,7 +3755,7 @@ function dashboard() {
 
       try {
         await fetch(`${window.__config.apiBase}/agents/${agentId}/steer`, {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
+          method: 'POST', headers: {'Content-Type': 'application/json', 'X-Chat-Session': this._chatSessionId},
           body: JSON.stringify({ message: msg }),
         });
         this.showToast(`Steered ${agentId}`);

@@ -936,12 +936,23 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="Message is required")
         from src.shared.utils import sanitize_for_prompt
         message = sanitize_for_prompt(message)
+        chat_session = request.headers.get("x-chat-session", "")
+        if event_bus:
+            event_bus.emit("chat_user_message", agent=agent_id,
+                data={"message": message, "session": chat_session})
         try:
             result = await transport.request(
                 agent_id, "POST", "/chat", json={"message": message}, timeout=120,
             )
-            return {"response": result.get("response", "(no response)")}
+            response = result.get("response", "(no response)")
+            if event_bus:
+                event_bus.emit("chat_done", agent=agent_id,
+                    data={"response": response, "session": chat_session})
+            return {"response": response}
         except Exception as e:
+            if event_bus:
+                event_bus.emit("chat_done", agent=agent_id,
+                    data={"response": "", "session": chat_session})
             raise HTTPException(status_code=502, detail=str(e))
 
     @api_router.post("/api/agents/{agent_id}/chat/stream")
@@ -957,8 +968,15 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="Message is required")
         from src.shared.utils import sanitize_for_prompt
         message = sanitize_for_prompt(message)
+        chat_session = request.headers.get("x-chat-session", "")
+
+        # Broadcast user message so other tabs/devices see it immediately
+        if event_bus:
+            event_bus.emit("chat_user_message", agent=agent_id,
+                data={"message": message, "session": chat_session})
 
         async def event_generator():
+            final_response = ""
             try:
                 async for event in transport.stream_request(
                     agent_id, "POST", "/chat/stream",
@@ -967,11 +985,19 @@ def create_dashboard_router(
                     if isinstance(event, dict):
                         yield f"data: {json.dumps(event, default=str)}\n\n"
                         etype = event.get("type", "")
-                        if event_bus and etype in ("tool_start", "tool_result"):
-                            event_bus.emit(etype, agent=agent_id,
-                                data={k: v for k, v in event.items() if k != "type"})
+                        if event_bus:
+                            if etype in ("tool_start", "tool_result", "text_delta"):
+                                event_bus.emit(etype, agent=agent_id,
+                                    data={k: v for k, v in event.items()
+                                          if k != "type"} | {"session": chat_session})
+                            if etype == "done":
+                                final_response = event.get("response", "")
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'message': friendly_streaming_error(e)})}\n\n"
+            # Notify other sessions that the response is complete
+            if event_bus:
+                event_bus.emit("chat_done", agent=agent_id,
+                    data={"response": final_response, "session": chat_session})
 
         from starlette.responses import StreamingResponse
         return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -1100,6 +1126,10 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="Message is required")
         from src.shared.utils import sanitize_for_prompt
         message = sanitize_for_prompt(message)
+        chat_session = request.headers.get("x-chat-session", "")
+        if event_bus:
+            event_bus.emit("chat_user_message", agent=agent_id,
+                data={"message": f"[steer] {message}", "session": chat_session})
         from src.shared.trace import new_trace_id
         result = await lane_manager.enqueue(agent_id, message, mode="steer", trace_id=new_trace_id())
         return {"result": result}
