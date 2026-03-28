@@ -807,11 +807,16 @@ function dashboard() {
       this._ws = new DashboardWebSocket(cfg.wsUrl, {
         onEvent: (evt) => this.onWsEvent(evt),
         onConnect: () => {
+          const isReconnect = this._wsConnectedOnce;
+          this._wsConnectedOnce = true;
           this.connected = true;
-          // Refresh chat histories on reconnect to catch messages from other sessions
-          for (const agentId of this.openChats) {
-            delete this._chatFetchedAt[agentId];
-            this._loadChatHistory(agentId);
+          // On reconnect, refresh chat histories to catch messages from other sessions.
+          // Skip on initial connect — init() already fetches them.
+          if (isReconnect) {
+            for (const agentId of this.openChats) {
+              delete this._chatFetchedAt[agentId];
+              this._loadChatHistory(agentId);
+            }
           }
         },
         onDisconnect: () => { this.connected = false; },
@@ -1243,11 +1248,14 @@ function dashboard() {
       if (evt.data?.session === this._chatSessionId) {
         // Own session — already handled via SSE, skip
       } else if (evt.type === 'chat_user_message' && agent && evt.data?.message) {
-        // Another session sent a message — add to our history
+        // Another session sent a message — add to our history.
+        // Skip replayed events from before page load (stale buffer entries
+        // would create phantom thinking bubbles with stuck streaming flags).
         if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
         const msg = evt.data.message;
         const evtTs = this._normalizeEventTs(evt);
-        const isDup = this.chatHistories[agent].some(m =>
+        const isReplay = evtTs < this._initTs - 5000;
+        const isDup = isReplay || this.chatHistories[agent].some(m =>
           m.role === 'user' && m.content === msg && Math.abs((m.ts || 0) - evtTs) < 5000
         );
         if (!isDup) {
@@ -1263,10 +1271,12 @@ function dashboard() {
           });
           if (this.activeChatId === agent) {
             this.$nextTick(() => this._scrollChat(agent));
+          } else {
+            this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
           }
           this._saveChatToSession();
         }
-      } else if (evt.type === 'text_delta' && agent && evt.data?.content) {
+      } else if (evt.type === 'text_delta' && agent && evt.data?.session && evt.data?.content) {
         // Another session's agent is streaming text
         const hist = this.chatHistories[agent] || [];
         const last = hist[hist.length - 1];

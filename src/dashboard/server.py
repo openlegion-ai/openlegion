@@ -950,6 +950,9 @@ def create_dashboard_router(
                     data={"response": response, "session": chat_session})
             return {"response": response}
         except Exception as e:
+            if event_bus:
+                event_bus.emit("chat_done", agent=agent_id,
+                    data={"response": "", "session": chat_session})
             raise HTTPException(status_code=502, detail=str(e))
 
     @api_router.post("/api/agents/{agent_id}/chat/stream")
