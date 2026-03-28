@@ -1068,8 +1068,20 @@ function dashboard() {
       // Strip <think>...</think> blocks and unclosed <think> (still streaming)
       let cleaned = text.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').trim();
       if (!cleaned) return '';
-      const html = marked.parse(cleaned, { breaks: true, gfm: true });
-      return DOMPurify.sanitize(html);
+      try {
+        const html = marked.parse(cleaned, { breaks: true, gfm: true });
+        const sanitized = DOMPurify.sanitize(html);
+        // Open all links in new tab so chat/artifact links don't navigate away
+        const tpl = document.createElement('template');
+        tpl.innerHTML = sanitized;
+        tpl.content.querySelectorAll('a[href]').forEach(a => {
+          a.setAttribute('target', '_blank');
+          a.setAttribute('rel', 'noopener noreferrer');
+        });
+        return tpl.innerHTML;
+      } catch (_) {
+        return this._escapeHtml(cleaned).replace(/\n/g, '<br>');
+      }
     },
 
     // ── Toast helper ──────────────────────────────────────
