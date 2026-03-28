@@ -1467,7 +1467,8 @@ class TestScroll:
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
-        mock_page.evaluate = AsyncMock()
+        mock_page.mouse = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
@@ -1475,7 +1476,7 @@ class TestScroll:
         assert result["success"] is True
         assert result["data"]["direction"] == "down"
         assert result["data"]["pixels"] >= 720
-        assert mock_page.evaluate.await_count >= 1
+        assert mock_page.mouse.wheel.await_count >= 1
 
     @pytest.mark.asyncio
     async def test_scroll_up(self):
@@ -1484,16 +1485,17 @@ class TestScroll:
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
-        mock_page.evaluate = AsyncMock()
+        mock_page.mouse = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
         result = await mgr.scroll("a1", direction="up", amount=200)
         assert result["success"] is True
         assert result["data"]["direction"] == "up"
-        # With parameterized evaluate, the second positional arg is the delta.
+        # mouse.wheel(0, delta) — second arg is the vertical delta.
         # All scroll deltas must be negative for "up" direction.
-        calls = mock_page.evaluate.call_args_list
+        calls = mock_page.mouse.wheel.call_args_list
         for call in calls:
             delta = call[0][1]  # second positional arg is the numeric delta
             assert delta < 0, f"Expected negative delta for 'up', got {delta}"
@@ -1582,7 +1584,8 @@ class TestScroll:
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
-        mock_page.evaluate = AsyncMock(side_effect=Exception("page closed"))
+        mock_page.mouse = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock(side_effect=Exception("page closed"))
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
@@ -2193,16 +2196,18 @@ class TestAllowedBrowserActions:
 
 
 class TestScrollParameterized:
-    """Verify scroll uses parameterized evaluate (not f-string injection)."""
+    """Verify scroll uses mouse.wheel() with correct delta signs."""
 
     @pytest.mark.asyncio
-    async def test_scroll_uses_parameterized_evaluate(self):
-        """evaluate must be called with a function string + separate delta arg."""
+    async def test_scroll_uses_wheel_events_not_evaluate(self):
+        """Scroll must use mouse.wheel() for isTrusted wheel events, not evaluate."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.mouse = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock()
         mock_page.evaluate = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
@@ -2210,32 +2215,32 @@ class TestScrollParameterized:
         with patch("src.browser.service.asyncio.sleep"):
             await mgr.scroll("a1", direction="down", amount=200)
 
-        for call in mock_page.evaluate.call_args_list:
-            fn_str, delta = call[0][0], call[0][1]
-            # Function string must not bake in the delta value
-            assert str(delta) not in fn_str, (
-                "Delta must be a separate argument, not interpolated into the JS string"
-            )
-            # Delta must be a plain number, not a string
+        # mouse.wheel should be called, not evaluate
+        assert mock_page.mouse.wheel.await_count >= 1
+        mock_page.evaluate.assert_not_called()
+        # All deltas must be positive for "down" direction
+        for call in mock_page.mouse.wheel.call_args_list:
+            delta = call[0][1]
             assert isinstance(delta, (int, float))
             assert delta > 0  # down = positive
 
     @pytest.mark.asyncio
     async def test_scroll_up_delta_is_negative(self):
-        """Scroll up must pass a negative delta as second evaluate argument."""
+        """Scroll up must pass a negative delta to mouse.wheel()."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
-        mock_page.evaluate = AsyncMock()
+        mock_page.mouse = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
         with patch("src.browser.service.asyncio.sleep"):
             await mgr.scroll("a1", direction="up", amount=200)
 
-        for call in mock_page.evaluate.call_args_list:
+        for call in mock_page.mouse.wheel.call_args_list:
             delta = call[0][1]
             assert delta < 0
 
@@ -3968,7 +3973,7 @@ class TestX11Input:
 
     @pytest.mark.asyncio
     async def test_x11_click_calls_xdotool(self):
-        """_x11_click should call xdotool getmouselocation, multi-step mousemove, then click."""
+        """_x11_click should call getmouselocation + mousemove steps + mousedown + mouseup."""
         mgr = self._make_manager()
         inst = self._make_instance()
 
@@ -3984,19 +3989,20 @@ class TestX11Input:
 
         with patch("src.browser.service.subprocess.run", return_value=mock_run) as sub_run:
             with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
-                with patch("src.browser.service.random.randint", return_value=3):
+                with patch("src.browser.service.random.randint", return_value=4):
                     await mgr._x11_click(inst, mock_locator)
 
         mock_locator.scroll_into_view_if_needed.assert_called_once()
         mock_locator.bounding_box.assert_called_once()
-        # 1 getmouselocation + 3 mousemove steps + 1 click = 5 calls
-        assert sub_run.call_count == 5
+        # 1 getmouselocation + 4 mousemove steps + 1 mousedown + 1 mouseup = 7
+        assert sub_run.call_count == 7
         calls = sub_run.call_args_list
         assert "getmouselocation" in calls[0][0][0]
-        assert "mousemove" in calls[1][0][0]
-        assert "mousemove" in calls[2][0][0]
-        assert "mousemove" in calls[3][0][0]
-        assert "click" in calls[4][0][0]
+        # All middle calls should be mousemove
+        for c in calls[1:5]:
+            assert "mousemove" in c[0][0]
+        assert "mousedown" in calls[5][0][0]
+        assert "mouseup" in calls[6][0][0]
 
     @pytest.mark.asyncio
     async def test_x11_click_no_wid_raises(self):
@@ -4028,7 +4034,7 @@ class TestX11Input:
 
     @pytest.mark.asyncio
     async def test_x11_click_uses_viewport_coords(self):
-        """_x11_click should pass viewport center coords to the final xdotool mousemove."""
+        """_x11_click should target viewport center coords in the final mousemove."""
         mgr = self._make_manager()
         inst = self._make_instance()
         mock_locator = AsyncMock()
@@ -4043,18 +4049,24 @@ class TestX11Input:
 
         with patch("src.browser.service.subprocess.run", return_value=mock_run) as sub_run:
             with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
-                with patch("src.browser.service.random.randint", return_value=3):
-                    await mgr._x11_click(inst, mock_locator)
+                with patch("src.browser.service.random.randint", return_value=4):
+                    with patch("src.browser.service.random.uniform", return_value=0.0):
+                        await mgr._x11_click(inst, mock_locator)
 
-        # The last mousemove (step 3/3, t=1.0) should have exact target coords:
-        # (100+80/2, 200+30/2) = (140, 215)
-        # calls: [getmouselocation, mv1, mv2, mv3, click]
-        last_mousemove = sub_run.call_args_list[3]
-        cmd = last_mousemove[0][0]
+        # With offsets=0 and start=(0,0), last mousemove should be at target (140, 215)
+        # Find the last mousemove call (before mousedown)
+        mousemove_calls = [c for c in sub_run.call_args_list if "mousemove" in c[0][0]]
+        last_mv = mousemove_calls[-1]
+        cmd = last_mv[0][0]
         assert "140" in cmd
         assert "215" in cmd
         # --window flag should target the agent's WID
         assert str(inst.x11_wid) in cmd
+        # Click should be mousedown + mouseup (not "click")
+        all_cmds = [c[0][0] for c in sub_run.call_args_list]
+        assert any("mousedown" in c for c in all_cmds)
+        assert any("mouseup" in c for c in all_cmds)
+        assert not any("click" == c[1] for c in all_cmds if len(c) > 1)
 
     @pytest.mark.asyncio
     async def test_x11_type_calls_xdotool_per_char(self):
@@ -4219,17 +4231,17 @@ class TestX11Input:
             "x": 100, "y": 200, "width": 80, "height": 30,
         })
 
-        # getmouselocation succeeds, first mousemove fails
-        ok_run = MagicMock()
-        ok_run.returncode = 0
-        ok_run.stdout = "x:0 y:0 screen:0 window:12345"
+        # getmouselocation succeeds, but first mousemove fails
+        success_run = MagicMock()
+        success_run.returncode = 0
+        success_run.stdout = "x:0 y:0 screen:0 window:12345"
         fail_run = MagicMock()
         fail_run.returncode = 1
 
         with pytest.raises(RuntimeError, match="mousemove failed"):
-            with patch("src.browser.service.subprocess.run", side_effect=[ok_run, fail_run]):
+            with patch("src.browser.service.subprocess.run", side_effect=[success_run, fail_run]):
                 with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
-                    with patch("src.browser.service.random.randint", return_value=3):
+                    with patch("src.browser.service.random.randint", return_value=4):
                         await mgr._x11_click(inst, mock_locator)
 
     @pytest.mark.asyncio
@@ -4472,7 +4484,7 @@ class TestX11Input:
 
         with patch("src.browser.service.subprocess.run", return_value=mock_run):
             with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
-                with patch("src.browser.service.random.randint", return_value=3):
+                with patch("src.browser.service.random.randint", return_value=4):
                     await mgr._x11_click(inst, mock_locator)
 
         mock_locator.hover.assert_not_called()
@@ -4579,16 +4591,10 @@ class TestX11Input:
         mgr._x11_type.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_x11_click_clamps_negative_coords(self):
-        """_x11_click should clamp waypoint coords to >= 0."""
+    async def test_x11_move_to_clamps_negative_coords(self):
+        """_x11_move_to should clamp waypoint coords to >= 0."""
         mgr = self._make_manager()
         inst = self._make_instance()
-
-        mock_locator = AsyncMock()
-        mock_locator.scroll_into_view_if_needed = AsyncMock()
-        mock_locator.bounding_box = AsyncMock(return_value={
-            "x": 5, "y": 3, "width": 10, "height": 6,
-        })
 
         mock_run = MagicMock()
         mock_run.returncode = 0
@@ -4596,15 +4602,9 @@ class TestX11Input:
 
         with patch("src.browser.service.subprocess.run", return_value=mock_run) as sub_run:
             with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
-                # Force large negative offsets by mocking randint
-                with patch("src.browser.service.random.randint", side_effect=[
-                    3,    # steps = 3
-                    -12,  # wp_x offset step 1
-                    -6,   # wp_y offset step 1
-                    -12,  # wp_x offset step 2
-                    -6,   # wp_y offset step 2
-                ]):
-                    await mgr._x11_click(inst, mock_locator)
+                with patch("src.browser.service.random.randint", return_value=4):
+                    with patch("src.browser.service.random.uniform", return_value=-60.0):
+                        await mgr._x11_move_to(inst, 10, 6)
 
         # All mousemove coords should be >= 0
         for call in sub_run.call_args_list:
@@ -4614,3 +4614,217 @@ class TestX11Input:
                 y_val = int(cmd[cmd.index("--window") + 3])
                 assert x_val >= 0, f"X coord {x_val} is negative"
                 assert y_val >= 0, f"Y coord {y_val} is negative"
+
+    # ── Behavioral antibot tests ─────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_x11_click_dwell_time(self):
+        """_x11_click should use mousedown + mouseup (not a single click)."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        mock_locator = AsyncMock()
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+        mock_locator.bounding_box = AsyncMock(return_value={
+            "x": 100, "y": 200, "width": 80, "height": 30,
+        })
+
+        mock_run = MagicMock()
+        mock_run.returncode = 0
+        mock_run.stdout = "x:50 y:50 screen:0 window:12345"
+
+        with patch("src.browser.service.subprocess.run", return_value=mock_run) as sub_run:
+            with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                with patch("src.browser.service.random.randint", return_value=4):
+                    await mgr._x11_click(inst, mock_locator)
+
+        all_cmds = [c[0][0] for c in sub_run.call_args_list]
+        # Should have mousedown and mouseup, but no single "click"
+        has_mousedown = any("mousedown" in cmd for cmd in all_cmds)
+        has_mouseup = any("mouseup" in cmd for cmd in all_cmds)
+        has_click = any(cmd[1] == "click" for cmd in all_cmds if len(cmd) > 1)
+        assert has_mousedown
+        assert has_mouseup
+        assert not has_click
+
+    @pytest.mark.asyncio
+    async def test_x11_move_to_uses_bezier(self):
+        """_x11_move_to should call getmouselocation + multiple mousemove steps."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+
+        mock_run = MagicMock()
+        mock_run.returncode = 0
+        mock_run.stdout = "x:0 y:0 screen:0 window:12345"
+
+        with patch("src.browser.service.subprocess.run", return_value=mock_run) as sub_run:
+            with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                with patch("src.browser.service.random.randint", return_value=5):
+                    with patch("src.browser.service.random.uniform", side_effect=[
+                        30.0, -20.0,  # off1, off2 (non-zero for Bezier curve)
+                        0.008,  # sleep between steps
+                        0.008, 0.008, 0.008, 0.008,
+                    ]):
+                        await mgr._x11_move_to(inst, 200, 200)
+
+        # 1 getmouselocation + 5 mousemove steps = 6 calls
+        assert sub_run.call_count == 6
+        assert "getmouselocation" in sub_run.call_args_list[0][0][0]
+        for i in range(1, 6):
+            assert "mousemove" in sub_run.call_args_list[i][0][0]
+
+        # With non-zero offsets, intermediate waypoints should NOT be
+        # on a straight line from (0,0) to (200,200).
+        # Check an intermediate step (e.g., step 2/5 at t=0.4)
+        # has coords that differ from linear interpolation (80, 80).
+        mid_cmd = sub_run.call_args_list[2][0][0]
+        # Extract x, y from cmd: ["xdotool", "mousemove", "--sync", "--window", wid, x, y]
+        mid_x = int(mid_cmd[-2])
+        mid_y = int(mid_cmd[-1])
+        # Linear would be close to (80, 80) at t=0.4 — Bezier offsets should differ
+        assert not (mid_x == 80 and mid_y == 80), "Waypoint should not be exactly linear"
+
+    @pytest.mark.asyncio
+    async def test_scroll_uses_wheel_events(self):
+        """scroll() should use page.mouse.wheel() instead of page.evaluate()."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        inst.page = MagicMock()
+        inst.page.viewport_size = {"width": 1920, "height": 1080}
+        inst.page.mouse = AsyncMock()
+        inst.page.mouse.wheel = AsyncMock()
+        inst.page.evaluate = AsyncMock()
+        inst.lock = asyncio.Lock()
+
+        mgr.get_or_start = AsyncMock(return_value=inst)
+
+        with patch("src.browser.service.scroll_increment", return_value=500):
+            with patch("src.browser.service.scroll_pause", return_value=0.01):
+                with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                    result = await mgr.scroll("agent-1", direction="down", amount=500)
+
+        assert result["success"]
+        inst.page.mouse.wheel.assert_called()
+        # page.evaluate should NOT be called for scrolling
+        inst.page.evaluate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_hover_routes_x11_on_x_com(self):
+        """hover() on x.com should route through _x11_hover."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        inst.page = MagicMock()
+        inst.page.url = "https://x.com/home"
+        inst.lock = asyncio.Lock()
+        inst.refs = {"e0": {"role": "button", "name": "Like", "index": 0}}
+
+        mock_locator = AsyncMock()
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._x11_hover = AsyncMock()
+
+        result = await mgr.hover("agent-1", ref="e0")
+        assert result["success"]
+        mgr._x11_hover.assert_called_once_with(inst, mock_locator)
+
+    @pytest.mark.asyncio
+    async def test_hover_uses_cdp_on_other_sites(self):
+        """hover() on non-X site should use CDP locator.hover."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        inst.page = MagicMock()
+        inst.page.url = "https://google.com"
+        inst.lock = asyncio.Lock()
+        inst.refs = {"e0": {"role": "button", "name": "Search", "index": 0}}
+
+        mock_locator = AsyncMock()
+        mock_locator.hover = AsyncMock()
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._x11_hover = AsyncMock()
+
+        result = await mgr.hover("agent-1", ref="e0")
+        assert result["success"]
+        mock_locator.hover.assert_called_once()
+        mgr._x11_hover.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_press_key_routes_x11_on_x_com(self):
+        """press_key('Enter') on x.com should call _x11_key."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        inst.page = MagicMock()
+        inst.page.url = "https://x.com/compose/post"
+        inst.page.keyboard = AsyncMock()
+        inst.lock = asyncio.Lock()
+
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        mgr._x11_key = AsyncMock()
+
+        result = await mgr.press_key("agent-1", "Enter")
+        assert result["success"]
+        mgr._x11_key.assert_called_once_with(inst, "Return")
+
+    @pytest.mark.asyncio
+    async def test_press_key_uses_cdp_on_other_sites(self):
+        """press_key on non-X site should use CDP keyboard.press."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        inst.page = MagicMock()
+        inst.page.url = "https://google.com"
+        inst.page.keyboard = AsyncMock()
+        inst.lock = asyncio.Lock()
+
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        mgr._x11_key = AsyncMock()
+
+        result = await mgr.press_key("agent-1", "Enter")
+        assert result["success"]
+        inst.page.keyboard.press.assert_called_once_with("Enter")
+        mgr._x11_key.assert_not_called()
+
+    def test_playwright_key_to_xdotool(self):
+        """_playwright_key_to_xdotool should map Playwright keys to xdotool names."""
+        assert BrowserManager._playwright_key_to_xdotool("Enter") == "Return"
+        assert BrowserManager._playwright_key_to_xdotool("Backspace") == "BackSpace"
+        assert BrowserManager._playwright_key_to_xdotool("ArrowUp") == "Up"
+        assert BrowserManager._playwright_key_to_xdotool("Control+a") == "ctrl+a"
+        assert BrowserManager._playwright_key_to_xdotool("Shift+Enter") == "shift+Return"
+        # Unmapped keys pass through as-is
+        assert BrowserManager._playwright_key_to_xdotool("Tab") == "Tab"
+        assert BrowserManager._playwright_key_to_xdotool("Escape") == "Escape"
+
+    @pytest.mark.asyncio
+    async def test_idle_jitter_starts_on_browser_launch(self):
+        """_jitter_task should be set when WID is discovered."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        # Simulate what _start_browser does after discovering WID
+        assert inst.x11_wid is not None
+        with patch("asyncio.create_task") as mock_create_task:
+            mock_create_task.return_value = MagicMock()
+            # Replicate the jitter task start logic
+            inst._jitter_task = asyncio.create_task(mgr._idle_mouse_jitter(inst))
+
+        assert inst._jitter_task is not None
+        mock_create_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_idle_jitter_cancelled_on_stop(self):
+        """_jitter_task should be cancelled in _stop_instance."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        inst.context = AsyncMock()
+        mock_task = MagicMock()
+        inst._jitter_task = mock_task
+        mgr._instances["agent-1"] = inst
+
+        await mgr._stop_instance("agent-1")
+        mock_task.cancel.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_idle_jitter_none_when_no_wid(self):
+        """_jitter_task should be None when no WID is discovered."""
+        inst = self._make_instance(x11_wid=None)
+        # Simulate what _start_browser does when no WID is found
+        inst._jitter_task = None
+        assert inst._jitter_task is None

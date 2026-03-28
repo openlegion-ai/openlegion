@@ -75,6 +75,15 @@ _ARIA_FORCE_ROLES = frozenset({"button", "link"})
 # pointer events on modal close buttons silently fail in some SPAs
 # (X/Twitter compose modal, etc.).
 _MODAL_CLOSE_NAMES = frozenset({"close", "×", "✕", "✖"})
+# Playwright key names → xdotool key names. Playwright follows the KeyboardEvent.key
+# spec; xdotool uses X11 keysym names. Only keys that differ need mapping.
+_PLAYWRIGHT_TO_XDOTOOL = {
+    "Enter": "Return", "Backspace": "BackSpace", "Delete": "Delete",
+    "Space": "space", "ArrowUp": "Up", "ArrowDown": "Down",
+    "ArrowLeft": "Left", "ArrowRight": "Right", "PageUp": "Prior",
+    "PageDown": "Next", "Control": "ctrl", "Shift": "shift",
+    "Alt": "alt", "Meta": "super",
+}
 # CSS selector for modal dialog detection via DOM queries.
 # Used in both snapshot() (to scope the a11y tree) and _locator_from_ref()
 # (to scope click/type locators). Must stay in sync — hence a single constant.
@@ -442,12 +451,15 @@ class BrowserManager:
         if wid:
             inst.x11_wid = wid
             logger.debug("Agent '%s' browser window: X11 WID %d", agent_id, wid)
+            # Start idle mouse jitter for human-like fidgeting
+            inst._jitter_task = asyncio.create_task(self._idle_mouse_jitter(inst))
         else:
             logger.warning(
                 "Could not discover X11 WID for '%s' — interactions on "
                 "high-sensitivity sites will use CDP (isTrusted=false)",
                 agent_id,
             )
+            inst._jitter_task = None
 
         return inst
 
@@ -463,6 +475,9 @@ class BrowserManager:
             return
         if self._user_focused_agent == agent_id:
             self._user_focused_agent = None
+        jitter = getattr(inst, '_jitter_task', None)
+        if jitter:
+            jitter.cancel()
         try:
             await inst.context.close()
         except Exception as e:
@@ -903,45 +918,23 @@ class BrowserManager:
             pass  # Hover failed — click will still work
         await page.click(selector, timeout=timeout, force=False)
 
-    async def _x11_click(self, inst: CamoufoxInstance, locator) -> None:
-        """Click via xdotool for isTrusted=true events.
+    async def _x11_move_to(
+        self, inst: CamoufoxInstance, target_x: int, target_y: int,
+    ) -> None:
+        """Move mouse to (target_x, target_y) via xdotool with a Bezier trajectory.
 
-        Bot-detection systems (ArkoseLabs on X/Twitter) hook addEventListener
-        and reject clicks where event.isTrusted is false.  CDP-dispatched
-        clicks always have isTrusted=false.  xdotool injects real X11
-        ButtonPress/ButtonRelease events through the kernel input stack,
-        which the browser marks isTrusted=true.
-
-        Steps:
-        1. scroll_into_view_if_needed — ensures element is visible without
-           generating any mouse events (CDP hover produces isTrusted=false
-           mousemove events that create a detectable mixed-trust pattern)
-        2. Get element bounding box (viewport coords)
-        3. Multi-step xdotool mousemove trajectory for natural mouse movement
-        4. xdotool click at the target
+        Generates a natural-looking curved mouse path using cubic Bezier
+        interpolation with randomized control points. Real human wrist
+        movement produces slight S-curves, not straight lines.
         """
-        # 1. Scroll into view — no mouse events, just DOM scroll
-        await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
-        await asyncio.sleep(random.uniform(0.02, 0.06))
-
-        # 2. Get element center in viewport coords
-        box = await locator.bounding_box()
-        if not box:
-            raise RuntimeError("Element has no bounding box — not visible")
-        target_x = int(box["x"] + box["width"] / 2)
-        target_y = int(box["y"] + box["height"] / 2)
-
-        # 3. Move mouse via X11 with a natural trajectory
         wid = inst.x11_wid
         if not wid:
-            raise RuntimeError("No X11 window ID — cannot use xdotool click")
+            raise RuntimeError("No X11 window ID — cannot use xdotool move")
 
         wid_s = str(wid)
         loop = asyncio.get_running_loop()
 
-        # Get current mouse position (window-relative).
-        # Camoufox runs in kiosk mode at (0,0) on Xvnc, so screen coords
-        # equal window-relative coords.
+        # Get current mouse position
         start_x, start_y = 0, 0
         loc_result = await loop.run_in_executor(
             None,
@@ -957,19 +950,36 @@ class BrowserManager:
                 elif part.startswith("y:"):
                     start_y = int(part[2:])
 
-        # Generate intermediate waypoints for a natural arc
-        steps = random.randint(3, 5)
+        # Bezier control points — offset perpendicular to the line
+        dx = target_x - start_x
+        dy = target_y - start_y
+        dist = max(1, (dx * dx + dy * dy) ** 0.5)
+        # Perpendicular unit vector
+        perp_x, perp_y = -dy / dist, dx / dist
+        # Control points with randomized perpendicular offset (scaled by distance)
+        spread = min(dist * 0.3, 60)
+        off1 = random.uniform(-spread, spread)
+        off2 = random.uniform(-spread, spread)
+        cp1_x = start_x + dx * 0.25 + perp_x * off1
+        cp1_y = start_y + dy * 0.25 + perp_y * off1
+        cp2_x = start_x + dx * 0.75 + perp_x * off2
+        cp2_y = start_y + dy * 0.75 + perp_y * off2
+
+        # Walk the Bezier curve in 4-8 steps
+        steps = random.randint(4, 8)
         for i in range(1, steps + 1):
             t = i / steps
-            wp_x = int(start_x + (target_x - start_x) * t)
-            wp_y = int(start_y + (target_y - start_y) * t)
-            if i < steps:
-                wp_x = max(0, wp_x + random.randint(-12, 12))
-                wp_y = max(0, wp_y + random.randint(-6, 6))
-            logger.debug(
-                "X11 mousemove for '%s': step %d/%d (%d,%d) wid=%s",
-                inst.agent_id, i, steps, wp_x, wp_y, wid_s,
+            u = 1 - t
+            wp_x = int(
+                u**3 * start_x + 3 * u**2 * t * cp1_x
+                + 3 * u * t**2 * cp2_x + t**3 * target_x
             )
+            wp_y = int(
+                u**3 * start_y + 3 * u**2 * t * cp1_y
+                + 3 * u * t**2 * cp2_y + t**3 * target_y
+            )
+            wp_x = max(0, wp_x)
+            wp_y = max(0, wp_y)
             mv_result = await loop.run_in_executor(
                 None,
                 lambda x=wp_x, y=wp_y: subprocess.run(
@@ -982,17 +992,106 @@ class BrowserManager:
                 raise RuntimeError(
                     f"xdotool mousemove failed (rc={mv_result.returncode})"
                 )
-            await asyncio.sleep(random.uniform(0.005, 0.015))
+            await asyncio.sleep(random.uniform(0.004, 0.012))
 
-        # 4. Settle + click
+    async def _x11_click(self, inst: CamoufoxInstance, locator) -> None:
+        """Click via xdotool for isTrusted=true events.
+
+        Bot-detection systems (ArkoseLabs on X/Twitter) hook addEventListener
+        and reject clicks where event.isTrusted is false.  CDP-dispatched
+        clicks always have isTrusted=false.  xdotool injects real X11
+        ButtonPress/ButtonRelease events through the kernel input stack,
+        which the browser marks isTrusted=true.
+
+        Steps:
+        1. scroll_into_view_if_needed — ensures element is visible without
+           generating any mouse events (CDP hover produces isTrusted=false
+           mousemove events that create a detectable mixed-trust pattern)
+        2. Get element bounding box (viewport coords)
+        3. Bezier mouse trajectory via _x11_move_to
+        4. mousedown + human dwell + mouseup (not instant click)
+        """
+        # 1. Scroll into view — no mouse events, just DOM scroll
+        await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
+        await asyncio.sleep(random.uniform(0.02, 0.06))
+
+        # 2. Get element center in viewport coords
+        box = await locator.bounding_box()
+        if not box:
+            raise RuntimeError("Element has no bounding box — not visible")
+        target_x = int(box["x"] + box["width"] / 2)
+        target_y = int(box["y"] + box["height"] / 2)
+
+        wid = inst.x11_wid
+        if not wid:
+            raise RuntimeError("No X11 window ID — cannot use xdotool click")
+
+        # 3. Move mouse with natural Bezier trajectory
+        await self._x11_move_to(inst, target_x, target_y)
+
+        # 4. Click with human-like dwell time (mousedown -> hold -> mouseup)
+        wid_s = str(wid)
+        loop = asyncio.get_running_loop()
         await asyncio.sleep(random.uniform(0.01, 0.03))
         await loop.run_in_executor(
             None,
             lambda: subprocess.run(
-                ["xdotool", "click", "--clearmodifiers", "--window", wid_s, "1"],
+                ["xdotool", "mousedown", "--clearmodifiers", "--window", wid_s, "1"],
                 capture_output=True, timeout=3,
             ),
         )
+        await asyncio.sleep(random.uniform(0.05, 0.14))
+        await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "1"],
+                capture_output=True, timeout=3,
+            ),
+        )
+
+    async def _x11_hover(self, inst: CamoufoxInstance, locator) -> None:
+        """Move mouse to element via xdotool for isTrusted=true mousemove events."""
+        await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
+        await asyncio.sleep(random.uniform(0.02, 0.06))
+
+        box = await locator.bounding_box()
+        if not box:
+            raise RuntimeError("Element has no bounding box — not visible")
+        target_x = int(box["x"] + box["width"] / 2)
+        target_y = int(box["y"] + box["height"] / 2)
+
+        await self._x11_move_to(inst, target_x, target_y)
+
+    async def _idle_mouse_jitter(self, inst: CamoufoxInstance) -> None:
+        """Periodic mouse micro-movement to simulate human fidgeting.
+
+        Real users constantly micro-move the mouse while reading — small
+        drifts, twitches, and repositioning. A mouse that is perfectly
+        still for seconds between actions is a textbook bot pattern
+        detected by ArkoseLabs and DataDome.
+        """
+        while True:
+            await asyncio.sleep(random.uniform(2.0, 7.0))
+            if not inst.x11_wid or inst.lock.locked():
+                continue
+            try:
+                dx = random.randint(-3, 3)
+                dy = random.randint(-2, 2)
+                if dx == 0 and dy == 0:
+                    continue
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda _dx=dx, _dy=dy: subprocess.run(
+                        ["xdotool", "mousemove_relative", "--sync",
+                         "--", str(_dx), str(_dy)],
+                        capture_output=True, timeout=2,
+                    ),
+                )
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                pass
 
     async def _x11_type(self, inst: CamoufoxInstance, text: str) -> None:
         """Type text via xdotool for isTrusted=true key events.
@@ -1063,6 +1162,13 @@ class BrowserManager:
         )
         if result.returncode != 0:
             raise RuntimeError(f"xdotool key {key!r} failed (rc={result.returncode})")
+
+    @staticmethod
+    def _playwright_key_to_xdotool(key: str) -> str:
+        """Convert a Playwright key name to xdotool key name."""
+        parts = key.split("+")
+        mapped = [_PLAYWRIGHT_TO_XDOTOOL.get(p, p) for p in parts]
+        return "+".join(mapped)
 
     def _is_x11_site(self, inst: CamoufoxInstance) -> bool:
         """Check if current page is on a site needing X11 input bypass."""
@@ -1248,9 +1354,30 @@ class BrowserManager:
                     locator = self._locator_from_ref(inst, ref)
                     if not locator:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
-                    await locator.hover(timeout=_CLICK_TIMEOUT_MS)
+                    if inst.x11_wid and self._is_x11_site(inst):
+                        try:
+                            await self._x11_hover(inst, locator)
+                        except Exception as e:
+                            logger.warning(
+                                "X11 hover failed for '%s', falling back to CDP: %s",
+                                agent_id, e,
+                            )
+                            await locator.hover(timeout=_CLICK_TIMEOUT_MS)
+                    else:
+                        await locator.hover(timeout=_CLICK_TIMEOUT_MS)
                 elif selector:
-                    await inst.page.hover(selector, timeout=_CLICK_TIMEOUT_MS)
+                    if inst.x11_wid and self._is_x11_site(inst):
+                        loc = inst.page.locator(selector).first
+                        try:
+                            await self._x11_hover(inst, loc)
+                        except Exception as e:
+                            logger.warning(
+                                "X11 hover failed for '%s', falling back to CDP: %s",
+                                agent_id, e,
+                            )
+                            await inst.page.hover(selector, timeout=_CLICK_TIMEOUT_MS)
+                    else:
+                        await inst.page.hover(selector, timeout=_CLICK_TIMEOUT_MS)
                 else:
                     return {"success": False, "error": "Must provide ref or selector"}
                 await asyncio.sleep(action_delay())
@@ -1497,9 +1624,11 @@ class BrowserManager:
                 while scrolled < amount:
                     step = min(scroll_increment(), amount - scrolled)
                     delta = step * sign
-                    await inst.page.evaluate(
-                        "(d) => window.scrollBy({top: d, behavior: 'smooth'})", delta
-                    )
+                    # Use mouse.wheel() to dispatch real WheelEvent
+                    # (isTrusted=true). JS window.scrollBy() only fires
+                    # scroll events without wheel events — antibot systems
+                    # check for the presence of wheel events in the stream.
+                    await inst.page.mouse.wheel(0, delta)
                     scrolled += step
                     if scrolled < amount:
                         await asyncio.sleep(scroll_pause())
@@ -1584,7 +1713,18 @@ class BrowserManager:
         inst.touch()
         async with inst.lock:
             try:
-                await inst.page.keyboard.press(key)
+                if inst.x11_wid and self._is_x11_site(inst):
+                    xkey = self._playwright_key_to_xdotool(key)
+                    try:
+                        await self._x11_key(inst, xkey)
+                    except Exception as e:
+                        logger.warning(
+                            "X11 press_key failed for '%s', falling back to CDP: %s",
+                            agent_id, e,
+                        )
+                        await inst.page.keyboard.press(key)
+                else:
+                    await inst.page.keyboard.press(key)
                 await asyncio.sleep(action_delay())
                 return {"success": True, "data": {"pressed": key}}
             except Exception as e:
