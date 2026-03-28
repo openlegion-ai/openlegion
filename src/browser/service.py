@@ -84,17 +84,6 @@ _MODAL_SELECTOR = (
     'dialog[open]'
 )
 
-# CSS selectors for elements guarded by bot-detection (ArkoseLabs, etc.)
-# that check event.isTrusted on click/keydown. CDP-dispatched events have
-# isTrusted=false; routing these through xdotool (real X11 input) produces
-# kernel-level events that the browser marks isTrusted=true.
-_X11_CLICK_SELECTORS = frozenset({
-    '[data-testid="tweetButtonInline"]',   # Post/tweet submit
-    '[data-testid="tweetButton"]',         # Reply submit
-})
-_X11_TYPE_SELECTORS = frozenset({
-    '[data-testid="tweetTextarea_0"]',     # Tweet composer
-})
 
 # ── JS-based accessibility tree builder ──────────────────────────────────
 # Fallback when page.accessibility.snapshot() is unavailable (Camoufox
@@ -417,7 +406,7 @@ class BrowserManager:
         assigns incrementing IDs — the highest is the most recently created
         (the main browser window, not a transient popup from startup).
         """
-        for _ in range(15):  # up to ~3s
+        for _ in range(30):  # up to ~6s
             current = await self._get_firefox_wids()
             new = current - before
             if new:
@@ -454,7 +443,11 @@ class BrowserManager:
             inst.x11_wid = wid
             logger.debug("Agent '%s' browser window: X11 WID %d", agent_id, wid)
         else:
-            logger.debug("Could not discover X11 WID for '%s', focus will use fallback", agent_id)
+            logger.warning(
+                "Could not discover X11 WID for '%s' — interactions on "
+                "high-sensitivity sites will use CDP (isTrusted=false)",
+                agent_id,
+            )
 
         return inst
 
@@ -920,23 +913,25 @@ class BrowserManager:
         which the browser marks isTrusted=true.
 
         Steps:
-        1. Hover to scroll into view + generate natural mouse movement
+        1. scroll_into_view_if_needed — ensures element is visible without
+           generating any mouse events (CDP hover produces isTrusted=false
+           mousemove events that create a detectable mixed-trust pattern)
         2. Get element bounding box (viewport coords)
-        3. xdotool mousemove + click using viewport coords with --window
-           (Camoufox runs without chrome, so viewport origin = window origin)
+        3. Multi-step xdotool mousemove trajectory for natural mouse movement
+        4. xdotool click at the target
         """
-        # 1. Hover first — scrolls into view and generates mouse trail
-        await locator.hover(timeout=_CLICK_TIMEOUT_MS)
+        # 1. Scroll into view — no mouse events, just DOM scroll
+        await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
         await asyncio.sleep(random.uniform(0.02, 0.06))
 
         # 2. Get element center in viewport coords
         box = await locator.bounding_box()
         if not box:
             raise RuntimeError("Element has no bounding box — not visible")
-        vp_x = int(box["x"] + box["width"] / 2)
-        vp_y = int(box["y"] + box["height"] / 2)
+        target_x = int(box["x"] + box["width"] / 2)
+        target_y = int(box["y"] + box["height"] / 2)
 
-        # 3. Move mouse and click via X11
+        # 3. Move mouse via X11 with a natural trajectory
         wid = inst.x11_wid
         if not wid:
             raise RuntimeError("No X11 window ID — cannot use xdotool click")
@@ -944,25 +939,52 @@ class BrowserManager:
         wid_s = str(wid)
         loop = asyncio.get_running_loop()
 
-        # xdotool mousemove --window makes coords relative to the window.
-        # Camoufox runs without browser chrome (kiosk, no Openbox decorations),
-        # so Playwright viewport coords map directly to window-relative coords.
-        logger.debug(
-            "X11 click for '%s': viewport=(%d,%d) wid=%s",
-            inst.agent_id, vp_x, vp_y, wid_s,
-        )
-        mv_result = await loop.run_in_executor(
+        # Get current mouse position (window-relative).
+        # Camoufox runs in kiosk mode at (0,0) on Xvnc, so screen coords
+        # equal window-relative coords.
+        start_x, start_y = 0, 0
+        loc_result = await loop.run_in_executor(
             None,
             lambda: subprocess.run(
-                ["xdotool", "mousemove", "--sync", "--window", wid_s,
-                 str(vp_x), str(vp_y)],
-                capture_output=True, timeout=3,
+                ["xdotool", "getmouselocation"],
+                capture_output=True, text=True, timeout=3,
             ),
         )
-        if mv_result.returncode != 0:
-            raise RuntimeError(
-                f"xdotool mousemove failed (rc={mv_result.returncode})"
+        if loc_result.returncode == 0:
+            for part in loc_result.stdout.split():
+                if part.startswith("x:"):
+                    start_x = int(part[2:])
+                elif part.startswith("y:"):
+                    start_y = int(part[2:])
+
+        # Generate intermediate waypoints for a natural arc
+        steps = random.randint(3, 5)
+        for i in range(1, steps + 1):
+            t = i / steps
+            wp_x = int(start_x + (target_x - start_x) * t)
+            wp_y = int(start_y + (target_y - start_y) * t)
+            if i < steps:
+                wp_x = max(0, wp_x + random.randint(-12, 12))
+                wp_y = max(0, wp_y + random.randint(-6, 6))
+            logger.debug(
+                "X11 mousemove for '%s': step %d/%d (%d,%d) wid=%s",
+                inst.agent_id, i, steps, wp_x, wp_y, wid_s,
             )
+            mv_result = await loop.run_in_executor(
+                None,
+                lambda x=wp_x, y=wp_y: subprocess.run(
+                    ["xdotool", "mousemove", "--sync", "--window", wid_s,
+                     str(x), str(y)],
+                    capture_output=True, timeout=3,
+                ),
+            )
+            if mv_result.returncode != 0:
+                raise RuntimeError(
+                    f"xdotool mousemove failed (rc={mv_result.returncode})"
+                )
+            await asyncio.sleep(random.uniform(0.005, 0.015))
+
+        # 4. Settle + click
         await asyncio.sleep(random.uniform(0.01, 0.03))
         await loop.run_in_executor(
             None,
@@ -1026,29 +1048,24 @@ class BrowserManager:
             await asyncio.sleep(keystroke_delay(char))
             prev_char = char
 
-    def _is_x11_click_target(self, selector: str | None) -> bool:
-        """Check if a CSS selector matches a high-sensitivity click target."""
-        if not selector:
-            return False
-        return selector in _X11_CLICK_SELECTORS
+    async def _x11_key(self, inst: CamoufoxInstance, key: str) -> None:
+        """Send a key combination via xdotool for isTrusted=true key events."""
+        wid = inst.x11_wid
+        if not wid:
+            raise RuntimeError("No X11 window ID — cannot use xdotool key")
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["xdotool", "key", "--clearmodifiers", "--window", str(wid), key],
+                capture_output=True, timeout=3,
+            ),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"xdotool key {key!r} failed (rc={result.returncode})")
 
-    def _is_x11_type_target(self, selector: str | None) -> bool:
-        """Check if a CSS selector matches a high-sensitivity type target."""
-        if not selector:
-            return False
-        return selector in _X11_TYPE_SELECTORS
-
-    def _is_x11_type_ref(self, inst: CamoufoxInstance, ref: str) -> bool:
-        """Check if a ref targets a textbox on a site with bot-detection.
-
-        ArkoseLabs on X/Twitter checks isTrusted on keydown in composer
-        textboxes.  When the agent types by ref (common path — agents use
-        refs from snapshot, not CSS selectors), we detect the site by URL
-        and apply X11 typing to all textbox-role elements.
-        """
-        info = inst.refs.get(ref)
-        if not info or info.get("role") != "textbox":
-            return False
+    def _is_x11_site(self, inst: CamoufoxInstance) -> bool:
+        """Check if current page is on a site needing X11 input bypass."""
         try:
             host = urlparse(inst.page.url).hostname or ""
         except Exception:
@@ -1057,18 +1074,6 @@ class BrowserManager:
             host == "x.com" or host.endswith(".x.com")
             or host == "twitter.com" or host.endswith(".twitter.com")
         )
-
-    def _ref_to_x11_selector(self, inst: CamoufoxInstance, ref: str) -> str | None:
-        """If a ref's element matches a known X11 click selector, return it."""
-        info = inst.refs.get(ref)
-        if not info:
-            return None
-        # Map known button names to their X11 selectors
-        name = (info.get("name") or "").lower().strip()
-        role = info.get("role", "")
-        if role == "button" and name in ("post", "reply"):
-            return '[data-testid="tweetButton"]'
-        return None
 
     async def click(
         self, agent_id: str, ref: str | None = None,
@@ -1113,18 +1118,30 @@ class BrowserManager:
                         )
                     locator = self._locator_from_ref(inst, ref)
                     if locator:
-                        # Check if the ref resolves to an X11 click target
-                        ref_selector = self._ref_to_x11_selector(inst, ref)
-                        if ref_selector and inst.x11_wid:
-                            await self._x11_click(inst, locator)
+                        if inst.x11_wid and self._is_x11_site(inst):
+                            try:
+                                await self._x11_click(inst, locator)
+                            except Exception as e:
+                                logger.warning(
+                                    "X11 click failed for '%s', falling back to CDP: %s",
+                                    agent_id, e,
+                                )
+                                await self._human_click(inst.page, locator, force=use_force)
                         else:
                             await self._human_click(inst.page, locator, force=use_force)
                     else:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
                 elif selector:
-                    if self._is_x11_click_target(selector) and inst.x11_wid:
-                        locator = inst.page.locator(selector).first
-                        await self._x11_click(inst, locator)
+                    if inst.x11_wid and self._is_x11_site(inst):
+                        loc = inst.page.locator(selector).first
+                        try:
+                            await self._x11_click(inst, loc)
+                        except Exception as e:
+                            logger.warning(
+                                "X11 click failed for '%s' (selector), falling back to CDP: %s",
+                                agent_id, e,
+                            )
+                            await self._human_click_selector(inst.page, selector, force=force)
                     else:
                         await self._human_click_selector(inst.page, selector, force=force)
                 else:
@@ -1164,7 +1181,13 @@ class BrowserManager:
                                 "modal for %s — sending Escape",
                                 agent_id,
                             )
-                            await inst.page.keyboard.press("Escape")
+                            if inst.x11_wid and self._is_x11_site(inst):
+                                try:
+                                    await self._x11_key(inst, "Escape")
+                                except Exception:
+                                    await inst.page.keyboard.press("Escape")
+                            else:
+                                await inst.page.keyboard.press("Escape")
                             await asyncio.sleep(0.5)
                             # Escape may surface a confirmation dialog
                             # (e.g. "Discard draft?" on X/Twitter).
@@ -1176,10 +1199,21 @@ class BrowserManager:
                                     "button", name="Discard",
                                 )
                                 if await confirm.count() > 0:
-                                    await self._human_click(
-                                        inst.page, confirm.first,
-                                        force=True,
-                                    )
+                                    if inst.x11_wid and self._is_x11_site(inst):
+                                        try:
+                                            await self._x11_click(
+                                                inst, confirm.first,
+                                            )
+                                        except Exception:
+                                            await self._human_click(
+                                                inst.page, confirm.first,
+                                                force=True,
+                                            )
+                                    else:
+                                        await self._human_click(
+                                            inst.page, confirm.first,
+                                            force=True,
+                                        )
                                     await asyncio.sleep(action_delay())
                                     logger.info(
                                         "Clicked Discard on confirmation"
@@ -1238,18 +1272,46 @@ class BrowserManager:
         inst.touch()
         async with inst.lock:
             try:
-                # Always click to focus, then optionally select-all to clear.
+                # Click to focus, then optionally select-all to clear.
                 # Never use fill() — it atomically sets the DOM value and bypasses
                 # the keyboard event chain, so React/Vue apps (e.g. X's tweet
                 # composer) don't see individual keystrokes and won't activate
                 # submit buttons or update their controlled-component state.
+                #
+                # On X11 sites (x.com/twitter.com), the entire interaction chain
+                # (focus click, select-all, typing) must use X11 input so all
+                # events carry isTrusted=true. Mixed CDP+X11 sequences create
+                # a detectable signal for ArkoseLabs.
+                _use_x11 = bool(inst.x11_wid) and self._is_x11_site(inst)
+
                 if ref and ref in inst.refs:
                     locator = self._locator_from_ref(inst, ref)
                     if not locator:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
-                    await self._human_click(inst.page, locator)
+                    if _use_x11:
+                        try:
+                            await self._x11_click(inst, locator)
+                        except Exception as e:
+                            logger.warning(
+                                "X11 focus click failed for '%s', falling back to CDP: %s",
+                                agent_id, e,
+                            )
+                            await self._human_click(inst.page, locator)
+                    else:
+                        await self._human_click(inst.page, locator)
                 elif selector:
-                    await self._human_click_selector(inst.page, selector)
+                    if _use_x11:
+                        loc = inst.page.locator(selector).first
+                        try:
+                            await self._x11_click(inst, loc)
+                        except Exception as e:
+                            logger.warning(
+                                "X11 focus click failed for '%s', falling back to CDP: %s",
+                                agent_id, e,
+                            )
+                            await self._human_click_selector(inst.page, selector)
+                    else:
+                        await self._human_click_selector(inst.page, selector)
                 else:
                     return {"success": False, "error": "Must provide ref or selector"}
 
@@ -1258,17 +1320,20 @@ class BrowserManager:
                 await asyncio.sleep(0.10 if fast else action_delay())
 
                 if clear:
-                    await inst.page.keyboard.press("Control+a")
+                    if _use_x11:
+                        try:
+                            await self._x11_key(inst, "ctrl+a")
+                        except Exception as e:
+                            logger.warning(
+                                "X11 ctrl+a failed for '%s', falling back to CDP: %s",
+                                agent_id, e,
+                            )
+                            await inst.page.keyboard.press("Control+a")
+                    else:
+                        await inst.page.keyboard.press("Control+a")
                     await asyncio.sleep(0.05)
 
-                # Use X11 input for high-sensitivity text fields (tweet composer).
-                # Check both CSS selector match and ref-based detection (agents
-                # commonly type by ref from the snapshot, not by CSS selector).
-                _use_x11_type = inst.x11_wid and (
-                    self._is_x11_type_target(selector)
-                    or (ref and self._is_x11_type_ref(inst, ref))
-                )
-                if _use_x11_type:
+                if _use_x11:
                     await self._x11_type(inst, text)
                 elif fast:
                     await self._type_fast(inst.page, text)
