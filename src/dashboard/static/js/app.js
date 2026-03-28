@@ -3301,7 +3301,7 @@ function dashboard() {
         this.activeChatId = agentId;
         if (this.chatUnread[agentId]) this.chatUnread = { ...this.chatUnread, [agentId]: 0 };
         this.$nextTick(() => {
-          this._scrollChat(agentId);
+          this._scrollChat(agentId, true);
           const input = document.getElementById('chat-slide-input');
           if (input) input.focus();
         });
@@ -3313,7 +3313,7 @@ function dashboard() {
       this.activeChatId = agentId;
       // Load from server if local history is empty
       this._loadChatHistory(agentId);
-      this.$nextTick(() => this._scrollChat(agentId));
+      this.$nextTick(() => this._scrollChat(agentId, true));
     },
 
     closeChat(agentId) {
@@ -3345,12 +3345,15 @@ function dashboard() {
 
     _scrollTimers: {},
 
-    _scrollChat(agentId) {
+    _scrollChat(agentId, force) {
       if (this._scrollTimers[agentId]) return;
       this._scrollTimers[agentId] = setTimeout(() => {
         delete this._scrollTimers[agentId];
         const el = document.getElementById('chat-messages-' + agentId);
-        if (el) el.scrollTop = el.scrollHeight;
+        if (!el) return;
+        // Only auto-scroll if user is near the bottom (within 150px) or forced
+        const nearBottom = force || (el.scrollHeight - el.scrollTop - el.clientHeight < 150);
+        if (nearBottom) el.scrollTop = el.scrollHeight;
       }, 50);
     },
 
@@ -3439,33 +3442,6 @@ function dashboard() {
         done: 'chat-phase-done',
         error: 'chat-phase-error',
       })[phase] || 'chat-phase-neutral';
-    },
-
-    renderChatMarkdown(text) {
-      const source = String(text ?? '');
-      if (!source) return '';
-      const fallback = this._escapeHtml(source).replace(/\n/g, '<br>');
-      const markedLib = window.marked;
-      const purify = window.DOMPurify;
-      if (!markedLib || !purify) return fallback;
-      try {
-        const raw = markedLib.parse(source, {
-          gfm: true,
-          breaks: true,
-          headerIds: false,
-          mangle: false,
-        });
-        const sanitized = purify.sanitize(raw, { USE_PROFILES: { html: true } });
-        const tpl = document.createElement('template');
-        tpl.innerHTML = sanitized;
-        tpl.content.querySelectorAll('a[href]').forEach((a) => {
-          a.setAttribute('target', '_blank');
-          a.setAttribute('rel', 'noopener noreferrer');
-        });
-        return tpl.innerHTML;
-      } catch (_) {
-        return fallback;
-      }
     },
 
     _normalizeEventTs(evt) {
@@ -3561,7 +3537,7 @@ function dashboard() {
       const idx = this.chatHistories[agentId].length - 1;
       this._chatStreamTarget[agentId] = idx;
       this._pushChatTimelinePhase(this.chatHistories[agentId][idx], 'thinking');
-      this.$nextTick(() => this._scrollChat(agentId));
+      this.$nextTick(() => this._scrollChat(agentId, true));
 
       const controller = new AbortController();
       this._chatAborts[agentId] = controller;
@@ -3673,37 +3649,39 @@ function dashboard() {
           this.chatHistories[agentId][finalIdx].phase = 'done';
         }
       } catch (e) {
-        if (e.name === 'AbortError') { clearTimeout(streamTimeout); return; }
-        const entry = this.chatHistories[agentId][this._chatStreamTarget[agentId]];
-        const hadContent = !!(entry.content || (entry.tools && entry.tools.length > 0));
-        if (hadContent) {
-          // Stream interrupted (e.g. tab backgrounded on mobile) but we have partial data.
-          // Mark any running tools as done and finalize the message gracefully.
-          entry.streaming = false;
-          entry.phase = 'done';
-          if (Array.isArray(entry.tools)) {
-            entry.tools.forEach(t => { if (t.status === 'running') t.status = 'done'; });
+        if (e.name !== 'AbortError') {
+          const entry = this.chatHistories[agentId][this._chatStreamTarget[agentId]];
+          const hadContent = !!(entry && (entry.content || (entry.tools && entry.tools.length > 0)));
+          if (entry && hadContent) {
+            // Stream interrupted (e.g. tab backgrounded on mobile) but we have partial data.
+            // Mark any running tools as done and finalize the message gracefully.
+            entry.streaming = false;
+            entry.phase = 'done';
+            if (Array.isArray(entry.tools)) {
+              entry.tools.forEach(t => { if (t.status === 'running') t.status = 'done'; });
+            }
+            if (Array.isArray(entry.timeline)) {
+              entry.timeline.forEach(t => { if (t.status === 'running') t.status = 'done'; });
+            }
+          } else if (entry) {
+            // No content at all — show error but with a friendlier message
+            entry.content = 'Connection interrupted — please try again.';
+            entry.role = 'error';
+            entry.streaming = false;
+            entry.phase = 'error';
+            this._pushChatTimelinePhase(entry, 'error');
           }
-          if (Array.isArray(entry.timeline)) {
-            entry.timeline.forEach(t => { if (t.status === 'running') t.status = 'done'; });
-          }
-        } else {
-          // No content at all — show error but with a friendlier message
-          entry.content = 'Connection interrupted — please try again.';
-          entry.role = 'error';
-          entry.streaming = false;
-          entry.phase = 'error';
-          this._pushChatTimelinePhase(entry, 'error');
         }
+      } finally {
+        clearTimeout(streamTimeout);
+        delete this._chatAborts[agentId];
+        delete this._chatStreamTarget[agentId];
+        this.chatLoadingAgents[agentId] = false;
+        this.chatStreamingAgents[agentId] = false;
+        this.$nextTick(() => this._scrollChat(agentId));
+        this._saveChatToSession();
+        this.fetchQueues();
       }
-      clearTimeout(streamTimeout);
-      delete this._chatAborts[agentId];
-      delete this._chatStreamTarget[agentId];
-      this.chatLoadingAgents[agentId] = false;
-      this.chatStreamingAgents[agentId] = false;
-      this.$nextTick(() => this._scrollChat(agentId));
-      this._saveChatToSession();
-      this.fetchQueues();
     },
 
     isAgentBusy(agentId) {
@@ -3750,7 +3728,7 @@ function dashboard() {
         const newIdx = this.chatHistories[agentId].length - 1;
         this._chatStreamTarget[agentId] = newIdx;
         this._pushChatTimelinePhase(this.chatHistories[agentId][newIdx], 'thinking');
-        this.$nextTick(() => this._scrollChat(agentId));
+        this.$nextTick(() => this._scrollChat(agentId, true));
       }
 
       try {
@@ -3951,6 +3929,13 @@ function dashboard() {
     async resetAgent(agentId) {
       this.showConfirm('Reset Conversation', `Start a fresh conversation with "${agentId}"? The conversation thread is wiped, but memories and skills are preserved.`, async () => {
         try {
+          // Abort active stream and recovery before clearing history
+          if (this._chatAborts[agentId]) {
+            this._chatAborts[agentId].abort();
+            delete this._chatAborts[agentId];
+          }
+          delete this._chatStreamTarget[agentId];
+          this._stopChatRecovery(agentId);
           const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/reset`, { method: 'POST' });
           if (resp.ok) {
             this.showToast(`${agentId} conversation reset`);
