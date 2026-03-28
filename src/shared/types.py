@@ -322,6 +322,7 @@ class DashboardEvent(BaseModel):
         "message_received",
         "tool_start",
         "tool_result",
+        "text_delta",
         "llm_call",
         "blackboard_write",
         "health_change",
@@ -329,6 +330,8 @@ class DashboardEvent(BaseModel):
         "workspace_updated",
         "heartbeat_complete",
         "cron_change",
+        "chat_user_message",
+        "chat_done",
     ]
     agent: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
