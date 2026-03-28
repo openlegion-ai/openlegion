@@ -3366,7 +3366,9 @@ class TestDialogScoping:
 
         # Should have fallen back to full tree since dialog had no actionable refs
         assert "Submit" in snap
-        assert inst.dialog_active is False
+        # dialog_active stays True so _locator_from_ref stays scoped to the
+        # modal — prevents clicks from targeting elements behind the overlay
+        assert inst.dialog_active is True
         # dialog_detected stays True — modal existed, just couldn't scope
         assert inst.dialog_detected is True
         assert "could not be isolated" in snap
@@ -3499,7 +3501,9 @@ class TestDialogScoping:
         # Should have fallen back to full tree
         assert len(refs) > 0
         assert "Home" in snap  # Full tree elements visible
-        assert inst.dialog_active is False  # Fallback clears dialog flag
+        # dialog_active stays True so _locator_from_ref stays scoped to
+        # modal — prevents clicks from targeting elements behind the overlay
+        assert inst.dialog_active is True
         assert inst.dialog_detected is True  # Modal was detected
         assert "could not be isolated" in snap  # Warning preserved
 
@@ -3539,7 +3543,9 @@ class TestDialogScoping:
         refs = result["data"]["refs"]
         assert len(refs) == 1
         assert refs["e0"]["name"] == "Submit"
-        assert inst.dialog_active is False
+        # dialog_active stays True so _locator_from_ref stays scoped to
+        # modal — prevents clicks from targeting elements behind the overlay
+        assert inst.dialog_active is True
         assert inst.dialog_detected is True  # Modal was detected
 
     @pytest.mark.asyncio
@@ -4883,3 +4889,116 @@ class TestX11Input:
         # Simulate what _start_browser does when no WID is found
         inst._jitter_task = None
         assert inst._jitter_task is None
+
+
+# -- Modal retry stale handle tests ----------------------------------------
+
+
+class TestModalRetryRequery:
+    """Tests that modal retry loop re-queries fresh element handles."""
+
+    @pytest.mark.asyncio
+    async def test_modal_retry_re_queries_elements(self):
+        """Retry loop should re-query modal elements (handles go stale on SPA re-render)."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        full_tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Post", "disabled": True},
+                {"role": "link", "name": "Home"},
+            ],
+        }
+        # Stale handle produces no a11y tree; fresh handle has content
+        dialog_tree = {
+            "role": "dialog", "name": "Compose",
+            "children": [
+                {"role": "textbox", "name": "What is happening?!"},
+                {"role": "button", "name": "Post"},
+            ],
+        }
+
+        stale_el = AsyncMock()
+        stale_el.is_visible = AsyncMock(return_value=True)
+        fresh_el = AsyncMock()
+        fresh_el.is_visible = AsyncMock(return_value=True)
+
+        query_call_count = [0]
+
+        async def mock_query_selector_all(sel):
+            query_call_count[0] += 1
+            if query_call_count[0] == 1:
+                return [stale_el]   # initial query
+            return [fresh_el]       # retry queries
+
+        mock_page = AsyncMock()
+        mock_page.query_selector_all = mock_query_selector_all
+
+        async def _snapshot(root=None):
+            if root is stale_el:
+                return None  # stale handle fails silently
+            if root is fresh_el:
+                return dialog_tree
+            return full_tree
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(side_effect=_snapshot)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        assert inst.dialog_active is True
+        # Should have re-queried at least once during retry
+        assert query_call_count[0] >= 2
+        # Fresh handle should have produced the Post button
+        post_refs = [r for r in inst.refs.values()
+                     if r["role"] == "button" and r["name"] == "Post"]
+        assert len(post_refs) == 1
+        # Sidebar elements should be excluded
+        assert "Home" not in result["data"]["snapshot"]
+
+    @pytest.mark.asyncio
+    async def test_modal_fallback_keeps_dialog_active_true(self):
+        """When modal scoping fails completely, dialog_active should stay True
+        so _locator_from_ref stays scoped to the modal and prevents clicks
+        from targeting elements behind the overlay.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        full_tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "button", "name": "Post"},
+                {"role": "link", "name": "Home"},
+            ],
+        }
+
+        # Modal is visible but a11y tree always returns None (scoping always fails)
+        modal_el = AsyncMock()
+        modal_el.is_visible = AsyncMock(return_value=True)
+        modal_el.evaluate = AsyncMock(return_value=None)
+
+        mock_page = AsyncMock()
+        mock_page.query_selector_all = AsyncMock(return_value=[modal_el])
+
+        async def _snapshot(root=None):
+            if root is not None:
+                return None  # Modal scoping always fails
+            return full_tree
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(side_effect=_snapshot)
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.snapshot("a1")
+        assert result["success"] is True
+        # dialog_active must stay True to prevent clicking behind modal
+        assert inst.dialog_active is True
+        assert inst.dialog_detected is True
+        # Full tree is shown as fallback
+        assert "Post" in result["data"]["snapshot"]
+        assert "could not be isolated" in result["data"]["snapshot"]

@@ -812,6 +812,17 @@ class BrowserManager:
                     ref_counter[0] = 0
                     occurrence_counts.clear()
                     lines.append("** Modal dialog is open — only dialog elements are shown **")
+                    # Re-query modal elements — handles go stale when SPAs
+                    # like X/Twitter re-render the modal during the wait.
+                    fresh_modals = []
+                    for el in (await inst.page.query_selector_all(_MODAL_SELECTOR)):
+                        try:
+                            if await el.is_visible():
+                                fresh_modals.append(el)
+                        except Exception:
+                            pass
+                    if fresh_modals:
+                        visible_modals = fresh_modals
                     for el in visible_modals:
                         try:
                             subtree = await self._build_a11y_tree(inst, root=el)
@@ -828,7 +839,12 @@ class BrowserManager:
                         "refs after retries — falling back to full tree "
                         "for %s", agent_id,
                     )
-                    inst.dialog_active = False
+                    # Keep dialog_active=True so _locator_from_ref stays
+                    # scoped to modal elements.  This prevents clicks from
+                    # targeting elements behind the overlay (e.g. X's feed
+                    # "Post" button behind the compose modal).  A modal-
+                    # scoped click that can't find the element will timeout
+                    # rather than hit the wrong target.
                     lines.clear()
                     lines.append(
                         "** A modal dialog is open but its elements could "
