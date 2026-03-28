@@ -724,6 +724,15 @@ Teammates read your status to decide whether to wait or proceed.
 You can still use the lower-level tools (read_blackboard, write_blackboard,
 publish_event) for custom patterns, but prefer the coordination tools above
 for inter-agent workflows.
+
+## Custom Skills
+
+You can create reusable tools with `create_skill`. Custom skills are Python
+functions decorated with `@skill` that get framework dependencies injected
+automatically. Key capability: `mesh_client.browser_command(action, params)`
+lets you build multi-step browser automation workflows — it's the same API
+that browser_navigate, browser_click, and all browser tools use internally.
+Call `reload_skills` after creating a skill to activate it.
 """
 
 
