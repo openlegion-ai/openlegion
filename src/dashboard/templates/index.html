@@ -4316,7 +4316,7 @@
             </button>
           </div>
         </div>
-        <!-- Horizontal agent tab strip — visible until sidebar expands with names at xl (1280px) -->
+        <!-- Horizontal agent tab strip — mobile only (sidebar replaces it on md+) -->
         <div x-show="openChats.length > 1" x-cloak class="md:hidden flex overflow-x-auto border-b border-gray-800/60 shrink-0 bg-gray-950/60">
           <template x-for="chatId in openChats" :key="chatId">
             <button @click="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId, true))"
