@@ -248,6 +248,12 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - **Branch naming:** `feat/`, `fix/`, `refactor/`, `docs/`, etc.
 - **Commit style:** descriptive subject line, body explains "why". No Co-Authored-By trailers.
 
+## Work Patterns
+
+- **Use subagents to parallelize independent work.** When a task decomposes into independent subtasks (e.g., editing unrelated files, researching separate questions), dispatch them as concurrent subagents rather than working sequentially.
+- **Always run tests in a subagent.** Keeps test output out of the main context window.
+- **Use Explore subagents for broad codebase research.** Reserve direct Glob/Grep for targeted, known-location searches.
+
 ## Testing
 
 ```bash
@@ -258,7 +264,6 @@ pytest tests/ --ignore=tests/test_e2e.py --ignore=tests/test_e2e_chat.py --ignor
 pytest tests/test_loop.py -x -v
 ```
 
-- **Always run tests in a subagent.** Use the Agent tool so the main context window isn't polluted.
 - Mock LLM responses, not the loop. See `tests/test_loop.py:_make_loop()`.
 - `AsyncMock` for async methods, SQLite in-memory or `tmp_path` for DB paths.
 - E2E tests skip gracefully without Docker + API key.
