@@ -350,7 +350,7 @@
         </div>
         <!-- ═══ PROJECT HUB (unified: Context · Activity · State · Files · Broadcast) ═══ -->
         <div x-show="activeProject && agents.length > 0" x-cloak class="mb-4">
-          <div class="bg-gray-900 border border-gray-800 rounded-xl">
+          <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
             <!-- Hub header — always visible -->
             <div class="flex items-center gap-2 px-3 sm:px-4 py-2.5 cursor-pointer select-none min-w-0"
               @click="projectHubExpanded = !projectHubExpanded">
@@ -367,7 +367,7 @@
               <span x-show="activeProjectData?.description" class="text-[10px] text-gray-600 truncate hidden sm:block"
                 :title="activeProjectData?.description" x-text="activeProjectData?.description"></span>
               <!-- Tab pills — desktop only, click stops propagation to header toggle -->
-              <div class="hidden md:flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Project sections">
+              <div class="project-hub-desktop-tabs hidden md:flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Project sections">
                 <button @click="projectHubExpanded = true; projectHubTab = 'docs'"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
                   :class="projectHubExpanded && projectHubTab === 'docs' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
@@ -428,7 +428,7 @@
             <!-- Hub body — collapsible -->
             <div x-show="projectHubExpanded" x-transition class="border-t border-gray-800/60">
               <!-- Mobile tab strip (sm:hidden) -->
-              <div class="project-hub-tabs md:hidden" role="tablist" aria-label="Project sections">
+              <div class="project-hub-tabs project-hub-mobile-tabs md:hidden" role="tablist" aria-label="Project sections">
                 <button @click="projectHubTab = 'docs'"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
                   :class="projectHubTab === 'docs' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
@@ -605,7 +605,7 @@
                 </div>
                 <!-- Write form -->
                 <div x-show="bbWriteMode" x-cloak class="border border-gray-800 rounded-lg p-3 mb-3">
-                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 chat-grid">
                     <div>
                       <label class="text-[10px] text-gray-500 mb-1 block">Key</label>
                       <input type="text" x-model="bbNewKey" :disabled="bbWriteLoading" placeholder="status/my_agent" class="dash-input w-full text-xs">
@@ -790,7 +790,7 @@
                 <!-- Add member -->
                 <div x-show="unassignedAgents.length > 0 && !activeProjectData?.over_limit" x-cloak>
                   <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Add Agent</div>
-                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-1.5 chat-grid">
                     <template x-for="a in unassignedAgents" :key="a.id">
                       <button @click="addMember(activeProject, a.id)"
                         class="flex items-center gap-2.5 py-2 px-3 rounded-lg border border-dashed border-gray-700/60 hover:border-indigo-500/40 hover:bg-indigo-900/10 transition-all text-left">
