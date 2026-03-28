@@ -767,18 +767,35 @@ select:focus-visible,
   transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* Tablet / small desktop (768-1279px): fixed-width panel so content keeps room */
 .messenger-half {
-  width: 50vw;
-  min-width: 400px;
-  max-width: 100vw;
+  width: 380px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .messenger-full {
-  width: 100vw;
+  width: 100%;
+}
+
+/* Large screens (1280px+): half-viewport panel */
+@media (min-width: 1280px) {
+  .messenger-half {
+    width: 50vw;
+    min-width: 400px;
+    max-width: 100%;
+  }
+}
+
+/* Mobile (< 768px): full-screen takeover */
+@media (max-width: 767px) {
+  .messenger-half {
+    width: 100%;
+  }
 }
 
 /* Sidebar: compact (avatar-only) by default, expanded on wide screens.
-   The sidebar has `hidden sm:flex` in HTML so it's invisible below 640px. */
+   The sidebar has `hidden md:flex` in HTML so it's invisible below 768px. */
 .messenger-sidebar {
   width: 56px;
   min-width: 56px;
@@ -826,22 +843,43 @@ select:focus-visible,
 /* Main-content margin to avoid content hiding behind the chat panel.
    Must stay in sync with .messenger-half widths at each breakpoint. */
 .messenger-margin {
-  margin-right: min(50vw, 400px);
+  margin-right: 380px;
 }
 
-@media (min-width: 1024px) {
+@media (min-width: 1280px) {
   .messenger-margin {
     margin-right: 50vw;
   }
 }
 
-@media (max-width: 640px) {
-  .messenger-half {
-    width: 100vw;
-    min-width: 0;
-  }
+@media (max-width: 767px) {
   .messenger-margin {
     margin-right: 0;
+  }
+}
+
+/* ── Chat-aware grid collapse ────────────────────────
+   When the side chat panel is open, viewport-based Tailwind breakpoints
+   fire even though the available content area is much narrower.
+   The .chat-side-open class on <main> (set by Alpine) plus .chat-grid on
+   individual grids lets us force single-column layout when space is tight. */
+
+@media (min-width: 768px) and (max-width: 1599px) {
+  main.chat-side-open .chat-grid {
+    grid-template-columns: 1fr !important;
+  }
+  main.chat-side-open .chat-grid > * {
+    grid-column: span 1 !important;
+  }
+}
+
+/* 1600px+ with 50vw panel leaves 800px+ for content — allow 2 cols */
+@media (min-width: 1600px) {
+  main.chat-side-open .chat-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+  main.chat-side-open .chat-grid > * {
+    grid-column: span 1 !important;
   }
 }
 
