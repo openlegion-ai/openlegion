@@ -168,7 +168,8 @@
     </div>
 
     <!-- Navigation bar -->
-    <nav class="nav-bar px-3 sm:px-5 py-2.5 flex items-center shrink-0 gap-3">
+    <nav class="nav-bar px-3 sm:px-5 py-2.5 flex items-center shrink-0 gap-3 transition-[margin] duration-200"
+      :class="openChats.length > 0 && !chatPanelMinimized && !chatFullScreen && 'messenger-margin'">
       <div class="flex items-center gap-2 sm:gap-4 min-w-0 shrink-0">
         <div class="flex items-center gap-2.5">
           <img src="/dashboard/static/logo.png" alt="OpenLegion" width="24" height="24" class="rounded-full">
@@ -200,7 +201,7 @@
       <!-- Command palette trigger (centered) -->
       <div class="hidden sm:flex flex-1 justify-start pl-4">
         <button @click="cmdPaletteOpen = true; cmdPaletteQuery = ''; cmdPaletteResults = []; $nextTick(() => { const el = document.getElementById('cmd-palette-input'); if (el) el.focus(); })"
-          class="flex items-center gap-2.5 text-[13px] text-gray-500 hover:text-gray-300 bg-gray-800/40 hover:bg-gray-800/80 pl-3.5 pr-3 py-1.5 rounded-lg border border-gray-700/40 hover:border-gray-600/60 transition-all cursor-pointer w-80"
+          class="flex items-center gap-2.5 text-[13px] text-gray-500 hover:text-gray-300 bg-gray-800/40 hover:bg-gray-800/80 pl-3.5 pr-3 py-1.5 rounded-lg border border-gray-700/40 hover:border-gray-600/60 transition-all cursor-pointer w-full max-w-80 min-w-0"
           title="Search (Cmd+K)">
           <svg class="w-3.5 h-3.5 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
           <span class="flex-1 text-left">Search...</span>
@@ -235,7 +236,7 @@
     </nav>
 
     <!-- Main content -->
-    <main class="flex-1 overflow-auto p-2 sm:p-4 lg:p-6 transition-[margin] duration-200" :class="openChats.length > 0 && !chatPanelMinimized && (chatFullScreen ? 'hidden' : 'messenger-margin')">
+    <main class="flex-1 overflow-auto p-2 sm:p-4 lg:p-6 transition-[margin] duration-200" :class="openChats.length > 0 && !chatPanelMinimized && (chatFullScreen ? 'hidden' : 'messenger-margin chat-side-open')">
 
       <!-- Connection error banner -->
       <div x-show="connectionError" x-cloak class="mb-4 bg-red-900/30 border border-red-800 rounded-lg px-4 py-3 flex items-center gap-3">
@@ -1058,7 +1059,7 @@
         </div>
         <!-- Loading state -->
         <div x-show="agents.length === 0 && loading" x-cloak>
-          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 chat-grid">
             <template x-for="i in 4" :key="i">
               <div class="agent-card p-4 animate-pulse">
                 <!-- Header: Avatar + Name/Role/Model + Health badge -->
@@ -1332,7 +1333,7 @@
               </div>
             </div>
             <!-- 2-column detail layout -->
-            <div class="grid grid-cols-1 md:grid-cols-5 gap-5 mb-5">
+            <div class="grid grid-cols-1 md:grid-cols-5 gap-5 mb-5 chat-grid">
               <!-- Left column: Identity panel -->
               <div class="md:col-span-3">
                 <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -1533,7 +1534,7 @@
                         <button @click="startConfigEdit()"
                           class="text-xs px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
                       </div>
-                      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 chat-grid">
                         <div class="bg-gray-800/50 rounded p-3">
                           <div class="text-xs text-gray-500 mb-1">Model</div>
                           <div class="text-sm text-gray-200 font-mono" x-text="agentConfigs[selectedAgent]?.model || '-'"></div>
@@ -1670,7 +1671,7 @@
                     <!-- Edit mode -->
                     <div x-show="agentConfigs[selectedAgent] && configEditing">
                       <div class="space-y-3">
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 chat-grid">
                           <div>
                             <label class="text-xs text-gray-500 mb-1 block">Model</label>
                             <div class="relative" @click.outside="editForm._modelDropdownOpen = false" @keydown.escape.stop="editForm._modelDropdownOpen = false">
@@ -2222,7 +2223,7 @@
         <div x-show="systemTab === 'costs'">
 
         <!-- Stat Cards -->
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5">
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5 chat-grid">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
             <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-1" x-text="costPeriod === 'today' ? 'Today' : costPeriod === 'week' ? 'This Week' : 'This Month'"></div>
             <div class="text-2xl font-bold font-mono text-white" x-text="formatCost(costTotal)"></div>
@@ -2257,7 +2258,7 @@
               </template>
             </div>
           </div>
-          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 chat-grid">
             <!-- Cost by Agent bar chart -->
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
               <div class="text-[10px] text-gray-500 uppercase tracking-wider mb-3">Cost by Agent</div>
@@ -2367,7 +2368,7 @@
         <!-- Cron creation form -->
         <div x-show="showCronForm" x-cloak x-transition class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-4">
           <div class="text-xs text-gray-500 mb-2">New cron job</div>
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2 chat-grid">
             <select x-model="cronFormAgent" :disabled="cronCreating" class="dash-select text-xs">
               <option value="">Agent...</option>
               <template x-for="a in agents" :key="a.id">
@@ -2597,7 +2598,7 @@
 
         <!-- Channels -->
         <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Channels<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Messaging platform integrations. Connect Telegram, Discord, Slack, or WhatsApp so users can chat with agents from those platforms.</span></span></div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6 chat-grid">
           <template x-for="ch in channels" :key="ch.type">
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
               <div class="flex items-center justify-between mb-3">
@@ -2822,7 +2823,7 @@
               Authenticate your backend for server-to-server API calls. Send as <code class="bg-gray-800 px-1 rounded text-gray-400">X-API-Key</code> header.
               Create separate keys per environment or integration — each key is hashed and the raw value is shown only once at creation.
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px] mb-4">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px] mb-4 chat-grid">
               <div class="text-gray-500"><code class="text-gray-400 font-mono">POST</code> <code class="text-gray-400 font-mono">/mesh/credentials</code></div>
               <div class="text-gray-600">Store a secret &rarr; returns <code class="bg-gray-800/60 px-0.5 rounded">$CRED{name}</code> handle</div>
               <div class="text-gray-500"><code class="text-gray-400 font-mono">DELETE</code> <code class="text-gray-400 font-mono">/mesh/credentials/{name}</code></div>
@@ -3381,7 +3382,7 @@
         <!-- Disk & Engine Data -->
         <div class="mt-6" x-show="storageData">
           <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Disk Usage<span class="setting-hint setting-hint-sm ml-1" tabindex="0">?<span class="setting-hint-text">Storage utilization across the server. Includes agent workspaces, uploaded files, and engine databases.</span></span></div>
-          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 chat-grid">
             <!-- Disk usage -->
             <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
               <div class="flex items-center justify-between mb-3">
@@ -3711,7 +3712,7 @@
               <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
               <h3 class="text-sm font-medium text-gray-200">Budgets</h3>
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4" x-show="systemSettings">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 chat-grid" x-show="systemSettings">
               <div>
                 <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Default Daily Budget (USD)
                   <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Maximum USD an agent can spend on LLM calls per day. When exceeded, the agent stops accepting new tasks until the next day. Per-agent overrides in mesh.yaml take priority.</span></span>
@@ -3740,7 +3741,7 @@
               <h3 class="text-sm font-medium text-gray-200">Agent Execution</h3>
               <span class="text-[10px] text-amber-500/70 ml-auto">restart required</span>
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4" x-show="systemSettings">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 chat-grid" x-show="systemSettings">
               <div>
                 <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Max Iterations (task mode)
                   <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">How many LLM calls an agent gets to complete a single task. Each iteration can use tools or return a final answer. If the agent hasn't finished after this many iterations, the task fails. Default: 20.</span></span>
@@ -3866,7 +3867,7 @@
               <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
               <h3 class="text-sm font-medium text-gray-200">Health &amp; Recovery</h3>
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4" x-show="systemSettings">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 chat-grid" x-show="systemSettings">
               <div>
                 <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Poll Interval (seconds)
                   <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">How often the mesh checks each agent's health endpoint. Lower values detect failures faster but add more network overhead. Default: 30s.</span></span>
@@ -4223,22 +4224,10 @@
       style="box-shadow: -8px 0 32px -4px rgba(0,0,0,0.5);">
 
       <!-- Left sidebar: agent list — hidden on mobile (horizontal tabs replace it) -->
-      <div class="messenger-sidebar shrink-0 border-r border-gray-800/80 hidden sm:flex flex-col">
+      <div class="messenger-sidebar shrink-0 border-r border-gray-800/80 hidden md:flex flex-col">
         <!-- Sidebar header -->
-        <div class="flex items-center justify-between px-3 py-2.5 border-b border-gray-800 shrink-0">
+        <div class="flex items-center px-3 py-2.5 border-b border-gray-800 shrink-0">
           <span class="text-xs font-semibold text-gray-300 uppercase tracking-wider">Chats</span>
-          <div class="flex items-center gap-1">
-            <button @click="chatFullScreen = !chatFullScreen" class="text-gray-500 hover:text-white transition-colors p-1 rounded" :title="chatFullScreen ? 'Half screen' : 'Full screen'">
-              <svg x-show="!chatFullScreen" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"/></svg>
-              <svg x-show="chatFullScreen" x-cloak class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 9L4 4m0 0v4m0-4h4m7 11l5 5m0 0v-4m0 4h-4M9 15l-5 5m0 0h4m-4 0v-4m11-7l5-5m0 0h-4m4 0v4"/></svg>
-            </button>
-            <button @click="chatPanelMinimized = true; _saveChatToSession()" class="text-gray-500 hover:text-white transition-colors p-1 rounded" title="Minimize">
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-            </button>
-            <button @click="openChats.slice().forEach(id => closeChat(id))" class="text-gray-500 hover:text-white transition-colors p-1 rounded" aria-label="Close all chats" title="Close all">
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-            </button>
-          </div>
         </div>
         <!-- Agent list -->
         <div class="flex-1 overflow-y-auto">
@@ -4278,46 +4267,55 @@
       <!-- Right side: chat area -->
       <div class="flex-1 flex flex-col min-w-0">
         <!-- Chat header -->
-        <div class="flex items-center gap-2.5 px-4 py-2.5 border-b border-gray-800/80 shrink-0"
+        <div class="flex items-center gap-2 px-3 py-2 border-b border-gray-800/80 shrink-0"
           :class="(chatStreamingAgents[activeChatId] || chatLoadingAgents[activeChatId]) && 'border-b-indigo-500/40'">
-          <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(activeChatId)">
-            <img :src="agentAvatarUrl(activeChatId)" :alt="activeChatId">
-            <span class="activity-dot"
-              :aria-label="chatHeaderStatus(activeChatId).label"
-              :class="chatHeaderStatus(activeChatId).dot"></span>
+          <!-- Clickable agent info — opens agent detail page -->
+          <div @click="drillDown(activeChatId)" class="flex items-center gap-2.5 cursor-pointer hover:opacity-80 transition-opacity min-w-0 flex-1" title="View agent details">
+            <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(activeChatId)">
+              <img :src="agentAvatarUrl(activeChatId)" :alt="activeChatId">
+              <span class="activity-dot"
+                :aria-label="chatHeaderStatus(activeChatId).label"
+                :class="chatHeaderStatus(activeChatId).dot"></span>
+            </div>
+            <div class="flex-1 min-w-0">
+              <span class="text-sm font-medium text-white truncate block" x-text="activeChatId"></span>
+              <span class="text-[10px]"
+                :class="chatHeaderStatus(activeChatId).color"
+                x-text="chatHeaderStatus(activeChatId).label"></span>
+            </div>
           </div>
-          <div class="flex-1 min-w-0">
-            <span class="text-sm font-medium text-white truncate block" x-text="activeChatId"></span>
-            <span class="text-[10px]"
-              :class="chatHeaderStatus(activeChatId).color"
-              x-text="chatHeaderStatus(activeChatId).label"></span>
-          </div>
-          <!-- Reset conversation (inline, discrete) -->
-          <button @click="resetAgent(activeChatId)"
-            title="Reset conversation — memories preserved"
-            class="text-gray-600 hover:text-red-400 transition-colors p-1.5 rounded shrink-0"
-            aria-label="Reset conversation">
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-              <path d="M3 3v5h5"/>
-            </svg>
-          </button>
-          <!-- Mobile-only: minimize and close (desktop has these in the sidebar header) -->
-          <div class="flex items-center gap-0.5 sm:hidden ml-1 shrink-0">
+          <!-- Control buttons — always visible at all screen sizes -->
+          <div class="flex items-center gap-0.5 shrink-0">
+            <button @click="resetAgent(activeChatId)"
+              title="Reset conversation — memories preserved"
+              class="text-gray-600 hover:text-red-400 transition-colors p-1.5 rounded"
+              aria-label="Reset conversation">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                <path d="M3 3v5h5"/>
+              </svg>
+            </button>
+            <button @click="chatFullScreen = !chatFullScreen"
+              class="text-gray-500 hover:text-white transition-colors p-1.5 rounded"
+              :title="chatFullScreen ? 'Half screen' : 'Full screen'"
+              :aria-label="chatFullScreen ? 'Exit full screen' : 'Full screen'">
+              <svg x-show="!chatFullScreen" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"/></svg>
+              <svg x-show="chatFullScreen" x-cloak class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 9L4 4m0 0v4m0-4h4m7 11l5 5m0 0v-4m0 4h-4M9 15l-5 5m0 0h4m-4 0v-4m11-7l5-5m0 0h-4m4 0v4"/></svg>
+            </button>
             <button @click="chatPanelMinimized = true; _saveChatToSession()"
               title="Minimize" aria-label="Minimize chat"
               class="text-gray-500 hover:text-white transition-colors p-1.5 rounded">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 9l-7 7-7-7"/></svg>
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 9l-7 7-7-7"/></svg>
             </button>
             <button @click="closeChat(activeChatId)"
               title="Close chat" aria-label="Close chat"
               class="text-gray-500 hover:text-white transition-colors p-1.5 rounded">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 18L18 6M6 6l12 12"/></svg>
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 18L18 6M6 6l12 12"/></svg>
             </button>
           </div>
         </div>
-        <!-- Mobile: horizontal agent tab strip (shown only when multiple chats) -->
-        <div x-show="openChats.length > 1" x-cloak class="sm:hidden flex overflow-x-auto border-b border-gray-800/60 shrink-0 bg-gray-950/60">
+        <!-- Horizontal agent tab strip — visible until sidebar expands with names at xl (1280px) -->
+        <div x-show="openChats.length > 1" x-cloak class="xl:hidden flex overflow-x-auto border-b border-gray-800/60 shrink-0 bg-gray-950/60">
           <template x-for="chatId in openChats" :key="chatId">
             <button @click="activeChatId = chatId; chatUnread = { ...chatUnread, [chatId]: 0 }; $nextTick(() => _scrollChat(chatId))"
               class="flex items-center gap-1.5 px-3 py-2 text-xs whitespace-nowrap transition-all border-b-2 shrink-0"
