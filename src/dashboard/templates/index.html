@@ -360,14 +360,14 @@
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
               </svg>
               <span class="text-xs font-medium text-gray-400 flex-shrink-0">Project</span>
-              <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/30 truncate max-w-[7rem] flex-shrink-0"
+              <span class="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/30 truncate max-w-[7rem] sm:max-w-[12rem] flex-shrink-0"
                 x-text="activeProject"></span>
               <span class="text-[10px] text-gray-600 flex-shrink-0 hidden sm:block"
                 x-text="(activeProjectData?.members || []).length + ' member' + ((activeProjectData?.members || []).length !== 1 ? 's' : '')"></span>
-              <span x-show="activeProjectData?.description" class="text-[10px] text-gray-600 truncate hidden md:block"
+              <span x-show="activeProjectData?.description" class="text-[10px] text-gray-600 truncate hidden sm:block"
                 :title="activeProjectData?.description" x-text="activeProjectData?.description"></span>
               <!-- Tab pills — desktop only, click stops propagation to header toggle -->
-              <div class="hidden sm:flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Project sections">
+              <div class="hidden md:flex gap-0.5 bg-gray-800/50 rounded-lg p-0.5 ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Project sections">
                 <button @click="projectHubExpanded = true; projectHubTab = 'docs'"
                   class="px-2.5 py-1 rounded-md text-xs font-medium transition-all"
                   :class="projectHubExpanded && projectHubTab === 'docs' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'"
@@ -406,7 +406,7 @@
                 </button>
               </div>
               <!-- Project options kebab menu -->
-              <div class="relative flex-shrink-0 ml-auto sm:ml-0" x-data="{ open: false }" @click.stop @keydown.escape.window="open = false">
+              <div class="relative flex-shrink-0 ml-auto md:ml-0" x-data="{ open: false }" @click.stop @keydown.escape.window="open = false">
                 <button @click="open = !open"
                   class="p-1.5 rounded-md text-gray-600 hover:text-gray-300 hover:bg-gray-800 transition-colors"
                   aria-label="Project options">
@@ -428,7 +428,7 @@
             <!-- Hub body — collapsible -->
             <div x-show="projectHubExpanded" x-transition class="border-t border-gray-800/60">
               <!-- Mobile tab strip (sm:hidden) -->
-              <div class="project-hub-tabs sm:hidden" role="tablist" aria-label="Project sections">
+              <div class="project-hub-tabs md:hidden" role="tablist" aria-label="Project sections">
                 <button @click="projectHubTab = 'docs'"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
                   :class="projectHubTab === 'docs' ? 'text-white border-indigo-500' : 'text-gray-500 border-transparent hover:text-gray-300'"
@@ -482,7 +482,7 @@
                     <button @click="startProjectEdit()" class="text-indigo-400 hover:text-indigo-300 transition-colors ml-1">Add content</button>
                   </div>
                   <div x-show="projectContent" class="relative">
-                    <pre class="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-52 overflow-y-auto custom-scrollbar"
+                    <pre class="bg-gray-800/50 border border-gray-700/50 rounded-lg p-3 text-sm text-gray-300 font-mono whitespace-pre-wrap break-words max-h-40 sm:max-h-52 overflow-y-auto custom-scrollbar"
                       x-text="projectContent"></pre>
                     <div class="flex items-center justify-between mt-2">
                       <span class="text-[10px] text-gray-600" x-text="projectContent.length.toLocaleString() + ' chars'"></span>
@@ -503,8 +503,8 @@
                   <textarea x-model="projectEditBuffer"
                     @keydown.ctrl.s.prevent="saveProject()"
                     @keydown.meta.s.prevent="saveProject()"
-                    class="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
-                    rows="10" spellcheck="false"
+                    class="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none min-h-[8rem] sm:min-h-[14rem]"
+                    rows="6" spellcheck="false"
                     placeholder="# Project Context&#10;&#10;Describe your project goals, architecture, team conventions..."></textarea>
                   <div class="flex items-center justify-between mt-2">
                     <span class="text-xs text-gray-600" x-text="projectEditBuffer.length.toLocaleString() + ' chars'"></span>
@@ -729,9 +729,9 @@
                           <span class="flex-shrink-0" x-text="formatFileSize(art.size)"></span>
                         </div>
                       </div>
-                      <div class="flex items-center gap-1 flex-shrink-0">
+                      <div class="flex items-center gap-0.5 sm:gap-1 flex-shrink-0">
                         <button @click="previewArtifact(art)"
-                          class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors"
+                          class="text-[10px] px-1.5 sm:px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors"
                           :class="art.size > 2097152 && 'opacity-40 cursor-not-allowed'"
                           :disabled="art.size > 2097152">
                           View
@@ -3941,7 +3941,7 @@
         x-transition:leave-start="opacity-100"
         x-transition:leave-end="opacity-0">
         <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="closeProjectModal()"></div>
-        <div class="relative w-full max-w-md bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-5">
+        <div class="relative w-full max-w-md bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-4 sm:p-5">
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-sm font-medium text-gray-200">New Project</h3>
             <button @click="closeProjectModal()" class="text-gray-500 hover:text-gray-300 text-lg leading-none">&times;</button>
