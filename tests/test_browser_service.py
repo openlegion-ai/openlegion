@@ -4748,6 +4748,61 @@ class TestX11Input:
         mgr._x11_hover.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_hover_x11_failure_falls_back_to_cdp(self):
+        """When _x11_hover raises on x.com, hover() should fall back to CDP."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        inst.page = MagicMock()
+        inst.page.url = "https://x.com/home"
+        inst.lock = asyncio.Lock()
+        inst.refs = {"e0": {"role": "button", "name": "Like", "index": 0}}
+
+        mock_locator = AsyncMock()
+        mock_locator.hover = AsyncMock()
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._x11_hover = AsyncMock(side_effect=RuntimeError("xdotool failed"))
+
+        result = await mgr.hover("agent-1", ref="e0")
+        assert result["success"]
+        mock_locator.hover.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_hover_selector_on_x_com_uses_x11(self):
+        """hover(selector=...) on x.com should route through _x11_hover."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        inst.page = MagicMock()
+        inst.page.url = "https://x.com/home"
+        mock_locator = AsyncMock()
+        inst.page.locator.return_value.first = mock_locator
+        inst.lock = asyncio.Lock()
+
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        mgr._x11_hover = AsyncMock()
+
+        result = await mgr.hover("agent-1", selector='[data-testid="like"]')
+        assert result["success"]
+        mgr._x11_hover.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_press_key_x11_failure_falls_back_to_cdp(self):
+        """When _x11_key raises on x.com, press_key() should fall back to CDP."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        inst.page = MagicMock()
+        inst.page.url = "https://x.com/compose/post"
+        inst.page.keyboard = AsyncMock()
+        inst.lock = asyncio.Lock()
+
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        mgr._x11_key = AsyncMock(side_effect=RuntimeError("xdotool failed"))
+
+        result = await mgr.press_key("agent-1", "Escape")
+        assert result["success"]
+        inst.page.keyboard.press.assert_called_once_with("Escape")
+
+    @pytest.mark.asyncio
     async def test_press_key_routes_x11_on_x_com(self):
         """press_key('Enter') on x.com should call _x11_key."""
         mgr = self._make_manager()
