@@ -55,7 +55,8 @@
     window.__config = {
       wsUrl: (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + "{{ ws_path }}",
       apiBase: "{{ api_base }}",
-      assetVersion: "{{ v }}"
+      assetVersion: "{{ v }}",
+      allProviders: {{ all_providers | tojson }}
     };
   </script>
 
@@ -2932,20 +2933,69 @@
               <div x-show="showCredForm" x-transition>
                 <div class="text-xs text-gray-500 mb-2">New API key</div>
                 <div class="flex gap-2 mb-2">
-                  <select x-model="credService" :disabled="credSaving" class="dash-select text-xs w-40" @change="credAuthType = 'api_key'; if ($event.target.value === 'ollama') credBaseUrl = credBaseUrl || 'http://localhost:11434'; if ($event.target.value !== '__custom__') { credCustomService = ''; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''; }">
-                    <option value="">Service...</option>
-                    <optgroup label="LLM Providers (system tier)">
-                      {% for p in all_providers %}
-                      <option value="{{ p.name }}">{{ p.label }}</option>
-                      {% endfor %}
-                    </optgroup>
-                    <optgroup label="Agent tools">
-                      <option value="brave_search_api_key">Brave Search</option>
-                      <option value="apollo_api_key">Apollo</option>
-                      <option value="hunter_api_key">Hunter</option>
-                    </optgroup>
-                    <option value="__custom__">Custom...</option>
-                  </select>
+                  <div class="relative" @click.outside="_credServiceDropdownOpen = false" @keydown.escape.stop="_credServiceDropdownOpen = false">
+                    <button type="button" :disabled="credSaving"
+                      @click="_credServiceDropdownOpen = !_credServiceDropdownOpen; if (_credServiceDropdownOpen) { _credServiceSearch = ''; $nextTick(() => $refs.credServiceSearchInput?.focus()); }"
+                      class="dash-input flex items-center justify-between gap-2 cursor-pointer text-left" style="min-width:10rem">
+                      <span class="truncate" :class="credService ? 'text-gray-200' : 'text-gray-400'"
+                        x-text="credService === '__custom__' ? 'Custom\u2026' : (credService ? (credServiceOptions.find(o => o.value === credService)?.label || credService) : 'Service\u2026')"></span>
+                      <svg class="w-3.5 h-3.5 text-gray-500 flex-shrink-0 transition-transform" :class="_credServiceDropdownOpen && 'rotate-180'" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
+                    <div x-show="_credServiceDropdownOpen" x-cloak x-transition:enter="transition ease-out duration-100" x-transition:enter-start="opacity-0 -translate-y-1" x-transition:enter-end="opacity-100 translate-y-0"
+                      class="absolute z-50 mt-1 min-w-full w-max bg-gray-800 border border-gray-700 rounded-lg shadow-xl" style="max-width:min(28rem, calc(100vw - 2rem))">
+                      <div class="p-2">
+                        <div class="flex items-center gap-2 bg-gray-900 border border-gray-600 rounded-md px-2.5 py-1.5 focus-within:border-indigo-500/60">
+                          <svg class="w-3.5 h-3.5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="11" cy="11" r="8"/><path stroke-linecap="round" d="m21 21-4.35-4.35"/></svg>
+                          <input x-ref="credServiceSearchInput" type="text" x-model="_credServiceSearch" placeholder="Search services…"
+                            @keydown.enter.prevent="(() => {
+                              const q = _credServiceSearch.toLowerCase().trim();
+                              const match = q ? credServiceOptions.find(o => o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q)) : null;
+                              if (match) { credService = match.value; _credServiceDropdownOpen = false; credAuthType = 'api_key'; if (match.value === 'ollama') credBaseUrl = credBaseUrl || 'http://localhost:11434'; if (match.value !== '__custom__') { credCustomService = ''; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''; } }
+                            })()"
+                            class="w-full bg-transparent text-xs text-gray-200 placeholder-gray-500 outline-none focus:outline-none focus:ring-0" style="outline:none!important;box-shadow:none!important">
+                        </div>
+                      </div>
+                      <div class="border-t border-gray-700/60 overflow-y-auto custom-scrollbar" style="max-height:280px">
+                        <!-- Grouped options -->
+                        <template x-for="group in [...new Set(credServiceOptions.map(o => o.group))].filter(g => {
+                          const q = _credServiceSearch.toLowerCase().trim();
+                          if (!q) return true;
+                          return credServiceOptions.some(o => o.group === g && (o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q)));
+                        })" :key="group">
+                          <div>
+                            <div class="px-3 pt-3 pb-1.5 mt-1 first:mt-0 border-t border-gray-700/50 first:border-t-0 text-[11px] font-medium text-gray-500 uppercase tracking-wider" x-text="group"></div>
+                            <template x-for="o in credServiceOptions.filter(o => {
+                              if (o.group !== group) return false;
+                              const q = _credServiceSearch.toLowerCase().trim();
+                              return !q || o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q);
+                            })" :key="o.value">
+                              <button type="button"
+                                @click="credService = o.value; _credServiceDropdownOpen = false; credAuthType = 'api_key'; if (o.value === 'ollama') credBaseUrl = credBaseUrl || 'http://localhost:11434'; if (o.value !== '__custom__') { credCustomService = ''; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''; }"
+                                class="w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center gap-2"
+                                :class="credService === o.value ? 'bg-indigo-600/20 text-indigo-300' : 'text-gray-300 hover:bg-gray-700/60'">
+                                <svg class="w-3 h-3 flex-shrink-0" :class="credService === o.value ? 'text-indigo-400' : 'text-transparent'" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+                                <span x-text="o.label" class="truncate"></span>
+                              </button>
+                            </template>
+                          </div>
+                        </template>
+                        <!-- Custom option (always visible at bottom) -->
+                        <div class="border-t border-gray-700/50">
+                          <button type="button"
+                            @click="credService = '__custom__'; _credServiceDropdownOpen = false; credAuthType = 'api_key';"
+                            class="w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center gap-2"
+                            :class="credService === '__custom__' ? 'bg-indigo-600/20 text-indigo-300' : 'text-gray-300 hover:bg-gray-700/60'"
+                            x-show="!_credServiceSearch || 'custom'.includes(_credServiceSearch.toLowerCase().trim())">
+                            <svg class="w-3 h-3 flex-shrink-0" :class="credService === '__custom__' ? 'text-indigo-400' : 'text-transparent'" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+                            Custom&hellip;
+                          </button>
+                        </div>
+                        <!-- No results -->
+                        <div x-show="_credServiceSearch && !credServiceOptions.some(o => o.label.toLowerCase().includes(_credServiceSearch.toLowerCase().trim()) || o.value.toLowerCase().includes(_credServiceSearch.toLowerCase().trim())) && !'custom'.includes(_credServiceSearch.toLowerCase().trim())"
+                          class="px-3 py-3 text-xs text-gray-500 text-center">No services match your search.</div>
+                      </div>
+                    </div>
+                  </div>
                   <template x-if="credService === 'anthropic' || credService === 'openai'">
                     <select x-model="credAuthType" :disabled="credSaving" class="dash-select text-xs w-48">
                       <option value="api_key">API Key (recommended)</option>
@@ -3000,7 +3050,7 @@
                 </template>
                 <input x-show="credService !== 'ollama' && credAuthType !== 'oauth'" type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
                 <div class="flex justify-between">
-                  <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'; credAuthType = 'api_key'; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'; credAuthType = 'api_key'; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''; _credServiceDropdownOpen = false; _credServiceSearch = ''" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
                   <button @click="addCredential()" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
                     <svg x-show="credSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                     <span x-text="credSaving ? 'Saving...' : 'Save'"></span>

@@ -289,6 +289,9 @@ function dashboard() {
     credIsLlmProvider: false,
     credCustomModels: '',
     credCustomLabel: '',
+    _credServiceDropdownOpen: false,
+    _credServiceSearch: '',
+    credServiceOptions: [],
 
     // Channels
     channels: [],
@@ -790,6 +793,16 @@ function dashboard() {
     init() {
       this._initTs = Date.now();  // track page load time to skip replayed events
       const cfg = window.__config || {};
+
+      // Build credential service options from server-injected providers
+      const allProviders = cfg.allProviders || [];
+      this.credServiceOptions = [
+        ...allProviders.map(p => ({ value: p.name, label: p.label, group: 'LLM Providers (system tier)' })),
+        { value: 'brave_search_api_key', label: 'Brave Search', group: 'Agent tools' },
+        { value: 'apollo_api_key', label: 'Apollo', group: 'Agent tools' },
+        { value: 'hunter_api_key', label: 'Hunter', group: 'Agent tools' },
+      ];
+
       this._ws = new DashboardWebSocket(cfg.wsUrl, {
         onEvent: (evt) => this.onWsEvent(evt),
         onConnect: () => { this.connected = true; },
@@ -3944,6 +3957,8 @@ function dashboard() {
           this.credIsLlmProvider = false;
           this.credCustomModels = '';
           this.credCustomLabel = '';
+          this._credServiceDropdownOpen = false;
+          this._credServiceSearch = '';
           this.showCredForm = false;
           this.fetchSettings();
         } else {
