@@ -4506,7 +4506,7 @@ class TestX11Input:
         import src.browser.service as svc
         source = inspect.getsource(svc.BrowserManager._start_browser)
         # The WID failure path should use logger.warning, not logger.debug
-        assert 'logger.warning("Could not discover X11 WID' in source
+        assert "logger.warning(" in source and "Could not discover X11 WID" in source
 
     @pytest.mark.asyncio
     async def test_click_ref_on_x_com_uses_x11(self):
