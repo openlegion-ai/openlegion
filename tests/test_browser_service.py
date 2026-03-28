@@ -3989,8 +3989,6 @@ class TestX11Input:
 
         mock_locator.scroll_into_view_if_needed.assert_called_once()
         mock_locator.bounding_box.assert_called_once()
-        # hover should NOT be called
-        mock_locator.hover = AsyncMock()  # would fail if called before
         # 1 getmouselocation + 3 mousemove steps + 1 click = 5 calls
         assert sub_run.call_count == 5
         calls = sub_run.call_args_list
@@ -4101,19 +4099,6 @@ class TestX11Input:
         with pytest.raises(RuntimeError, match="No X11 window ID"):
             await mgr._x11_type(inst, "hello")
 
-    def test_is_x11_click_target_matches(self):
-        mgr = self._make_manager()
-        assert mgr._is_x11_click_target('[data-testid="tweetButtonInline"]')
-        assert mgr._is_x11_click_target('[data-testid="tweetButton"]')
-        assert not mgr._is_x11_click_target('[data-testid="someOther"]')
-        assert not mgr._is_x11_click_target(None)
-
-    def test_is_x11_type_target_matches(self):
-        mgr = self._make_manager()
-        assert mgr._is_x11_type_target('[data-testid="tweetTextarea_0"]')
-        assert not mgr._is_x11_type_target('[data-testid="someOther"]')
-        assert not mgr._is_x11_type_target(None)
-
     @pytest.mark.asyncio
     async def test_click_routes_sensitive_selector_to_x11(self):
         """click() with any selector on x.com should route through _x11_click."""
@@ -4223,35 +4208,6 @@ class TestX11Input:
         assert result["success"]
         mgr._type_with_variance.assert_called_once()
 
-    def test_ref_to_x11_selector_post_button(self):
-        """_ref_to_x11_selector should match Post button refs."""
-        mgr = self._make_manager()
-        inst = self._make_instance()
-        inst.refs = {"B1": {"role": "button", "name": "Post", "index": 0}}
-        result = mgr._ref_to_x11_selector(inst, "B1")
-        assert result == '[data-testid="tweetButton"]'
-
-    def test_ref_to_x11_selector_reply_button(self):
-        mgr = self._make_manager()
-        inst = self._make_instance()
-        inst.refs = {"B2": {"role": "button", "name": "Reply", "index": 0}}
-        result = mgr._ref_to_x11_selector(inst, "B2")
-        assert result == '[data-testid="tweetButton"]'
-
-    def test_ref_to_x11_selector_non_matching(self):
-        mgr = self._make_manager()
-        inst = self._make_instance()
-        inst.refs = {"B3": {"role": "button", "name": "Follow", "index": 0}}
-        result = mgr._ref_to_x11_selector(inst, "B3")
-        assert result is None
-
-    def test_ref_to_x11_selector_missing_ref(self):
-        mgr = self._make_manager()
-        inst = self._make_instance()
-        inst.refs = {}
-        result = mgr._ref_to_x11_selector(inst, "B4")
-        assert result is None
-
     @pytest.mark.asyncio
     async def test_x11_click_mousemove_failure_raises(self):
         """_x11_click should raise when xdotool mousemove fails."""
@@ -4296,60 +4252,6 @@ class TestX11Input:
         dash_dash_idx = cmd.index("--")
         char_idx = len(cmd) - 1  # last element
         assert dash_dash_idx < char_idx
-
-    def test_is_x11_type_ref_on_x_com(self):
-        """_is_x11_type_ref should return True for textbox refs on x.com."""
-        mgr = self._make_manager()
-        inst = self._make_instance()
-        inst.refs = {"T1": {"role": "textbox", "name": "What is happening?!", "index": 0}}
-        inst.page = MagicMock()
-        inst.page.url = "https://x.com/compose/post"
-        assert mgr._is_x11_type_ref(inst, "T1") is True
-
-    def test_is_x11_type_ref_on_twitter_com(self):
-        """_is_x11_type_ref should return True for textbox refs on twitter.com."""
-        mgr = self._make_manager()
-        inst = self._make_instance()
-        inst.refs = {"T1": {"role": "textbox", "name": "", "index": 0}}
-        inst.page = MagicMock()
-        inst.page.url = "https://twitter.com/compose/post"
-        assert mgr._is_x11_type_ref(inst, "T1") is True
-
-    def test_is_x11_type_ref_on_other_site(self):
-        """_is_x11_type_ref should return False for textbox refs on non-X sites."""
-        mgr = self._make_manager()
-        inst = self._make_instance()
-        inst.refs = {"T1": {"role": "textbox", "name": "Search", "index": 0}}
-        inst.page = MagicMock()
-        inst.page.url = "https://google.com/search"
-        assert mgr._is_x11_type_ref(inst, "T1") is False
-
-    def test_is_x11_type_ref_non_textbox_role(self):
-        """_is_x11_type_ref should return False for non-textbox roles even on x.com."""
-        mgr = self._make_manager()
-        inst = self._make_instance()
-        inst.refs = {"B1": {"role": "button", "name": "Post", "index": 0}}
-        inst.page = MagicMock()
-        inst.page.url = "https://x.com/compose/post"
-        assert mgr._is_x11_type_ref(inst, "B1") is False
-
-    def test_is_x11_type_ref_subdomain(self):
-        """_is_x11_type_ref should match subdomains like mobile.x.com."""
-        mgr = self._make_manager()
-        inst = self._make_instance()
-        inst.refs = {"T1": {"role": "textbox", "name": "", "index": 0}}
-        inst.page = MagicMock()
-        inst.page.url = "https://mobile.x.com/compose/post"
-        assert mgr._is_x11_type_ref(inst, "T1") is True
-
-    def test_is_x11_type_ref_no_false_positive_suffix(self):
-        """_is_x11_type_ref should not match notx.com."""
-        mgr = self._make_manager()
-        inst = self._make_instance()
-        inst.refs = {"T1": {"role": "textbox", "name": "", "index": 0}}
-        inst.page = MagicMock()
-        inst.page.url = "https://notx.com/compose/post"
-        assert mgr._is_x11_type_ref(inst, "T1") is False
 
     @pytest.mark.asyncio
     async def test_type_text_routes_ref_on_x_com_to_x11(self):
@@ -4598,28 +4500,116 @@ class TestX11Input:
 
     @pytest.mark.asyncio
     async def test_wid_discovery_failure_logs_warning(self):
-        """Failed WID discovery should log a warning (not debug)."""
-        mgr = self._make_manager()
-
-        # Manually inject dependencies to skip real browser start
-        from unittest.mock import AsyncMock as AM
-
-        mgr._get_firefox_wids = AM(return_value=set())
-        mgr._discover_new_wid = AM(return_value=None)
-
-        # We need to test _start_browser but it requires Camoufox, so instead
-        # test the log level by checking the message in the source code.
-        # The simpler approach: verify the log call directly.
+        """Failed WID discovery should log at WARNING, not DEBUG."""
+        import inspect
         import src.browser.service as svc
-        with patch.object(svc.logger, "warning") as mock_warn:
-            # Simulate the code path in _start_browser after failed discovery
-            agent_id = "test-agent"
-            wid = None
-            if not wid:
-                svc.logger.warning(
-                    "Could not discover X11 WID for '%s' — interactions on "
-                    "high-sensitivity sites will use CDP (isTrusted=false)",
-                    agent_id,
-                )
-            mock_warn.assert_called_once()
-            assert "high-sensitivity" in mock_warn.call_args[0][0]
+        source = inspect.getsource(svc.BrowserManager._start_browser)
+        # The WID failure path should use logger.warning, not logger.debug
+        assert 'logger.warning("Could not discover X11 WID' in source
+
+    @pytest.mark.asyncio
+    async def test_click_ref_on_x_com_uses_x11(self):
+        """click(ref=...) on x.com should route through _x11_click."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        inst.page = MagicMock()
+        inst.page.url = "https://x.com/home"
+        inst.refs = {"B1": {"role": "button", "name": "Like", "index": 0}}
+        inst.lock = asyncio.Lock()
+
+        mock_locator = AsyncMock()
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._x11_click = AsyncMock()
+        mgr._snapshot_impl = AsyncMock(return_value={"data": {}})
+
+        result = await mgr.click("agent-1", ref="B1")
+        assert result["success"]
+        mgr._x11_click.assert_called_once_with(inst, mock_locator)
+
+    @pytest.mark.asyncio
+    async def test_type_text_clear_false_skips_x11_key(self):
+        """type_text(clear=False) on x.com should NOT call _x11_key."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        inst.page = MagicMock()
+        inst.page.url = "https://x.com/compose/post"
+        inst.page.keyboard = AsyncMock()
+        inst.lock = asyncio.Lock()
+        inst.refs = {"T1": {"role": "textbox", "name": "Post", "index": 0}}
+
+        mock_locator = AsyncMock()
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._x11_click = AsyncMock()
+        mgr._x11_key = AsyncMock()
+        mgr._x11_type = AsyncMock()
+        mgr._snapshot_impl = AsyncMock(return_value={"data": {}})
+
+        result = await mgr.type_text("agent-1", ref="T1", text="test", clear=False)
+        assert result["success"]
+        mgr._x11_key.assert_not_called()
+        mgr._x11_type.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_type_text_x11_focus_failure_falls_back_to_cdp(self):
+        """When _x11_click fails for focus in type_text(), should fall back to CDP."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+        inst.page = MagicMock()
+        inst.page.url = "https://x.com/compose/post"
+        inst.page.keyboard = AsyncMock()
+        inst.lock = asyncio.Lock()
+        inst.refs = {"T1": {"role": "textbox", "name": "Post", "index": 0}}
+
+        mock_locator = AsyncMock()
+        mgr.get_or_start = AsyncMock(return_value=inst)
+        mgr._locator_from_ref = MagicMock(return_value=mock_locator)
+        mgr._x11_click = AsyncMock(side_effect=RuntimeError("xdotool error"))
+        mgr._human_click = AsyncMock()
+        mgr._x11_key = AsyncMock()
+        mgr._x11_type = AsyncMock()
+        mgr._snapshot_impl = AsyncMock(return_value={"data": {}})
+
+        result = await mgr.type_text("agent-1", ref="T1", text="test")
+        assert result["success"]
+        mgr._human_click.assert_called_once()
+        # X11 type should still be attempted since _use_x11 is True
+        mgr._x11_type.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_x11_click_clamps_negative_coords(self):
+        """_x11_click should clamp waypoint coords to >= 0."""
+        mgr = self._make_manager()
+        inst = self._make_instance()
+
+        mock_locator = AsyncMock()
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+        mock_locator.bounding_box = AsyncMock(return_value={
+            "x": 5, "y": 3, "width": 10, "height": 6,
+        })
+
+        mock_run = MagicMock()
+        mock_run.returncode = 0
+        mock_run.stdout = "x:2 y:1 screen:0 window:12345"
+
+        with patch("src.browser.service.subprocess.run", return_value=mock_run) as sub_run:
+            with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
+                # Force large negative offsets by mocking randint
+                with patch("src.browser.service.random.randint", side_effect=[
+                    3,    # steps = 3
+                    -12,  # wp_x offset step 1
+                    -6,   # wp_y offset step 1
+                    -12,  # wp_x offset step 2
+                    -6,   # wp_y offset step 2
+                ]):
+                    await mgr._x11_click(inst, mock_locator)
+
+        # All mousemove coords should be >= 0
+        for call in sub_run.call_args_list:
+            cmd = call[0][0]
+            if "mousemove" in cmd:
+                x_val = int(cmd[cmd.index("--window") + 2])
+                y_val = int(cmd[cmd.index("--window") + 3])
+                assert x_val >= 0, f"X coord {x_val} is negative"
+                assert y_val >= 0, f"Y coord {y_val} is negative"

@@ -84,17 +84,6 @@ _MODAL_SELECTOR = (
     'dialog[open]'
 )
 
-# CSS selectors historically guarded by bot-detection (ArkoseLabs, etc.).
-# Routing is now URL-based via _is_x11_site() — ALL interactions on
-# x.com/twitter.com go through X11 when a WID is available. These
-# constants are retained as reference documentation.
-_X11_CLICK_SELECTORS = frozenset({
-    '[data-testid="tweetButtonInline"]',   # Post/tweet submit
-    '[data-testid="tweetButton"]',         # Reply submit
-})
-_X11_TYPE_SELECTORS = frozenset({
-    '[data-testid="tweetTextarea_0"]',     # Tweet composer
-})
 
 # ── JS-based accessibility tree builder ──────────────────────────────────
 # Fallback when page.accessibility.snapshot() is unavailable (Camoufox
@@ -971,8 +960,8 @@ class BrowserManager:
             wp_x = int(start_x + (target_x - start_x) * t)
             wp_y = int(start_y + (target_y - start_y) * t)
             if i < steps:
-                wp_x += random.randint(-12, 12)
-                wp_y += random.randint(-6, 6)
+                wp_x = max(0, wp_x + random.randint(-12, 12))
+                wp_y = max(0, wp_y + random.randint(-6, 6))
             logger.debug(
                 "X11 mousemove for '%s': step %d/%d (%d,%d) wid=%s",
                 inst.agent_id, i, steps, wp_x, wp_y, wid_s,
@@ -1071,38 +1060,6 @@ class BrowserManager:
         if result.returncode != 0:
             raise RuntimeError(f"xdotool key {key!r} failed (rc={result.returncode})")
 
-    def _is_x11_click_target(self, selector: str | None) -> bool:
-        """Check if a CSS selector matches a high-sensitivity click target."""
-        if not selector:
-            return False
-        return selector in _X11_CLICK_SELECTORS
-
-    def _is_x11_type_target(self, selector: str | None) -> bool:
-        """Check if a CSS selector matches a high-sensitivity type target."""
-        if not selector:
-            return False
-        return selector in _X11_TYPE_SELECTORS
-
-    def _is_x11_type_ref(self, inst: CamoufoxInstance, ref: str) -> bool:
-        """Check if a ref targets a textbox on a site with bot-detection.
-
-        ArkoseLabs on X/Twitter checks isTrusted on keydown in composer
-        textboxes.  When the agent types by ref (common path — agents use
-        refs from snapshot, not CSS selectors), we detect the site by URL
-        and apply X11 typing to all textbox-role elements.
-        """
-        info = inst.refs.get(ref)
-        if not info or info.get("role") != "textbox":
-            return False
-        try:
-            host = urlparse(inst.page.url).hostname or ""
-        except Exception:
-            return False
-        return (
-            host == "x.com" or host.endswith(".x.com")
-            or host == "twitter.com" or host.endswith(".twitter.com")
-        )
-
     def _is_x11_site(self, inst: CamoufoxInstance) -> bool:
         """Check if current page is on a site needing X11 input bypass."""
         try:
@@ -1113,18 +1070,6 @@ class BrowserManager:
             host == "x.com" or host.endswith(".x.com")
             or host == "twitter.com" or host.endswith(".twitter.com")
         )
-
-    def _ref_to_x11_selector(self, inst: CamoufoxInstance, ref: str) -> str | None:
-        """If a ref's element matches a known X11 click selector, return it."""
-        info = inst.refs.get(ref)
-        if not info:
-            return None
-        # Map known button names to their X11 selectors
-        name = (info.get("name") or "").lower().strip()
-        role = info.get("role", "")
-        if role == "button" and name in ("post", "reply"):
-            return '[data-testid="tweetButton"]'
-        return None
 
     async def click(
         self, agent_id: str, ref: str | None = None,
@@ -1232,7 +1177,13 @@ class BrowserManager:
                                 "modal for %s — sending Escape",
                                 agent_id,
                             )
-                            await inst.page.keyboard.press("Escape")
+                            if inst.x11_wid and self._is_x11_site(inst):
+                                try:
+                                    await self._x11_key(inst, "Escape")
+                                except Exception:
+                                    await inst.page.keyboard.press("Escape")
+                            else:
+                                await inst.page.keyboard.press("Escape")
                             await asyncio.sleep(0.5)
                             # Escape may surface a confirmation dialog
                             # (e.g. "Discard draft?" on X/Twitter).
@@ -1244,10 +1195,21 @@ class BrowserManager:
                                     "button", name="Discard",
                                 )
                                 if await confirm.count() > 0:
-                                    await self._human_click(
-                                        inst.page, confirm.first,
-                                        force=True,
-                                    )
+                                    if inst.x11_wid and self._is_x11_site(inst):
+                                        try:
+                                            await self._x11_click(
+                                                inst, confirm.first,
+                                            )
+                                        except Exception:
+                                            await self._human_click(
+                                                inst.page, confirm.first,
+                                                force=True,
+                                            )
+                                    else:
+                                        await self._human_click(
+                                            inst.page, confirm.first,
+                                            force=True,
+                                        )
                                     await asyncio.sleep(action_delay())
                                     logger.info(
                                         "Clicked Discard on confirmation"
