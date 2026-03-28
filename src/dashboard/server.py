@@ -1346,6 +1346,7 @@ def create_dashboard_router(
                 # Check for Anthropic OAuth (access_token starts with sk-ant-oat)
                 if parsed.get("access_token", "").startswith("sk-ant-oat"):
                     credential_vault.store_anthropic_oauth(parsed)
+                    credential_vault.remove_credential("anthropic_api_key")
                     return {"stored": True, "service": "anthropic_oauth", "tier": "system"}
                 # Check for OpenAI OAuth (flat or nested Codex CLI format)
                 normalized = _CV.normalize_openai_oauth(parsed)
@@ -2283,6 +2284,9 @@ def create_dashboard_router(
         agent_cred_names = credential_vault.list_agent_credential_names() if credential_vault else []
         _llm_key_names = {f"{p}_api_key" for p in SYSTEM_CREDENTIAL_PROVIDERS}
         has_llm = bool(set(cred_names) & _llm_key_names)
+        if not has_llm and credential_vault:
+            if credential_vault._has_anthropic_oauth() or credential_vault._has_openai_oauth():
+                has_llm = True
         pubsub_subs = pubsub.subscriptions if pubsub else {}
 
         # Filtered models: only providers with credentials
