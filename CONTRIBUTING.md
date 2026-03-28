@@ -1,34 +1,21 @@
 # Contributing to OpenLegion.ai
 
-Thank you for your interest in contributing.
+Thanks for wanting to contribute! Here's how to get started.
 
-To keep the project legally clean and preserve future licensing flexibility, all contributors must agree to the Contributor License Agreement (CLA) before any pull request can be merged.
+## How to Contribute
 
-## Contributor License Agreement (CLA)
-
-By submitting a pull request, you confirm that:
-
-1. You have read and agreed to the CLA located at /CLA.md.
-2. You have the legal right to submit the contribution.
-3. Your contribution is original or properly licensed.
-4. You grant the Licensor broad rights to use, modify, relicense, and commercialize your contribution.
-
-Pull requests may not be merged until the CLA has been acknowledged.
-
-## Ownership & GitHub Roles
-
-Being a contributor, maintainer, or GitHub organization member does NOT grant ownership of the project or its intellectual property.
-
-All intellectual property rights remain with the Licensor unless explicitly assigned in writing.
+1. **Fork** this repo and create a branch (`feat/`, `fix/`, etc.)
+2. Make your changes — keep them focused and well-scoped
+3. Open a pull request against `main`
+4. Our CLA bot will ask you to sign the [Contributor License Agreement](CLA.md) on your first PR (one-time, takes 30 seconds)
+5. CI runs, we review, and merge
 
 ## Code Standards
 
-- Keep changes minimal and well-scoped.
-- Follow existing architecture patterns.
-- Include tests where appropriate.
-- Do not introduce third-party code with incompatible licenses.
+- Follow existing architecture patterns
+- Include tests where appropriate
+- Do not introduce third-party code with incompatible licenses
 
 ## Security Issues
 
-Please report security issues privately to:
-admin@openlegion.ai
+Please report security issues privately to admin@openlegion.ai
