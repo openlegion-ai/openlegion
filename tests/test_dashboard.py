@@ -71,6 +71,8 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         credential_vault.list_system_credential_names.return_value = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
         credential_vault.system_credentials = {"anthropic_api_key": "sk-test", "openai_api_key": "sk-openai"}
         credential_vault.get_providers_with_credentials.return_value = {"anthropic", "openai"}
+        credential_vault._has_anthropic_oauth.return_value = False
+        credential_vault._has_openai_oauth.return_value = False
 
         msg_router = MagicMock()
         msg_router.agent_registry = agent_registry
