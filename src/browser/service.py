@@ -443,7 +443,11 @@ class BrowserManager:
             inst.x11_wid = wid
             logger.debug("Agent '%s' browser window: X11 WID %d", agent_id, wid)
         else:
-            logger.warning("Could not discover X11 WID for '%s' — interactions on high-sensitivity sites will use CDP (isTrusted=false)", agent_id)
+            logger.warning(
+                "Could not discover X11 WID for '%s' — interactions on "
+                "high-sensitivity sites will use CDP (isTrusted=false)",
+                agent_id,
+            )
 
         return inst
 

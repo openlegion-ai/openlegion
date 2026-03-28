@@ -4502,6 +4502,7 @@ class TestX11Input:
     async def test_wid_discovery_failure_logs_warning(self):
         """Failed WID discovery should log at WARNING, not DEBUG."""
         import inspect
+
         import src.browser.service as svc
         source = inspect.getsource(svc.BrowserManager._start_browser)
         # The WID failure path should use logger.warning, not logger.debug
