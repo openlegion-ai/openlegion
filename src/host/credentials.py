@@ -1793,26 +1793,30 @@ class CredentialVault:
                     elif etype == "response.output_item.added":
                         item = event.get("item", {})
                         if item.get("type") == "function_call":
-                            call_id = item.get("call_id", "")
                             idx = len(collected_tool_calls)
                             collected_tool_calls.append({
                                 "name": item.get("name", ""),
                                 "arguments": "",
                             })
-                            call_id_to_idx[call_id] = idx
+                            # Map both item.id and item.call_id so delta
+                            # events can match regardless of which key they
+                            # use (call_id vs item_id varies by API version).
+                            for key in ("call_id", "id"):
+                                val = item.get(key, "")
+                                if val:
+                                    call_id_to_idx[val] = idx
 
                     elif etype == "response.function_call_arguments.delta":
                         delta = event.get("delta", "")
-                        call_id = event.get("call_id", "")
-                        idx = call_id_to_idx.get(call_id)
+                        lookup = event.get("call_id") or event.get("item_id", "")
+                        idx = call_id_to_idx.get(lookup)
                         if idx is not None and delta:
                             collected_tool_calls[idx]["arguments"] += delta
 
                     elif etype == "response.function_call_arguments.done":
-                        # Full arguments available — overwrite
-                        call_id = event.get("call_id", "")
+                        lookup = event.get("call_id") or event.get("item_id", "")
                         arguments = event.get("arguments", "")
-                        idx = call_id_to_idx.get(call_id)
+                        idx = call_id_to_idx.get(lookup)
                         if idx is not None and arguments:
                             collected_tool_calls[idx]["arguments"] = arguments
 
@@ -1830,6 +1834,17 @@ class CredentialVault:
 
             tokens_used = input_tokens + output_tokens
             self._health_tracker.record_success(model)
+
+            # Log tool calls with empty arguments — helps diagnose
+            # streaming event format mismatches between API versions.
+            for tc in collected_tool_calls:
+                if tc["name"] and not tc["arguments"]:
+                    logger.warning(
+                        "Codex streaming produced tool call '%s' with empty "
+                        "arguments — possible call_id/item_id mismatch in "
+                        "streaming events",
+                        tc["name"],
+                    )
 
             done_data: dict = {
                 "type": "done", "content": collected_content,
