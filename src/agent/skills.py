@@ -277,7 +277,9 @@ class SkillRegistry:
                     if k in {"mesh_client", "workspace_manager", "memory_store"}:
                         continue
                     tag = "required" if "default" not in v else "optional"
-                    hints.append(f"{k} ({v.get('type', 'any')}, {tag})")
+                    enum = v.get("enum")
+                    enum_str = f", one of: {'/'.join(str(e) for e in enum)}" if enum else ""
+                    hints.append(f"{k} ({v.get('type', 'any')}, {tag}{enum_str})")
                 hint_str = f" Expected: {', '.join(hints)}" if hints else ""
                 raise TypeError(
                     f"Missing required parameter(s): {', '.join(sorted(missing))}.{hint_str}"

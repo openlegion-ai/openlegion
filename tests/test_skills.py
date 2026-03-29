@@ -809,6 +809,26 @@ async def test_execute_missing_param_error_includes_hints():
 
 
 @pytest.mark.asyncio
+async def test_execute_missing_param_error_includes_enum_values():
+    """Error hints include enum values so agent knows valid options."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="status_tool", description="t", parameters={
+        "state": {
+            "type": "string",
+            "enum": ["idle", "working", "blocked", "done"],
+            "description": "current state",
+        },
+    })
+    def status_tool(state: str) -> dict:
+        return {"state": state}
+
+    registry.skills = dict(_skill_staging)
+    with pytest.raises(TypeError, match=r"one of: idle/working/blocked/done"):
+        await registry.execute("status_tool", {})
+
+
+@pytest.mark.asyncio
 async def test_execute_none_arguments_treated_as_empty():
     """None arguments (from null JSON) should be treated as empty dict."""
     registry = SkillRegistry.__new__(SkillRegistry)
