@@ -1142,6 +1142,8 @@ def create_dashboard_router(
             raise HTTPException(status_code=503, detail="Transport not available")
         try:
             await transport.request(agent_id, "POST", "/chat/reset", timeout=10)
+            if event_bus:
+                event_bus.emit("chat_reset", agent=agent_id)
             return {"reset": True, "agent": agent_id}
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))

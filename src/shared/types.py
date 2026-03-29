@@ -332,6 +332,7 @@ class DashboardEvent(BaseModel):
         "cron_change",
         "chat_user_message",
         "chat_done",
+        "chat_reset",
     ]
     agent: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
