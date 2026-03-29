@@ -183,7 +183,7 @@ class SkillRegistry:
 
         info = self.skills[name]
         func = info["function"]
-        call_args = dict(arguments) if arguments else {}
+        call_args = dict(arguments) if isinstance(arguments, dict) else {}
 
         # ── Type coercion ──────────────────────────────────────────────
         # The LLM occasionally sends values with the wrong JSON type

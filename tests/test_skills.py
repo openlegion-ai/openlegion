@@ -822,3 +822,20 @@ async def test_execute_none_arguments_treated_as_empty():
     registry.skills = dict(_skill_staging)
     result = await registry.execute("no_req_tool", None)
     assert result == {"verbose": False}
+
+
+@pytest.mark.asyncio
+async def test_execute_non_dict_arguments_treated_as_empty():
+    """Non-dict arguments (int, list, string) should not crash execute."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="safe_tool", description="t", parameters={
+        "verbose": {"type": "boolean", "description": "v", "default": False},
+    })
+    def safe_tool(verbose: bool = False) -> dict:
+        return {"verbose": verbose}
+
+    registry.skills = dict(_skill_staging)
+    for bad_args in [42, [1, 2], "hello", True, 0]:
+        result = await registry.execute("safe_tool", bad_args)
+        assert result == {"verbose": False}, f"Failed for arguments={bad_args!r}"
