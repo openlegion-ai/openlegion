@@ -271,19 +271,29 @@ class SkillRegistry:
         if sig_required:
             missing = sig_required - set(call_args)
             if missing:
-                # Include parameter hints so the agent can self-correct
-                hints = []
+                # Build a prescriptive correction that helps the LLM
+                # self-correct — include param descriptions and enum
+                # values so it knows exactly what to provide.
+                req_parts = []
+                opt_parts = []
                 for k, v in param_schemas.items():
                     if k in {"mesh_client", "workspace_manager", "memory_store"}:
                         continue
-                    tag = "required" if "default" not in v else "optional"
+                    ptype = v.get("type", "any")
+                    desc = v.get("description", "")
                     enum = v.get("enum")
-                    enum_str = f", one of: {'/'.join(str(e) for e in enum)}" if enum else ""
-                    hints.append(f"{k} ({v.get('type', 'any')}, {tag}{enum_str})")
-                hint_str = f" Expected: {', '.join(hints)}" if hints else ""
-                raise TypeError(
-                    f"Missing required parameter(s): {', '.join(sorted(missing))}.{hint_str}"
-                )
+                    enum_str = f" (one of: {', '.join(str(e) for e in enum)})" if enum else ""
+                    line = f"  {k} ({ptype}{enum_str}): {desc}" if desc else f"  {k} ({ptype}{enum_str})"
+                    if "default" not in v:
+                        req_parts.append(line)
+                    else:
+                        opt_parts.append(line)
+                parts = [f"Tool '{name}' called without required parameter(s): {', '.join(sorted(missing))}."]
+                if req_parts:
+                    parts.append("REQUIRED:\n" + "\n".join(req_parts))
+                if opt_parts:
+                    parts.append("OPTIONAL:\n" + "\n".join(opt_parts))
+                raise TypeError("\n".join(parts))
 
         if is_coroutine:
             return await func(**call_args)

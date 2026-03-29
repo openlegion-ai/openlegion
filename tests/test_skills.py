@@ -703,7 +703,7 @@ async def test_execute_missing_required_param_raises():
         return {"path": path}
 
     registry.skills = dict(_skill_staging)
-    with pytest.raises(TypeError, match="Missing required.*path"):
+    with pytest.raises(TypeError, match="without required.*path"):
         await registry.execute("req_tool", {})
 
 
@@ -720,7 +720,7 @@ async def test_execute_malformed_raw_args_raises():
 
     registry.skills = dict(_skill_staging)
     # Simulates what happens when LLM sends malformed JSON → {"raw": "garbage"}
-    with pytest.raises(TypeError, match="Missing required.*path"):
+    with pytest.raises(TypeError, match="without required.*path"):
         await registry.execute("file_tool", {"raw": "some garbage"})
 
 
@@ -804,7 +804,7 @@ async def test_execute_missing_param_error_includes_hints():
         return {"query": query}
 
     registry.skills = dict(_skill_staging)
-    with pytest.raises(TypeError, match="Expected:.*query.*string.*required.*limit.*integer.*optional"):
+    with pytest.raises(TypeError, match=r"(?s)REQUIRED:.*query.*OPTIONAL:.*limit"):
         await registry.execute("search_tool", {})
 
 
@@ -824,7 +824,7 @@ async def test_execute_missing_param_error_includes_enum_values():
         return {"state": state}
 
     registry.skills = dict(_skill_staging)
-    with pytest.raises(TypeError, match=r"one of: idle/working/blocked/done"):
+    with pytest.raises(TypeError, match=r"one of: idle, working, blocked, done"):
         await registry.execute("status_tool", {})
 
 
