@@ -1269,6 +1269,9 @@ select:focus-visible,
   main.chat-side-open .project-hub-mobile-tabs {
     display: flex !important;
   }
+  main.chat-side-open .project-hub-kebab {
+    margin-left: auto !important;
+  }
 }
 
 /* ── Mobile responsiveness ───────────────────────── */
