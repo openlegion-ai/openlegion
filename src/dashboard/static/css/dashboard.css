@@ -1271,7 +1271,7 @@ select:focus-visible,
 /* When chat panel is open on medium screens, hide desktop tab pills
    and show the mobile scrolling tab strip instead — available content
    is too narrow for six inline pill buttons. */
-@media (min-width: 768px) and (max-width: 1279px) {
+@media (min-width: 768px) and (max-width: 1599px) {
   main.chat-side-open .project-hub-desktop-tabs {
     display: none !important;
   }
