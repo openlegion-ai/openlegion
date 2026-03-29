@@ -45,11 +45,13 @@ _FILENAME_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9._-]")
         "filename": {
             "type": "string",
             "description": "Output filename (without path). Auto-generated if not provided.",
+            "default": "",
         },
         "provider": {
             "type": "string",
             "description": "Image generation provider: 'gemini' or 'openai'. Uses system default if not specified.",
             "enum": ["gemini", "openai"],
+            "default": "",
         },
     },
 )

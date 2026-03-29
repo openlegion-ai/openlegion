@@ -771,3 +771,54 @@ async def test_execute_coerces_string_false_to_bool():
     registry.skills = dict(_skill_staging)
     result = await registry.execute("bool_false_tool", {"flag": "false"})
     assert result == {"flag": False}
+
+
+@pytest.mark.asyncio
+async def test_execute_function_default_not_flagged_as_required():
+    """Param with function default but no schema default should NOT be rejected."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="image_tool", description="t", parameters={
+        "prompt": {"type": "string", "description": "p"},
+        "filename": {"type": "string", "description": "f"},  # No "default" in schema
+    })
+    def image_tool(prompt: str, filename: str = "") -> dict:  # Has default in function
+        return {"prompt": prompt, "filename": filename}
+
+    registry.skills = dict(_skill_staging)
+    # LLM omits filename — should succeed using the function default
+    result = await registry.execute("image_tool", {"prompt": "a cat"})
+    assert result == {"prompt": "a cat", "filename": ""}
+
+
+@pytest.mark.asyncio
+async def test_execute_missing_param_error_includes_hints():
+    """Error message includes parameter hints so agent can self-correct."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="search_tool", description="t", parameters={
+        "query": {"type": "string", "description": "what to search"},
+        "limit": {"type": "integer", "description": "max results", "default": 5},
+    })
+    def search_tool(query: str, limit: int = 5) -> dict:
+        return {"query": query}
+
+    registry.skills = dict(_skill_staging)
+    with pytest.raises(TypeError, match="Expected:.*query.*string.*required.*limit.*integer.*optional"):
+        await registry.execute("search_tool", {})
+
+
+@pytest.mark.asyncio
+async def test_execute_none_arguments_treated_as_empty():
+    """None arguments (from null JSON) should be treated as empty dict."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="no_req_tool", description="t", parameters={
+        "verbose": {"type": "boolean", "description": "v", "default": False},
+    })
+    def no_req_tool(verbose: bool = False) -> dict:
+        return {"verbose": verbose}
+
+    registry.skills = dict(_skill_staging)
+    result = await registry.execute("no_req_tool", None)
+    assert result == {"verbose": False}
