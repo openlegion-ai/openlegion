@@ -278,6 +278,33 @@ class TestFileToolErrorHandling:
         paths = [e["path"] for e in result["entries"]]
         assert any("b.txt" in p for p in paths)
 
+    def test_read_file_negative_offset_clamped(self):
+        """Negative offset is clamped to 0 instead of triggering Python backward slicing."""
+        f = os.path.join(self._tmpdir, "lines.txt")
+        with open(f, "w") as fh:
+            fh.write("line1\nline2\nline3\n")
+        result = self._ft.read_file("lines.txt", offset=-1, limit=2)
+        assert "error" not in result
+        # Should behave as offset=0, limit=2 — not return the last line
+        assert result["content"] == "line1\nline2\n"
+
+    def test_list_files_glob_oserror_returns_error(self):
+        """OSError from glob itself (not just individual entries) is caught."""
+        from pathlib import Path
+        from unittest.mock import patch
+
+        subdir = os.path.join(self._tmpdir, "sub")
+        os.makedirs(subdir)
+
+        def raise_on_glob(self_path, pattern):
+            raise PermissionError("cannot read directory")
+
+        with patch.object(Path, "glob", raise_on_glob):
+            result = self._ft.list_files("sub")
+
+        assert "error" in result
+        assert "cannot list" in result["error"].lower()
+
 
 # ── update_workspace (mesh_tool) ────────────────────────────
 

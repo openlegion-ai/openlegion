@@ -739,3 +739,35 @@ async def test_execute_optional_params_not_required():
     registry.skills = dict(_skill_staging)
     result = await registry.execute("opt_tool", {"path": "test.txt"})
     assert result == {"path": "test.txt", "verbose": False}
+
+
+@pytest.mark.asyncio
+async def test_execute_coerces_string_to_float():
+    """LLM sends '3.14' instead of 3.14 for a number parameter."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="num_tool", description="t", parameters={
+        "value": {"type": "number", "description": "n"},
+    })
+    def num_tool(value: float) -> dict:
+        return {"value": value, "type": type(value).__name__}
+
+    registry.skills = dict(_skill_staging)
+    result = await registry.execute("num_tool", {"value": "3.14"})
+    assert result == {"value": 3.14, "type": "float"}
+
+
+@pytest.mark.asyncio
+async def test_execute_coerces_string_false_to_bool():
+    """LLM sends 'false' string — must coerce to False, not truthy non-empty string."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="bool_false_tool", description="t", parameters={
+        "flag": {"type": "boolean", "description": "f"},
+    })
+    def bool_false_tool(flag: bool) -> dict:
+        return {"flag": flag}
+
+    registry.skills = dict(_skill_staging)
+    result = await registry.execute("bool_false_tool", {"flag": "false"})
+    assert result == {"flag": False}

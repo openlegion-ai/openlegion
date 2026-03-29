@@ -125,6 +125,8 @@ def read_file(path: str, offset: int = 0, limit: int = 0) -> dict:
         return {"error": f"Cannot read file: {e}"}
     if offset or limit:
         lines = content.splitlines(keepends=True)
+        offset = max(0, offset)
+        limit = max(0, limit)
         end = offset + limit if limit else len(lines)
         content = "".join(lines[offset:end])
 
@@ -214,7 +216,11 @@ def list_files(path: str = ".", pattern: str = "*", recursive: bool = False) -> 
 
     glob_fn = safe.rglob if recursive else safe.glob
     entries = []
-    for item in sorted(glob_fn(pattern))[:_MAX_LIST_ENTRIES]:
+    try:
+        items = sorted(glob_fn(pattern))[:_MAX_LIST_ENTRIES]
+    except OSError as e:
+        return {"error": f"Cannot list directory: {e}"}
+    for item in items:
         try:
             rel = item.relative_to(Path(_ALLOWED_ROOT).resolve())
             entries.append({
