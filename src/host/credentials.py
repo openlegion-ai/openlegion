@@ -1620,7 +1620,7 @@ class CredentialVault:
         if instructions_parts:
             body["instructions"] = "\n\n".join(instructions_parts)
 
-        # Tools — only set tool_choice/parallel_tool_calls when tools exist
+        # Tools — only set tool_choice when tools exist
         tools = params.get("tools")
         if tools:
             unwrapped: list[dict] = []
@@ -1638,7 +1638,6 @@ class CredentialVault:
                     unwrapped.append(t)
             body["tools"] = unwrapped
             body["tool_choice"] = "auto"
-            body["parallel_tool_calls"] = True
 
         return body
 
