@@ -108,6 +108,11 @@ class LLMClient:
                         args[:200] if isinstance(args, str) else args,
                     )
                     args = {"raw": args}
+            # json.loads can return non-dict types (null→None, "42"→int,
+            # "[1,2]"→list).  Normalise to dict so ToolCallInfo validation
+            # and downstream execute() don't crash.
+            if not isinstance(args, dict):
+                args = {}
             tool_calls.append(ToolCallInfo(name=tc.get("name", ""), arguments=args))
         return tool_calls if tool_calls else None
 
