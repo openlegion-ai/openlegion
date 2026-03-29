@@ -3262,10 +3262,8 @@ function dashboard() {
         const data = await resp.json();
         const localMsgs = this.chatHistories[agentId] || [];
         if (!data.messages || data.messages.length === 0) {
-          if (localMsgs.length > 0) {
-            this.chatHistories[agentId] = [];
-            this._saveChatToSession();
-          }
+          // Server returned empty — agent may be restarting or transcript not yet
+          // initialized. Preserve local messages to avoid losing visible history.
           return;
         }
         const serverMsgs = data.messages.map(m => ({
@@ -3284,7 +3282,16 @@ function dashboard() {
           const t = m.ts || 0;
           return t < 1e12 ? t * 1000 : t;
         }));
+        // Preserve local messages not yet on the server:
+        // 1. User messages sent after the last server timestamp
+        // 2. Notifications injected via WebSocket not yet in the server transcript
         const trailing = localMsgs.filter(m => {
+          if (m.role === 'notification') {
+            // Keep local notifications not yet in server response
+            return !serverMsgs.some(s =>
+              s.role === 'notification' && s.content === m.content && Math.abs((s.ts || 0) - (m.ts || 0)) < 2000
+            );
+          }
           if (m.role !== 'user' || (m.ts || 0) <= lastServerTs) return false;
           // Skip if server already has a message with matching content
           return !serverMsgs.some(s => s.role === 'user' && s.content === m.content && Math.abs((s.ts || 0) - (m.ts || 0)) < 10000);
@@ -3375,21 +3382,22 @@ function dashboard() {
       this.chatPanelMinimized = false;
       if (this.openChats.includes(agentId)) {
         this.activeChatId = agentId;
-        if (this.chatUnread[agentId]) this.chatUnread = { ...this.chatUnread, [agentId]: 0 };
+        this._loadChatHistory(agentId);
         this.$nextTick(() => {
           this._scrollChat(agentId, true);
+          if (this.chatUnread[agentId]) this.chatUnread = { ...this.chatUnread, [agentId]: 0 };
           const input = document.getElementById('chat-slide-input');
           if (input) input.focus();
         });
-        // Load from server if local history is empty
-        this._loadChatHistory(agentId);
         return;
       }
       this.openChats.push(agentId);
       this.activeChatId = agentId;
-      // Load from server if local history is empty
       this._loadChatHistory(agentId);
-      this.$nextTick(() => this._scrollChat(agentId, true));
+      this.$nextTick(() => {
+        this._scrollChat(agentId, true);
+        if (this.chatUnread[agentId]) this.chatUnread = { ...this.chatUnread, [agentId]: 0 };
+      });
     },
 
     closeChat(agentId) {
