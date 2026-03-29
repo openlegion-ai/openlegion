@@ -1793,26 +1793,37 @@ class CredentialVault:
                     elif etype == "response.output_item.added":
                         item = event.get("item", {})
                         if item.get("type") == "function_call":
-                            call_id = item.get("call_id", "")
                             idx = len(collected_tool_calls)
                             collected_tool_calls.append({
                                 "name": item.get("name", ""),
                                 "arguments": "",
                             })
-                            call_id_to_idx[call_id] = idx
+                            # Map both item.id and item.call_id so delta
+                            # events match regardless of which key they
+                            # reference (varies by API version/model).
+                            for id_key in ("call_id", "id"):
+                                id_val = item.get(id_key, "")
+                                if id_val:
+                                    call_id_to_idx[id_val] = idx
 
                     elif etype == "response.function_call_arguments.delta":
                         delta = event.get("delta", "")
-                        call_id = event.get("call_id", "")
-                        idx = call_id_to_idx.get(call_id)
+                        lookup = event.get("call_id") or event.get("item_id", "")
+                        idx = call_id_to_idx.get(lookup)
                         if idx is not None and delta:
                             collected_tool_calls[idx]["arguments"] += delta
+                        elif delta:
+                            logger.debug(
+                                "Codex streaming: unmatched argument delta "
+                                "(keys in event: %s, known IDs: %s)",
+                                sorted(event.keys()),
+                                sorted(call_id_to_idx.keys()),
+                            )
 
                     elif etype == "response.function_call_arguments.done":
-                        # Full arguments available — overwrite
-                        call_id = event.get("call_id", "")
+                        lookup = event.get("call_id") or event.get("item_id", "")
                         arguments = event.get("arguments", "")
-                        idx = call_id_to_idx.get(call_id)
+                        idx = call_id_to_idx.get(lookup)
                         if idx is not None and arguments:
                             collected_tool_calls[idx]["arguments"] = arguments
 
@@ -1821,6 +1832,26 @@ class CredentialVault:
                         usage = response_data.get("usage", {})
                         input_tokens = usage.get("input_tokens", input_tokens)
                         output_tokens = usage.get("output_tokens", output_tokens)
+
+                        # Backfill tool call arguments from the completed
+                        # response.  Streaming deltas can be lost if the
+                        # API changes the ID field used to correlate them;
+                        # the completed response always has the final state.
+                        fc_idx = 0
+                        for out_item in response_data.get("output", []):
+                            if out_item.get("type") != "function_call":
+                                continue
+                            if fc_idx < len(collected_tool_calls):
+                                tc = collected_tool_calls[fc_idx]
+                                final_args = out_item.get("arguments", "")
+                                if not tc["arguments"] and final_args:
+                                    logger.info(
+                                        "Backfilling empty arguments for "
+                                        "'%s' from completed response",
+                                        tc["name"],
+                                    )
+                                    tc["arguments"] = final_args
+                            fc_idx += 1
 
                     elif etype == "response.failed":
                         error_info = event.get("response", {}).get("error", {})
