@@ -108,16 +108,21 @@ def _is_protected_workspace_file(resolved: Path) -> bool:
 )
 def read_file(path: str, offset: int = 0, limit: int = 0) -> dict:
     """Read file contents with optional line offset/limit."""
-    safe = _safe_path(path)
+    try:
+        safe = _safe_path(path)
+    except (ValueError, OSError) as e:
+        return {"error": str(e)}
     if not safe.exists():
         return {"error": f"File not found: {path}"}
     if not safe.is_file():
         return {"error": f"Not a file: {path}"}
 
-    file_size = safe.stat().st_size
-    # Read with a size limit to avoid OOM on very large files
-    with safe.open("r", errors="replace") as f:
-        content = f.read(_MAX_READ)
+    try:
+        file_size = safe.stat().st_size
+        with safe.open("r", errors="replace") as f:
+            content = f.read(_MAX_READ)
+    except OSError as e:
+        return {"error": f"Cannot read file: {e}"}
     if offset or limit:
         lines = content.splitlines(keepends=True)
         end = offset + limit if limit else len(lines)
@@ -146,7 +151,10 @@ def read_file(path: str, offset: int = 0, limit: int = 0) -> dict:
 )
 def write_file(path: str, content: str, append: bool = False) -> dict:
     """Write or append content to a file."""
-    safe = _safe_path(path)
+    try:
+        safe = _safe_path(path)
+    except (ValueError, OSError) as e:
+        return {"error": str(e)}
     if _is_protected_workspace_file(safe):
         return {
             "error": (
@@ -155,10 +163,13 @@ def write_file(path: str, content: str, append: bool = False) -> dict:
                 "USER.md, and HEARTBEAT.md. MEMORY.md is system-managed."
             ),
         }
-    safe.parent.mkdir(parents=True, exist_ok=True)
-    mode = "a" if append else "w"
-    with safe.open(mode) as f:
-        f.write(content)
+    try:
+        safe.parent.mkdir(parents=True, exist_ok=True)
+        mode = "a" if append else "w"
+        with safe.open(mode) as f:
+            f.write(content)
+    except OSError as e:
+        return {"error": f"Cannot write file: {e}"}
     return {"path": str(safe), "bytes_written": len(content.encode())}
 
 
@@ -192,7 +203,10 @@ def list_files(path: str = ".", pattern: str = "*", recursive: bool = False) -> 
     if ".." in pattern.split("/"):
         return {"error": "Pattern must not contain '..' components"}
 
-    safe = _safe_path(path)
+    try:
+        safe = _safe_path(path)
+    except (ValueError, OSError) as e:
+        return {"error": str(e)}
     if not safe.exists():
         return {"error": f"Directory not found: {path}"}
     if not safe.is_dir():
@@ -201,11 +215,14 @@ def list_files(path: str = ".", pattern: str = "*", recursive: bool = False) -> 
     glob_fn = safe.rglob if recursive else safe.glob
     entries = []
     for item in sorted(glob_fn(pattern))[:_MAX_LIST_ENTRIES]:
-        rel = item.relative_to(Path(_ALLOWED_ROOT).resolve())
-        entries.append({
-            "path": str(rel),
-            "type": "dir" if item.is_dir() else "file",
-            "size": item.lstat().st_size if item.is_file() else 0,
-        })
+        try:
+            rel = item.relative_to(Path(_ALLOWED_ROOT).resolve())
+            entries.append({
+                "path": str(rel),
+                "type": "dir" if item.is_dir() else "file",
+                "size": item.lstat().st_size if item.is_file() else 0,
+            })
+        except OSError:
+            continue
 
     return {"entries": entries, "count": len(entries)}
