@@ -1410,6 +1410,20 @@ function dashboard() {
         delete this._chatFetchedAt[agent];
         this._loadChatHistory(agent);
         this._saveChatToSession();
+      } else if (evt.type === 'chat_reset' && agent) {
+        // Another session reset this agent's conversation — clear local history
+        this.chatHistories[agent] = [];
+        this.chatStreamingAgents[agent] = false;
+        this.chatLoadingAgents[agent] = false;
+        this._stopChatRecovery(agent);
+        if (this._chatAborts[agent]) {
+          this._chatAborts[agent].abort();
+          delete this._chatAborts[agent];
+        }
+        delete this._chatStreamTarget[agent];
+        delete this._chatFetchedAt[agent];
+        this.chatUnread = { ...this.chatUnread, [agent]: 0 };
+        this._saveChatToSession();
       }
 
       // Debounced cost panel refresh on llm_call events
