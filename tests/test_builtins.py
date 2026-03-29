@@ -199,6 +199,113 @@ class TestFileToolWorkspaceGuard:
         assert "error" not in result
 
 
+class TestFileToolErrorHandling:
+    """Tool functions catch ValueError/_safe_path and OSError gracefully."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        import src.agent.builtins.file_tool as ft
+
+        self._ft = ft
+        self._original_root = ft._ALLOWED_ROOT
+        ft._ALLOWED_ROOT = self._tmpdir
+
+    def teardown_method(self):
+        self._ft._ALLOWED_ROOT = self._original_root
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_read_file_path_traversal_returns_error(self):
+        """_safe_path ValueError is caught and returned as error dict."""
+        result = self._ft.read_file("../../etc/passwd")
+        assert "error" in result
+        assert "traversal" in result["error"].lower() or "not allowed" in result["error"].lower()
+
+    def test_write_file_path_traversal_returns_error(self):
+        """_safe_path ValueError is caught and returned as error dict."""
+        result = self._ft.write_file("../../etc/evil", "pwned")
+        assert "error" in result
+        assert "traversal" in result["error"].lower() or "not allowed" in result["error"].lower()
+
+    def test_list_files_path_traversal_returns_error(self):
+        """_safe_path ValueError is caught and returned as error dict."""
+        result = self._ft.list_files("../../etc")
+        assert "error" in result
+
+    def test_read_file_permission_error(self):
+        """OSError during read is caught and returned as error dict."""
+        f = os.path.join(self._tmpdir, "secret.txt")
+        with open(f, "w") as fh:
+            fh.write("secret")
+        os.chmod(f, 0o000)
+        try:
+            result = self._ft.read_file("secret.txt")
+            assert "error" in result
+            assert "cannot read" in result["error"].lower()
+        finally:
+            os.chmod(f, 0o644)
+
+    def test_write_file_read_only_returns_error(self):
+        """OSError during write is caught and returned as error dict."""
+        ro_dir = os.path.join(self._tmpdir, "readonly")
+        os.makedirs(ro_dir)
+        os.chmod(ro_dir, 0o444)
+        try:
+            result = self._ft.write_file("readonly/test.txt", "data")
+            assert "error" in result
+            assert "permission denied" in result["error"].lower() or "cannot write" in result["error"].lower()
+        finally:
+            os.chmod(ro_dir, 0o755)
+
+    def test_list_files_skips_vanished_entries(self):
+        """Files that vanish between glob and stat are skipped, not fatal."""
+        from pathlib import Path
+        from unittest.mock import patch
+
+        (Path(self._tmpdir) / "a.txt").write_text("a")
+        (Path(self._tmpdir) / "b.txt").write_text("b")
+
+        real_lstat = Path.lstat
+
+        def flaky_lstat(self_path):
+            if self_path.name == "a.txt":
+                raise FileNotFoundError("vanished")
+            return real_lstat(self_path)
+
+        with patch.object(Path, "lstat", flaky_lstat):
+            result = self._ft.list_files()
+
+        assert "error" not in result
+        paths = [e["path"] for e in result["entries"]]
+        assert any("b.txt" in p for p in paths)
+
+    def test_read_file_negative_offset_clamped(self):
+        """Negative offset is clamped to 0 instead of triggering Python backward slicing."""
+        f = os.path.join(self._tmpdir, "lines.txt")
+        with open(f, "w") as fh:
+            fh.write("line1\nline2\nline3\n")
+        result = self._ft.read_file("lines.txt", offset=-1, limit=2)
+        assert "error" not in result
+        # Should behave as offset=0, limit=2 — not return the last line
+        assert result["content"] == "line1\nline2\n"
+
+    def test_list_files_glob_oserror_returns_error(self):
+        """OSError from glob itself (not just individual entries) is caught."""
+        from pathlib import Path
+        from unittest.mock import patch
+
+        subdir = os.path.join(self._tmpdir, "sub")
+        os.makedirs(subdir)
+
+        def raise_on_glob(self_path, pattern):
+            raise PermissionError("cannot read directory")
+
+        with patch.object(Path, "glob", raise_on_glob):
+            result = self._ft.list_files("sub")
+
+        assert "error" in result
+        assert "cannot list" in result["error"].lower()
+
+
 # ── update_workspace (mesh_tool) ────────────────────────────
 
 

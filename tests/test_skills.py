@@ -618,3 +618,156 @@ class TestGetToolSources:
         registry.skills = {}
         registry._builtin_functions = frozenset()
         assert registry.get_tool_sources() == {}
+
+
+# ── Type coercion tests ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_execute_coerces_string_to_int():
+    """LLM sends '5' instead of 5 for an integer parameter."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="int_tool", description="t", parameters={
+        "count": {"type": "integer", "description": "n"},
+    })
+    def int_tool(count: int) -> dict:
+        return {"count": count, "type": type(count).__name__}
+
+    registry.skills = dict(_skill_staging)
+    result = await registry.execute("int_tool", {"count": "5"})
+    assert result == {"count": 5, "type": "int"}
+
+
+@pytest.mark.asyncio
+async def test_execute_coerces_string_to_bool():
+    """LLM sends 'true' instead of true for a boolean parameter."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="bool_tool", description="t", parameters={
+        "flag": {"type": "boolean", "description": "f"},
+    })
+    def bool_tool(flag: bool) -> dict:
+        return {"flag": flag}
+
+    registry.skills = dict(_skill_staging)
+    result = await registry.execute("bool_tool", {"flag": "true"})
+    assert result == {"flag": True}
+
+
+@pytest.mark.asyncio
+async def test_execute_coerces_int_to_string():
+    """LLM sends 42 instead of '42' for a string parameter."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="str_tool", description="t", parameters={
+        "name": {"type": "string", "description": "n"},
+    })
+    def str_tool(name: str) -> dict:
+        return {"name": name}
+
+    registry.skills = dict(_skill_staging)
+    result = await registry.execute("str_tool", {"name": 42})
+    assert result == {"name": "42"}
+
+
+@pytest.mark.asyncio
+async def test_execute_type_coercion_failure_raises():
+    """Non-numeric string for integer parameter raises TypeError."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="bad_int", description="t", parameters={
+        "count": {"type": "integer", "description": "n"},
+    })
+    def bad_int(count: int) -> dict:
+        return {"count": count}
+
+    registry.skills = dict(_skill_staging)
+    with pytest.raises(TypeError, match="expects integer"):
+        await registry.execute("bad_int", {"count": "not_a_number"})
+
+
+# ── Required-parameter validation tests ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_execute_missing_required_param_raises():
+    """Missing required parameter raises TypeError with clear message."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="req_tool", description="t", parameters={
+        "path": {"type": "string", "description": "p"},
+        "limit": {"type": "integer", "description": "l", "default": 10},
+    })
+    def req_tool(path: str, limit: int = 10) -> dict:
+        return {"path": path}
+
+    registry.skills = dict(_skill_staging)
+    with pytest.raises(TypeError, match="Missing required.*path"):
+        await registry.execute("req_tool", {})
+
+
+@pytest.mark.asyncio
+async def test_execute_malformed_raw_args_raises():
+    """When LLM sends malformed JSON, the {"raw": ...} fallback triggers missing-param error."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="file_tool", description="t", parameters={
+        "path": {"type": "string", "description": "p"},
+    })
+    def file_tool(path: str) -> dict:
+        return {"path": path}
+
+    registry.skills = dict(_skill_staging)
+    # Simulates what happens when LLM sends malformed JSON → {"raw": "garbage"}
+    with pytest.raises(TypeError, match="Missing required.*path"):
+        await registry.execute("file_tool", {"raw": "some garbage"})
+
+
+@pytest.mark.asyncio
+async def test_execute_optional_params_not_required():
+    """Optional params (with defaults) should not trigger missing-param error."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="opt_tool", description="t", parameters={
+        "path": {"type": "string", "description": "p"},
+        "verbose": {"type": "boolean", "description": "v", "default": False},
+    })
+    def opt_tool(path: str, verbose: bool = False) -> dict:
+        return {"path": path, "verbose": verbose}
+
+    registry.skills = dict(_skill_staging)
+    result = await registry.execute("opt_tool", {"path": "test.txt"})
+    assert result == {"path": "test.txt", "verbose": False}
+
+
+@pytest.mark.asyncio
+async def test_execute_coerces_string_to_float():
+    """LLM sends '3.14' instead of 3.14 for a number parameter."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="num_tool", description="t", parameters={
+        "value": {"type": "number", "description": "n"},
+    })
+    def num_tool(value: float) -> dict:
+        return {"value": value, "type": type(value).__name__}
+
+    registry.skills = dict(_skill_staging)
+    result = await registry.execute("num_tool", {"value": "3.14"})
+    assert result == {"value": 3.14, "type": "float"}
+
+
+@pytest.mark.asyncio
+async def test_execute_coerces_string_false_to_bool():
+    """LLM sends 'false' string — must coerce to False, not truthy non-empty string."""
+    registry = SkillRegistry.__new__(SkillRegistry)
+
+    @skill(name="bool_false_tool", description="t", parameters={
+        "flag": {"type": "boolean", "description": "f"},
+    })
+    def bool_false_tool(flag: bool) -> dict:
+        return {"flag": flag}
+
+    registry.skills = dict(_skill_staging)
+    result = await registry.execute("bool_false_tool", {"flag": "false"})
+    assert result == {"flag": False}

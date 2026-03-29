@@ -26,6 +26,9 @@ logger = setup_logging("agent.skills")
 _skill_staging: dict[str, dict] = {}
 _skill_staging_lock = threading.Lock()
 
+# Parameters that are auto-injected by the framework — never required from the LLM.
+_INJECTED_PARAMS = frozenset({"mesh_client", "workspace_manager", "memory_store"})
+
 
 def skill(
     name: str,
@@ -179,6 +182,40 @@ class SkillRegistry:
         func = info["function"]
         call_args = dict(arguments)
 
+        # ── Type coercion ──────────────────────────────────────────────
+        # The LLM occasionally sends values with the wrong JSON type
+        # (e.g. "5" instead of 5 for an integer parameter).  Coerce to
+        # the type declared in the skill's parameter schema so that tool
+        # functions don't crash with TypeError.
+        param_schemas = info.get("parameters", {})
+        for key in list(call_args):
+            schema = param_schemas.get(key)
+            if not schema:
+                continue
+            value = call_args[key]
+            if value is None:
+                continue
+            expected = schema.get("type")
+            if not expected:
+                continue
+            try:
+                if expected == "integer" and not isinstance(value, int):
+                    call_args[key] = int(value)
+                elif expected == "number" and not isinstance(value, (int, float)):
+                    call_args[key] = float(value)
+                elif expected == "boolean" and not isinstance(value, bool):
+                    if isinstance(value, str):
+                        call_args[key] = value.lower() in ("true", "1", "yes")
+                    else:
+                        call_args[key] = bool(value)
+                elif expected == "string" and not isinstance(value, str):
+                    call_args[key] = str(value)
+            except (TypeError, ValueError):
+                raise TypeError(
+                    f"Parameter '{key}' expects {expected}, "
+                    f"got {type(value).__name__}: {value!r}"
+                )
+
         # Use cached signature metadata (computed at registration time via @skill)
         sig_params = info.get("_sig_params")
         if sig_params is not None:
@@ -213,6 +250,20 @@ class SkillRegistry:
                     "Dropping unknown args %s for skill '%s'", extra, name,
                 )
                 call_args = {k: v for k, v in call_args.items() if k in sig_params}
+
+        # ── Required-parameter check ──────────────────────────────────
+        # Catch missing required params *before* calling the function so
+        # the agent gets a clear message instead of a raw TypeError.
+        if param_schemas:
+            required = {
+                k for k, v in param_schemas.items()
+                if "default" not in v and k not in _INJECTED_PARAMS
+            }
+            missing = required - set(call_args)
+            if missing:
+                raise TypeError(
+                    f"Missing required parameter(s): {', '.join(sorted(missing))}"
+                )
 
         if is_coroutine:
             return await func(**call_args)
