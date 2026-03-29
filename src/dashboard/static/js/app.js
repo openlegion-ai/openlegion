@@ -980,6 +980,70 @@ function dashboard() {
           });
         }
       });
+
+      // ── Tooltip positioning for .setting-hint elements ──
+      // Uses position:fixed to escape overflow:hidden ancestors.
+      const _positionHint = (hint) => {
+        const text = hint.querySelector('.setting-hint-text');
+        if (!text) return;
+        const r = hint.getBoundingClientRect();
+        const gap = 6;
+        // Measure tooltip (show off-screen briefly)
+        text.style.visibility = 'hidden';
+        text.style.display = 'block';
+        text.style.top = '-9999px';
+        text.style.left = '-9999px';
+        const tw = text.offsetWidth;
+        const th = text.offsetHeight;
+        // Default: above, left-aligned with icon
+        let top = r.top - gap - th;
+        let left = r.left;
+        let below = false;
+        // Flip below if clipped at top
+        if (top < 8) {
+          top = r.bottom + gap;
+          below = true;
+        }
+        // Clamp to right edge
+        if (left + tw > window.innerWidth - 8) {
+          left = window.innerWidth - tw - 8;
+        }
+        // Clamp to left edge
+        if (left < 8) left = 8;
+        // Arrow points at icon center
+        const arrowX = Math.min(Math.max(r.left + r.width / 2 - left, 8), tw - 8);
+        text.style.setProperty('--arrow-x', arrowX + 'px');
+        text.style.top = top + 'px';
+        text.style.left = left + 'px';
+        text.style.visibility = '';
+        text.classList.toggle('hint-below', below);
+      };
+      const _hideHint = (hint) => {
+        const text = hint.querySelector('.setting-hint-text');
+        if (!text) return;
+        text.style.display = '';
+        text.style.top = '';
+        text.style.left = '';
+        text.style.visibility = '';
+        text.classList.remove('hint-below');
+        text.style.removeProperty('--arrow-x');
+      };
+      document.addEventListener('mouseenter', (e) => {
+        const hint = e.target.closest('.setting-hint');
+        if (hint) _positionHint(hint);
+      }, true);
+      document.addEventListener('mouseleave', (e) => {
+        const hint = e.target.closest('.setting-hint');
+        if (hint) _hideHint(hint);
+      }, true);
+      document.addEventListener('focusin', (e) => {
+        const hint = e.target.closest('.setting-hint');
+        if (hint) _positionHint(hint);
+      }, true);
+      document.addEventListener('focusout', (e) => {
+        const hint = e.target.closest('.setting-hint');
+        if (hint) _hideHint(hint);
+      }, true);
     },
 
     destroy() {
