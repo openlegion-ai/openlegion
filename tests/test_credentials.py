@@ -2365,7 +2365,7 @@ class TestBuildOpenAIResponsesBody:
         assert body["stream"] is True
         assert body["text"] == {"verbosity": "medium"}
         assert body["include"] == ["reasoning.encrypted_content"]
-        # tool_choice/parallel_tool_calls only present when tools exist
+        # tool_choice only present when tools exist
         assert "tool_choice" not in body
         assert "parallel_tool_calls" not in body
         assert "max_output_tokens" not in body
@@ -2428,7 +2428,7 @@ class TestBuildOpenAIResponsesBody:
         assert body["tools"][0]["type"] == "function"
         assert body["tools"][0]["strict"] is None
         assert body["tool_choice"] == "auto"
-        assert body["parallel_tool_calls"] is True
+        assert "parallel_tool_calls" not in body
 
     def test_strips_prefix(self):
         params = {"model": "openai/gpt-4o-mini", "messages": []}
