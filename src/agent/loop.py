@@ -918,9 +918,10 @@ class AgentLoop:
         """Execute an autonomous heartbeat — stateless, separate from chat.
 
         Returns a structured dict with response, tools used, duration, etc.
-        Does NOT touch _chat_messages or chat_transcript.  Uses its own
-        message list and the _heartbeat_mode ContextVar so tools like
-        notify_user can route output to activity.jsonl instead of chat.
+        Does NOT touch _chat_messages.  Uses its own message list and the
+        _heartbeat_mode ContextVar so tools can detect heartbeat context.
+        Notifications are still persisted to the chat transcript so users
+        can find them in chat history.
         """
         # Don't run if the agent is busy with a task, chat, or queued chat
         if self.state != "idle" or self._chat_lock.locked():

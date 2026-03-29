@@ -1728,7 +1728,7 @@ class TestNotifyUser:
         mock_ws.append_chat_message.assert_called_once_with("notification", "Update")
 
     @pytest.mark.asyncio
-    async def test_notify_user_skips_transcript_during_heartbeat(self):
+    async def test_notify_user_writes_transcript_during_heartbeat(self):
         from src.agent.builtins.mesh_tool import notify_user
         from src.agent.loop import _heartbeat_mode
 
@@ -1742,9 +1742,9 @@ class TestNotifyUser:
                 message="Alert", mesh_client=mock_mesh, workspace_manager=mock_ws,
             )
             assert result == {"sent": True}
-            # Should NOT write to chat transcript during heartbeat
-            mock_ws.append_chat_message.assert_not_called()
-            # But mesh notification should still be sent
+            # Should write to chat transcript even during heartbeat
+            mock_ws.append_chat_message.assert_called_once_with("notification", "Alert")
+            # Mesh notification should also be sent
             mock_mesh.notify_user.assert_awaited_once_with("Alert")
         finally:
             _heartbeat_mode.reset(token)
