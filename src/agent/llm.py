@@ -96,7 +96,9 @@ class LLMClient:
         tool_calls: list[ToolCallInfo] = []
         for tc in raw_calls:
             args = tc.get("arguments", "")
-            if isinstance(args, str):
+            if args is None:
+                args = {}
+            elif isinstance(args, str):
                 try:
                     args = json.loads(args)
                 except json.JSONDecodeError:

@@ -186,10 +186,11 @@ async def write_blackboard(key: str, value: str, *, mesh_client=None) -> dict:
                 "Key prefix to filter by (e.g. 'status/', 'research/', "
                 "'artifacts/', '' for all)"
             ),
+            "default": "",
         },
     },
 )
-async def list_blackboard(prefix: str, *, mesh_client=None) -> dict:
+async def list_blackboard(prefix: str = "", *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     if mesh_client.is_standalone:

@@ -26,9 +26,6 @@ logger = setup_logging("agent.skills")
 _skill_staging: dict[str, dict] = {}
 _skill_staging_lock = threading.Lock()
 
-# Parameters that are auto-injected by the framework — never required from the LLM.
-_INJECTED_PARAMS = frozenset({"mesh_client", "workspace_manager", "memory_store"})
-
 
 def skill(
     name: str,
@@ -51,6 +48,11 @@ def skill(
     def decorator(func):
         sig = inspect.signature(func)
         param_names = set(sig.parameters.keys())
+        required_params = frozenset(
+            pname for pname, param in sig.parameters.items()
+            if param.default is inspect.Parameter.empty
+            and param.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        )
         _skill_staging[name] = {
             "name": name,
             "description": description,
@@ -62,6 +64,7 @@ def skill(
                 p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
             ),
             "_sig_is_coroutine": inspect.iscoroutinefunction(func),
+            "_sig_required_params": required_params,
             "_parallel_safe": parallel_safe,
             "_loop_exempt": loop_exempt,
         }
@@ -180,7 +183,7 @@ class SkillRegistry:
 
         info = self.skills[name]
         func = info["function"]
-        call_args = dict(arguments)
+        call_args = dict(arguments) if arguments else {}
 
         # ── Type coercion ──────────────────────────────────────────────
         # The LLM occasionally sends values with the wrong JSON type
@@ -252,17 +255,32 @@ class SkillRegistry:
                 call_args = {k: v for k, v in call_args.items() if k in sig_params}
 
         # ── Required-parameter check ──────────────────────────────────
-        # Catch missing required params *before* calling the function so
-        # the agent gets a clear message instead of a raw TypeError.
-        if param_schemas:
-            required = {
-                k for k, v in param_schemas.items()
-                if "default" not in v and k not in _INJECTED_PARAMS
-            }
-            missing = required - set(call_args)
+        # Use the *function signature* to determine which params are truly
+        # required (no default value).  The schema's "default" field tells
+        # the LLM what's optional, but the function signature is the
+        # runtime truth — some tools have function defaults without a
+        # corresponding schema "default".
+        sig_required = info.get("_sig_required_params")
+        if sig_required is None and not has_var_keyword:
+            # Fallback for dynamically registered skills
+            sig_required = frozenset(
+                pname for pname, param in inspect.signature(func).parameters.items()
+                if param.default is inspect.Parameter.empty
+                and param.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+            )
+        if sig_required:
+            missing = sig_required - set(call_args)
             if missing:
+                # Include parameter hints so the agent can self-correct
+                hints = []
+                for k, v in param_schemas.items():
+                    if k in {"mesh_client", "workspace_manager", "memory_store"}:
+                        continue
+                    tag = "required" if "default" not in v else "optional"
+                    hints.append(f"{k} ({v.get('type', 'any')}, {tag})")
+                hint_str = f" Expected: {', '.join(hints)}" if hints else ""
                 raise TypeError(
-                    f"Missing required parameter(s): {', '.join(sorted(missing))}"
+                    f"Missing required parameter(s): {', '.join(sorted(missing))}.{hint_str}"
                 )
 
         if is_coroutine:
