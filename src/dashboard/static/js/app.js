@@ -3291,6 +3291,9 @@ function dashboard() {
           // initialized. Preserve local messages to avoid losing visible history.
           return;
         }
+        // Re-check streaming state after await — guards at function entry
+        // ran before the fetch, but streaming may have started during it.
+        if (this.chatStreamingAgents[agentId] || (this._chatAborts && this._chatAborts[agentId])) return;
         const serverMsgs = data.messages.map(m => ({
           role: m.role === 'assistant' ? 'agent' : m.role,
           content: m.content,
@@ -3311,7 +3314,9 @@ function dashboard() {
         // 1. User messages sent after the last server timestamp
         // 2. Agent messages from just-completed streams not yet persisted
         // 3. Notifications injected via WebSocket not yet in the server transcript
+        // 4. Active streaming bubbles (may have tools but no text yet)
         const trailing = localMsgs.filter(m => {
+          if (m.streaming) return true;  // Never drop an active streaming bubble
           if (m.role === 'notification') {
             return !serverMsgs.some(s =>
               s.role === 'notification' && s.content === m.content && Math.abs((s.ts || 0) - (m.ts || 0)) < 2000
@@ -3759,11 +3764,11 @@ function dashboard() {
           this.chatHistories[agentId][finalIdx].phase = 'done';
         }
       } catch (e) {
-        if (e.name !== 'AbortError') {
-          const entry = this.chatHistories[agentId][this._chatStreamTarget[agentId]];
-          const hadContent = !!(entry && (entry.content || (entry.tools && entry.tools.length > 0)));
-          if (entry && hadContent) {
-            // Stream interrupted (e.g. tab backgrounded on mobile) but we have partial data.
+        const entry = this.chatHistories[agentId]?.[this._chatStreamTarget[agentId]];
+        if (entry) {
+          const hadContent = !!(entry.content || (entry.tools && entry.tools.length > 0));
+          if (hadContent) {
+            // Stream interrupted (timeout, tab backgrounded, network) but we have partial data.
             // Mark any running tools as done and finalize the message gracefully.
             entry.streaming = false;
             entry.phase = 'done';
@@ -3773,9 +3778,11 @@ function dashboard() {
             if (Array.isArray(entry.timeline)) {
               entry.timeline.forEach(t => { if (t.status === 'running') t.status = 'done'; });
             }
-          } else if (entry) {
+          } else {
             // No content at all — show error but with a friendlier message
-            entry.content = 'Connection interrupted — please try again.';
+            entry.content = e.name === 'AbortError'
+              ? 'Response timed out — please try again.'
+              : 'Connection interrupted — please try again.';
             entry.role = 'error';
             entry.streaming = false;
             entry.phase = 'error';
