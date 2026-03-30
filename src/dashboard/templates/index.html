@@ -1252,7 +1252,7 @@
                   Browser
                 </button>
                 <!-- Agent actions dropdown -->
-                <div class="relative" x-data="{ _menuOpen: false }">
+                <div class="relative" x-data="{ _menuOpen: false }" @click.stop>
                   <button @click="_menuOpen = !_menuOpen"
                     class="action-btn action-btn-warn px-2.5 py-1.5"
                     :class="_menuOpen && 'bg-gray-800/60 text-gray-300'"
@@ -1715,7 +1715,7 @@
                             <label class="text-xs text-gray-500 mb-1 block">Role</label>
                             <input type="text" x-model="editForm.role" class="dash-input w-full">
                           </div>
-                          <div class="relative">
+                          <div class="relative" @click.stop>
                             <label class="text-xs text-gray-500 mb-1 block">Avatar</label>
                             <button type="button" @click="editForm._showAvatarPicker = !editForm._showAvatarPicker; editForm._showColorPicker = false"
                               class="dash-input flex items-center gap-2 cursor-pointer text-left">
@@ -1736,7 +1736,7 @@
                             </div>
                           </div>
                           <!-- Color picker -->
-                          <div class="relative">
+                          <div class="relative" @click.stop>
                             <label class="text-xs text-gray-500 mb-1 block">Color</label>
                             <button type="button" @click="editForm._showColorPicker = !editForm._showColorPicker; editForm._showAvatarPicker = false"
                               class="dash-input flex items-center gap-2 cursor-pointer text-left w-full">
@@ -3339,7 +3339,7 @@
                       </template>
                     </div>
                     <!-- Purge dropdown -->
-                    <div x-show="db.purgeable" class="relative" x-data="{ purgeOpen: false }">
+                    <div x-show="db.purgeable" class="relative" x-data="{ purgeOpen: false }" @click.stop>
                       <button @click="purgeOpen = !purgeOpen"
                         :disabled="dbPurging[db.id]"
                         class="text-[10px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-50 flex items-center gap-1">
@@ -4182,7 +4182,7 @@
                 </div>
               </div>
             </div>
-            <div class="relative">
+            <div class="relative" @click.stop>
               <label class="text-xs text-gray-500 mb-1 block">Avatar</label>
               <button type="button" @click="addAgentForm._showPicker = !addAgentForm._showPicker; addAgentForm._showColorPicker = false"
                 class="dash-input w-full flex items-center gap-2 cursor-pointer text-left">
@@ -4206,7 +4206,7 @@
           <!-- Color + Project row -->
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
             <!-- Color picker -->
-            <div class="relative">
+            <div class="relative" @click.stop>
               <label class="text-xs text-gray-500 mb-1 block">Color</label>
               <button type="button" @click="addAgentForm._showColorPicker = !addAgentForm._showColorPicker; addAgentForm._showPicker = false"
                 :disabled="addAgentLoading"
