@@ -381,9 +381,9 @@ class Blackboard:
     def recent_keys_by_agent(self, agent_id: str, limit: int = 10) -> list[str]:
         """Return recently written blackboard keys by this agent."""
         rows = self.db.execute(
-            "SELECT DISTINCT key FROM event_log "
+            "SELECT key FROM event_log "
             "WHERE agent_id = ? AND event_type IN ('write', 'cas_write') "
-            "ORDER BY id DESC LIMIT ?",
+            "GROUP BY key ORDER BY MAX(id) DESC LIMIT ?",
             (agent_id, limit),
         ).fetchall()
         return [r[0] for r in rows]

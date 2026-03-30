@@ -671,8 +671,8 @@ async def get_agent_profile(agent_id: str, *, mesh_client=None) -> dict:
             "enum": ["SOUL.md", "INSTRUCTIONS.md", "USER.md", "HEARTBEAT.md", "INTERFACE.md"],
             "description": (
                 "File to update: SOUL.md (identity/tone), INSTRUCTIONS.md "
-                "(procedures/rules), USER.md (user prefs), or HEARTBEAT.md "
-                "(autonomous rules)"
+                "(procedures/rules), USER.md (user prefs), HEARTBEAT.md "
+                "(autonomous rules), or INTERFACE.md (public collaboration contract)"
             ),
         },
         "content": {

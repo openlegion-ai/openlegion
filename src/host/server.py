@@ -1193,7 +1193,11 @@ def create_mesh_app(
             h = health_monitor.agents.get(agent_id)
             if h is not None:
                 status = h.status
-                last_active = h.last_healthy if h.last_healthy else None
+                if h.last_healthy:
+                    from datetime import datetime, timezone
+                    last_active = datetime.fromtimestamp(
+                        h.last_healthy, tz=timezone.utc,
+                    ).isoformat()
 
         # Heartbeat schedule
         heartbeat_schedule = None
@@ -1240,9 +1244,9 @@ def create_mesh_app(
             agent_url = router.agent_registry[agent_id]
             if isinstance(agent_url, dict):
                 agent_url = agent_url.get("url", agent_url)
-            import httpx as _httpx
+            import httpx
             try:
-                async with _httpx.AsyncClient(timeout=10) as client:
+                async with httpx.AsyncClient(timeout=10) as client:
                     resp = await client.get(f"{agent_url}/workspace/INTERFACE.md")
                     if resp.status_code == 200:
                         content = resp.json().get("content", "")
