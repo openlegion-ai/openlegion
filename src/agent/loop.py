@@ -1899,16 +1899,33 @@ class AgentLoop:
 
     async def reset_chat(self) -> None:
         """Clear conversation history. Flushes important facts to memory
-        before clearing. Acquires the chat lock to avoid corrupting state
-        during an active chat turn."""
+        before clearing (unless the conversation was mostly errors).
+        Acquires the chat lock to avoid corrupting state during an active
+        chat turn."""
         async with self._chat_lock:
             if self._chat_messages and self.context_manager:
-                try:
-                    await self.context_manager._flush_to_memory(
-                        "", self._chat_messages,
+                # Skip flush if the conversation is dominated by tool errors
+                # — extracting "facts" from error messages poisons memory.
+                error_count = sum(
+                    1 for m in self._chat_messages
+                    if m.get("role") == "tool"
+                    and isinstance(m.get("content", ""), str)
+                    and '"error"' in m.get("content", "")
+                )
+                tool_count = sum(1 for m in self._chat_messages if m.get("role") == "tool")
+                should_flush = tool_count == 0 or error_count < tool_count * 0.5
+                if should_flush:
+                    try:
+                        await self.context_manager._flush_to_memory(
+                            "", self._chat_messages,
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to flush memory on chat reset: %s", e)
+                else:
+                    logger.info(
+                        "Skipping memory flush on reset — conversation had "
+                        "%d/%d tool errors", error_count, tool_count,
                     )
-                except Exception as e:
-                    logger.warning("Failed to flush memory on chat reset: %s", e)
             # Archive transcript before clearing in-memory state
             if self.workspace:
                 self.workspace.archive_chat_transcript()
