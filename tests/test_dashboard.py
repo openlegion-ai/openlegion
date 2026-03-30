@@ -3509,6 +3509,29 @@ class TestDashboardBrowserSettings:
         )
         assert resp.status_code == 400
 
+    def test_post_delay_zero_accepted(self):
+        """POST with delay=0 should succeed (disables delay, not treated as missing)."""
+        resp = self.client.post(
+            "/dashboard/api/browser-settings",
+            json={"delay": 0},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["delay"] == 0.0
+
+    def test_post_delay_only_preserves_speed(self):
+        """POST with only delay should not overwrite previously saved speed."""
+        self.client.post(
+            "/dashboard/api/browser-settings",
+            json={"speed": 2.5},
+        )
+        resp = self.client.post(
+            "/dashboard/api/browser-settings",
+            json={"delay": 4.0},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["speed"] == 2.5
+        assert resp.json()["delay"] == 4.0
+
 
 # ── External API Key Management ──────────────────────────────
 

@@ -1396,11 +1396,13 @@ class TestHumanTiming:
     """Validate timing helper distributions stay within expected ranges."""
 
     def setup_method(self):
-        from src.browser.timing import set_delay
+        from src.browser.timing import set_delay, set_speed
+        set_speed(1.0)
         set_delay(0.0)
 
     def teardown_method(self):
-        from src.browser.timing import set_delay
+        from src.browser.timing import set_delay, set_speed
+        set_speed(1.0)
         set_delay(0.0)
 
     def test_action_delay_range(self):

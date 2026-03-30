@@ -3146,9 +3146,9 @@ function dashboard() {
     get browserDelayLabel() {
       const d = this.browserDelay;
       if (d <= 0) return 'Off';
-      if (d <= 1.0) return 'Light';
-      if (d <= 3.0) return 'Moderate';
-      if (d <= 6.0) return 'Heavy';
+      if (d <= 2.0) return 'Light';
+      if (d <= 4.0) return 'Moderate';
+      if (d <= 7.0) return 'Heavy';
       return 'Maximum';
     },
 
