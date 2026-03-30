@@ -46,7 +46,7 @@ async def notify_user(message: str, *, mesh_client=None, workspace_manager=None)
 
 @skill(
     name="emit_event",
-    description="Emit a custom event to outbound webhooks. Use this to notify external systems about specific occurrences.",
+    description="Emit a custom event to outbound webhooks. Notifies external systems.",
     parameters={
         "type": "object",
         "properties": {

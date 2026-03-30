@@ -500,8 +500,8 @@ class RuntimeContext:
     def _start_mesh_server(self) -> None:
         import uvicorn
 
-        from src.host.server import create_mesh_app
         from src.host.api_endpoints import ApiEndpointManager
+        from src.host.server import create_mesh_app
 
         mesh_port = self.cfg["mesh"]["port"]
 

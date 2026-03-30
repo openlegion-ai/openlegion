@@ -59,13 +59,13 @@ def e2e_trigger_stack(tmp_path_factory):
         if openai_key:
             os.environ["OPENLEGION_CRED_OPENAI_API_KEY"] = openai_key
 
+    from src.host.api_endpoints import ApiEndpointManager
     from src.host.containers import ContainerManager
     from src.host.costs import CostTracker
     from src.host.credentials import CredentialVault
     from src.host.mesh import Blackboard, MessageRouter, PubSub
     from src.host.permissions import PermissionMatrix
     from src.host.server import create_mesh_app
-    from src.host.api_endpoints import ApiEndpointManager
 
     tmp_dir = tmp_path_factory.mktemp("e2e_trigger")
     bb = Blackboard(db_path=str(tmp_dir / "blackboard.db"))

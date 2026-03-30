@@ -438,7 +438,7 @@ class TestDeliveryWorker:
     async def test_worker_processes_queue(self, tmp_path):
         config_path = str(tmp_path / "webhooks.json")
         mgr = OutboundWebhookManager(config_path=config_path)
-        sub = mgr.add_subscription("test", "https://example.com/hook", ["notification"])
+        mgr.add_subscription("test", "https://example.com/hook", ["notification"])
 
         mock_response = MagicMock()
         mock_response.status_code = 200
