@@ -1,7 +1,7 @@
 /**
  * OpenLegion Dashboard — Alpine.js application.
  *
- * Two panels: Agents, System (Activity / Costs / Automation / Integrations / API Keys / Wallet / Storage / Settings).
+ * Three panels: Agents, Integrations (API Endpoints / Webhooks / Credentials), System (Activity / Costs / Automation / Channels / Wallet / Storage / Settings).
  * Real-time updates via WebSocket + periodic REST polling.
  */
 
@@ -48,6 +48,7 @@ function dashboard() {
     activeTab: 'fleet',
     tabs: [
       { id: 'fleet', label: 'Agents' },
+      { id: 'integrations', label: 'Integrations' },
       { id: 'system', label: 'System' },
     ],
     connected: false,
@@ -266,11 +267,18 @@ function dashboard() {
       { id: 'activity', label: 'Activity' },
       { id: 'costs', label: 'Costs' },
       { id: 'automation', label: 'Automation' },
-      { id: 'integrations', label: 'Integrations' },
-      { id: 'apikeys', label: 'API Keys' },
+      { id: 'channels', label: 'Channels' },
       { id: 'wallet', label: 'Wallet' },
       { id: 'storage', label: 'Storage' },
       { id: 'settings', label: 'Settings' },
+    ],
+
+    // Integrations tab — sub-navigation
+    integrationsTab: 'endpoints',
+    integrationsTabs: [
+      { id: 'endpoints', label: 'API Endpoints' },
+      { id: 'webhooks', label: 'Webhooks' },
+      { id: 'apikeys', label: 'Credentials' },
     ],
 
     // Unified Project Hub (replaces separate PROJECT.md + Comms + Broadcast panels)
@@ -301,24 +309,24 @@ function dashboard() {
     channelTokens: {},
 
 
-    // Webhooks
-    webhooks: [],
-    showWebhookForm: false,
-    webhookFormName: '',
-    webhookFormAgent: '',
-    webhookFormInstructions: '',
-    webhookFormRequireSig: false,
-    editingWebhookId: null,
-    webhookEditName: '',
-    webhookEditAgent: '',
-    webhookEditInstructions: '',
-    webhookEditRequireSig: false,
+    // API Endpoints
+    apiEndpoints: [],
+    showEndpointForm: false,
+    endpointFormName: '',
+    endpointFormAgent: '',
+    endpointFormInstructions: '',
+    endpointFormRequireSig: false,
+    editingEndpointId: null,
+    endpointEditName: '',
+    endpointEditAgent: '',
+    endpointEditInstructions: '',
+    endpointEditRequireSig: false,
 
-    // Webhook inline edit
-    editingWebhookId: null,
-    webhookEditName: '',
-    webhookEditAgent: '',
-    webhookEditInstructions: '',
+    // Endpoint inline edit
+    editingEndpointId: null,
+    endpointEditName: '',
+    endpointEditAgent: '',
+    endpointEditInstructions: '',
 
     // Model health
     modelHealth: [],
@@ -363,11 +371,29 @@ function dashboard() {
     credSaving: false,
     onboardSaving: false,
     channelConnecting: false,
-    webhookCreating: false,
-    webhookTesting: {},
-    webhookSaving: false,
-    webhookRevealedSecret: null,
-    webhookRevealedSecretHookId: null,
+    endpointCreating: false,
+    endpointTesting: {},
+    endpointSaving: false,
+    endpointRevealedSecret: null,
+    endpointRevealedSecretId: null,
+    // Outbound webhooks
+    outboundWebhooks: [],
+    outboundFormName: '',
+    outboundFormUrl: '',
+    outboundFormEvents: [],
+    outboundFormAgentFilter: [],
+    outboundEditName: '',
+    outboundEditUrl: '',
+    outboundEditEvents: [],
+    outboundEditAgentFilter: [],
+    outboundEditEnabled: true,
+    editingOutboundId: null,
+    outboundCreating: false,
+    outboundSaving: false,
+    outboundDeliveries: [],
+    showOutboundForm: false,
+    showDeliveries: false,
+
     apiKeys: [],
     apiKeysLegacy: false,
     apiKeyNewValue: null,
@@ -426,6 +452,9 @@ function dashboard() {
           ? `/agents/${this.detailAgent}`
           : `/agents/${this.detailAgent}/${tab}`;
       }
+      if (this.activeTab === 'integrations') {
+        return '/integrations/' + (this.integrationsTab || 'endpoints');
+      }
       if (this.activeTab === 'system') {
         if (this.systemTab === 'activity') {
           if (this.activityView === 'events') return '/system/activity/events';
@@ -442,6 +471,10 @@ function dashboard() {
         const tabLabel = (_IDENTITY_TABS.find(t => t.id === this.identityTab) || _IDENTITY_TABS[0]).label;
         return `${this.detailAgent} \u00b7 ${tabLabel} \u2014 OpenLegion`;
       }
+      if (this.activeTab === 'integrations') {
+        const st = this.integrationsTabs.find(t => t.id === this.integrationsTab);
+        return (st ? st.label : 'Integrations') + ' \u2014 OpenLegion';
+      }
       if (this.activeTab === 'system') {
         if (this.systemTab === 'activity') {
           if (this.activityView === 'events') return 'Live Feed \u2014 OpenLegion';
@@ -456,7 +489,7 @@ function dashboard() {
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
+      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'activity', integrationsTab: 'endpoints', agentId: null, identityTab: 'config' };
       if (!clean) return route;
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
@@ -470,13 +503,23 @@ function dashboard() {
       if (clean === 'activity/events') { route.tab = 'system'; route.systemTab = 'activity'; route.activityView = 'events'; }
       else if (clean === 'activity/logs') { route.tab = 'system'; route.systemTab = 'activity'; route.activityView = 'logs'; }
       else if (clean === 'activity') { route.tab = 'system'; route.systemTab = 'activity'; }
+      else if (clean.startsWith('integrations')) {
+        route.tab = 'integrations';
+        const sub = clean.split('/')[1];
+        if (sub && ['endpoints', 'webhooks', 'apikeys'].includes(sub)) {
+          route.integrationsTab = sub;
+        }
+      }
       else if (clean.startsWith('system')) {
         route.tab = 'system';
         const sub = clean.split('/')[1];
         // Backward compat for old URLs
-        const _tabAliases = { schedules: 'automation', connections: 'integrations', uploads: 'storage' };
+        const _tabAliases = { schedules: 'automation', connections: 'channels', uploads: 'storage' };
         const resolved = _tabAliases[sub] || sub;
-        if (resolved && ['activity', 'costs', 'automation', 'integrations', 'apikeys', 'wallet', 'storage', 'settings'].includes(resolved)) {
+        // Redirect old system/integrations and system/apikeys URLs to new integrations tab
+        if (resolved === 'integrations') { route.tab = 'integrations'; route.integrationsTab = 'endpoints'; }
+        else if (resolved === 'apikeys') { route.tab = 'integrations'; route.integrationsTab = 'apikeys'; }
+        else if (resolved && ['activity', 'costs', 'automation', 'channels', 'wallet', 'storage', 'settings'].includes(resolved)) {
           route.systemTab = resolved;
           if (resolved === 'activity') {
             const view = clean.split('/')[2];
@@ -519,20 +562,27 @@ function dashboard() {
           }
           if (this.activeTab !== route.tab) {
             // Sync sub-state before switchTab so it uses the correct values
+            if (route.tab === 'integrations') {
+              this.integrationsTab = route.integrationsTab;
+            }
             if (route.tab === 'system') {
               this.systemTab = route.systemTab;
               if (route.systemTab === 'activity') this.activityView = route.activityView;
             }
             this.switchTab(route.tab);
+          } else if (route.tab === 'integrations') {
+            if (this.integrationsTab !== route.integrationsTab) {
+              this.integrationsTab = route.integrationsTab;
+              if (route.integrationsTab === 'endpoints') { this.fetchEndpoints(); }
+              if (route.integrationsTab === 'webhooks') { this.fetchOutboundWebhooks(); }
+              if (route.integrationsTab === 'apikeys') { this.fetchSettings(); this.fetchApiKeys(); }
+            }
           } else if (route.tab === 'system') {
             if (this.systemTab !== route.systemTab) {
               if (this.systemTab === 'activity') this._stopActivityRefresh();
               this.systemTab = route.systemTab;
-              if (route.systemTab === 'integrations') {
-                this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys();
-              }
-              if (route.systemTab === 'apikeys') {
-                this.fetchSettings();
+              if (route.systemTab === 'channels') {
+                this.fetchChannels();
               }
               if (route.systemTab === 'settings') {
                 this.fetchBrowserSettings();
@@ -1085,16 +1135,20 @@ function dashboard() {
         this.fetchProject();
         this.fetchProjects();
       }
+      if (tab === 'integrations') {
+        this.fetchEndpoints();
+        this.fetchOutboundWebhooks();
+        this.fetchApiKeys();
+        if (this.integrationsTab === 'apikeys') this.fetchSettings();
+      }
       if (tab === 'system') {
         this.fetchSettings();
         this.fetchCosts();
         this.fetchStorage();
         this.fetchCronJobs();
         this.fetchWorkflows();
-        if (this.systemTab === 'integrations') {
-          this.fetchWebhooks();
+        if (this.systemTab === 'channels') {
           this.fetchChannels();
-          this.fetchApiKeys();
         }
         if (this.systemTab === 'settings') {
           this.fetchBrowserSettings();
@@ -1116,14 +1170,21 @@ function dashboard() {
       if (this.systemTab === 'activity' && tabId !== 'activity') this._stopActivityRefresh();
       this.systemTab = tabId;
       this._pushUrl(false);
-      if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); }
-      if (tabId === 'apikeys') { this.fetchSettings(); }
+      if (tabId === 'channels') { this.fetchChannels(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
       if (tabId === 'activity') {
         if (this.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
         else if (this.activityView === 'logs') { this.fetchSystemLogs(); }
       }
+    },
+
+    switchIntegrationsTab(tabId) {
+      this.integrationsTab = tabId;
+      this._pushUrl(false);
+      if (tabId === 'endpoints') { this.fetchEndpoints(); this.fetchApiKeys(); }
+      if (tabId === 'webhooks') { this.fetchOutboundWebhooks(); }
+      if (tabId === 'apikeys') { this.fetchSettings(); this.fetchApiKeys(); }
     },
 
     // ── Markdown rendering for chat messages ─────────────
@@ -3956,7 +4017,8 @@ function dashboard() {
       // Match tabs with keywords
       const tabKeywords = {
         fleet: ['agents', 'fleet', 'cards', 'project'],
-        system: ['system', 'costs', 'cron', 'schedules', 'automation', 'credentials', 'api keys', 'connections', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows', 'storage', 'uploads', 'disk'],
+        integrations: ['integrations', 'api', 'endpoints', 'webhooks', 'api keys', 'credentials'],
+        system: ['system', 'costs', 'cron', 'schedules', 'automation', 'channels', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows', 'storage', 'uploads', 'disk'],
       };
       for (const [tabId, keywords] of Object.entries(tabKeywords)) {
         const tab = this.tabs.find(t => t.id === tabId);
@@ -4007,16 +4069,17 @@ function dashboard() {
       // Match credentials
       for (const name of this.settingsData?.credentials?.names || []) {
         if (name.toLowerCase().includes(q)) {
-          results.push({ type: 'action', label: name, desc: 'API Key', action: () => { this.systemTab = 'apikeys'; this.switchTab('system'); } });
+          results.push({ type: 'action', label: name, desc: 'Credential', action: () => { this.integrationsTab = 'apikeys'; this.switchTab('integrations'); } });
         }
       }
       // System quick actions
       const sysActions = [
         { label: 'Activity', desc: 'Traces, live feed, and logs', keywords: ['activity', 'traces', 'events', 'live'], action: () => { this.systemTab = 'activity'; this.switchTab('system'); } },
         { label: 'View Logs', desc: 'Open runtime logs', keywords: ['logs', 'runtime', 'debug'], action: () => { this.systemTab = 'activity'; this.switchTab('system'); this.setActivityView('logs'); } },
-        { label: 'Add API Key', desc: 'Add new API key or credential', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.systemTab = 'apikeys'; this.switchTab('system'); this.showCredForm = true; } },
-        { label: 'Manage Webhooks', desc: 'View and create webhooks', keywords: ['webhook', 'hook', 'endpoint'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchWebhooks(); } },
-        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchChannels(); } },
+        { label: 'Add Credential', desc: 'Add new LLM provider key or agent credential', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.integrationsTab = 'apikeys'; this.switchTab('integrations'); this.showCredForm = true; } },
+        { label: 'Manage API Endpoints', desc: 'View and create API endpoints', keywords: ['api', 'endpoint', 'webhook', 'hook'], action: () => { this.integrationsTab = 'endpoints'; this.switchTab('integrations'); } },
+        { label: 'Manage Webhooks', desc: 'View outbound webhook subscriptions', keywords: ['webhook', 'outbound', 'notify'], action: () => { this.integrationsTab = 'webhooks'; this.switchTab('integrations'); } },
+        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'channels'; this.switchTab('system'); } },
         { label: 'Model Pricing', desc: 'Token costs by model', keywords: ['model', 'pricing', 'tokens'], action: () => { this.systemTab = 'costs'; this.switchTab('system'); } },
         { label: 'Browser Settings', desc: 'Browser speed and timing', keywords: ['browser', 'speed', 'settings', 'timing', 'stealth'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchBrowserSettings(); } },
         { label: 'Default Model', desc: 'Change the default LLM model', keywords: ['model', 'llm', 'default', 'openai', 'anthropic', 'ollama'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
@@ -4480,26 +4543,26 @@ function dashboard() {
       }, true);
     },
 
-    // ── Webhooks ──────────────────────────────────────────
+    // ── API Endpoints ──────────────────────────────────────────
 
-    async fetchWebhooks() {
+    async fetchEndpoints() {
       try {
-        const resp = await fetch(`${window.__config.apiBase}/webhooks`);
-        if (resp.ok) this.webhooks = (await resp.json()).webhooks || [];
-      } catch (e) { console.warn('fetchWebhooks failed:', e); }
+        const resp = await fetch(`${window.__config.apiBase}/endpoints`);
+        if (resp.ok) this.apiEndpoints = (await resp.json()).endpoints || [];
+      } catch (e) { console.warn('fetchEndpoints failed:', e); }
     },
 
-    async createWebhook() {
-      if (this.webhookCreating) return;
-      const name = this.webhookFormName.trim();
-      const agent = this.webhookFormAgent;
+    async createEndpoint() {
+      if (this.endpointCreating) return;
+      const name = this.endpointFormName.trim();
+      const agent = this.endpointFormAgent;
       if (!name || !agent) { this.showToast('Name and agent are required'); return; }
-      this.webhookCreating = true;
+      this.endpointCreating = true;
       try {
         const body = { name, agent };
-        if (this.webhookFormInstructions.trim()) body.instructions = this.webhookFormInstructions.trim();
-        if (this.webhookFormRequireSig) body.secret = true;
-        const resp = await fetch(`${window.__config.apiBase}/webhooks`, {
+        if (this.endpointFormInstructions.trim()) body.instructions = this.endpointFormInstructions.trim();
+        if (this.endpointFormRequireSig) body.secret = true;
+        const resp = await fetch(`${window.__config.apiBase}/endpoints`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
@@ -4507,37 +4570,37 @@ function dashboard() {
           const data = await resp.json();
           const hook = data.hook || {};
           if (hook.secret) {
-            this.webhookRevealedSecret = hook.secret;
-            this.webhookRevealedSecretHookId = hook.id;
+            this.endpointRevealedSecret = hook.secret;
+            this.endpointRevealedSecretId = hook.id;
             if (navigator.clipboard) navigator.clipboard.writeText(hook.secret).catch(() => {});
-            this.showToast(`Webhook "${name}" created — copy the secret below`, 8000);
+            this.showToast(`Endpoint "${name}" created — copy the secret below`, 8000);
           } else if (hook.url && navigator.clipboard) {
             navigator.clipboard.writeText(hook.url).catch(() => {});
-            this.showToast(`Webhook "${name}" created — URL copied`);
+            this.showToast(`Endpoint "${name}" created — URL copied`);
           } else {
-            this.showToast(`Webhook "${name}" created`);
+            this.showToast(`Endpoint "${name}" created`);
           }
-          this.webhookFormName = '';
-          this.webhookFormAgent = '';
-          this.webhookFormInstructions = '';
-          this.webhookFormRequireSig = false;
-          this.showWebhookForm = false;
-          this.fetchWebhooks();
+          this.endpointFormName = '';
+          this.endpointFormAgent = '';
+          this.endpointFormInstructions = '';
+          this.endpointFormRequireSig = false;
+          this.showEndpointForm = false;
+          this.fetchEndpoints();
         } else {
           const err = await resp.json().catch(() => ({}));
-          this.showToast(`Error: ${err.detail || 'Failed to create webhook'}`);
+          this.showToast(`Error: ${err.detail || 'Failed to create endpoint'}`);
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
-      finally { this.webhookCreating = false; }
+      finally { this.endpointCreating = false; }
     },
 
-    async deleteWebhook(hookId, name) {
-      this.showConfirm('Delete Webhook', `Delete webhook "${name}"?`, async () => {
+    async deleteEndpoint(hookId, name) {
+      this.showConfirm('Delete Endpoint', `Delete endpoint "${name}"?`, async () => {
         try {
-          const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(hookId)}`, { method: 'DELETE' });
+          const resp = await fetch(`${window.__config.apiBase}/endpoints/${encodeURIComponent(hookId)}`, { method: 'DELETE' });
           if (resp.ok) {
-            this.showToast(`Webhook "${name}" deleted`);
-            this.fetchWebhooks();
+            this.showToast(`Endpoint "${name}" deleted`);
+            this.fetchEndpoints();
           } else {
             const err = await resp.json().catch(() => ({}));
             this.showToast(`Error: ${err.detail || 'Delete failed'}`);
@@ -4546,62 +4609,62 @@ function dashboard() {
       }, true);
     },
 
-    async testWebhook(hookId) {
-      if (this.webhookTesting[hookId]) return;
-      this.webhookTesting = { ...this.webhookTesting, [hookId]: true };
+    async testEndpoint(hookId) {
+      if (this.endpointTesting[hookId]) return;
+      this.endpointTesting = { ...this.endpointTesting, [hookId]: true };
       try {
-        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(hookId)}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const resp = await fetch(`${window.__config.apiBase}/endpoints/${encodeURIComponent(hookId)}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         if (resp.ok) {
-          this.showToast('Webhook test sent');
+          this.showToast('Endpoint test sent');
         } else {
           const err = await resp.json().catch(() => ({}));
           this.showToast(`Test failed: ${err.detail || 'Unknown error'}`);
         }
       } catch (e) { this.showToast(`Test failed: ${e.message}`); }
-      finally { this.webhookTesting = { ...this.webhookTesting, [hookId]: false }; }
+      finally { this.endpointTesting = { ...this.endpointTesting, [hookId]: false }; }
     },
 
-    editWebhook(wh) {
-      this.showWebhookForm = false;
-      this.editingWebhookId = wh.id;
-      this.webhookEditName = wh.name;
-      this.webhookEditAgent = wh.agent;
-      this.webhookEditInstructions = wh.instructions || '';
-      this.webhookEditRequireSig = !!wh.has_secret;
+    editEndpoint(wh) {
+      this.showEndpointForm = false;
+      this.editingEndpointId = wh.id;
+      this.endpointEditName = wh.name;
+      this.endpointEditAgent = wh.agent;
+      this.endpointEditInstructions = wh.instructions || '';
+      this.endpointEditRequireSig = !!wh.has_secret;
     },
 
-    cancelWebhookEdit() {
-      this.editingWebhookId = null;
-      this.webhookEditName = '';
-      this.webhookEditAgent = '';
-      this.webhookEditInstructions = '';
-      this.webhookEditRequireSig = false;
+    cancelEndpointEdit() {
+      this.editingEndpointId = null;
+      this.endpointEditName = '';
+      this.endpointEditAgent = '';
+      this.endpointEditInstructions = '';
+      this.endpointEditRequireSig = false;
     },
 
-    async saveWebhookEdit() {
-      if (this.webhookSaving) return;
-      const id = this.editingWebhookId;
+    async saveEndpointEdit() {
+      if (this.endpointSaving) return;
+      const id = this.editingEndpointId;
       if (!id) return;
-      const wh = this.webhooks.find(w => w.id === id);
+      const wh = this.apiEndpoints.find(w => w.id === id);
       if (!wh) return;
-      const name = this.webhookEditName.trim();
-      const agent = this.webhookEditAgent;
+      const name = this.endpointEditName.trim();
+      const agent = this.endpointEditAgent;
       if (!name || !agent) { this.showToast('Name and agent are required'); return; }
 
       const body = {};
       if (name !== wh.name) body.name = name;
       if (agent !== wh.agent) body.agent = agent;
-      const newInstr = this.webhookEditInstructions.trim();
+      const newInstr = this.endpointEditInstructions.trim();
       const oldInstr = (wh.instructions || '').trim();
       if (newInstr !== oldInstr) body.instructions = newInstr;
       const hadSecret = !!wh.has_secret;
-      if (this.webhookEditRequireSig !== hadSecret) body.require_signature = this.webhookEditRequireSig;
+      if (this.endpointEditRequireSig !== hadSecret) body.require_signature = this.endpointEditRequireSig;
 
       if (Object.keys(body).length === 0) { this.showToast('No changes to save'); return; }
 
-      this.webhookSaving = true;
+      this.endpointSaving = true;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(id)}`, {
+        const resp = await fetch(`${window.__config.apiBase}/endpoints/${encodeURIComponent(id)}`, {
           method: 'PATCH', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
@@ -4609,27 +4672,27 @@ function dashboard() {
           const data = await resp.json();
           const hook = data.hook || {};
           if (hook.secret) {
-            this.webhookRevealedSecret = hook.secret;
-            this.webhookRevealedSecretHookId = hook.id || this.editingWebhookId;
+            this.endpointRevealedSecret = hook.secret;
+            this.endpointRevealedSecretId = hook.id || this.editingEndpointId;
             if (navigator.clipboard) navigator.clipboard.writeText(hook.secret).catch(() => {});
-            this.showToast(`Webhook updated — copy the secret below`, 8000);
+            this.showToast(`Endpoint updated — copy the secret below`, 8000);
           } else {
-            this.showToast(`Webhook "${name}" updated`);
+            this.showToast(`Endpoint "${name}" updated`);
           }
-          this.cancelWebhookEdit();
-          this.fetchWebhooks();
+          this.cancelEndpointEdit();
+          this.fetchEndpoints();
         } else {
           const err = await resp.json().catch(() => ({}));
           this.showToast(`Error: ${err.detail || 'Update failed'}`);
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
-      finally { this.webhookSaving = false; }
+      finally { this.endpointSaving = false; }
     },
 
-    regenerateWebhookSecret(hookId, name) {
+    regenerateEndpointSecret(hookId, name) {
       this.showConfirm('Regenerate Secret', `Regenerate HMAC secret for "${name}"? The old secret will stop working immediately.`, async () => {
         try {
-          const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(hookId)}`, {
+          const resp = await fetch(`${window.__config.apiBase}/endpoints/${encodeURIComponent(hookId)}`, {
             method: 'PATCH', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ regenerate_secret: true }),
           });
@@ -4637,21 +4700,109 @@ function dashboard() {
             const data = await resp.json();
             const hook = data.hook || {};
             if (hook.secret) {
-              this.webhookRevealedSecret = hook.secret;
-              this.webhookRevealedSecretHookId = hook.id || hookId;
+              this.endpointRevealedSecret = hook.secret;
+              this.endpointRevealedSecretId = hook.id || hookId;
               if (navigator.clipboard) navigator.clipboard.writeText(hook.secret).catch(() => {});
               this.showToast('New secret shown below — copy it now', 8000);
             } else {
               this.showToast('Secret regenerated');
             }
-            this.cancelWebhookEdit();
-            this.fetchWebhooks();
+            this.cancelEndpointEdit();
+            this.fetchEndpoints();
           } else {
             const err = await resp.json().catch(() => ({}));
             this.showToast(`Error: ${err.detail || 'Regeneration failed'}`);
           }
         } catch (e) { this.showToast(`Error: ${e.message}`); }
       }, true);
+    },
+
+    // ── Outbound Webhooks ──────────────────────────────────
+
+    async fetchOutboundWebhooks() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/webhooks`);
+        if (resp.ok) this.outboundWebhooks = (await resp.json()).webhooks || [];
+      } catch (e) { console.error('Failed to fetch webhooks', e); }
+    },
+
+    async createOutboundWebhook() {
+      if (this.outboundCreating) return;
+      const name = this.outboundFormName.trim();
+      const url = this.outboundFormUrl.trim();
+      const events = this.outboundFormEvents;
+      if (!name || !url || !events.length) { this.showToast('Name, URL, and at least one event required'); return; }
+      this.outboundCreating = true;
+      try {
+        const body = { name, url, events, agent_filter: this.outboundFormAgentFilter };
+        const resp = await fetch(`${window.__config.apiBase}/webhooks`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(body) });
+        const data = await resp.json();
+        if (resp.ok) {
+          this.showToast('Webhook created');
+          this.outboundFormName = ''; this.outboundFormUrl = ''; this.outboundFormEvents = []; this.outboundFormAgentFilter = [];
+          this.showOutboundForm = false;
+          await this.fetchOutboundWebhooks();
+        } else { this.showToast(`Error: ${data.detail || 'Failed to create webhook'}`); }
+      } catch (e) { this.showToast('Failed to create webhook'); }
+      finally { this.outboundCreating = false; }
+    },
+
+    async deleteOutboundWebhook(subId, name) {
+      this.showConfirm('Delete Webhook', `Delete webhook "${name}"?`, async () => {
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(subId)}`, { method: 'DELETE', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+          if (resp.ok) { this.showToast('Webhook deleted'); await this.fetchOutboundWebhooks(); }
+        } catch (e) { this.showToast('Failed to delete webhook'); }
+      });
+    },
+
+    async testOutboundWebhook(subId) {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(subId)}/test`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: '{}' });
+        if (resp.ok) this.showToast('Test event sent');
+        else this.showToast('Test failed');
+      } catch (e) { this.showToast('Test failed'); }
+    },
+
+    async fetchDeliveries() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/webhooks/deliveries`);
+        if (resp.ok) this.outboundDeliveries = (await resp.json()).deliveries || [];
+      } catch (e) { console.error('Failed to fetch deliveries', e); }
+    },
+
+    editOutboundWebhook(wh) {
+      this.editingOutboundId = wh.id;
+      this.outboundEditName = wh.name;
+      this.outboundEditUrl = wh.url;
+      this.outboundEditEvents = [...(wh.events || [])];
+      this.outboundEditAgentFilter = [...(wh.agent_filter || [])];
+      this.outboundEditEnabled = wh.enabled !== false;
+    },
+
+    cancelOutboundEdit() {
+      this.editingOutboundId = null;
+    },
+
+    async saveOutboundEdit() {
+      if (this.outboundSaving) return;
+      const id = this.editingOutboundId;
+      const body = {};
+      const wh = this.outboundWebhooks.find(w => w.id === id);
+      if (!wh) return;
+      if (this.outboundEditName.trim() !== wh.name) body.name = this.outboundEditName.trim();
+      if (this.outboundEditUrl.trim() !== wh.url) body.url = this.outboundEditUrl.trim();
+      if (JSON.stringify(this.outboundEditEvents) !== JSON.stringify(wh.events)) body.events = this.outboundEditEvents;
+      if (JSON.stringify(this.outboundEditAgentFilter) !== JSON.stringify(wh.agent_filter || [])) body.agent_filter = this.outboundEditAgentFilter;
+      if (this.outboundEditEnabled !== (wh.enabled !== false)) body.enabled = this.outboundEditEnabled;
+      if (!Object.keys(body).length) { this.editingOutboundId = null; return; }
+      this.outboundSaving = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/webhooks/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, body: JSON.stringify(body) });
+        if (resp.ok) { this.showToast('Webhook updated'); this.editingOutboundId = null; await this.fetchOutboundWebhooks(); }
+        else { const data = await resp.json(); this.showToast(`Error: ${data.detail || 'Failed'}`); }
+      } catch (e) { this.showToast('Failed to update webhook'); }
+      finally { this.outboundSaving = false; }
     },
 
     // ── External API key ──────────────────────────────────

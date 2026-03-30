@@ -54,7 +54,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `file_tool.py` | File I/O with two-stage path traversal protection (`lstat()` for symlink safety) |
 | `http_tool.py` | HTTP requests with CRED handles, SSRF protection (DNS pinning, IP blocking incl. CGNAT, 6to4, Teredo), cross-origin auth header stripping |
 | `memory_tool.py` | Memory search with hierarchical fallback, memory save |
-| `mesh_tool.py` | Blackboard (with `sanitize_for_prompt()`), pub/sub, notify_user, list_agents, artifacts, cron, spawn |
+| `mesh_tool.py` | Blackboard (with `sanitize_for_prompt()`), pub/sub, notify_user, emit_event, list_agents, artifacts, cron, spawn |
 | `coordination_tool.py` | Structured multi-agent coordination protocol — hand_off, check_inbox, update_status. Higher-level wrappers over blackboard for inter-agent work handoffs. |
 | `vault_tool.py` | Credential generation without returning actual values |
 | `web_search_tool.py` | DuckDuckGo search (no API key needed) |
@@ -64,7 +64,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `introspect_tool.py` | Runtime state query (permissions, budget, fleet, cron, health) |
 | `wallet_tool.py` | Wallet operations — get address, get balance, read contract, transfer, execute (Ethereum + Solana) |
 | **`src/host/`** | |
-| `server.py` | Mesh FastAPI app factory — 43 endpoints, all permission-checked. `_RATE_LIMITS` dict (13 entries). VNC reverse proxy with agent token rejection. Localhost validation for `x-mesh-internal`. |
+| `server.py` | Mesh FastAPI app factory — 44 endpoints, all permission-checked. Rate limits on state-mutating endpoints (`_RATE_LIMITS` dict at top of file). VNC reverse proxy with agent token rejection. Localhost validation for `x-mesh-internal`. |
 | `mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter |
 | `runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. Container security: non-root UID 1000, `cap_drop=[ALL]`, `no-new-privileges`, `read_only=True`, `tmpfs=/tmp` (100m, noexec, nosuid), `mem_limit=384m`, `cpu_quota=15000` (0.15 CPU), `pids_limit=256`. |
 | `transport.py` | Transport ABC → HttpTransport / SandboxTransport |
@@ -77,7 +77,8 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `failover.py` | Model health tracking + failover chains |
 | `traces.py` | Request tracing + grouped summaries |
 | `transcript.py` | Provider-specific transcript sanitization |
-| `webhooks.py` | Named webhook endpoints (payloads sanitized, 1MB body size limit) |
+| `api_endpoints.py` | Named API endpoints that accept third-party POSTs and dispatch to agents (payloads sanitized, 1MB body size limit) |
+| `outbound_webhooks.py` | Outbound webhook delivery — POSTs signed event payloads to registered third-party URLs with retry |
 | `watchers.py` | File watcher with polling (messages sanitized) |
 | `wallet.py` | WalletService — Ethereum and Solana wallet operations |
 | `api_keys.py` | Named API key management — salted SHA-256 hashes stored in `config/api_keys.json`. Raw keys returned once at creation. |
@@ -97,7 +98,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `slack.py` | Slack adapter (Socket Mode, sanitized streaming) |
 | `whatsapp.py` | WhatsApp Cloud API adapter (`X-Hub-Signature-256` verification, warns when signature verification disabled) |
 | **`src/dashboard/`** | |
-| `server.py` | Dashboard FastAPI router + 95 API endpoints + VNC URL injection. Alpine.js SPA with `autoescape=True`, CSP headers, CSRF via `X-Requested-With` requirement on state-changing endpoints. |
+| `server.py` | Dashboard FastAPI router + API endpoints + VNC URL injection + outbound webhook management endpoints. Alpine.js SPA with `autoescape=True`, CSP headers, CSRF via `X-Requested-With` requirement on state-changing endpoints. |
 | `events.py` | EventBus for real-time WebSocket streaming. `threading.Lock` on `emit()`. |
 | `auth.py` | Session cookie verification for dashboard access |
 | `static/` | JS (app.js, websocket.js), CSS, avatars (50 SVGs), favicons |
@@ -182,19 +183,20 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - **Agents never hold API keys.** All LLM/API calls go through mesh credential vault.
 - **No `eval()`/`exec()` on untrusted input.** Skill self-authoring uses AST validation.
 - **Permission checks on all mesh endpoints.** Default deny.
-- **Rate limits on state-mutating mesh endpoints.** 13 rate-limited categories defined in `server.py:_RATE_LIMITS`.
+- **Rate limits on state-mutating mesh endpoints.** API proxy, vault, notify, emit_event, spawn, cron_create, wallet (read/transfer/execute), image_gen all rate-limited. Defined in `server.py:_RATE_LIMITS`.
 - **File path traversal protection.** Two-stage validation in `file_tool.py` (reject `..` before resolution, then walk with symlink resolution via `lstat()`). Workspace `_read_file()` uses `resolve` + `is_relative_to`.
 - **Container hardening.** Non-root (UID 1000), `no-new-privileges`, `cap_drop=[ALL]`, `read_only=True`, `tmpfs=/tmp` (100m, noexec, nosuid), 384MB memory, 0.15 CPU, `pids_limit=256`.
-- **All untrusted text sanitized** via `sanitize_for_prompt()` before reaching LLM context.
+- **All untrusted text sanitized** via `sanitize_for_prompt()` before reaching LLM context (72 call sites across 14 source files including inter-agent messages and daily logs).
 - **VNC proxy blocks agent Bearer tokens.** Dashboard auth required (`ol_session` cookie on HTTP and WebSocket).
 - **AST validation for skill self-authoring.** `_FORBIDDEN_IMPORTS` (23 modules), `_FORBIDDEN_CALLS` (16 functions incl. eval, exec, open), `_FORBIDDEN_ATTRS` (11 attributes incl. `__dict__`, `__subclasses__`).
-- **SSRF protection.** DNS pinning + IP blocking including `0.0.0.0` (unspecified), CGNAT (`100.64.0.0/10`), IPv4-mapped IPv6, 6to4 (`2002::/16`), Teredo (`2001::/32`). Max 5 redirects with re-validation at each hop.
+- **SSRF protection.** DNS pinning + IP blocking including `0.0.0.0` (unspecified), CGNAT (`100.64.0.0/10`), IPv4-mapped IPv6, 6to4 (`2002::/16`), Teredo (`2001::/32`). Max 5 redirects with re-validation at each hop. Also applied to outbound webhook delivery URLs.
+- **Outbound webhook signing.** HMAC-SHA256 signatures on all outbound webhook payloads (`X-OpenLegion-Signature` header).
 - **Credential isolation.** Two-tier vault (SYSTEM_*/CRED_*), opaque handles. Dashboard shows masked values (last 4 chars).
 - **Bounded execution.** 20 iterations for tasks, 30 tool rounds for chat, 200 total chat rounds, token budgets per task. Env-var bounds clamped with validation.
 - **Write-then-compact.** Before discarding context, important facts flush to MEMORY.md. Empty summary falls back to hard prune.
 - **CSRF protection.** Dashboard state-changing endpoints require `X-Requested-With` header.
 - **Workspace file caps.** `_FILE_CAPS` enforced on workspace writes (HTTP 413).
-- **Webhook body size limit.** 1MB with Content-Length pre-check.
+- **API endpoint body size limit.** 1MB with Content-Length pre-check.
 - **Wallet seed protection.** Seed reveal endpoint returns HTTP 410 (seed shown once at init). Init response has `Cache-Control: no-store`.
 - **Env file permissions.** `.agent.env` written with `chmod(0o600)`.
 
@@ -236,7 +238,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 6. **`src/shared/types.py` is the contract.** Every cross-component message is a Pydantic model here (335 lines, 24 models).
 7. **LLM tool-calling message roles must alternate.** `user → assistant(tool_calls) → tool(result) → assistant`. `_trim_context` merges summary into first user message to preserve this invariant.
 8. **busy_timeout variance.** Traces uses 5000ms while other SQLite connections use 30000ms.
-9. **Monolithic server files.** `dashboard/server.py` (~3045 lines, 95 endpoints) and `host/server.py` (~1566 lines, 43 endpoints) are single function-scoped definitions.
+9. **Monolithic server files.** `dashboard/server.py` (~3130 lines) and `host/server.py` (~1580 lines) are single function-scoped definitions.
 10. **`containers.py` backward-compat alias.** Only consumed by E2E tests.
 
 ## Git Workflow
@@ -267,7 +269,7 @@ pytest tests/test_loop.py -x -v
 - Mock LLM responses, not the loop. See `tests/test_loop.py:_make_loop()`.
 - `AsyncMock` for async methods, SQLite in-memory or `tmp_path` for DB paths.
 - E2E tests skip gracefully without Docker + API key.
-- 62 test files covering all modules.
+- 64 test files covering all modules.
 
 ### Test File Mapping
 
@@ -301,7 +303,8 @@ pytest tests/test_loop.py -x -v
 | `src/host/traces.py` | `tests/test_traces.py` |
 | `src/host/transcript.py` | `tests/test_transcript.py` |
 | `src/host/failover.py` | `tests/test_failover.py` |
-| `src/host/webhooks.py` | `tests/test_webhooks.py` |
+| `src/host/api_endpoints.py` | `tests/test_api_endpoints.py` |
+| `src/host/outbound_webhooks.py` | `tests/test_outbound_webhooks.py` |
 | `src/host/watchers.py` | `tests/test_watchers.py` |
 | `src/host/wallet.py` | `tests/test_wallet_endpoints.py` |
 | `src/host/api_keys.py` | `tests/test_api_keys.py` |

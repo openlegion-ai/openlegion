@@ -549,7 +549,8 @@ def _suppress_host_logs() -> None:
     """Set host-side loggers to WARNING for clean CLI output."""
     for name in [
         "host", "host.containers", "host.credentials",
-        "host.mesh", "host.costs", "host.permissions", "host.cron", "host.webhooks",
+        "host.mesh", "host.costs", "host.permissions", "host.cron", "host.api_endpoints",
+        "host.outbound_webhooks",
         "host.health", "host.lanes", "host.runtime", "host.watchers",
         "channels", "channels.base", "channels.telegram", "channels.discord",
         "channels.slack", "channels.whatsapp",

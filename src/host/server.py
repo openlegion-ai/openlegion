@@ -20,8 +20,9 @@ from collections import defaultdict
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
+from fastapi.security import APIKeyHeader
 
 from src.host.credentials import is_system_credential
 from src.shared.types import (
@@ -96,7 +97,46 @@ def create_mesh_app(
     api_key_manager: ApiKeyManager | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
-    app = FastAPI(title="OpenLegion Mesh")
+    app = FastAPI(
+        title="OpenLegion API",
+        description=(
+            "External API for integrating with OpenLegion. "
+            "Authenticate with an API key sent as the `X-API-Key` header. "
+            "Create keys in the dashboard under Integrations > Access Keys."
+        ),
+        version="1.0.0",
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_tags=[
+            {
+                "name": "Credentials",
+                "description": (
+                    "Store and manage agent-tier credentials. Credentials are "
+                    "stored as opaque handles — agents reference them by name "
+                    "without seeing raw values."
+                ),
+            },
+            {
+                "name": "Agent Status",
+                "description": (
+                    "Query agent health, queue depth, and budget from external "
+                    "systems."
+                ),
+            },
+            {
+                "name": "Inbound Dispatch",
+                "description": (
+                    "Trigger agent workflows by POSTing JSON payloads to named "
+                    "API endpoints. Optionally secured with HMAC-SHA256 "
+                    "signature verification via the `X-Signature` header."
+                ),
+            },
+        ],
+    )
+    # OpenAPI security scheme — enables "Authorize" button in Swagger UI.
+    # auto_error=False so internal routes that share paths aren't blocked.
+    _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
     # Exposed for external callers (dashboard, health monitor) to clean up
     # agent state when agents are removed.
     app.cleanup_agent = lambda agent_id: None  # replaced below
@@ -274,7 +314,7 @@ def create_mesh_app(
 
     # === System Messaging (mesh → agent) ===
 
-    @app.post("/mesh/message")
+    @app.post("/mesh/message", include_in_schema=False)
     async def send_message(msg: AgentMessage, request: Request) -> dict:
         """Route a message to an agent via the mesh router."""
         msg.from_agent = _resolve_agent_id(msg.from_agent, request)
@@ -285,7 +325,7 @@ def create_mesh_app(
     # === Blackboard ===
     # NOTE: list route must be defined BEFORE the {key:path} route to avoid shadowing
 
-    @app.get("/mesh/blackboard/")
+    @app.get("/mesh/blackboard/", include_in_schema=False)
     async def list_blackboard(prefix: str, agent_id: str, request: Request) -> list[dict]:
         """List blackboard entries by prefix."""
         agent_id = _resolve_agent_id(agent_id, request)
@@ -295,7 +335,7 @@ def create_mesh_app(
         entries = blackboard.list_by_prefix(prefix)
         return [e.model_dump(mode="json") for e in entries]
 
-    @app.get("/mesh/blackboard/{key:path}")
+    @app.get("/mesh/blackboard/{key:path}", include_in_schema=False)
     async def read_blackboard(key: str, agent_id: str, request: Request) -> dict:
         """Read a blackboard entry. Agent must have read permission."""
         agent_id = _resolve_agent_id(agent_id, request)
@@ -307,7 +347,7 @@ def create_mesh_app(
             raise HTTPException(404, f"Key not found: {key}")
         return entry.model_dump(mode="json")
 
-    @app.put("/mesh/blackboard/{key:path}")
+    @app.put("/mesh/blackboard/{key:path}", include_in_schema=False)
     async def write_blackboard(
         key: str, agent_id: str, value: dict, request: Request,
         ttl: int | None = None,
@@ -341,7 +381,7 @@ def create_mesh_app(
             _notify_watchers_batch(watchers, notify_msg)
         return entry.model_dump(mode="json")
 
-    @app.delete("/mesh/blackboard/{key:path}")
+    @app.delete("/mesh/blackboard/{key:path}", include_in_schema=False)
     async def delete_blackboard_entry(key: str, agent_id: str, request: Request) -> dict:
         """Delete a blackboard entry. Agent must have write permission."""
         agent_id = _resolve_agent_id(agent_id, request)
@@ -358,7 +398,7 @@ def create_mesh_app(
             raise HTTPException(400, str(e))
         return {"deleted": True, "key": key}
 
-    @app.post("/mesh/blackboard/watch")
+    @app.post("/mesh/blackboard/watch", include_in_schema=False)
     async def watch_blackboard(data: BlackboardWatchRequest, request: Request) -> dict:
         """Register a glob pattern watch on blackboard keys."""
         agent_id = _resolve_agent_id(data.agent_id, request)
@@ -368,7 +408,7 @@ def create_mesh_app(
         blackboard.add_watch(agent_id, pattern)
         return {"watching": True, "pattern": pattern}
 
-    @app.post("/mesh/blackboard/claim")
+    @app.post("/mesh/blackboard/claim", include_in_schema=False)
     async def claim_blackboard(body: BlackboardClaimRequest, request: Request) -> dict:
         """Atomic compare-and-swap write. Returns 409 on version mismatch."""
         agent_id = _resolve_agent_id(body.agent_id, request)
@@ -406,7 +446,7 @@ def create_mesh_app(
 
     # === Pub/Sub ===
 
-    @app.post("/mesh/publish")
+    @app.post("/mesh/publish", include_in_schema=False)
     async def publish_event(event: MeshEvent, request: Request) -> dict:
         """Publish an event to a topic."""
         event.source = _resolve_agent_id(event.source, request)
@@ -452,7 +492,7 @@ def create_mesh_app(
                 ), return_exceptions=True)
         return {"subscribers_notified": len(subscribers)}
 
-    @app.post("/mesh/subscribe")
+    @app.post("/mesh/subscribe", include_in_schema=False)
     async def subscribe(topic: str, agent_id: str, request: Request) -> dict:
         """Subscribe an agent to an event topic."""
         agent_id = _resolve_agent_id(agent_id, request)
@@ -474,7 +514,7 @@ def create_mesh_app(
 
     # === API Proxy ===
 
-    @app.post("/mesh/api", response_model=APIProxyResponse)
+    @app.post("/mesh/api", response_model=APIProxyResponse, include_in_schema=False)
     async def proxy_api_call(request: Request, api_request: APIProxyRequest, agent_id: str) -> APIProxyResponse:
         """Proxy external API calls. Agent never sees credentials."""
         agent_id = _resolve_agent_id(agent_id, request)
@@ -556,7 +596,7 @@ def create_mesh_app(
             event_bus.emit("llm_call", agent=agent_id, data=event_data)
         return result
 
-    @app.post("/mesh/api/stream")
+    @app.post("/mesh/api/stream", include_in_schema=False)
     async def proxy_api_stream(request: Request, api_request: APIProxyRequest, agent_id: str) -> StreamingResponse:
         """Streaming API proxy. Returns SSE stream for LLM completions."""
         agent_id = _resolve_agent_id(agent_id, request)
@@ -590,7 +630,7 @@ def create_mesh_app(
 
     # === Model Health Diagnostic ===
 
-    @app.get("/mesh/model-health")
+    @app.get("/mesh/model-health", include_in_schema=False)
     async def model_health(request: Request) -> list[dict]:
         """Return model failover health status. Mesh-internal diagnostic."""
         _require_any_auth(request)
@@ -600,7 +640,7 @@ def create_mesh_app(
 
     # === Vault (credential management) ===
 
-    @app.post("/mesh/vault/store")
+    @app.post("/mesh/vault/store", include_in_schema=False)
     async def vault_store(data: dict, request: Request) -> dict:
         """Store a credential and return an opaque $CRED{name} handle."""
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
@@ -624,7 +664,7 @@ def create_mesh_app(
         handle = credential_vault.add_credential(name, value)
         return {"stored": True, "handle": handle}
 
-    @app.get("/mesh/vault/list")
+    @app.get("/mesh/vault/list", include_in_schema=False)
     async def vault_list(agent_id: str, request: Request) -> dict:
         """List credential names the agent can access (never values)."""
         agent_id = _resolve_agent_id(agent_id, request)
@@ -637,7 +677,7 @@ def create_mesh_app(
         names = [n for n in all_names if permissions.can_access_credential(agent_id, n)]
         return {"credentials": names, "count": len(names)}
 
-    @app.get("/mesh/vault/status/{name}")
+    @app.get("/mesh/vault/status/{name}", include_in_schema=False)
     async def vault_status(name: str, agent_id: str, request: Request) -> dict:
         """Check if a credential exists by name."""
         agent_id = _resolve_agent_id(agent_id, request)
@@ -647,7 +687,7 @@ def create_mesh_app(
             raise HTTPException(503, "No credential vault configured")
         return {"name": name, "exists": credential_vault.has_credential(name)}
 
-    @app.post("/mesh/vault/resolve")
+    @app.post("/mesh/vault/resolve", include_in_schema=False)
     async def vault_resolve(data: dict, request: Request) -> dict:
         """Resolve a credential handle to its value. Internal use only (browser tool)."""
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
@@ -676,7 +716,7 @@ def create_mesh_app(
 
     _ws_ref = wallet_service_ref or [None]
 
-    @app.get("/mesh/wallet/address")
+    @app.get("/mesh/wallet/address", include_in_schema=False)
     async def wallet_address(chain: str, agent_id: str, request: Request) -> dict:
         """Get agent's wallet address for a chain."""
         agent_id = _resolve_agent_id(agent_id, request)
@@ -693,7 +733,7 @@ def create_mesh_app(
         except ValueError as e:
             raise HTTPException(400, str(e))
 
-    @app.get("/mesh/wallet/balance")
+    @app.get("/mesh/wallet/balance", include_in_schema=False)
     async def wallet_balance(
         chain: str, agent_id: str, request: Request, token: str = "native",
     ) -> dict:
@@ -711,7 +751,7 @@ def create_mesh_app(
         except ValueError as e:
             raise HTTPException(400, str(e))
 
-    @app.post("/mesh/wallet/read")
+    @app.post("/mesh/wallet/read", include_in_schema=False)
     async def wallet_read(data: dict, request: Request) -> dict:
         """Read-only contract call / account read."""
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
@@ -731,7 +771,7 @@ def create_mesh_app(
         except ValueError as e:
             raise HTTPException(400, str(e))
 
-    @app.post("/mesh/wallet/transfer")
+    @app.post("/mesh/wallet/transfer", include_in_schema=False)
     async def wallet_transfer_endpoint(data: dict, request: Request) -> dict:
         """Sign and broadcast a token transfer."""
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
@@ -761,7 +801,7 @@ def create_mesh_app(
         except PermissionError as e:
             raise HTTPException(403, str(e))
 
-    @app.post("/mesh/wallet/execute")
+    @app.post("/mesh/wallet/execute", include_in_schema=False)
     async def wallet_execute_endpoint(data: dict, request: Request) -> dict:
         """Sign and broadcast a contract call or Solana transaction."""
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
@@ -797,7 +837,7 @@ def create_mesh_app(
 
     # === Agent Registry ===
 
-    @app.post("/mesh/register")
+    @app.post("/mesh/register", include_in_schema=False)
     async def register_agent(data: dict, request: Request) -> dict:
         """Agent registers itself with the mesh on startup."""
         agent_id = _validate_agent_id(data.get("agent_id", ""))
@@ -839,7 +879,7 @@ def create_mesh_app(
     _NOTIFY_MAX_LEN = 2000
     _WS_FILE_NAMES = ("SOUL.md", "INSTRUCTIONS.md", "USER.md", "HEARTBEAT.md", "MEMORY.md")
 
-    @app.post("/mesh/notify")
+    @app.post("/mesh/notify", include_in_schema=False)
     async def notify_user(body: NotifyRequest, request: Request) -> dict:
         """Push a notification from an agent to the user across all channels."""
         body.agent_id = _resolve_agent_id(body.agent_id, request)
@@ -862,7 +902,7 @@ def create_mesh_app(
             raise HTTPException(500, f"Notification failed: {e}")
         return {"sent": True}
 
-    @app.get("/mesh/agents")
+    @app.get("/mesh/agents", include_in_schema=False)
     async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:
         """List registered agents, optionally scoped by project or agent_id.
 
@@ -902,7 +942,7 @@ def create_mesh_app(
 
     # === Agent Introspection ===
 
-    @app.get("/mesh/introspect")
+    @app.get("/mesh/introspect", include_in_schema=False)
     async def introspect(section: str = "all", request: Request = ...):
         """Return runtime state for the requesting agent.
 
@@ -971,7 +1011,7 @@ def create_mesh_app(
 
     # === Project Costs ===
 
-    @app.get("/mesh/costs/project/{project}")
+    @app.get("/mesh/costs/project/{project}", include_in_schema=False)
     async def get_project_costs(project: str, request: Request, period: str = "today") -> dict:
         """Return aggregated cost data for a project."""
         _require_any_auth(request)
@@ -983,7 +1023,7 @@ def create_mesh_app(
 
     # === Cron CRUD ===
 
-    @app.post("/mesh/cron")
+    @app.post("/mesh/cron", include_in_schema=False)
     async def create_cron_job(data: dict, request: Request) -> dict:
         """Create a cron job. Body: {agent_id, schedule, message, heartbeat?}."""
         if cron_scheduler is None:
@@ -1021,7 +1061,7 @@ def create_mesh_app(
             "heartbeat": job.heartbeat, "tool_name": job.tool_name,
         }
 
-    @app.get("/mesh/cron")
+    @app.get("/mesh/cron", include_in_schema=False)
     async def list_cron_jobs(request: Request, agent_id: str | None = None) -> list[dict]:
         """List cron jobs, optionally filtered by agent_id."""
         _require_any_auth(request)
@@ -1032,7 +1072,7 @@ def create_mesh_app(
             jobs = [j for j in jobs if j["agent"] == agent_id]
         return jobs
 
-    @app.put("/mesh/cron/{job_id}")
+    @app.put("/mesh/cron/{job_id}", include_in_schema=False)
     async def update_cron_job(job_id: str, request: Request) -> dict:
         """Update a cron job by ID. Body: fields to update (schedule, enabled, etc)."""
         agent_id = _resolve_agent_id("", request)
@@ -1056,7 +1096,7 @@ def create_mesh_app(
         from dataclasses import asdict
         return {"status": "updated", "job": asdict(job)}
 
-    @app.delete("/mesh/cron/{job_id}")
+    @app.delete("/mesh/cron/{job_id}", include_in_schema=False)
     async def delete_cron_job(job_id: str, request: Request) -> dict:
         """Remove a cron job by ID."""
         agent_id = _resolve_agent_id("", request)
@@ -1075,7 +1115,7 @@ def create_mesh_app(
 
     # === Dynamic Agent Spawning ===
 
-    @app.post("/mesh/spawn")
+    @app.post("/mesh/spawn", include_in_schema=False)
     async def spawn_agent(data: dict, request: Request) -> dict:
         """Spawn an ephemeral agent. Body: {role, system_prompt?, model?, ttl?}."""
         if container_manager is None:
@@ -1131,7 +1171,7 @@ def create_mesh_app(
 
     # === Agent History Access ===
 
-    @app.get("/mesh/agents/{agent_id}/history")
+    @app.get("/mesh/agents/{agent_id}/history", include_in_schema=False)
     async def get_agent_history(agent_id: str, request: Request, requesting_agent: str = "") -> dict:
         """Retrieve an agent's daily logs. Permission-checked."""
         if requesting_agent:
@@ -1270,7 +1310,7 @@ def create_mesh_app(
 
     # === Request Traces ===
 
-    @app.get("/mesh/traces")
+    @app.get("/mesh/traces", include_in_schema=False)
     async def list_traces(request: Request, limit: int = 50) -> list[dict]:
         """Return recent trace events."""
         _require_any_auth(request)
@@ -1278,7 +1318,7 @@ def create_mesh_app(
             return []
         return trace_store.list_recent(limit=limit)
 
-    @app.get("/mesh/traces/{trace_id}")
+    @app.get("/mesh/traces/{trace_id}", include_in_schema=False)
     async def get_trace(trace_id: str, request: Request) -> list[dict]:
         """Return all events for a specific trace."""
         _require_any_auth(request)
@@ -1309,7 +1349,10 @@ def create_mesh_app(
 
     _CRED_NAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]{1,128}$")
 
-    @app.post("/mesh/credentials")
+    @app.post(
+        "/mesh/credentials", tags=["Credentials"],
+        summary="Store a credential", dependencies=[Depends(_api_key_header)],
+    )
     async def ext_store_credential(request: Request) -> dict:
         """Store an agent-tier credential. Returns an opaque $CRED{name} handle.
 
@@ -1334,7 +1377,10 @@ def create_mesh_app(
         handle = credential_vault.add_credential(name, value)
         return {"stored": True, "handle": handle, "name": name}
 
-    @app.delete("/mesh/credentials/{name}")
+    @app.delete(
+        "/mesh/credentials/{name}", tags=["Credentials"],
+        summary="Remove a credential", dependencies=[Depends(_api_key_header)],
+    )
     async def ext_remove_credential(name: str, request: Request) -> dict:
         """Remove an agent-tier credential by name."""
         kid = _require_api_key(request)
@@ -1348,7 +1394,10 @@ def create_mesh_app(
             raise HTTPException(404, f"Credential not found: {name}")
         return {"removed": True, "name": name}
 
-    @app.get("/mesh/credentials")
+    @app.get(
+        "/mesh/credentials", tags=["Credentials"],
+        summary="List credentials", dependencies=[Depends(_api_key_header)],
+    )
     async def ext_list_credentials(request: Request) -> dict:
         """List agent-tier credential names (never values)."""
         kid = _require_api_key(request)
@@ -1358,7 +1407,10 @@ def create_mesh_app(
         names = credential_vault.list_agent_credential_names()
         return {"credentials": names, "count": len(names)}
 
-    @app.get("/mesh/credentials/{name}/exists")
+    @app.get(
+        "/mesh/credentials/{name}/exists", tags=["Credentials"],
+        summary="Check credential exists", dependencies=[Depends(_api_key_header)],
+    )
     async def ext_credential_exists(name: str, request: Request) -> dict:
         """Check if a credential exists by name (never returns value)."""
         kid = _require_api_key(request)
@@ -1367,7 +1419,10 @@ def create_mesh_app(
             raise HTTPException(503, "Credential vault not configured")
         return {"name": name, "exists": credential_vault.has_credential(name)}
 
-    @app.get("/mesh/agents/{agent_id}/ext-status")
+    @app.get(
+        "/mesh/agents/{agent_id}/ext-status", tags=["Agent Status"],
+        summary="Get agent status", dependencies=[Depends(_api_key_header)],
+    )
     async def ext_agent_status(agent_id: str, request: Request) -> dict:
         """Query agent status from an external system.
 
@@ -1407,7 +1462,7 @@ def create_mesh_app(
         "wait_for", "press_key", "go_back", "go_forward", "switch_tab",
     })
 
-    @app.post("/mesh/browser/command")
+    @app.post("/mesh/browser/command", include_in_schema=False)
     async def browser_command(request: Request) -> dict:
         """Proxy a browser command to the shared browser service.
 
@@ -1550,7 +1605,7 @@ def create_mesh_app(
                 if hmac.compare_digest(token, expected):
                     raise HTTPException(403, "Agent access denied")
 
-    @app.get("/vnc/{path:path}")
+    @app.get("/vnc/{path:path}", include_in_schema=False)
     async def vnc_http_proxy(path: str, request: Request):
         """Reverse-proxy HTTP requests to KasmVNC (static files)."""
         _reject_agent_tokens(request)

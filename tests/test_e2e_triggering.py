@@ -59,13 +59,13 @@ def e2e_trigger_stack(tmp_path_factory):
         if openai_key:
             os.environ["OPENLEGION_CRED_OPENAI_API_KEY"] = openai_key
 
+    from src.host.api_endpoints import ApiEndpointManager
     from src.host.containers import ContainerManager
     from src.host.costs import CostTracker
     from src.host.credentials import CredentialVault
     from src.host.mesh import Blackboard, MessageRouter, PubSub
     from src.host.permissions import PermissionMatrix
     from src.host.server import create_mesh_app
-    from src.host.webhooks import WebhookManager
 
     tmp_dir = tmp_path_factory.mktemp("e2e_trigger")
     bb = Blackboard(db_path=str(tmp_dir / "blackboard.db"))
@@ -88,13 +88,13 @@ def e2e_trigger_stack(tmp_path_factory):
             r = await client.post(f"{url}/chat", json={"message": message})
             return r.json().get("response", "(no response)")
 
-    webhook_manager = WebhookManager(
-        config_path=str(tmp_dir / "webhooks.json"),
+    api_endpoint_manager = ApiEndpointManager(
+        config_path=str(tmp_dir / "api_endpoints.json"),
         dispatch_fn=dispatch_fn,
     )
 
     app = create_mesh_app(bb, pubsub, router, perms, vault)
-    app.include_router(webhook_manager.create_router())
+    app.include_router(api_endpoint_manager.create_router())
 
     config = uvicorn.Config(app, host="0.0.0.0", port=MESH_PORT, log_level="warning")
     server = uvicorn.Server(config)
@@ -141,7 +141,7 @@ def e2e_trigger_stack(tmp_path_factory):
         "mesh_url": f"http://localhost:{MESH_PORT}",
         "agent_url": url,
         "cost_tracker": cost_tracker,
-        "webhook_manager": webhook_manager,
+        "api_endpoint_manager": api_endpoint_manager,
         "container_manager": cm,
         "dispatch_fn": dispatch_fn,
     }
@@ -192,11 +192,11 @@ def test_cron_dispatch_to_agent(e2e_trigger_stack):
 @skip_no_key
 def test_webhook_dispatch_to_agent(e2e_trigger_stack):
     """Webhook endpoint receives POST and dispatches to agent."""
-    mgr = e2e_trigger_stack["webhook_manager"]
-    hook = mgr.add_hook(agent="trigger_test", name="test-event")
+    mgr = e2e_trigger_stack["api_endpoint_manager"]
+    hook = mgr.add_endpoint(agent="trigger_test", name="test-event")
 
     r = httpx.post(
-        f"{e2e_trigger_stack['mesh_url']}/webhook/hook/{hook['id']}",
+        f"{e2e_trigger_stack['mesh_url']}/api/inbound/{hook['id']}",
         json={"event": "push", "repo": "openlegion"},
         timeout=120,
     )
@@ -230,7 +230,7 @@ def test_cost_tracked_after_chat(e2e_trigger_stack):
 def test_webhook_unknown_hook_returns_404(e2e_trigger_stack):
     """Unknown webhook ID returns 404."""
     r = httpx.post(
-        f"{e2e_trigger_stack['mesh_url']}/webhook/hook/nonexistent",
+        f"{e2e_trigger_stack['mesh_url']}/api/inbound/nonexistent",
         json={"event": "test"},
         timeout=10,
     )

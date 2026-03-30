@@ -510,6 +510,11 @@ class CronScheduler:
                     logger.info(f"Cron {job.id} executed for agent '{job.agent}'")
 
                 self._emit_cron_change("executed", job)
+                if self._event_bus:
+                    self._event_bus.emit(
+                        "cron_complete", agent=job.agent,
+                        data={"job_id": job.id, "job_name": job.message[:200]},
+                    )
                 return response
             except Exception as e:
                 job.error_count += 1
