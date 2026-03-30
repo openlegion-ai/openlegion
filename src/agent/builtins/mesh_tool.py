@@ -669,7 +669,10 @@ async def get_agent_profile(agent_id: str, *, mesh_client=None) -> dict:
         "Update these when you discover something lasting, not every turn. "
         "Read the current content first (via read_file) to avoid losing "
         "existing information — merge new knowledge in, don't overwrite blindly. "
-        "A backup is saved automatically."
+        "A backup is saved automatically.\n\n"
+        "Files have bootstrap limits — content beyond the limit is saved "
+        "on disk but won't load into your active context. The write "
+        "response warns you if you exceed the limit."
     ),
     parameters={
         "filename": {
@@ -727,4 +730,17 @@ async def update_workspace(
             await mesh_client.notify_user(summary)
         except Exception as e:
             logger.debug("Non-fatal: workspace notification failed: %s", e)
+    # Warn if content exceeds bootstrap cap (file is saved in full,
+    # but only the capped portion loads into the system prompt).
+    from src.agent.workspace import BOOTSTRAP_CAPS
+    cap = BOOTSTRAP_CAPS.get(filename)
+    if cap and len(content) > cap:
+        result["bootstrap_cap"] = cap
+        result["content_length"] = len(content)
+        result["over_cap"] = len(content) - cap
+        result["warning"] = (
+            f"Saved all {len(content)} chars, but only the first {cap} "
+            f"will load into your active context. The last {len(content) - cap} "
+            f"chars won't guide your behavior. Consider trimming."
+        )
     return result

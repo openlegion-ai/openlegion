@@ -470,6 +470,34 @@ class TestUpdateWorkspaceTool:
         # Write should still succeed even though notification failed
         assert result.get("updated") is True
 
+    @pytest.mark.asyncio
+    async def test_update_workspace_cap_warning(self):
+        """update_workspace warns when content exceeds bootstrap cap."""
+        from src.agent.builtins.mesh_tool import update_workspace
+
+        mock_ws = MagicMock()
+        mock_ws._read_file = MagicMock(return_value="# Identity\n")
+        mock_ws.update_file = MagicMock(return_value={
+            "filename": "SOUL.md",
+            "size": 5000,
+            "updated": True,
+        })
+        mock_client = AsyncMock()
+        mock_client.agent_id = "test-agent"
+        mock_client.notify_user = AsyncMock()
+
+        # Write content that exceeds SOUL.md's 4000 char bootstrap cap
+        big_content = "# Soul\n" + "x" * 4500
+        result = await update_workspace(
+            "SOUL.md", big_content,
+            workspace_manager=mock_ws,
+            mesh_client=mock_client,
+        )
+        assert result["updated"] is True
+        assert result.get("over_cap") is not None
+        assert result["bootstrap_cap"] == 4000
+        assert "warning" in result
+
 
 # ── http_tool ────────────────────────────────────────────────
 

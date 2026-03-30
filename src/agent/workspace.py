@@ -48,7 +48,7 @@ _SCAFFOLD_FILES: dict[str, str] = {
 _MAX_FILE_SIZE = 200_000
 
 # Bootstrap capping — limits for system prompt injection
-_MAX_BOOTSTRAP = 40_000
+_MAX_BOOTSTRAP = 48_000
 _MAX_SYSTEM = 6_000
 
 # Headers prepended to workspace files in the system prompt so the LLM
@@ -78,10 +78,19 @@ INTROSPECT_PERM_KEYS = (
     "can_publish", "can_subscribe", "allowed_apis",
     "allowed_credentials",
 )
-_MAX_INSTRUCTIONS = 8_000
+_MAX_INSTRUCTIONS = 12_000
 _MAX_SOUL = 4_000
 _MAX_USER = 4_000
 _MAX_MEMORY = 16_000
+
+# Public mapping for external consumers (skill response, dashboard).
+# Files not listed have no per-file bootstrap cap.
+BOOTSTRAP_CAPS: dict[str, int] = {
+    "INSTRUCTIONS.md": _MAX_INSTRUCTIONS,
+    "SOUL.md": _MAX_SOUL,
+    "USER.md": _MAX_USER,
+    "MEMORY.md": _MAX_MEMORY,
+}
 
 _CORRECTION_SIGNALS = frozenset({
     "no,", "no.", "wrong", "incorrect", "that's not", "that is not",

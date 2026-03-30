@@ -285,8 +285,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
     _FILE_CAPS = {
         "SOUL.md": 4000,
-        "INSTRUCTIONS.md": 8000,
-        "AGENTS.md": 8000,
+        "INSTRUCTIONS.md": 12000,
+        "AGENTS.md": 12000,
         "USER.md": 4000,
         "MEMORY.md": 16000,
         "HEARTBEAT.md": None,
