@@ -567,14 +567,15 @@ def create_mesh_app(
             raise HTTPException(503, "No credential vault configured")
 
         req_trace_id = request.headers.get("x-trace-id")
+        prompt_preview = _extract_prompt_preview(api_request.params)
+
         if req_trace_id and trace_store:
             stream_meta: dict = {
                 "service": api_request.service,
                 "action": api_request.action,
             }
-            stream_prompt_preview = _extract_prompt_preview(api_request.params)
-            if stream_prompt_preview:
-                stream_meta["prompt_preview"] = stream_prompt_preview
+            if prompt_preview:
+                stream_meta["prompt_preview"] = prompt_preview
             trace_store.record(
                 trace_id=req_trace_id,
                 source="mesh.api_proxy",
@@ -583,10 +584,56 @@ def create_mesh_app(
                 detail=f"{api_request.service}/{api_request.action}",
                 meta=stream_meta,
             )
-        return StreamingResponse(
-            credential_vault.stream_llm(api_request, agent_id=agent_id),
-            media_type="text/event-stream",
-        )
+
+        async def _stream_with_events():
+            start = time.monotonic()
+            done_data: dict = {}
+            async for chunk in credential_vault.stream_llm(api_request, agent_id=agent_id):
+                yield chunk
+                if not done_data and chunk.startswith("data: {") and '"type": "done"' in chunk:
+                    try:
+                        done_data = json.loads(chunk[6:].rstrip("\n"))
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+            # Post-stream: emit llm_call event + trace completion
+            duration_ms = int((time.monotonic() - start) * 1000)
+            tokens = done_data.get("tokens_used", 0)
+            model = done_data.get("model", "")
+            if event_bus is not None and (tokens or model):
+                from src.host.costs import estimate_cost
+                ev: dict = {
+                    "service": api_request.service,
+                    "action": api_request.action,
+                    "duration_ms": duration_ms,
+                    "model": model,
+                    "total_tokens": tokens,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cost_usd": estimate_cost(model, total_tokens=tokens),
+                }
+                if prompt_preview:
+                    ev["prompt_preview"] = prompt_preview
+                response_preview = (done_data.get("content") or "")[:500]
+                if response_preview:
+                    ev["response_preview"] = response_preview
+                event_bus.emit("llm_call", agent=agent_id, data=ev)
+            if req_trace_id and trace_store and done_data:
+                trace_store.record(
+                    trace_id=req_trace_id,
+                    source="mesh.api_proxy",
+                    agent=agent_id,
+                    event_type="llm_call",
+                    detail=f"{api_request.service}/{api_request.action}",
+                    duration_ms=duration_ms,
+                    status="ok",
+                    meta={
+                        "model": model,
+                        "tokens_used": tokens,
+                        "streaming": True,
+                    },
+                )
+
+        return StreamingResponse(_stream_with_events(), media_type="text/event-stream")
 
     # === Model Health Diagnostic ===
 
