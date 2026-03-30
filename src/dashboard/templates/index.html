@@ -3339,7 +3339,7 @@
                       </template>
                     </div>
                     <!-- Purge dropdown -->
-                    <div x-show="db.purgeable" class="relative" x-data="{ purgeOpen: false }">
+                    <div x-show="db.purgeable" class="relative" x-data="{ purgeOpen: false }" @click.stop>
                       <button @click="purgeOpen = !purgeOpen"
                         :disabled="dbPurging[db.id]"
                         class="text-[10px] px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-50 flex items-center gap-1">
