@@ -8,6 +8,7 @@ Layout:
   ├── USER.md           # User context, preferences
   ├── MEMORY.md         # Curated long-term memory (auto + manual)
   ├── HEARTBEAT.md      # Autonomous task rules (checked on heartbeat)
+  ├── INTERFACE.md      # Public collaboration contract (read by other agents)
   ├── memory/
   │   ├── 2026-02-18.md   # Today's session log
   │   └── 2026-02-17.md   # Yesterday's log
@@ -41,6 +42,7 @@ _SCAFFOLD_FILES: dict[str, str] = {
     "USER.md": "# User Context\n",
     "MEMORY.md": "# Long-Term Memory\n",
     "HEARTBEAT.md": "# Heartbeat Rules\n",
+    "INTERFACE.md": "# Interface\n",
 }
 
 _MAX_FILE_SIZE = 200_000
@@ -299,7 +301,7 @@ class WorkspaceManager:
         self._bootstrap_cache = None  # MEMORY.md is part of bootstrap
 
     # Files agents are allowed to update themselves
-    AGENT_WRITABLE = frozenset({"HEARTBEAT.md", "USER.md", "SOUL.md", "INSTRUCTIONS.md"})
+    AGENT_WRITABLE = frozenset({"HEARTBEAT.md", "USER.md", "SOUL.md", "INSTRUCTIONS.md", "INTERFACE.md"})
     _MAX_WRITABLE_SIZE = 32_000  # 32KB cap for agent-writable files
     _MAX_BACKUPS_PER_FILE = 20
 
@@ -701,6 +703,12 @@ conversations (large context), vision/screenshot tools, embedding calls.
 
 Use these tools to coordinate with teammates:
 
+**Discovering teammates:**
+→ `list_agents()` — roster with name, role, capabilities
+→ `get_agent_profile(agent_id)` — read their INTERFACE.md contract
+  plus live metadata (status, subscriptions, watches, recent writes)
+Check a teammate's profile before your first coordination with them.
+
 **Handing off work:**
 → `hand_off(to="agent_id", summary="what to do next", data="optional JSON")`
 Writes your output to the blackboard, creates a task in their inbox, and
@@ -716,14 +724,25 @@ After processing a task, call `complete_task(task_key)` to mark it done.
 → `update_status(state="working|idle|blocked|done", summary="...")`
 Teammates read your status to decide whether to wait or proceed.
 
+**Your collaboration interface (INTERFACE.md):**
+Describe what you accept (inputs, blackboard keys you read, events you
+subscribe to), what you produce (outputs, keys you write, events you
+publish), and how to send you work or feedback. Update via
+`update_workspace`. Teammates read it via `get_agent_profile`.
+
+**Reactive notifications (no polling needed):**
+- `watch_blackboard(pattern)` — notified when matching keys change
+- `subscribe_event(topic)` — notified on ephemeral one-time signals
+Set these up once during setup — they persist across sessions.
+
 **Three standard blackboard sections:**
 - `status/{agent_id}` — each agent's current state
 - `output/{agent_id}/{name}` — completed work products
 - `tasks/{agent_id}/{task_id}` — pending work inbox
 
 You can still use the lower-level tools (read_blackboard, write_blackboard,
-publish_event) for custom patterns, but prefer the coordination tools above
-for inter-agent workflows.
+publish_event) for custom data patterns (e.g. research/, drafts/, analysis/),
+but prefer the coordination tools above for inter-agent workflows.
 
 ## Custom Skills
 

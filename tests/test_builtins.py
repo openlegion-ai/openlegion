@@ -2538,3 +2538,42 @@ class TestClaimTaskTool:
         # Verify the parsed value was {"text": "not valid json"}
         call_args = mock_client.claim_blackboard.call_args
         assert call_args[0][1] == {"text": "not valid json"}
+
+
+# ── get_agent_profile ────────────────────────────────────────────────
+
+
+class TestGetAgentProfile:
+    @pytest.mark.asyncio
+    async def test_get_agent_profile(self):
+        """get_agent_profile calls mesh_client and sanitizes result."""
+        from src.agent.builtins.mesh_tool import get_agent_profile
+
+        mock_client = AsyncMock()
+        mock_client.get_agent_profile = AsyncMock(return_value={
+            "agent_id": "writer",
+            "role": "Content writer",
+            "status": "idle",
+            "last_active": "2026-03-30T14:00:00+00:00",
+            "heartbeat_schedule": "every 2h",
+            "subscriptions": ["research_complete"],
+            "watches": ["sources/*"],
+            "recent_writes": ["drafts/ai-security"],
+            "capabilities": ["read_blackboard", "write_blackboard"],
+            "interface": "# Interface: writer\n\n## Role\nTurns briefs into content.",
+        })
+
+        result = await get_agent_profile("writer", mesh_client=mock_client)
+        assert result["agent_id"] == "writer"
+        assert result["role"] == "Content writer"
+        assert result["interface"] is not None
+        assert "writer" in result["interface"]
+        mock_client.get_agent_profile.assert_awaited_once_with("writer")
+
+    @pytest.mark.asyncio
+    async def test_get_agent_profile_no_client(self):
+        """get_agent_profile returns error when no mesh_client."""
+        from src.agent.builtins.mesh_tool import get_agent_profile
+
+        result = await get_agent_profile("writer", mesh_client=None)
+        assert "error" in result

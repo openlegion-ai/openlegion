@@ -2015,3 +2015,62 @@ def test_ext_store_and_remove_lifecycle(ext_api_components):
 
     resp = client.get("/mesh/credentials/company_abc_ssn/exists", headers=h)
     assert resp.json()["exists"] is False
+
+
+# ── Agent profile endpoint ────────────────────────────────────────────
+
+
+def test_agent_profile_basic(mesh_components):
+    """GET /mesh/agents/{id}/profile returns metadata for a registered agent."""
+    client = mesh_components["client"]
+    bb = mesh_components["blackboard"]
+    pubsub = mesh_components["pubsub"]
+
+    # Register the agent
+    client.post("/mesh/register", json={
+        "agent_id": "research",
+        "capabilities": ["web_search", "memory_save"],
+        "port": 8401,
+    })
+
+    # Set up some state the profile should reflect
+    pubsub.subscribe("projects/teamA/research_complete", "research")
+    bb.add_watch("research", "projects/teamA/feedback/*")
+    bb.write("projects/teamA/sources/topic-1", {"data": "brief"}, written_by="research")
+
+    # No requesting_agent — falls through to _require_any_auth which is
+    # a no-op when no auth_tokens are configured (test fixture).
+    resp = client.get("/mesh/agents/research/profile")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["agent_id"] == "research"
+    # Role is empty string — /mesh/register does not accept a role param
+    assert data["role"] == ""
+    assert data["capabilities"] == ["web_search", "memory_save"]
+    # No agent_projects in fixture, so project prefix is NOT stripped
+    assert "projects/teamA/research_complete" in data["subscriptions"]
+    assert "projects/teamA/feedback/*" in data["watches"]
+    assert "projects/teamA/sources/topic-1" in data["recent_writes"]
+    assert data["interface"] is None  # No INTERFACE.md on the container
+
+
+def test_agent_profile_not_found(mesh_components):
+    """GET /mesh/agents/{id}/profile returns 404 for unknown agent."""
+    client = mesh_components["client"]
+    # No requesting_agent — bypasses can_message check (no auth_tokens in fixture).
+    resp = client.get("/mesh/agents/nonexistent/profile")
+    assert resp.status_code == 404
+
+
+def test_agent_profile_permission_denied(mesh_components):
+    """GET /mesh/agents/{id}/profile returns 403 when agent lacks can_message."""
+    client = mesh_components["client"]
+
+    # Register both agents
+    client.post("/mesh/register", json={"agent_id": "qualify", "capabilities": [], "port": 8402})
+    client.post("/mesh/register", json={"agent_id": "research", "capabilities": [], "port": 8401})
+
+    # "qualify" can only message "mesh" per the fixture permissions.
+    # Try to read "research" profile from "qualify" — should be denied.
+    resp = client.get("/mesh/agents/research/profile", params={"requesting_agent": "qualify"})
+    assert resp.status_code == 403

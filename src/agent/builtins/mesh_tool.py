@@ -48,8 +48,10 @@ async def notify_user(message: str, *, mesh_client=None, workspace_manager=None)
     name="list_agents",
     description=(
         "List agents in your project (or just yourself if standalone). Returns "
-        "each agent's name and role. Use this to discover who else is working "
-        "in your project."
+        "each agent's name, role, and capabilities. Use this to discover who "
+        "else is working in your project. For detailed collaboration info "
+        "(what they accept/produce, their status, INTERFACE.md contract), "
+        "follow up with get_agent_profile(agent_id)."
     ),
     parameters={},
 )
@@ -251,11 +253,13 @@ async def publish_event(
 @skill(
     name="subscribe_event",
     description=(
-        "Subscribe to a pub/sub topic. Once subscribed, events published to "
-        "this topic by other agents arrive as steer messages between your "
-        "tool rounds — no polling needed. Use this to react to coordination "
-        "signals (e.g. 'research_complete', 'deploy_ready'). For watching "
-        "persistent blackboard changes, use watch_blackboard instead."
+        "Subscribe to a pub/sub topic for one-time signals. Once subscribed, "
+        "events published to this topic arrive as steer messages between your "
+        "tool rounds — no polling needed. Use for ephemeral notifications "
+        "where you need to react immediately (e.g. 'research_complete', "
+        "'deploy_ready'). Events are fire-and-forget — if you subscribe "
+        "after an event fires, you won't see it. For reacting to persistent "
+        "data changes, use watch_blackboard instead."
     ),
     parameters={
         "topic": {
@@ -280,10 +284,12 @@ async def subscribe_event(topic: str, *, mesh_client=None) -> dict:
     name="watch_blackboard",
     description=(
         "Watch blackboard keys matching a glob pattern. When any matching "
-        "key is written by another agent, you'll receive a notification "
-        "between tool rounds — no polling needed. Use this to react "
-        "when shared state changes (e.g. watch 'tasks/*' to know when "
-        "new tasks appear)."
+        "key is written by another agent, you receive a notification "
+        "between tool rounds — no polling needed. Use this to react to "
+        "persistent data changes (e.g. watch 'sources/*' for new research "
+        "briefs, 'feedback/*' for revision requests). Set up watches once "
+        "during setup or your first heartbeat — they persist across sessions. "
+        "For one-time event signals, use subscribe_event instead."
     ),
     parameters={
         "pattern": {
@@ -615,6 +621,34 @@ async def read_agent_history(agent_id: str, *, mesh_client=None) -> dict:
 
 
 @skill(
+    name="get_agent_profile",
+    description=(
+        "Read another agent's public profile — mesh-verified metadata plus "
+        "their collaboration interface. Use this to understand HOW to work "
+        "with another agent: what inputs they expect, what they produce, "
+        "what events they listen to, and their current status. More detailed "
+        "than list_agents — call this when you need to coordinate with a "
+        "specific peer. Permission-checked: you can only read profiles of "
+        "agents you're allowed to message."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "ID of the agent whose profile to read",
+        },
+    },
+)
+async def get_agent_profile(agent_id: str, *, mesh_client=None) -> dict:
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    try:
+        result = await mesh_client.get_agent_profile(agent_id)
+        return _sanitize_value(result)
+    except Exception as e:
+        return {"error": f"Failed to read profile of '{agent_id}': {e}"}
+
+
+@skill(
     name="update_workspace",
     description=(
         "Update one of your writable workspace files to get better over time. "
@@ -628,7 +662,10 @@ async def read_agent_history(agent_id: str, *, mesh_client=None) -> dict:
         "style, project background, and important facts so you serve them "
         "better in future sessions.\n"
         "- HEARTBEAT.md: your autonomous rules — what to check and do on "
-        "periodic wakeups. Drop wasteful checks, add useful ones.\n\n"
+        "periodic wakeups. Drop wasteful checks, add useful ones.\n"
+        "- INTERFACE.md: your public collaboration contract — what you accept, "
+        "what you produce, and how other agents should interact with you. "
+        "Other agents read this via get_agent_profile.\n\n"
         "Update these when you discover something lasting, not every turn. "
         "Read the current content first (via read_file) to avoid losing "
         "existing information — merge new knowledge in, don't overwrite blindly. "
@@ -637,11 +674,11 @@ async def read_agent_history(agent_id: str, *, mesh_client=None) -> dict:
     parameters={
         "filename": {
             "type": "string",
-            "enum": ["SOUL.md", "INSTRUCTIONS.md", "USER.md", "HEARTBEAT.md"],
+            "enum": ["SOUL.md", "INSTRUCTIONS.md", "USER.md", "HEARTBEAT.md", "INTERFACE.md"],
             "description": (
                 "File to update: SOUL.md (identity/tone), INSTRUCTIONS.md "
-                "(procedures/rules), USER.md (user prefs), or HEARTBEAT.md "
-                "(autonomous rules)"
+                "(procedures/rules), USER.md (user prefs), HEARTBEAT.md "
+                "(autonomous rules), or INTERFACE.md (public collaboration contract)"
             ),
         },
         "content": {
@@ -677,6 +714,7 @@ async def update_workspace(
                 "# Identity",
                 "# Instructions",
                 "# Long-Term Memory",
+                "# Interface",
             ) or old_stripped.startswith((
                 "# Heartbeat Rules\n\nYou are woken",
                 "# User Context\n\nYour user",

@@ -33,6 +33,7 @@ const _IDENTITY_FILE_MAP = {
   identity: [
     { file: 'SOUL.md', label: 'Soul', cap: 4000, access: 'both', desc: 'Personality, tone, and communication style. Shapes how the agent speaks and approaches problems.' },
     { file: 'INSTRUCTIONS.md', label: 'Instructions', cap: 8000, access: 'both', desc: 'Step-by-step procedures, workflow rules, tool patterns, and domain knowledge. The agent\'s operating manual.' },
+    { file: 'INTERFACE.md', label: 'Interface', cap: 4000, access: 'both', desc: 'Public collaboration contract — what this agent accepts, produces, and how other agents should interact with it. Teammates read this via get_agent_profile.' },
   ],
   memory: [
     { file: 'MEMORY.md', label: 'Memory', cap: 16000, access: 'auto', desc: 'Facts and context the agent remembers across sessions. Auto-updated during conversations — you can also edit directly.' },

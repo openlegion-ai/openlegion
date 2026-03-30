@@ -359,6 +359,15 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_agent_profile(self, agent_id: str) -> dict:
+        """Read another agent's public profile (permission-checked on server)."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/profile",
+            params={"requesting_agent": self.agent_id},
+        )
+        response.raise_for_status()
+        return response.json()
+
     # === Vault (credential management) ===
 
     async def vault_store(self, name: str, value: str) -> dict:

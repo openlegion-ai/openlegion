@@ -139,6 +139,7 @@ def create_mesh_app(
         "wallet_transfer": (10, 3600),
         "wallet_execute": (10, 3600),
         "image_gen": (10, 60),
+        "agent_profile": (30, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
@@ -1159,6 +1160,113 @@ def create_mesh_app(
                 return resp.json()
         except Exception as e:
             raise HTTPException(502, f"Failed to fetch history from {agent_id}: {e}") from e
+
+    # === Agent Profile ===
+
+    @app.get("/mesh/agents/{agent_id}/profile")
+    async def get_agent_profile(agent_id: str, request: Request, requesting_agent: str = "") -> dict:
+        """Return an agent's public profile: mesh-derived metadata + INTERFACE.md.
+
+        Agents use this to understand how to collaborate with a peer —
+        what it accepts, produces, subscribes to, and its public contract.
+        Permission-checked: requesting agent must be allowed to message the target.
+        """
+        if requesting_agent:
+            requesting_agent = _resolve_agent_id(requesting_agent, request)
+            await _check_rate_limit("agent_profile", requesting_agent)
+            if not permissions.can_message(requesting_agent, agent_id):
+                raise HTTPException(403, f"Agent {requesting_agent} cannot read profile of {agent_id}")
+        else:
+            _require_any_auth(request)
+
+        if agent_id not in router.agent_registry:
+            raise HTTPException(404, f"Agent not found: {agent_id}")
+
+        # -- Mesh-derived metadata (verifiable, always fresh) --
+        role = router.agent_roles.get(agent_id, "")
+        capabilities = router._capabilities_cache.get(agent_id, [])
+
+        # Health status
+        status = "unknown"
+        last_active = None
+        if health_monitor is not None:
+            h = health_monitor.agents.get(agent_id)
+            if h is not None:
+                status = h.status
+                if h.last_healthy:
+                    from datetime import datetime, timezone
+                    last_active = datetime.fromtimestamp(
+                        h.last_healthy, tz=timezone.utc,
+                    ).isoformat()
+
+        # Heartbeat schedule
+        heartbeat_schedule = None
+        if cron_scheduler is not None:
+            for job in cron_scheduler.jobs.values():
+                if job.agent == agent_id and job.heartbeat:
+                    heartbeat_schedule = job.schedule
+                    break
+
+        # Subscriptions (strip project prefix for readability)
+        raw_subs = pubsub.get_agent_subscriptions(agent_id) if pubsub else []
+        project = _agent_projects.get(agent_id)
+        prefix = f"projects/{project}/" if project else ""
+        subscriptions = [
+            t[len(prefix):] if prefix and t.startswith(prefix) else t
+            for t in raw_subs
+        ]
+
+        # Watches (strip project prefix)
+        raw_watches = blackboard.get_agent_watches(agent_id)
+        watches = [
+            w[len(prefix):] if prefix and w.startswith(prefix) else w
+            for w in raw_watches
+        ]
+
+        # Recent blackboard writes (strip project prefix, keys only)
+        raw_writes = blackboard.recent_keys_by_agent(agent_id)
+        recent_writes = [
+            k[len(prefix):] if prefix and k.startswith(prefix) else k
+            for k in raw_writes
+        ]
+
+        # -- Agent-declared interface (INTERFACE.md) --
+        interface = None
+        if transport is not None:
+            try:
+                ws_resp = await transport.request(agent_id, "GET", "/workspace/INTERFACE.md", timeout=10)
+                content = ws_resp.get("content", "") if isinstance(ws_resp, dict) else ""
+                if content and content.strip() not in ("", "# Interface"):
+                    interface = sanitize_for_prompt(content)
+            except Exception:
+                logger.debug("Could not fetch INTERFACE.md from %s", agent_id)
+        elif agent_id in router.agent_registry:
+            agent_url = router.agent_registry[agent_id]
+            if isinstance(agent_url, dict):
+                agent_url = agent_url.get("url", agent_url)
+            import httpx
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.get(f"{agent_url}/workspace/INTERFACE.md")
+                    if resp.status_code == 200:
+                        content = resp.json().get("content", "")
+                        if content and content.strip() not in ("", "# Interface"):
+                            interface = sanitize_for_prompt(content)
+            except Exception:
+                logger.debug("Could not fetch INTERFACE.md from %s (direct)", agent_id)
+
+        return {
+            "agent_id": agent_id,
+            "role": role,
+            "status": status,
+            "last_active": last_active,
+            "heartbeat_schedule": heartbeat_schedule,
+            "subscriptions": subscriptions,
+            "watches": watches,
+            "recent_writes": recent_writes,
+            "capabilities": capabilities,
+            "interface": interface,
+        }
 
     # === Request Traces ===
 
