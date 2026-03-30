@@ -273,26 +273,35 @@ After pairing, the bot sends a help summary with all available commands. Unautho
 - Per-user agent tracking by phone number
 - Webhook verification challenge handled automatically
 
-## Webhooks
+## API Endpoints (Inbound)
 
-HTTP webhooks for programmatic integration. Incoming payloads are dispatched to agents as tasks.
+Named HTTP endpoints for programmatic integration. Incoming payloads are dispatched to agents as tasks. Manage these from the **Integrations > API Endpoints** tab in the dashboard.
 
 ### Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/webhook/hook/<hook_id>` | Dispatch a JSON payload to the configured agent |
+| `POST` | `/api/inbound/<endpoint_id>` | Dispatch a JSON payload to the configured agent |
+| `POST` | `/webhook/hook/<endpoint_id>` | Deprecated compatibility route (same behavior) |
 
 ### Usage
 
 ```bash
-# Send a payload to a webhook
-curl -X POST http://localhost:8420/webhook/hook/<hook_id> \
+# Send a payload to an API endpoint
+curl -X POST http://localhost:8420/api/inbound/<endpoint_id> \
   -H "Content-Type: application/json" \
   -d '{"company": "Acme Corp", "source": "website"}'
+
+# With HMAC signature verification (if enabled on the endpoint)
+BODY='{"company": "Acme Corp", "source": "website"}'
+SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | cut -d' ' -f2)
+curl -X POST http://localhost:8420/api/inbound/<endpoint_id> \
+  -H "Content-Type: application/json" \
+  -H "X-Signature: $SIG" \
+  -d "$BODY"
 ```
 
-Each webhook is configured with a target agent. When a payload arrives, it is dispatched to that agent as a task.
+Each endpoint is configured with a target agent. When a payload arrives, it is dispatched to that agent as a task.
 
 ## Writing a Custom Channel
 

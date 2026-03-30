@@ -1,7 +1,7 @@
 /**
  * OpenLegion Dashboard — Alpine.js application.
  *
- * Two panels: Agents, System (Activity / Costs / Automation / Integrations / API Keys / Wallet / Storage / Settings).
+ * Three panels: Agents, Integrations (API Endpoints / Webhooks / Credentials), System (Activity / Costs / Automation / Channels / Wallet / Storage / Settings).
  * Real-time updates via WebSocket + periodic REST polling.
  */
 
@@ -47,6 +47,7 @@ function dashboard() {
     activeTab: 'fleet',
     tabs: [
       { id: 'fleet', label: 'Agents' },
+      { id: 'integrations', label: 'Integrations' },
       { id: 'system', label: 'System' },
     ],
     connected: false,
@@ -265,11 +266,19 @@ function dashboard() {
       { id: 'activity', label: 'Activity' },
       { id: 'costs', label: 'Costs' },
       { id: 'automation', label: 'Automation' },
-      { id: 'integrations', label: 'Integrations' },
-      { id: 'apikeys', label: 'API Keys' },
+      { id: 'channels', label: 'Channels' },
       { id: 'wallet', label: 'Wallet' },
       { id: 'storage', label: 'Storage' },
       { id: 'settings', label: 'Settings' },
+    ],
+
+    // Integrations tab — sub-navigation
+    integrationsTab: 'endpoints',
+    integrationsTabs: [
+      { id: 'endpoints', label: 'API Endpoints' },
+      { id: 'webhooks', label: 'Webhooks' },
+      { id: 'accesskeys', label: 'Access Keys' },
+      { id: 'apikeys', label: 'Credentials' },
     ],
 
     // Unified Project Hub (replaces separate PROJECT.md + Comms + Broadcast panels)
@@ -443,6 +452,9 @@ function dashboard() {
           ? `/agents/${this.detailAgent}`
           : `/agents/${this.detailAgent}/${tab}`;
       }
+      if (this.activeTab === 'integrations') {
+        return '/integrations/' + (this.integrationsTab || 'endpoints');
+      }
       if (this.activeTab === 'system') {
         if (this.systemTab === 'activity') {
           if (this.activityView === 'events') return '/system/activity/events';
@@ -459,6 +471,10 @@ function dashboard() {
         const tabLabel = (_IDENTITY_TABS.find(t => t.id === this.identityTab) || _IDENTITY_TABS[0]).label;
         return `${this.detailAgent} \u00b7 ${tabLabel} \u2014 OpenLegion`;
       }
+      if (this.activeTab === 'integrations') {
+        const st = this.integrationsTabs.find(t => t.id === this.integrationsTab);
+        return (st ? st.label : 'Integrations') + ' \u2014 OpenLegion';
+      }
       if (this.activeTab === 'system') {
         if (this.systemTab === 'activity') {
           if (this.activityView === 'events') return 'Live Feed \u2014 OpenLegion';
@@ -473,7 +489,7 @@ function dashboard() {
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
+      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'activity', integrationsTab: 'endpoints', agentId: null, identityTab: 'config' };
       if (!clean) return route;
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
@@ -487,13 +503,23 @@ function dashboard() {
       if (clean === 'activity/events') { route.tab = 'system'; route.systemTab = 'activity'; route.activityView = 'events'; }
       else if (clean === 'activity/logs') { route.tab = 'system'; route.systemTab = 'activity'; route.activityView = 'logs'; }
       else if (clean === 'activity') { route.tab = 'system'; route.systemTab = 'activity'; }
+      else if (clean.startsWith('integrations')) {
+        route.tab = 'integrations';
+        const sub = clean.split('/')[1];
+        if (sub && ['endpoints', 'webhooks', 'accesskeys', 'apikeys'].includes(sub)) {
+          route.integrationsTab = sub;
+        }
+      }
       else if (clean.startsWith('system')) {
         route.tab = 'system';
         const sub = clean.split('/')[1];
         // Backward compat for old URLs
-        const _tabAliases = { schedules: 'automation', connections: 'integrations', uploads: 'storage' };
+        const _tabAliases = { schedules: 'automation', connections: 'channels', uploads: 'storage' };
         const resolved = _tabAliases[sub] || sub;
-        if (resolved && ['activity', 'costs', 'automation', 'integrations', 'apikeys', 'wallet', 'storage', 'settings'].includes(resolved)) {
+        // Redirect old system/integrations and system/apikeys URLs to new integrations tab
+        if (resolved === 'integrations') { route.tab = 'integrations'; route.integrationsTab = 'endpoints'; }
+        else if (resolved === 'apikeys') { route.tab = 'integrations'; route.integrationsTab = 'apikeys'; }
+        else if (resolved && ['activity', 'costs', 'automation', 'channels', 'wallet', 'storage', 'settings'].includes(resolved)) {
           route.systemTab = resolved;
           if (resolved === 'activity') {
             const view = clean.split('/')[2];
@@ -536,20 +562,27 @@ function dashboard() {
           }
           if (this.activeTab !== route.tab) {
             // Sync sub-state before switchTab so it uses the correct values
+            if (route.tab === 'integrations') {
+              this.integrationsTab = route.integrationsTab;
+            }
             if (route.tab === 'system') {
               this.systemTab = route.systemTab;
               if (route.systemTab === 'activity') this.activityView = route.activityView;
             }
             this.switchTab(route.tab);
+          } else if (route.tab === 'integrations') {
+            if (this.integrationsTab !== route.integrationsTab) {
+              this.integrationsTab = route.integrationsTab;
+              if (route.integrationsTab === 'endpoints') { this.fetchEndpoints(); }
+              if (route.integrationsTab === 'webhooks') { this.fetchOutboundWebhooks(); }
+              if (route.integrationsTab === 'apikeys') { this.fetchSettings(); this.fetchApiKeys(); }
+            }
           } else if (route.tab === 'system') {
             if (this.systemTab !== route.systemTab) {
               if (this.systemTab === 'activity') this._stopActivityRefresh();
               this.systemTab = route.systemTab;
-              if (route.systemTab === 'integrations') {
-                this.fetchChannels(); this.fetchEndpoints(); this.fetchApiKeys(); this.fetchOutboundWebhooks();
-              }
-              if (route.systemTab === 'apikeys') {
-                this.fetchSettings();
+              if (route.systemTab === 'channels') {
+                this.fetchChannels();
               }
               if (route.systemTab === 'settings') {
                 this.fetchBrowserSettings();
@@ -1102,17 +1135,20 @@ function dashboard() {
         this.fetchProject();
         this.fetchProjects();
       }
+      if (tab === 'integrations') {
+        this.fetchEndpoints();
+        this.fetchOutboundWebhooks();
+        this.fetchApiKeys();
+        if (this.integrationsTab === 'apikeys') this.fetchSettings();
+      }
       if (tab === 'system') {
         this.fetchSettings();
         this.fetchCosts();
         this.fetchStorage();
         this.fetchCronJobs();
         this.fetchWorkflows();
-        if (this.systemTab === 'integrations') {
-          this.fetchEndpoints();
+        if (this.systemTab === 'channels') {
           this.fetchChannels();
-          this.fetchApiKeys();
-          this.fetchOutboundWebhooks();
         }
         if (this.systemTab === 'settings') {
           this.fetchBrowserSettings();
@@ -1134,14 +1170,22 @@ function dashboard() {
       if (this.systemTab === 'activity' && tabId !== 'activity') this._stopActivityRefresh();
       this.systemTab = tabId;
       this._pushUrl(false);
-      if (tabId === 'integrations') { this.fetchChannels(); this.fetchEndpoints(); this.fetchApiKeys(); this.fetchOutboundWebhooks(); }
-      if (tabId === 'apikeys') { this.fetchSettings(); }
+      if (tabId === 'channels') { this.fetchChannels(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
       if (tabId === 'activity') {
         if (this.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
         else if (this.activityView === 'logs') { this.fetchSystemLogs(); }
       }
+    },
+
+    switchIntegrationsTab(tabId) {
+      this.integrationsTab = tabId;
+      this._pushUrl(false);
+      if (tabId === 'endpoints') { this.fetchEndpoints(); }
+      if (tabId === 'webhooks') { this.fetchOutboundWebhooks(); }
+      if (tabId === 'accesskeys') { this.fetchApiKeys(); }
+      if (tabId === 'apikeys') { this.fetchSettings(); this.fetchApiKeys(); }
     },
 
     // ── Markdown rendering for chat messages ─────────────
@@ -3951,7 +3995,8 @@ function dashboard() {
       // Match tabs with keywords
       const tabKeywords = {
         fleet: ['agents', 'fleet', 'cards', 'project'],
-        system: ['system', 'costs', 'cron', 'schedules', 'automation', 'credentials', 'api keys', 'connections', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows', 'storage', 'uploads', 'disk'],
+        integrations: ['integrations', 'api', 'endpoints', 'webhooks', 'api keys', 'credentials'],
+        system: ['system', 'costs', 'cron', 'schedules', 'automation', 'channels', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows', 'storage', 'uploads', 'disk'],
       };
       for (const [tabId, keywords] of Object.entries(tabKeywords)) {
         const tab = this.tabs.find(t => t.id === tabId);
@@ -4002,17 +4047,17 @@ function dashboard() {
       // Match credentials
       for (const name of this.settingsData?.credentials?.names || []) {
         if (name.toLowerCase().includes(q)) {
-          results.push({ type: 'action', label: name, desc: 'API Key', action: () => { this.systemTab = 'apikeys'; this.switchTab('system'); } });
+          results.push({ type: 'action', label: name, desc: 'Credential', action: () => { this.integrationsTab = 'apikeys'; this.switchTab('integrations'); } });
         }
       }
       // System quick actions
       const sysActions = [
         { label: 'Activity', desc: 'Traces, live feed, and logs', keywords: ['activity', 'traces', 'events', 'live'], action: () => { this.systemTab = 'activity'; this.switchTab('system'); } },
         { label: 'View Logs', desc: 'Open runtime logs', keywords: ['logs', 'runtime', 'debug'], action: () => { this.systemTab = 'activity'; this.switchTab('system'); this.setActivityView('logs'); } },
-        { label: 'Add API Key', desc: 'Add new API key or credential', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.systemTab = 'apikeys'; this.switchTab('system'); this.showCredForm = true; } },
-        { label: 'Manage API Endpoints', desc: 'View and create API endpoints', keywords: ['api', 'endpoint', 'webhook', 'hook'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchEndpoints(); } },
-        { label: 'Manage Webhooks', desc: 'View outbound webhook subscriptions', keywords: ['webhook', 'outbound', 'notify'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchOutboundWebhooks(); } },
-        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'integrations'; this.switchTab('system'); this.fetchChannels(); } },
+        { label: 'Add Credential', desc: 'Add new LLM provider key or agent credential', keywords: ['key', 'api', 'credential', 'token'], action: () => { this.integrationsTab = 'apikeys'; this.switchTab('integrations'); this.showCredForm = true; } },
+        { label: 'Manage API Endpoints', desc: 'View and create API endpoints', keywords: ['api', 'endpoint', 'webhook', 'hook'], action: () => { this.integrationsTab = 'endpoints'; this.switchTab('integrations'); } },
+        { label: 'Manage Webhooks', desc: 'View outbound webhook subscriptions', keywords: ['webhook', 'outbound', 'notify'], action: () => { this.integrationsTab = 'webhooks'; this.switchTab('integrations'); } },
+        { label: 'Manage Channels', desc: 'Connect Telegram, Discord, Slack, WhatsApp', keywords: ['channel', 'telegram', 'discord', 'slack', 'whatsapp'], action: () => { this.systemTab = 'channels'; this.switchTab('system'); } },
         { label: 'Model Pricing', desc: 'Token costs by model', keywords: ['model', 'pricing', 'tokens'], action: () => { this.systemTab = 'costs'; this.switchTab('system'); } },
         { label: 'Browser Settings', desc: 'Browser speed and timing', keywords: ['browser', 'speed', 'settings', 'timing', 'stealth'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchBrowserSettings(); } },
         { label: 'Default Model', desc: 'Change the default LLM model', keywords: ['model', 'llm', 'default', 'openai', 'anthropic', 'ollama'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },

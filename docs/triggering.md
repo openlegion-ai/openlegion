@@ -1,6 +1,6 @@
 # Triggering & Automation
 
-OpenLegion agents can be triggered automatically through cron schedules, heartbeat monitoring, webhooks, and pub/sub events.
+OpenLegion agents can be triggered automatically through cron schedules, heartbeat monitoring, API endpoints (inbound webhooks), outbound webhooks, and pub/sub events.
 
 ## Cron Jobs
 
@@ -190,17 +190,42 @@ Heartbeats skip the LLM dispatch entirely (zero cost) when all three conditions 
 
 This makes always-on heartbeats economically viable even at high frequencies.
 
-## Webhooks
+## API Endpoints (Inbound)
 
-External systems can dispatch messages to agents via named webhooks.
+External systems can dispatch messages to agents via named API endpoints.
 
 ```bash
-curl -X POST http://localhost:8420/webhook/hook/<hook_id> \
+curl -X POST http://localhost:8420/api/inbound/<endpoint_id> \
   -H "Content-Type: application/json" \
   -d '{"company": "Acme Corp", "source": "website"}'
 ```
 
-The webhook payload is included in the message dispatched to the configured agent.
+Optionally secure each endpoint with HMAC-SHA256 signature verification by enabling "Require HMAC signature" at creation time. When enabled, sign the raw request body with the endpoint secret and send as the `X-Signature` header.
+
+The payload is included in the message dispatched to the configured agent. A deprecated compatibility route at `/webhook/hook/<endpoint_id>` is also available.
+
+## Outbound Webhooks
+
+OpenLegion can push signed event payloads to external URLs when things happen. Configure outbound webhooks from the **Integrations > Webhooks** tab in the dashboard.
+
+### Event Types
+
+| Event | Fired When |
+|-------|-----------|
+| `notification` | Agent sends a user notification |
+| `task_complete` | Agent finishes a task |
+| `task_failed` | Agent task fails |
+| `agent_state` | Agent state changes (idle, working, error) |
+| `cron_complete` | Cron job execution completes |
+| `custom` | Agent emits a custom event |
+
+### Verification
+
+Each delivery includes an `X-OpenLegion-Signature` header containing an HMAC-SHA256 signature of the request body. Verify this against the webhook's signing secret to authenticate payloads.
+
+### Agent Filtering
+
+Webhooks can optionally filter by agent — only events from selected agents are delivered. An empty filter delivers events from all agents.
 
 ## Pub/Sub Events
 

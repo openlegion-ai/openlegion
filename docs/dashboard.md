@@ -10,13 +10,13 @@ No additional setup is required -- the dashboard starts automatically with `open
 
 ## Navigation
 
-The dashboard uses a consolidated three-tab layout:
+The dashboard uses a three-tab layout:
 
 | Tab | What It Shows |
 |-----|--------------|
-| **Fleet** | Agent cards, agent detail views, configuration editing |
-| **Activity** | Traces, live events, blackboard, costs, and automation |
-| **System** | Credentials, pub/sub, model pricing |
+| **Agents** | Agent cards, agent detail views, configuration editing |
+| **Integrations** | API Endpoints, Webhooks (outbound), Access Keys, Credentials |
+| **System** | Activity, Costs, Automation, Channels, Wallet, Storage, Settings |
 
 A command palette (**Cmd+K** / **Ctrl+K**) provides quick access to agents, actions, and navigation. The search button in the nav bar also opens it.
 
@@ -241,10 +241,17 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `POST` | `/dashboard/api/broadcast` | Send message to all agents |
 | `POST` | `/dashboard/api/broadcast/stream` | SSE streaming broadcast to all agents |
 | `GET` | `/dashboard/api/messages` | Recent message log |
-| `GET` | `/dashboard/api/webhooks` | List configured webhooks |
-| `POST` | `/dashboard/api/webhooks` | Create a webhook endpoint |
-| `DELETE` | `/dashboard/api/webhooks/{name}` | Delete a webhook |
-| `POST` | `/dashboard/api/webhooks/{name}/test` | Send test payload to webhook |
+| `GET` | `/dashboard/api/endpoints` | List API endpoints (inbound) |
+| `POST` | `/dashboard/api/endpoints` | Create an API endpoint |
+| `DELETE` | `/dashboard/api/endpoints/{id}` | Delete an API endpoint |
+| `PATCH` | `/dashboard/api/endpoints/{id}` | Update an API endpoint |
+| `POST` | `/dashboard/api/endpoints/{id}/test` | Send test payload to API endpoint |
+| `GET` | `/dashboard/api/webhooks` | List outbound webhooks |
+| `POST` | `/dashboard/api/webhooks` | Create an outbound webhook |
+| `DELETE` | `/dashboard/api/webhooks/{id}` | Delete an outbound webhook |
+| `PATCH` | `/dashboard/api/webhooks/{id}` | Update an outbound webhook |
+| `POST` | `/dashboard/api/webhooks/{id}/test` | Send test event to outbound webhook |
+| `GET` | `/dashboard/api/webhooks/deliveries` | Recent outbound webhook delivery log |
 | `GET` | `/dashboard/api/logs` | Runtime logs (query: lines, level) |
 | `GET` | `/dashboard/api/channels` | List connected messaging channels |
 | `GET` | `/dashboard/api/agent-templates` | Available agent fleet templates |

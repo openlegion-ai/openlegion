@@ -188,6 +188,9 @@
               <template x-if="tab.id === 'fleet'">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
               </template>
+              <template x-if="tab.id === 'integrations'">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+              </template>
               <template x-if="tab.id === 'system'">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
               </template>
@@ -2205,7 +2208,566 @@
         </template>
       </div>
 
-      <!-- System (Activity + Costs + Automation + Integrations + API Keys + Wallet + Storage + Settings) -->
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <!-- INTEGRATIONS TAB (API Endpoints + Webhooks + API Keys)    -->
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <div x-show="activeTab === 'integrations'" x-cloak>
+        <!-- Integrations sub-tab bar -->
+        <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
+          <template x-for="st in integrationsTabs" :key="st.id">
+            <button @click="switchIntegrationsTab(st.id)"
+              class="px-3 py-1.5 rounded-md text-sm font-medium transition-all relative whitespace-nowrap"
+              :class="integrationsTab === st.id ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'">
+              <span x-text="st.label"></span>
+            </button>
+          </template>
+        </div>
+
+        <!-- ─── Endpoints sub-tab ─── -->
+        <div x-show="integrationsTab === 'endpoints'">
+
+        <!-- API Reference -->
+        <details open class="mb-6 bg-gray-900/50 border border-gray-800 rounded-lg group">
+          <summary class="px-4 py-3 cursor-pointer text-xs text-gray-500 uppercase tracking-wider flex items-center gap-1.5 select-none">
+            <svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+            API Reference
+          </summary>
+          <div class="px-4 pb-4 space-y-3">
+            <div class="text-[11px] text-gray-500 mb-2">All endpoints below require an <code class="bg-gray-800 px-1 rounded">X-API-Key</code> header. Inbound API endpoints use <code class="bg-gray-800 px-1 rounded">X-Signature</code> instead (HMAC-SHA256 of the raw body).</div>
+            <div class="space-y-2">
+              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">Credential Vault</div>
+              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
+                <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/mesh/credentials</code><span class="text-gray-500">Store a secret. Body: <code class="bg-gray-800 px-0.5 rounded">{"name":"...","value":"..."}</code> &rarr; returns <code class="bg-gray-800 px-0.5 rounded">$CRED{name}</code> handle</span>
+                <code class="text-red-400/70 font-mono">DELETE</code><code class="text-gray-400 font-mono">/mesh/credentials/{name}</code><span class="text-gray-500">Remove a secret by name</span>
+                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/credentials</code><span class="text-gray-500">List credential names (never values)</span>
+                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/credentials/{name}/exists</code><span class="text-gray-500">Check if a credential exists</span>
+              </div>
+            </div>
+            <div class="space-y-2">
+              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">Agent Status</div>
+              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
+                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/agents/{id}/ext-status</code><span class="text-gray-500">Health, queue depth, and budget for an agent</span>
+              </div>
+            </div>
+            <div class="space-y-2">
+              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">API Endpoints</div>
+              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
+                <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/api/inbound/{endpoint_id}</code><span class="text-gray-500">Trigger an agent workflow. Requires <code class="bg-gray-800 px-0.5 rounded">X-Signature</code> header (no API key needed)</span>
+              </div>
+            </div>
+            <div class="space-y-2">
+              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">Outbound Webhook Payload</div>
+              <div class="text-[11px] text-gray-500 leading-relaxed">
+                Events POST to your URL with <code class="bg-gray-800 px-0.5 rounded">X-OpenLegion-Signature: sha256=HMAC</code> and <code class="bg-gray-800 px-0.5 rounded">X-OpenLegion-Event</code> headers.
+                Body: <code class="bg-gray-800 px-1 rounded text-gray-400">{"event", "agent", "data", "timestamp", "delivery_id"}</code>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <!-- API Endpoints -->
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">API Endpoints<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Named HTTP endpoints that accept POST requests and route them to agents. Enable "Require HMAC signature" to secure the endpoint — your app signs the raw request body with HMAC-SHA256(body, secret) and sends it as the X-Signature header. The secret is shown once at creation time; use Regenerate Secret if you missed it.</span></span></div>
+        <div class="mb-6">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="mb-3 pb-3 border-b border-gray-800">
+              <div class="text-sm text-gray-200 font-medium mb-1">API Endpoints</div>
+              <div class="text-[12px] text-gray-500 leading-relaxed">Named HTTP endpoints that accept <code class="bg-gray-800 px-1 rounded text-gray-400">POST</code> requests and route payloads to agents. Optionally secure each endpoint with HMAC-SHA256 signature verification.</div>
+            </div>
+            <div class="space-y-2 mb-3">
+              <template x-for="wh in apiEndpoints" :key="wh.id">
+                <div>
+                  <div class="flex items-center gap-3 text-xs group py-2 px-2 -mx-2 rounded-md hover:bg-gray-800/40 transition-colors border-b border-gray-800/30 last:border-0">
+                    <span class="w-2 h-2 rounded-full bg-green-400/70 shrink-0"></span>
+                    <span class="text-gray-200 font-mono font-medium shrink-0" x-text="wh.name"></span>
+                    <span class="text-gray-600 shrink-0">&rarr;</span>
+                    <span class="text-gray-400 shrink-0" x-text="wh.agent"></span>
+                    <span class="text-indigo-300/80 text-[10px] font-mono flex-1 truncate bg-indigo-950/30 px-2 py-0.5 rounded border border-indigo-900/50" x-text="wh.url || ''" :title="wh.url || ''"></span>
+                    <button x-show="wh.url" @click.stop="copyToClipboard(wh.url)"
+                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0" title="Copy URL" aria-label="Copy endpoint URL">
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </button>
+                    <button @click="editEndpoint(wh)"
+                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0">Edit</button>
+                    <button @click="testEndpoint(wh.id)" :disabled="endpointTesting[wh.id] === true"
+                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-all disabled:opacity-50 shrink-0" x-text="endpointTesting[wh.id] === true ? '...' : 'Test'"></button>
+                    <button @click="deleteEndpoint(wh.id, wh.name)"
+                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all shrink-0">Delete</button>
+                  </div>
+                  <!-- Inline edit form -->
+                  <div x-show="editingEndpointId === wh.id" x-transition class="bg-gray-800/30 border border-gray-800 rounded-lg p-3 mt-1 mb-2">
+                    <div class="text-xs text-gray-500 mb-2">Edit endpoint</div>
+                    <div class="flex gap-2 mb-2">
+                      <input type="text" x-model="endpointEditName" :disabled="endpointSaving" class="dash-input text-xs flex-1" placeholder="Endpoint name">
+                      <select x-model="endpointEditAgent" :disabled="endpointSaving" class="dash-select text-xs w-40">
+                        <option value="">Agent...</option>
+                        <template x-for="a in agents" :key="a.id">
+                          <option :value="a.id" x-text="a.id"></option>
+                        </template>
+                      </select>
+                    </div>
+                    <textarea x-model="endpointEditInstructions" :disabled="endpointSaving" class="dash-input w-full text-xs mb-2" rows="2" placeholder="Instructions for the agent (optional)"></textarea>
+                    <label class="flex items-center gap-2 text-xs text-gray-400 mb-3 cursor-pointer select-none">
+                      <input type="checkbox" x-model="endpointEditRequireSig" :disabled="endpointSaving" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
+                      Require HMAC signature
+                    </label>
+                    <div class="flex justify-between items-center">
+                      <div class="flex gap-2">
+                        <button @click="cancelEndpointEdit()" :disabled="endpointSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                        <button x-show="wh.has_secret" @click="regenerateEndpointSecret(wh.id, wh.name)" :disabled="endpointSaving" class="text-xs px-3 py-1.5 rounded border border-yellow-900/50 hover:border-yellow-700/50 text-yellow-600 hover:text-yellow-500 transition-colors disabled:opacity-50">Regenerate Secret</button>
+                      </div>
+                      <button @click="saveEndpointEdit()" :disabled="endpointSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                        <svg x-show="endpointSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        <span x-text="endpointSaving ? 'Saving...' : 'Save'"></span>
+                      </button>
+                    </div>
+                  </div>
+                  <!-- One-time secret display -->
+                  <div x-show="endpointRevealedSecret && endpointRevealedSecretId === wh.id" x-transition class="mt-2 mb-2 p-3 bg-amber-950 border border-amber-700/60 rounded-lg">
+                    <div class="flex items-center gap-1.5 text-[11px] text-amber-300 font-semibold mb-2.5">
+                      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/></svg>
+                      HMAC Secret — copy this now, it won't be shown again
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <code class="text-[12px] text-amber-100 bg-black/40 px-3 py-2 rounded font-mono flex-1 break-all select-all tracking-wide border border-amber-900/60" x-text="endpointRevealedSecret"></code>
+                      <button @click="copyToClipboard(endpointRevealedSecret)" class="text-[10px] px-3 py-1.5 rounded bg-amber-800/60 hover:bg-amber-700/60 text-amber-200 hover:text-white border border-amber-700/50 transition-colors shrink-0 font-medium">Copy</button>
+                      <button @click="endpointRevealedSecret = null; endpointRevealedSecretId = null" class="text-[10px] px-2.5 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors shrink-0">Dismiss</button>
+                    </div>
+                  </div>
+                </div>
+              </template>
+              <div x-show="apiEndpoints.length === 0" class="text-gray-600 text-sm py-2 text-center">No API endpoints configured</div>
+            </div>
+            <div class="border-t border-gray-800 pt-3">
+              <button x-show="!showEndpointForm" @click="showEndpointForm = true; cancelEndpointEdit()" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Endpoint</button>
+              <div x-show="showEndpointForm" x-transition>
+                <div class="text-xs text-gray-500 mb-2">New endpoint</div>
+                <div class="flex gap-2 mb-2">
+                  <input type="text" x-model="endpointFormName" :disabled="endpointCreating" class="dash-input text-xs flex-1" placeholder="Endpoint name">
+                  <select x-model="endpointFormAgent" :disabled="endpointCreating" class="dash-select text-xs w-40">
+                    <option value="">Agent...</option>
+                    <template x-for="a in agents" :key="a.id">
+                      <option :value="a.id" x-text="a.id"></option>
+                    </template>
+                  </select>
+                </div>
+                <textarea x-model="endpointFormInstructions" :disabled="endpointCreating" class="dash-input w-full text-xs mb-2" rows="2" placeholder="Instructions for the agent (optional) — e.g. 'Extract the event type and update the CRM'"></textarea>
+                <label class="flex items-center gap-2 text-xs text-gray-400 mb-3 cursor-pointer select-none">
+                  <input type="checkbox" x-model="endpointFormRequireSig" :disabled="endpointCreating" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
+                  Require HMAC signature
+                </label>
+                <div class="flex justify-between">
+                  <button @click="showEndpointForm = false; endpointFormName = ''; endpointFormAgent = ''; endpointFormInstructions = ''; endpointFormRequireSig = false" :disabled="endpointCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="createEndpoint()" :disabled="endpointCreating" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                    <svg x-show="endpointCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                    <span x-text="endpointCreating ? 'Creating...' : 'Create Endpoint'"></span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        </div><!-- /endpoints sub-tab -->
+
+        <!-- ─── Webhooks sub-tab ─── -->
+        <div x-show="integrationsTab === 'webhooks'">
+
+        <!-- Outbound Webhooks -->
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Webhooks<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Send events to external URLs when things happen. OpenLegion POSTs signed JSON payloads with HMAC-SHA256 verification. Events: notification, task_complete, task_failed, agent_state, cron_complete, custom.</span></span></div>
+        <div class="mb-6">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="mb-4 pb-3 border-b border-gray-800">
+              <div class="text-sm text-gray-200 font-medium mb-1">Webhooks</div>
+              <div class="text-[12px] text-gray-500 leading-relaxed">Send events to external URLs. Each delivery includes an <code class="bg-gray-800 px-1 rounded text-gray-400">X-OpenLegion-Signature</code> HMAC-SHA256 header for verification.</div>
+            </div>
+            <div class="space-y-2 mb-3">
+              <template x-for="wh in outboundWebhooks" :key="wh.id">
+                <div>
+                  <div x-show="editingOutboundId !== wh.id" class="flex items-center gap-3 text-xs group py-2 px-2 -mx-2 rounded-md hover:bg-gray-800/40 transition-colors border-b border-gray-800/30 last:border-0">
+                    <span class="w-2 h-2 rounded-full shrink-0" :class="wh.enabled !== false ? 'bg-green-400/70' : 'bg-gray-600'"></span>
+                    <span class="text-gray-200 font-medium shrink-0" x-text="wh.name"></span>
+                    <span class="text-indigo-300/80 text-[10px] font-mono flex-1 truncate bg-indigo-950/30 px-2 py-0.5 rounded border border-indigo-900/50" x-text="wh.url" :title="wh.url"></span>
+                    <template x-for="ev in (wh.events || [])" :key="ev">
+                      <span class="text-[9px] px-1.5 py-0.5 rounded-full bg-cyan-900/40 text-cyan-400 border border-cyan-800/30" x-text="ev"></span>
+                    </template>
+                    <span x-show="wh.enabled === false" class="text-[9px] px-1.5 py-0.5 rounded-full bg-gray-800 text-gray-500">disabled</span>
+                    <button @click="editOutboundWebhook(wh)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0">Edit</button>
+                    <button @click="testOutboundWebhook(wh.id)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-all shrink-0">Test</button>
+                    <button @click="deleteOutboundWebhook(wh.id, wh.name)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all shrink-0">Delete</button>
+                  </div>
+                  <!-- Inline edit form -->
+                  <div x-show="editingOutboundId === wh.id" x-transition class="bg-gray-800/30 border border-gray-800 rounded-lg p-4 mt-1 mb-2">
+                    <div class="text-xs text-gray-400 font-medium mb-3">Edit webhook</div>
+                    <div class="flex gap-2 mb-4">
+                      <input type="text" x-model="outboundEditName" :disabled="outboundSaving" class="dash-input text-xs flex-1" placeholder="Webhook name">
+                      <input type="url" x-model="outboundEditUrl" :disabled="outboundSaving" class="dash-input text-xs flex-1" placeholder="https://example.com/hook">
+                    </div>
+                    <div class="text-[11px] text-gray-400 font-medium mb-2">Event types</div>
+                    <div class="flex flex-wrap gap-1.5 mb-4">
+                      <template x-for="et in ['notification','task_complete','task_failed','agent_state','cron_complete','custom']" :key="et">
+                        <label class="cursor-pointer select-none">
+                          <input type="checkbox" :value="et" x-model="outboundEditEvents" :disabled="outboundSaving" class="hidden peer">
+                          <span class="peer-checked:bg-indigo-600 peer-checked:text-white peer-checked:border-indigo-500 px-2.5 py-1 rounded-full text-[11px] border border-gray-700 text-gray-400 hover:border-gray-500 transition-all inline-block" x-text="et"></span>
+                        </label>
+                      </template>
+                    </div>
+                    <div class="text-[11px] text-gray-400 font-medium mb-2">Agent filter <span class="text-gray-600 font-normal">(empty = all agents)</span></div>
+                    <div class="flex flex-wrap gap-1.5 mb-4">
+                      <template x-for="a in agents" :key="a.id">
+                        <label class="cursor-pointer select-none">
+                          <input type="checkbox" :value="a.id" x-model="outboundEditAgentFilter" :disabled="outboundSaving" class="hidden peer">
+                          <span class="peer-checked:bg-slate-600 peer-checked:text-white peer-checked:border-slate-500 px-2.5 py-1 rounded-full text-[11px] border border-gray-700 text-gray-400 hover:border-gray-500 transition-all inline-block" x-text="a.id"></span>
+                        </label>
+                      </template>
+                    </div>
+                    <label class="flex items-center gap-2 text-xs text-gray-400 mb-4 cursor-pointer select-none">
+                      <input type="checkbox" x-model="outboundEditEnabled" :disabled="outboundSaving" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
+                      Enabled
+                    </label>
+                    <div class="flex justify-end gap-2">
+                      <button @click="cancelOutboundEdit()" :disabled="outboundSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                      <button @click="saveOutboundEdit()" :disabled="outboundSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                        <svg x-show="outboundSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                        <span x-text="outboundSaving ? 'Saving...' : 'Save'"></span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </template>
+              <!-- Empty state -->
+              <div x-show="outboundWebhooks.length === 0" class="flex flex-col items-center py-6 text-center">
+                <svg class="w-8 h-8 text-gray-700 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101"/>
+                  <path d="M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101"/>
+                </svg>
+                <div class="text-gray-500 text-sm">No outbound webhooks configured</div>
+                <div class="text-gray-600 text-[11px] mt-1">Add a webhook to push events to your external services</div>
+              </div>
+            </div>
+            <div class="border-t border-gray-800 pt-3">
+              <div class="flex gap-2">
+                <button x-show="!showOutboundForm" @click="showOutboundForm = true; cancelOutboundEdit()" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Webhook</button>
+                <button @click="showDeliveries = !showDeliveries; if (showDeliveries) fetchDeliveries()" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors" x-text="showDeliveries ? 'Hide Deliveries' : 'Recent Deliveries'"></button>
+              </div>
+              <div x-show="showOutboundForm" x-transition class="mt-3">
+                <div class="text-xs text-gray-400 font-medium mb-3">New webhook</div>
+                <div class="flex gap-2 mb-4">
+                  <input type="text" x-model="outboundFormName" :disabled="outboundCreating" class="dash-input text-xs flex-1" placeholder="Webhook name">
+                  <input type="url" x-model="outboundFormUrl" :disabled="outboundCreating" class="dash-input text-xs flex-1" placeholder="https://example.com/hook">
+                </div>
+                <div class="text-[11px] text-gray-400 font-medium mb-2">Event types</div>
+                <div class="flex flex-wrap gap-1.5 mb-4">
+                  <template x-for="et in ['notification','task_complete','task_failed','agent_state','cron_complete','custom']" :key="et">
+                    <label class="cursor-pointer select-none">
+                      <input type="checkbox" :value="et" x-model="outboundFormEvents" :disabled="outboundCreating" class="hidden peer">
+                      <span class="peer-checked:bg-indigo-600 peer-checked:text-white peer-checked:border-indigo-500 px-2.5 py-1 rounded-full text-[11px] border border-gray-700 text-gray-400 hover:border-gray-500 transition-all inline-block" x-text="et"></span>
+                    </label>
+                  </template>
+                </div>
+                <div class="text-[11px] text-gray-400 font-medium mb-2">Agent filter <span class="text-gray-600 font-normal">(empty = all agents)</span></div>
+                <div class="flex flex-wrap gap-1.5 mb-4">
+                  <template x-for="a in agents" :key="a.id">
+                    <label class="cursor-pointer select-none">
+                      <input type="checkbox" :value="a.id" x-model="outboundFormAgentFilter" :disabled="outboundCreating" class="hidden peer">
+                      <span class="peer-checked:bg-slate-600 peer-checked:text-white peer-checked:border-slate-500 px-2.5 py-1 rounded-full text-[11px] border border-gray-700 text-gray-400 hover:border-gray-500 transition-all inline-block" x-text="a.id"></span>
+                    </label>
+                  </template>
+                </div>
+                <div class="flex justify-between">
+                  <button @click="showOutboundForm = false; outboundFormName = ''; outboundFormUrl = ''; outboundFormEvents = []; outboundFormAgentFilter = []" :disabled="outboundCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="createOutboundWebhook()" :disabled="outboundCreating" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                    <svg x-show="outboundCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                    <span x-text="outboundCreating ? 'Creating...' : 'Create Webhook'"></span>
+                  </button>
+                </div>
+              </div>
+              <!-- Recent Deliveries -->
+              <div x-show="showDeliveries" x-transition class="mt-3">
+                <div class="text-xs text-gray-400 font-medium mb-2">Recent Deliveries</div>
+                <div class="max-h-60 overflow-y-auto">
+                  <!-- Header row -->
+                  <div class="grid grid-cols-[1.2rem_4.5rem_6rem_5rem_1fr_2.5rem_8rem] gap-2 text-[10px] text-gray-600 uppercase tracking-wider font-medium px-2 py-1.5 border-b border-gray-800 sticky top-0 bg-gray-900">
+                    <span>St</span>
+                    <span>Time</span>
+                    <span>Event</span>
+                    <span>Agent</span>
+                    <span>Webhook</span>
+                    <span>Code</span>
+                    <span>Error</span>
+                  </div>
+                  <template x-for="d in outboundDeliveries.slice().reverse()" :key="d.delivery_id">
+                    <div class="grid grid-cols-[1.2rem_4.5rem_6rem_5rem_1fr_2.5rem_8rem] gap-2 items-center text-[11px] py-1.5 px-2 rounded hover:bg-gray-800/30 border-b border-gray-800/20 last:border-0">
+                      <span class="shrink-0" :class="d.status === 'delivered' ? 'text-green-400' : 'text-red-400'" x-text="d.status === 'delivered' ? '&#10003;' : '&#10007;'"></span>
+                      <span class="text-gray-500 truncate" x-text="d.timestamp ? d.timestamp.split('T')[1]?.slice(0,8) : ''"></span>
+                      <span class="text-cyan-400/80 truncate" x-text="d.event"></span>
+                      <span class="text-gray-400 truncate" x-text="d.agent"></span>
+                      <span class="text-gray-600 truncate" x-text="d.subscription_id"></span>
+                      <span x-show="d.response_code" class="text-gray-500 text-[10px]" x-text="d.response_code"></span>
+                      <span x-show="d.error" class="text-red-400/70 text-[10px] truncate" :title="d.error" x-text="d.error"></span>
+                    </div>
+                  </template>
+                  <div x-show="outboundDeliveries.length === 0" class="text-gray-600 text-sm py-4 text-center">No recent deliveries</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        </div><!-- /webhooks sub-tab -->
+
+        <!-- ─── Access Keys sub-tab ─── -->
+        <div x-show="integrationsTab === 'accesskeys'">
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Access Keys
+          <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">API keys for authenticating server-to-server calls to the OpenLegion mesh. Send as X-API-Key header. Each key is hashed — the raw value is shown only once at creation.</span></span>
+        </div>
+        <div class="mb-6">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="text-[12px] text-gray-500 leading-relaxed mb-3">
+              Authenticate your backend for server-to-server API calls. Send as <code class="bg-gray-800 px-1 rounded text-gray-400">X-API-Key</code> header.
+              Create separate keys per environment or integration &mdash; each key is hashed and the raw value is shown only once at creation.
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px] mb-4 chat-grid">
+              <div class="text-gray-500"><code class="text-gray-400 font-mono">POST</code> <code class="text-gray-400 font-mono">/mesh/credentials</code></div>
+              <div class="text-gray-600">Store a secret &rarr; returns <code class="bg-gray-800/60 px-0.5 rounded">$CRED{name}</code> handle</div>
+              <div class="text-gray-500"><code class="text-gray-400 font-mono">DELETE</code> <code class="text-gray-400 font-mono">/mesh/credentials/{name}</code></div>
+              <div class="text-gray-600">Remove a secret</div>
+              <div class="text-gray-500"><code class="text-gray-400 font-mono">GET</code> <code class="text-gray-400 font-mono">/mesh/credentials</code></div>
+              <div class="text-gray-600">List credential names (never values)</div>
+              <div class="text-gray-500"><code class="text-gray-400 font-mono">GET</code> <code class="text-gray-400 font-mono">/mesh/agents/{id}/ext-status</code></div>
+              <div class="text-gray-600">Agent health, queue depth, budget</div>
+            </div>
+            <div class="border-t border-gray-800 pt-3 mb-3"></div>
+            <!-- One-time new key display -->
+            <div x-show="apiKeyNewValue" x-transition class="mb-3 p-3 bg-emerald-950/40 border border-emerald-700/40 rounded-lg">
+              <div class="text-[11px] text-emerald-400 font-medium mb-2">New API Key &mdash; copy this now, it won't be shown again</div>
+              <div class="flex items-center gap-2">
+                <code class="text-[12px] text-emerald-200 bg-gray-950/80 px-3 py-2 rounded font-mono flex-1 break-all select-all tracking-wide" x-text="apiKeyNewValue"></code>
+                <button @click="copyToClipboard(apiKeyNewValue)" class="text-[10px] px-3 py-1.5 rounded bg-emerald-800/40 hover:bg-emerald-700/40 text-emerald-300 hover:text-emerald-200 border border-emerald-700/30 transition-colors shrink-0">Copy</button>
+                <button @click="apiKeyNewValue = null" class="text-[10px] px-2.5 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors shrink-0">Dismiss</button>
+              </div>
+            </div>
+            <!-- Legacy env var notice -->
+            <div x-show="apiKeysLegacy" x-cloak class="mb-3 px-3 py-2 bg-amber-950/30 border border-amber-800/25 rounded text-[11px] text-amber-400/90">
+              Legacy key detected from <code class="bg-gray-800/80 text-amber-300 px-1 rounded">OPENLEGION_API_KEY</code> env var. Create named keys below to replace it.
+            </div>
+            <!-- Key list -->
+            <div class="space-y-0.5 mb-3">
+              <template x-for="ak in apiKeys" :key="ak.id">
+                <div class="flex items-center gap-3 text-xs group py-2 px-2 rounded hover:bg-gray-800/30 transition-colors">
+                  <span class="w-2 h-2 rounded-full bg-emerald-500/60 shrink-0"></span>
+                  <span class="text-white font-medium" x-text="ak.name"></span>
+                  <span class="text-gray-500 font-mono text-[10px]" x-text="ak.id"></span>
+                  <span class="text-gray-500 text-[10px] flex-1 text-right" x-text="ak.last_used_at ? 'Used ' + ak.last_used_at.split('T')[0] : 'Never used'"></span>
+                  <span class="text-gray-600 text-[10px]" x-text="'Created ' + ak.created_at.split('T')[0]"></span>
+                  <button @click="revokeApiKey(ak.id, ak.name)"
+                    class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all">Revoke</button>
+                </div>
+              </template>
+              <div x-show="apiKeys.length === 0 && !apiKeysLegacy" class="text-gray-500 text-sm py-3 text-center">No API keys configured</div>
+            </div>
+            <!-- Create key form -->
+            <div class="border-t border-gray-800 pt-3">
+              <div x-show="!showApiKeyForm">
+                <button @click="showApiKeyForm = true; apiKeyNewName = ''" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Create API Key</button>
+              </div>
+              <div x-show="showApiKeyForm" x-transition>
+                <div class="text-xs text-gray-500 mb-2">New API key</div>
+                <div class="flex gap-2">
+                  <input type="text" x-model="apiKeyNewName" :disabled="apiKeyCreating" class="dash-input text-xs flex-1" placeholder="Key name (e.g. company-production)" @keydown.enter="createApiKey()">
+                  <button @click="showApiKeyForm = false" :disabled="apiKeyCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="createApiKey()" :disabled="apiKeyCreating || !apiKeyNewName.trim()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                    <svg x-show="apiKeyCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                    <span x-text="apiKeyCreating ? 'Creating...' : 'Create'"></span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </div><!-- /accesskeys sub-tab -->
+
+        <!-- ─── Credentials sub-tab (LLM provider keys + agent credentials) ─── -->
+        <div x-show="integrationsTab === 'apikeys'" x-effect="if (integrationsTab === 'apikeys') fetchSettings()">
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Credentials
+          <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">LLM provider keys and agent credentials stored in the mesh vault. "System" keys (LLM providers like Anthropic, OpenAI) are used by the mesh for model routing and never exposed to agents. "Agent" keys are available to agents as opaque handles for HTTP requests.</span></span>
+        </div>
+        <div class="mb-6" x-show="settingsData">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="text-sm text-gray-400 mb-2">
+              <span x-text="settingsData?.credentials?.count || 0"></span> key(s) configured
+            </div>
+            <div class="space-y-1 mb-3">
+              <template x-for="name in settingsData?.credentials?.names || []" :key="name">
+                <div>
+                  <div class="flex items-center gap-2 text-xs group">
+                    <span class="w-2 h-2 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-500/50' : 'bg-amber-500/50'"></span>
+                    <span class="text-gray-300 font-mono flex-1 truncate" x-text="name"></span>
+                    <span class="text-[10px] px-1.5 py-0.5 rounded-full shrink-0" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-900/40 text-green-400' : 'bg-amber-900/40 text-amber-400'" x-text="(settingsData.agent_credentials || []).includes(name) ? 'agent' : 'system'"></span>
+                    <div class="flex items-center gap-0 shrink-0 w-[4.5rem] justify-end">
+                      <button x-show="!name.endsWith('_oauth')" @click="revealCredential(name)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-gray-400 hover:text-gray-300 transition-opacity px-1" :title="revealedCredentials[name] ? 'Hide value' : 'Reveal value'">
+                        <svg x-show="!revealedCredentials[name]" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+                        <svg x-show="revealedCredentials[name]" x-cloak class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/></svg>
+                      </button>
+                      <button x-show="!name.endsWith('_oauth')" @click="editingCredential = editingCredential === name ? null : name; editCredKey = ''" :aria-expanded="editingCredential === name" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-gray-400 hover:text-indigo-300 transition-opacity text-[10px] px-1" title="Update key">Update</button>
+                      <button @click="deleteCredential(name)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-red-400 hover:text-red-300 transition-opacity text-base leading-none px-1" title="Remove key" aria-label="Remove key">&times;</button>
+                    </div>
+                  </div>
+                  <!-- Revealed key value -->
+                  <div x-show="revealedCredentials[name]" x-cloak x-transition class="ml-4 mt-1 mb-1 flex items-center gap-2">
+                    <code class="text-[11px] text-green-400/80 bg-gray-800 px-2 py-1 rounded font-mono flex-1 break-all select-all" x-text="revealedCredentials[name]"></code>
+                    <button @click="copyToClipboard(revealedCredentials[name])" class="text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 shrink-0" title="Copy value">Copy</button>
+                  </div>
+                  <!-- Inline key update form -->
+                  <div x-show="editingCredential === name" x-cloak x-transition class="ml-4 mt-1 mb-1 flex items-center gap-2">
+                    <input type="password" x-model="editCredKey" class="dash-input text-xs flex-1" placeholder="New key value">
+                    <button @click="updateCredential(name)" :disabled="credentialSaving" class="text-[10px] px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 disabled:cursor-not-allowed" x-text="credentialSaving ? 'Saving...' : 'Save'"></button>
+                    <button @click="editingCredential = null; editCredKey = ''" class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400">Cancel</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+            <!-- Credential tier legend -->
+            <div class="flex flex-wrap gap-x-5 gap-y-1 mb-3 text-[10px] text-gray-500 leading-relaxed">
+              <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-green-500/50 shrink-0"></span><strong class="text-gray-400">Agent key</strong> &mdash; agents can request by name, granted per-agent via Credential Access permissions. The vault returns an opaque handle; the raw value is never exposed.</span>
+              <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-amber-500/50 shrink-0"></span><strong class="text-gray-400">System key</strong> &mdash; held exclusively by the mesh host. Agents cannot access it at all. LLM provider API keys (Anthropic, OpenAI, etc.) are always stored here.</span>
+            </div>
+            <div class="border-t border-gray-800 pt-3">
+              <button x-show="!showCredForm" @click="showCredForm = true" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Key</button>
+              <div x-show="showCredForm" x-transition>
+                <div class="text-xs text-gray-500 mb-2">New API key</div>
+                <div class="flex gap-2 mb-2">
+                  <div class="relative" @click.outside="_credServiceDropdownOpen = false" @keydown.escape.stop="_credServiceDropdownOpen = false">
+                    <button type="button" :disabled="credSaving"
+                      @click="_credServiceDropdownOpen = !_credServiceDropdownOpen; if (_credServiceDropdownOpen) { _credServiceSearch = ''; $nextTick(() => $refs.credServiceSearchInput?.focus()); }"
+                      class="dash-input flex items-center justify-between gap-2 cursor-pointer text-left" style="min-width:10rem">
+                      <span class="truncate" :class="credService ? 'text-gray-200' : 'text-gray-400'"
+                        x-text="credService === '__custom__' ? 'Custom\u2026' : (credService ? (credServiceOptions.find(o => o.value === credService)?.label || credService) : 'Service\u2026')"></span>
+                      <svg class="w-3.5 h-3.5 text-gray-500 flex-shrink-0 transition-transform" :class="_credServiceDropdownOpen && 'rotate-180'" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
+                    <div x-show="_credServiceDropdownOpen" x-cloak x-transition:enter="transition ease-out duration-100" x-transition:enter-start="opacity-0 -translate-y-1" x-transition:enter-end="opacity-100 translate-y-0"
+                      class="absolute z-50 mt-1 min-w-full w-max bg-gray-800 border border-gray-700 rounded-lg shadow-xl" style="max-width:min(28rem, calc(100vw - 2rem))">
+                      <div class="p-2">
+                        <div class="flex items-center gap-2 bg-gray-900 border border-gray-600 rounded-md px-2.5 py-1.5 focus-within:border-indigo-500/60">
+                          <svg class="w-3.5 h-3.5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="11" cy="11" r="8"/><path stroke-linecap="round" d="m21 21-4.35-4.35"/></svg>
+                          <input x-ref="credServiceSearchInput" type="text" x-model="_credServiceSearch" placeholder="Search services…"
+                            @keydown.enter.prevent="(() => {
+                              const q = _credServiceSearch.toLowerCase().trim();
+                              const match = q ? credServiceOptions.find(o => o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q)) : null;
+                              if (match) { credService = match.value; _credServiceDropdownOpen = false; credAuthType = 'api_key'; if (match.value === 'ollama') credBaseUrl = credBaseUrl || 'http://localhost:11434'; if (match.value !== '__custom__') { credCustomService = ''; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''; } }
+                            })()"
+                            class="w-full bg-transparent text-xs text-gray-200 placeholder-gray-500 outline-none focus:outline-none focus:ring-0" style="outline:none!important;box-shadow:none!important">
+                        </div>
+                      </div>
+                      <div class="border-t border-gray-700/60 overflow-y-auto custom-scrollbar" style="max-height:280px">
+                        <!-- Grouped options -->
+                        <template x-for="group in [...new Set(credServiceOptions.map(o => o.group))].filter(g => {
+                          const q = _credServiceSearch.toLowerCase().trim();
+                          if (!q) return true;
+                          return credServiceOptions.some(o => o.group === g && (o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q)));
+                        })" :key="group">
+                          <div>
+                            <div class="px-3 pt-3 pb-1.5 mt-1 first:mt-0 border-t border-gray-700/50 first:border-t-0 text-[11px] font-medium text-gray-500 uppercase tracking-wider" x-text="group"></div>
+                            <template x-for="o in credServiceOptions.filter(o => {
+                              if (o.group !== group) return false;
+                              const q = _credServiceSearch.toLowerCase().trim();
+                              return !q || o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q);
+                            })" :key="o.value">
+                              <button type="button"
+                                @click="credService = o.value; _credServiceDropdownOpen = false; credAuthType = 'api_key'; if (o.value === 'ollama') credBaseUrl = credBaseUrl || 'http://localhost:11434'; if (o.value !== '__custom__') { credCustomService = ''; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''; }"
+                                class="w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center gap-2"
+                                :class="credService === o.value ? 'bg-indigo-600/20 text-indigo-300' : 'text-gray-300 hover:bg-gray-700/60'">
+                                <svg class="w-3 h-3 flex-shrink-0" :class="credService === o.value ? 'text-indigo-400' : 'text-transparent'" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+                                <span x-text="o.label" class="truncate"></span>
+                              </button>
+                            </template>
+                          </div>
+                        </template>
+                        <!-- Custom option (always visible at bottom) -->
+                        <div class="border-t border-gray-700/50">
+                          <button type="button"
+                            @click="credService = '__custom__'; _credServiceDropdownOpen = false; credAuthType = 'api_key';"
+                            class="w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center gap-2"
+                            :class="credService === '__custom__' ? 'bg-indigo-600/20 text-indigo-300' : 'text-gray-300 hover:bg-gray-700/60'"
+                            x-show="!_credServiceSearch || 'custom'.includes(_credServiceSearch.toLowerCase().trim())">
+                            <svg class="w-3 h-3 flex-shrink-0" :class="credService === '__custom__' ? 'text-indigo-400' : 'text-transparent'" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+                            Custom&hellip;
+                          </button>
+                        </div>
+                        <!-- No results -->
+                        <div x-show="_credServiceSearch && !credServiceOptions.some(o => o.label.toLowerCase().includes(_credServiceSearch.toLowerCase().trim()) || o.value.toLowerCase().includes(_credServiceSearch.toLowerCase().trim())) && !'custom'.includes(_credServiceSearch.toLowerCase().trim())"
+                          class="px-3 py-3 text-xs text-gray-500 text-center">No services match your search.</div>
+                      </div>
+                    </div>
+                  </div>
+                  <template x-if="credService === 'anthropic' || credService === 'openai'">
+                    <select x-model="credAuthType" :disabled="credSaving" class="dash-select text-xs w-48">
+                      <option value="api_key">API Key (recommended)</option>
+                      <option value="oauth" x-text="credService === 'openai' ? 'ChatGPT OAuth (JSON)' : 'Subscription Token'"></option>
+                    </select>
+                  </template>
+                  <input x-show="credService === '__custom__'" type="text" x-model="credCustomService" :disabled="credSaving" class="dash-input text-xs w-40" placeholder="credential_name">
+                  <select x-show="credService === '__custom__'" x-model="credTier" :disabled="credSaving" class="dash-select text-xs w-28">
+                    <option value="agent">Agent tier</option>
+                    <option value="system">System tier</option>
+                  </select>
+                  <input x-show="credService !== 'ollama'" type="password" x-model="credKey" :disabled="credSaving" class="dash-input flex-1"
+                    :placeholder="credAuthType === 'oauth' ? (credService === 'openai' ? '{&quot;access_token&quot;:...,&quot;refresh_token&quot;:...}' : 'sk-ant-oat01-...') : 'API key or value'">
+                </div>
+                <template x-if="credService === '__custom__'">
+                  <div class="text-[10px] text-gray-500 leading-snug mb-2 p-2 rounded bg-gray-800/60 border border-gray-700/40">
+                    <strong class="text-gray-400">Agent tier</strong>: agents can request this credential by name. Access is controlled per-agent via the Credential Access permission pattern. The agent receives an opaque handle &mdash; the raw value is never returned.
+                    <span class="mx-1">&middot;</span>
+                    <strong class="text-gray-400">System tier</strong>: held only by the mesh host. No agent can read or reference it. Use this for infrastructure tokens or secrets that agents should never touch.
+                  </div>
+                </template>
+                <template x-if="credService === '__custom__' && credTier === 'system'">
+                  <div class="space-y-2 mb-2">
+                    <label class="inline-flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
+                      <input type="checkbox" x-model="credIsLlmProvider" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
+                      This is an LLM provider
+                    </label>
+                    <template x-if="credIsLlmProvider">
+                      <div class="space-y-1.5">
+                        <input type="text" x-model="credCustomLabel" :disabled="credSaving" class="dash-input w-full text-xs" placeholder="Display name (e.g. My Provider)">
+                        <textarea x-model="credCustomModels" :disabled="credSaving" class="dash-input w-full text-xs" rows="2" placeholder="Model names, comma-separated (e.g. model-7b, model-70b)"></textarea>
+                        <div class="text-[10px] text-gray-500">Models will be available as <code class="bg-gray-800 px-0.5 rounded" x-text="(credCustomService || 'provider') + '/model-name'"></code> in the agent model selector. Must be OpenAI-compatible.</div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <template x-if="credAuthType === 'oauth' && credService === 'anthropic'">
+                  <div class="text-[10px] text-amber-400/80 leading-snug mb-2">
+                    Experimental — uses unofficial OAuth that may break without notice. Generate with: <code class="font-mono bg-gray-800 px-1 rounded">claude setup-token</code>
+                  </div>
+                </template>
+                <template x-if="credAuthType === 'oauth' && credService === 'openai'">
+                  <div class="text-[10px] text-amber-400/80 leading-snug mb-2">
+                    Paste the JSON blob from <code class="font-mono bg-gray-800 px-1 rounded">~/.codex/auth.json</code> containing <code class="font-mono bg-gray-800 px-1 rounded">access_token</code> and <code class="font-mono bg-gray-800 px-1 rounded">refresh_token</code>.
+                  </div>
+                </template>
+                <template x-if="credService === 'ollama'">
+                  <div>
+                    <input type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-1" placeholder="http://localhost:11434">
+                    <div class="text-[10px] text-gray-500 mb-3">Ollama URL — no API key needed. Make sure Ollama is running.</div>
+                  </div>
+                </template>
+                <input x-show="credService !== 'ollama' && credAuthType !== 'oauth'" type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
+                <div class="flex justify-between">
+                  <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'; credAuthType = 'api_key'; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''; _credServiceDropdownOpen = false; _credServiceSearch = ''" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="addCredential()" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                    <svg x-show="credSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                    <span x-text="credSaving ? 'Saving...' : 'Save'"></span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </div><!-- /apikeys sub-tab (integrations) -->
+
+      </div><!-- /integrations tab -->
+
+      <!-- System (Activity + Costs + Automation + Channels + Wallet + Storage + Settings) -->
       <div x-show="activeTab === 'system'" x-cloak>
         <!-- System sub-tab bar -->
         <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-4">
@@ -2560,47 +3122,8 @@
         </div>
         </div><!-- /automation sub-tab -->
 
-        <!-- Integrations sub-tab (Channels + API Endpoints) -->
-        <div x-show="systemTab === 'integrations'">
-
-        <!-- API Reference -->
-        <details class="mb-6 bg-gray-900/50 border border-gray-800 rounded-lg group">
-          <summary class="px-4 py-3 cursor-pointer text-xs text-gray-500 uppercase tracking-wider flex items-center gap-1.5 select-none">
-            <svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-            API Reference
-          </summary>
-          <div class="px-4 pb-4 space-y-3">
-            <div class="text-[11px] text-gray-500 mb-2">All endpoints below require an <code class="bg-gray-800 px-1 rounded">X-API-Key</code> header. Inbound API endpoints use <code class="bg-gray-800 px-1 rounded">X-Signature</code> instead (HMAC-SHA256 of the raw body).</div>
-            <div class="space-y-2">
-              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">Credential Vault</div>
-              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
-                <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/mesh/credentials</code><span class="text-gray-500">Store a secret. Body: <code class="bg-gray-800 px-0.5 rounded">{"name":"...","value":"..."}</code> &rarr; returns <code class="bg-gray-800 px-0.5 rounded">$CRED{name}</code> handle</span>
-                <code class="text-red-400/70 font-mono">DELETE</code><code class="text-gray-400 font-mono">/mesh/credentials/{name}</code><span class="text-gray-500">Remove a secret by name</span>
-                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/credentials</code><span class="text-gray-500">List credential names (never values)</span>
-                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/credentials/{name}/exists</code><span class="text-gray-500">Check if a credential exists</span>
-              </div>
-            </div>
-            <div class="space-y-2">
-              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">Agent Status</div>
-              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
-                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/agents/{id}/ext-status</code><span class="text-gray-500">Health, queue depth, and budget for an agent</span>
-              </div>
-            </div>
-            <div class="space-y-2">
-              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">API Endpoints</div>
-              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
-                <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/api/inbound/{endpoint_id}</code><span class="text-gray-500">Trigger an agent workflow. Requires <code class="bg-gray-800 px-0.5 rounded">X-Signature</code> header (no API key needed)</span>
-              </div>
-            </div>
-            <div class="space-y-2">
-              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">Outbound Webhook Payload</div>
-              <div class="text-[11px] text-gray-500 leading-relaxed">
-                Events POST to your URL with <code class="bg-gray-800 px-0.5 rounded">X-OpenLegion-Signature: sha256=HMAC</code> and <code class="bg-gray-800 px-0.5 rounded">X-OpenLegion-Event</code> headers.
-                Body: <code class="bg-gray-800 px-1 rounded text-gray-400">{"event", "agent", "data", "timestamp", "delivery_id"}</code>
-              </div>
-            </div>
-          </div>
-        </details>
+        <!-- Channels sub-tab -->
+        <div x-show="systemTab === 'channels'">
 
         <!-- Channels -->
         <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Channels<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Messaging platform integrations. Connect Telegram, Discord, Slack, or WhatsApp so users can chat with agents from those platforms.</span></span></div>
@@ -2719,478 +3242,7 @@
         </div>
         <div x-show="channels.length === 0" class="text-sm text-gray-500 py-4 mb-6">No channel data available</div>
 
-        <!-- API Endpoints -->
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">API Endpoints<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Named HTTP endpoints that accept POST requests and route them to agents. Enable "Require HMAC signature" to secure the endpoint — your app signs the raw request body with HMAC-SHA256(body, secret) and sends it as the X-Signature header. The secret is shown once at creation time; use Regenerate Secret if you missed it.</span></span></div>
-        <div class="mb-6">
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-            <div class="mb-3 pb-3 border-b border-gray-800">
-              <div class="text-sm text-gray-200 font-medium mb-1">API Endpoints</div>
-              <div class="text-[12px] text-gray-500 leading-relaxed">Named HTTP endpoints that accept <code class="bg-gray-800 px-1 rounded text-gray-400">POST</code> requests and route payloads to agents. Optionally secure each endpoint with HMAC-SHA256 signature verification.</div>
-            </div>
-            <div class="space-y-2 mb-3">
-              <template x-for="wh in apiEndpoints" :key="wh.id">
-                <div>
-                  <div class="flex items-center gap-3 text-xs group py-2 px-2 -mx-2 rounded-md hover:bg-gray-800/40 transition-colors border-b border-gray-800/30 last:border-0">
-                    <span class="w-2 h-2 rounded-full bg-green-400/70 shrink-0"></span>
-                    <span class="text-gray-200 font-mono font-medium shrink-0" x-text="wh.name"></span>
-                    <span class="text-gray-600 shrink-0">&rarr;</span>
-                    <span class="text-gray-400 shrink-0" x-text="wh.agent"></span>
-                    <span class="text-indigo-300/80 text-[10px] font-mono flex-1 truncate bg-indigo-950/30 px-2 py-0.5 rounded border border-indigo-900/50" x-text="wh.url || ''" :title="wh.url || ''"></span>
-                    <button x-show="wh.url" @click.stop="copyToClipboard(wh.url)"
-                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0" title="Copy URL" aria-label="Copy endpoint URL">
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                    </button>
-                    <button @click="editEndpoint(wh)"
-                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0">Edit</button>
-                    <button @click="testEndpoint(wh.id)" :disabled="endpointTesting[wh.id] === true"
-                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-all disabled:opacity-50 shrink-0" x-text="endpointTesting[wh.id] === true ? '...' : 'Test'"></button>
-                    <button @click="deleteEndpoint(wh.id, wh.name)"
-                      class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all shrink-0">Delete</button>
-                  </div>
-                  <!-- Inline edit form -->
-                  <div x-show="editingEndpointId === wh.id" x-transition class="bg-gray-800/30 border border-gray-800 rounded-lg p-3 mt-1 mb-2">
-                    <div class="text-xs text-gray-500 mb-2">Edit endpoint</div>
-                    <div class="flex gap-2 mb-2">
-                      <input type="text" x-model="endpointEditName" :disabled="endpointSaving" class="dash-input text-xs flex-1" placeholder="Endpoint name">
-                      <select x-model="endpointEditAgent" :disabled="endpointSaving" class="dash-select text-xs w-40">
-                        <option value="">Agent...</option>
-                        <template x-for="a in agents" :key="a.id">
-                          <option :value="a.id" x-text="a.id"></option>
-                        </template>
-                      </select>
-                    </div>
-                    <textarea x-model="endpointEditInstructions" :disabled="endpointSaving" class="dash-input w-full text-xs mb-2" rows="2" placeholder="Instructions for the agent (optional)"></textarea>
-                    <label class="flex items-center gap-2 text-xs text-gray-400 mb-3 cursor-pointer select-none">
-                      <input type="checkbox" x-model="endpointEditRequireSig" :disabled="endpointSaving" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
-                      Require HMAC signature
-                    </label>
-                    <div class="flex justify-between items-center">
-                      <div class="flex gap-2">
-                        <button @click="cancelEndpointEdit()" :disabled="endpointSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
-                        <button x-show="wh.has_secret" @click="regenerateEndpointSecret(wh.id, wh.name)" :disabled="endpointSaving" class="text-xs px-3 py-1.5 rounded border border-yellow-900/50 hover:border-yellow-700/50 text-yellow-600 hover:text-yellow-500 transition-colors disabled:opacity-50">Regenerate Secret</button>
-                      </div>
-                      <button @click="saveEndpointEdit()" :disabled="endpointSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
-                        <svg x-show="endpointSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                        <span x-text="endpointSaving ? 'Saving...' : 'Save'"></span>
-                      </button>
-                    </div>
-                  </div>
-                  <!-- One-time secret display -->
-                  <div x-show="endpointRevealedSecret && endpointRevealedSecretId === wh.id" x-transition class="mt-2 mb-2 p-3 bg-amber-950 border border-amber-700/60 rounded-lg">
-                    <div class="flex items-center gap-1.5 text-[11px] text-amber-300 font-semibold mb-2.5">
-                      <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/></svg>
-                      HMAC Secret — copy this now, it won't be shown again
-                    </div>
-                    <div class="flex items-center gap-2">
-                      <code class="text-[12px] text-amber-100 bg-black/40 px-3 py-2 rounded font-mono flex-1 break-all select-all tracking-wide border border-amber-900/60" x-text="endpointRevealedSecret"></code>
-                      <button @click="copyToClipboard(endpointRevealedSecret)" class="text-[10px] px-3 py-1.5 rounded bg-amber-800/60 hover:bg-amber-700/60 text-amber-200 hover:text-white border border-amber-700/50 transition-colors shrink-0 font-medium">Copy</button>
-                      <button @click="endpointRevealedSecret = null; endpointRevealedSecretId = null" class="text-[10px] px-2.5 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors shrink-0">Dismiss</button>
-                    </div>
-                  </div>
-                </div>
-              </template>
-              <div x-show="apiEndpoints.length === 0" class="text-gray-600 text-sm py-2 text-center">No API endpoints configured</div>
-            </div>
-            <div class="border-t border-gray-800 pt-3">
-              <button x-show="!showEndpointForm" @click="showEndpointForm = true; cancelEndpointEdit()" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Endpoint</button>
-              <div x-show="showEndpointForm" x-transition>
-                <div class="text-xs text-gray-500 mb-2">New endpoint</div>
-                <div class="flex gap-2 mb-2">
-                  <input type="text" x-model="endpointFormName" :disabled="endpointCreating" class="dash-input text-xs flex-1" placeholder="Endpoint name">
-                  <select x-model="endpointFormAgent" :disabled="endpointCreating" class="dash-select text-xs w-40">
-                    <option value="">Agent...</option>
-                    <template x-for="a in agents" :key="a.id">
-                      <option :value="a.id" x-text="a.id"></option>
-                    </template>
-                  </select>
-                </div>
-                <textarea x-model="endpointFormInstructions" :disabled="endpointCreating" class="dash-input w-full text-xs mb-2" rows="2" placeholder="Instructions for the agent (optional) — e.g. 'Extract the event type and update the CRM'"></textarea>
-                <label class="flex items-center gap-2 text-xs text-gray-400 mb-3 cursor-pointer select-none">
-                  <input type="checkbox" x-model="endpointFormRequireSig" :disabled="endpointCreating" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
-                  Require HMAC signature
-                </label>
-                <div class="flex justify-between">
-                  <button @click="showEndpointForm = false; endpointFormName = ''; endpointFormAgent = ''; endpointFormInstructions = ''; endpointFormRequireSig = false" :disabled="endpointCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
-                  <button @click="createEndpoint()" :disabled="endpointCreating" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
-                    <svg x-show="endpointCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                    <span x-text="endpointCreating ? 'Creating...' : 'Create Endpoint'"></span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Outbound Webhooks -->
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5 mt-6">Webhooks<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Send events to external URLs when things happen. OpenLegion POSTs signed JSON payloads with HMAC-SHA256 verification. Events: notification, task_complete, task_failed, agent_state, cron_complete, custom.</span></span></div>
-        <div class="mb-6">
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-            <div class="mb-3 pb-3 border-b border-gray-800">
-              <div class="text-sm text-gray-200 font-medium mb-1">Webhooks</div>
-              <div class="text-[12px] text-gray-500 leading-relaxed">Send events to external URLs. Each delivery includes an <code class="bg-gray-800 px-1 rounded text-gray-400">X-OpenLegion-Signature</code> HMAC-SHA256 header for verification.</div>
-            </div>
-            <div class="space-y-2 mb-3">
-              <template x-for="wh in outboundWebhooks" :key="wh.id">
-                <div>
-                  <div x-show="editingOutboundId !== wh.id" class="flex items-center gap-3 text-xs group py-2 px-2 -mx-2 rounded-md hover:bg-gray-800/40 transition-colors border-b border-gray-800/30 last:border-0">
-                    <span class="w-2 h-2 rounded-full shrink-0" :class="wh.enabled !== false ? 'bg-green-400/70' : 'bg-gray-600'"></span>
-                    <span class="text-gray-200 font-medium shrink-0" x-text="wh.name"></span>
-                    <span class="text-indigo-300/80 text-[10px] font-mono flex-1 truncate bg-indigo-950/30 px-2 py-0.5 rounded border border-indigo-900/50" x-text="wh.url" :title="wh.url"></span>
-                    <template x-for="ev in (wh.events || [])" :key="ev">
-                      <span class="text-[9px] px-1.5 py-0.5 rounded-full bg-cyan-900/40 text-cyan-400 border border-cyan-800/30" x-text="ev"></span>
-                    </template>
-                    <span x-show="wh.enabled === false" class="text-[9px] px-1.5 py-0.5 rounded-full bg-gray-800 text-gray-500">disabled</span>
-                    <button @click="editOutboundWebhook(wh)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0">Edit</button>
-                    <button @click="testOutboundWebhook(wh.id)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-indigo-900/40 text-gray-400 hover:text-indigo-300 transition-all shrink-0">Test</button>
-                    <button @click="deleteOutboundWebhook(wh.id, wh.name)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all shrink-0">Delete</button>
-                  </div>
-                  <!-- Inline edit form -->
-                  <div x-show="editingOutboundId === wh.id" x-transition class="bg-gray-800/30 border border-gray-800 rounded-lg p-3 mt-1 mb-2">
-                    <div class="text-xs text-gray-500 mb-2">Edit webhook</div>
-                    <div class="flex gap-2 mb-2">
-                      <input type="text" x-model="outboundEditName" :disabled="outboundSaving" class="dash-input text-xs flex-1" placeholder="Webhook name">
-                      <input type="url" x-model="outboundEditUrl" :disabled="outboundSaving" class="dash-input text-xs flex-1" placeholder="https://example.com/hook">
-                    </div>
-                    <div class="text-[10px] text-gray-500 mb-1">Event types:</div>
-                    <div class="flex flex-wrap gap-2 mb-2">
-                      <template x-for="et in ['notification','task_complete','task_failed','agent_state','cron_complete','custom']" :key="et">
-                        <label class="flex items-center gap-1 text-[11px] text-gray-400 cursor-pointer select-none">
-                          <input type="checkbox" :value="et" x-model="outboundEditEvents" :disabled="outboundSaving" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30 w-3 h-3">
-                          <span x-text="et"></span>
-                        </label>
-                      </template>
-                    </div>
-                    <div class="text-[10px] text-gray-500 mb-1">Agent filter (empty = all agents):</div>
-                    <div class="flex flex-wrap gap-2 mb-2">
-                      <template x-for="a in agents" :key="a.id">
-                        <label class="flex items-center gap-1 text-[11px] text-gray-400 cursor-pointer select-none">
-                          <input type="checkbox" :value="a.id" x-model="outboundEditAgentFilter" :disabled="outboundSaving" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30 w-3 h-3">
-                          <span x-text="a.id"></span>
-                        </label>
-                      </template>
-                    </div>
-                    <label class="flex items-center gap-2 text-xs text-gray-400 mb-3 cursor-pointer select-none">
-                      <input type="checkbox" x-model="outboundEditEnabled" :disabled="outboundSaving" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
-                      Enabled
-                    </label>
-                    <div class="flex justify-end gap-2">
-                      <button @click="cancelOutboundEdit()" :disabled="outboundSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
-                      <button @click="saveOutboundEdit()" :disabled="outboundSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
-                        <svg x-show="outboundSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                        <span x-text="outboundSaving ? 'Saving...' : 'Save'"></span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </template>
-              <div x-show="outboundWebhooks.length === 0" class="text-gray-600 text-sm py-2 text-center">No outbound webhooks configured</div>
-            </div>
-            <div class="border-t border-gray-800 pt-3">
-              <div class="flex gap-2">
-                <button x-show="!showOutboundForm" @click="showOutboundForm = true; cancelOutboundEdit()" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Webhook</button>
-                <button @click="showDeliveries = !showDeliveries; if (showDeliveries) fetchDeliveries()" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors" x-text="showDeliveries ? 'Hide Deliveries' : 'Recent Deliveries'"></button>
-              </div>
-              <div x-show="showOutboundForm" x-transition class="mt-3">
-                <div class="text-xs text-gray-500 mb-2">New webhook</div>
-                <div class="flex gap-2 mb-2">
-                  <input type="text" x-model="outboundFormName" :disabled="outboundCreating" class="dash-input text-xs flex-1" placeholder="Webhook name">
-                  <input type="url" x-model="outboundFormUrl" :disabled="outboundCreating" class="dash-input text-xs flex-1" placeholder="https://example.com/hook">
-                </div>
-                <div class="text-[10px] text-gray-500 mb-1">Event types:</div>
-                <div class="flex flex-wrap gap-2 mb-2">
-                  <template x-for="et in ['notification','task_complete','task_failed','agent_state','cron_complete','custom']" :key="et">
-                    <label class="flex items-center gap-1 text-[11px] text-gray-400 cursor-pointer select-none">
-                      <input type="checkbox" :value="et" x-model="outboundFormEvents" :disabled="outboundCreating" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30 w-3 h-3">
-                      <span x-text="et"></span>
-                    </label>
-                  </template>
-                </div>
-                <div class="text-[10px] text-gray-500 mb-1">Agent filter (empty = all agents):</div>
-                <div class="flex flex-wrap gap-2 mb-3">
-                  <template x-for="a in agents" :key="a.id">
-                    <label class="flex items-center gap-1 text-[11px] text-gray-400 cursor-pointer select-none">
-                      <input type="checkbox" :value="a.id" x-model="outboundFormAgentFilter" :disabled="outboundCreating" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30 w-3 h-3">
-                      <span x-text="a.id"></span>
-                    </label>
-                  </template>
-                </div>
-                <div class="flex justify-between">
-                  <button @click="showOutboundForm = false; outboundFormName = ''; outboundFormUrl = ''; outboundFormEvents = []; outboundFormAgentFilter = []" :disabled="outboundCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
-                  <button @click="createOutboundWebhook()" :disabled="outboundCreating" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
-                    <svg x-show="outboundCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                    <span x-text="outboundCreating ? 'Creating...' : 'Create Webhook'"></span>
-                  </button>
-                </div>
-              </div>
-              <!-- Recent Deliveries -->
-              <div x-show="showDeliveries" x-transition class="mt-3">
-                <div class="text-xs text-gray-500 mb-2">Recent Deliveries</div>
-                <div class="max-h-48 overflow-y-auto space-y-1">
-                  <template x-for="d in outboundDeliveries.slice().reverse()" :key="d.delivery_id">
-                    <div class="flex items-center gap-2 text-[11px] py-1 px-2 rounded hover:bg-gray-800/30">
-                      <span class="shrink-0" :class="d.status === 'delivered' ? 'text-green-400' : 'text-red-400'" x-text="d.status === 'delivered' ? '&#10003;' : '&#10007;'"></span>
-                      <span class="text-gray-500 shrink-0" x-text="d.timestamp ? d.timestamp.split('T')[1]?.slice(0,8) : ''"></span>
-                      <span class="text-cyan-400/80 shrink-0" x-text="d.event"></span>
-                      <span class="text-gray-400 shrink-0" x-text="d.agent"></span>
-                      <span class="text-gray-600 flex-1 truncate" x-text="d.subscription_id"></span>
-                      <span x-show="d.response_code" class="text-gray-500 text-[10px]" x-text="d.response_code"></span>
-                      <span x-show="d.error" class="text-red-400/70 text-[10px] truncate max-w-[200px]" :title="d.error" x-text="d.error"></span>
-                    </div>
-                  </template>
-                  <div x-show="outboundDeliveries.length === 0" class="text-gray-600 text-sm py-2 text-center">No recent deliveries</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- API Keys -->
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5 mt-6">API Keys</div>
-        <div class="mb-6">
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-            <div class="text-[12px] text-gray-500 leading-relaxed mb-3">
-              Authenticate your backend for server-to-server API calls. Send as <code class="bg-gray-800 px-1 rounded text-gray-400">X-API-Key</code> header.
-              Create separate keys per environment or integration — each key is hashed and the raw value is shown only once at creation.
-            </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px] mb-4 chat-grid">
-              <div class="text-gray-500"><code class="text-gray-400 font-mono">POST</code> <code class="text-gray-400 font-mono">/mesh/credentials</code></div>
-              <div class="text-gray-600">Store a secret &rarr; returns <code class="bg-gray-800/60 px-0.5 rounded">$CRED{name}</code> handle</div>
-              <div class="text-gray-500"><code class="text-gray-400 font-mono">DELETE</code> <code class="text-gray-400 font-mono">/mesh/credentials/{name}</code></div>
-              <div class="text-gray-600">Remove a secret</div>
-              <div class="text-gray-500"><code class="text-gray-400 font-mono">GET</code> <code class="text-gray-400 font-mono">/mesh/credentials</code></div>
-              <div class="text-gray-600">List credential names (never values)</div>
-              <div class="text-gray-500"><code class="text-gray-400 font-mono">GET</code> <code class="text-gray-400 font-mono">/mesh/agents/{id}/ext-status</code></div>
-              <div class="text-gray-600">Agent health, queue depth, budget</div>
-            </div>
-            <div class="border-t border-gray-800 pt-3 mb-3"></div>
-            <!-- One-time new key display -->
-            <div x-show="apiKeyNewValue" x-transition class="mb-3 p-3 bg-emerald-950/40 border border-emerald-700/40 rounded-lg">
-              <div class="text-[11px] text-emerald-400 font-medium mb-2">New API Key — copy this now, it won't be shown again</div>
-              <div class="flex items-center gap-2">
-                <code class="text-[12px] text-emerald-200 bg-gray-950/80 px-3 py-2 rounded font-mono flex-1 break-all select-all tracking-wide" x-text="apiKeyNewValue"></code>
-                <button @click="copyToClipboard(apiKeyNewValue)" class="text-[10px] px-3 py-1.5 rounded bg-emerald-800/40 hover:bg-emerald-700/40 text-emerald-300 hover:text-emerald-200 border border-emerald-700/30 transition-colors shrink-0">Copy</button>
-                <button @click="apiKeyNewValue = null" class="text-[10px] px-2.5 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors shrink-0">Dismiss</button>
-              </div>
-            </div>
-            <!-- Legacy env var notice -->
-            <div x-show="apiKeysLegacy" x-cloak class="mb-3 px-3 py-2 bg-amber-950/30 border border-amber-800/25 rounded text-[11px] text-amber-400/90">
-              Legacy key detected from <code class="bg-gray-800/80 text-amber-300 px-1 rounded">OPENLEGION_API_KEY</code> env var. Create named keys below to replace it.
-            </div>
-            <!-- Key list -->
-            <div class="space-y-0.5 mb-3">
-              <template x-for="ak in apiKeys" :key="ak.id">
-                <div class="flex items-center gap-3 text-xs group py-2 px-2 rounded hover:bg-gray-800/30 transition-colors">
-                  <span class="w-2 h-2 rounded-full bg-emerald-500/60 shrink-0"></span>
-                  <span class="text-white font-medium" x-text="ak.name"></span>
-                  <span class="text-gray-500 font-mono text-[10px]" x-text="ak.id"></span>
-                  <span class="text-gray-500 text-[10px] flex-1 text-right" x-text="ak.last_used_at ? 'Used ' + ak.last_used_at.split('T')[0] : 'Never used'"></span>
-                  <span class="text-gray-600 text-[10px]" x-text="'Created ' + ak.created_at.split('T')[0]"></span>
-                  <button @click="revokeApiKey(ak.id, ak.name)"
-                    class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all">Revoke</button>
-                </div>
-              </template>
-              <div x-show="apiKeys.length === 0 && !apiKeysLegacy" class="text-gray-500 text-sm py-3 text-center">No API keys configured</div>
-            </div>
-            <!-- Create key form -->
-            <div class="border-t border-gray-800 pt-3">
-              <div x-show="!showApiKeyForm">
-                <button @click="showApiKeyForm = true; apiKeyNewName = ''" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Create API Key</button>
-              </div>
-              <div x-show="showApiKeyForm" x-transition>
-                <div class="text-xs text-gray-500 mb-2">New API key</div>
-                <div class="flex gap-2">
-                  <input type="text" x-model="apiKeyNewName" :disabled="apiKeyCreating" class="dash-input text-xs flex-1" placeholder="Key name (e.g. company-production)" @keydown.enter="createApiKey()">
-                  <button @click="showApiKeyForm = false" :disabled="apiKeyCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
-                  <button @click="createApiKey()" :disabled="apiKeyCreating || !apiKeyNewName.trim()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
-                    <svg x-show="apiKeyCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                    <span x-text="apiKeyCreating ? 'Creating...' : 'Create'"></span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        </div><!-- /integrations sub-tab -->
-
-        <!-- ═══ API KEYS SUB-TAB ═══ -->
-        <div x-show="systemTab === 'apikeys'" x-effect="if (systemTab === 'apikeys') fetchSettings()">
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">API Keys
-          <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Credentials stored in the mesh vault. "system" keys (OPENLEGION_SYSTEM_*) are used by the mesh for LLM routing and never exposed to agents. "agent" keys (OPENLEGION_CRED_*) are available to agents as opaque handles for HTTP requests.</span></span>
-        </div>
-        <div class="mb-6" x-show="settingsData">
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-            <div class="text-sm text-gray-400 mb-2">
-              <span x-text="settingsData?.credentials?.count || 0"></span> key(s) configured
-            </div>
-            <div class="space-y-1 mb-3">
-              <template x-for="name in settingsData?.credentials?.names || []" :key="name">
-                <div>
-                  <div class="flex items-center gap-2 text-xs group">
-                    <span class="w-2 h-2 rounded-full" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-500/50' : 'bg-amber-500/50'"></span>
-                    <span class="text-gray-300 font-mono flex-1 truncate" x-text="name"></span>
-                    <span class="text-[10px] px-1.5 py-0.5 rounded-full shrink-0" :class="(settingsData.agent_credentials || []).includes(name) ? 'bg-green-900/40 text-green-400' : 'bg-amber-900/40 text-amber-400'" x-text="(settingsData.agent_credentials || []).includes(name) ? 'agent' : 'system'"></span>
-                    <div class="flex items-center gap-0 shrink-0 w-[4.5rem] justify-end">
-                      <button x-show="!name.endsWith('_oauth')" @click="revealCredential(name)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-gray-400 hover:text-gray-300 transition-opacity px-1" :title="revealedCredentials[name] ? 'Hide value' : 'Reveal value'">
-                        <svg x-show="!revealedCredentials[name]" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
-                        <svg x-show="revealedCredentials[name]" x-cloak class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/></svg>
-                      </button>
-                      <button x-show="!name.endsWith('_oauth')" @click="editingCredential = editingCredential === name ? null : name; editCredKey = ''" :aria-expanded="editingCredential === name" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-gray-400 hover:text-indigo-300 transition-opacity text-[10px] px-1" title="Update key">Update</button>
-                      <button @click="deleteCredential(name)" class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-red-400 hover:text-red-300 transition-opacity text-base leading-none px-1" title="Remove key" aria-label="Remove key">&times;</button>
-                    </div>
-                  </div>
-                  <!-- Revealed key value -->
-                  <div x-show="revealedCredentials[name]" x-cloak x-transition class="ml-4 mt-1 mb-1 flex items-center gap-2">
-                    <code class="text-[11px] text-green-400/80 bg-gray-800 px-2 py-1 rounded font-mono flex-1 break-all select-all" x-text="revealedCredentials[name]"></code>
-                    <button @click="copyToClipboard(revealedCredentials[name])" class="text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 shrink-0" title="Copy value">Copy</button>
-                  </div>
-                  <!-- Inline key update form -->
-                  <div x-show="editingCredential === name" x-cloak x-transition class="ml-4 mt-1 mb-1 flex items-center gap-2">
-                    <input type="password" x-model="editCredKey" class="dash-input text-xs flex-1" placeholder="New key value">
-                    <button @click="updateCredential(name)" :disabled="credentialSaving" class="text-[10px] px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 disabled:cursor-not-allowed" x-text="credentialSaving ? 'Saving...' : 'Save'"></button>
-                    <button @click="editingCredential = null; editCredKey = ''" class="text-[10px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400">Cancel</button>
-                  </div>
-                </div>
-              </template>
-            </div>
-            <!-- Credential tier legend -->
-            <div class="flex flex-wrap gap-x-5 gap-y-1 mb-3 text-[10px] text-gray-500 leading-relaxed">
-              <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-green-500/50 shrink-0"></span><strong class="text-gray-400">Agent key</strong> &mdash; agents can request by name, granted per-agent via Credential Access permissions. The vault returns an opaque handle; the raw value is never exposed.</span>
-              <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-amber-500/50 shrink-0"></span><strong class="text-gray-400">System key</strong> &mdash; held exclusively by the mesh host. Agents cannot access it at all. LLM provider API keys (Anthropic, OpenAI, etc.) are always stored here.</span>
-            </div>
-            <div class="border-t border-gray-800 pt-3">
-              <button x-show="!showCredForm" @click="showCredForm = true" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add Key</button>
-              <div x-show="showCredForm" x-transition>
-                <div class="text-xs text-gray-500 mb-2">New API key</div>
-                <div class="flex gap-2 mb-2">
-                  <div class="relative" @click.outside="_credServiceDropdownOpen = false" @keydown.escape.stop="_credServiceDropdownOpen = false">
-                    <button type="button" :disabled="credSaving"
-                      @click="_credServiceDropdownOpen = !_credServiceDropdownOpen; if (_credServiceDropdownOpen) { _credServiceSearch = ''; $nextTick(() => $refs.credServiceSearchInput?.focus()); }"
-                      class="dash-input flex items-center justify-between gap-2 cursor-pointer text-left" style="min-width:10rem">
-                      <span class="truncate" :class="credService ? 'text-gray-200' : 'text-gray-400'"
-                        x-text="credService === '__custom__' ? 'Custom\u2026' : (credService ? (credServiceOptions.find(o => o.value === credService)?.label || credService) : 'Service\u2026')"></span>
-                      <svg class="w-3.5 h-3.5 text-gray-500 flex-shrink-0 transition-transform" :class="_credServiceDropdownOpen && 'rotate-180'" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
-                    </button>
-                    <div x-show="_credServiceDropdownOpen" x-cloak x-transition:enter="transition ease-out duration-100" x-transition:enter-start="opacity-0 -translate-y-1" x-transition:enter-end="opacity-100 translate-y-0"
-                      class="absolute z-50 mt-1 min-w-full w-max bg-gray-800 border border-gray-700 rounded-lg shadow-xl" style="max-width:min(28rem, calc(100vw - 2rem))">
-                      <div class="p-2">
-                        <div class="flex items-center gap-2 bg-gray-900 border border-gray-600 rounded-md px-2.5 py-1.5 focus-within:border-indigo-500/60">
-                          <svg class="w-3.5 h-3.5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="11" cy="11" r="8"/><path stroke-linecap="round" d="m21 21-4.35-4.35"/></svg>
-                          <input x-ref="credServiceSearchInput" type="text" x-model="_credServiceSearch" placeholder="Search services…"
-                            @keydown.enter.prevent="(() => {
-                              const q = _credServiceSearch.toLowerCase().trim();
-                              const match = q ? credServiceOptions.find(o => o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q)) : null;
-                              if (match) { credService = match.value; _credServiceDropdownOpen = false; credAuthType = 'api_key'; if (match.value === 'ollama') credBaseUrl = credBaseUrl || 'http://localhost:11434'; if (match.value !== '__custom__') { credCustomService = ''; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''; } }
-                            })()"
-                            class="w-full bg-transparent text-xs text-gray-200 placeholder-gray-500 outline-none focus:outline-none focus:ring-0" style="outline:none!important;box-shadow:none!important">
-                        </div>
-                      </div>
-                      <div class="border-t border-gray-700/60 overflow-y-auto custom-scrollbar" style="max-height:280px">
-                        <!-- Grouped options -->
-                        <template x-for="group in [...new Set(credServiceOptions.map(o => o.group))].filter(g => {
-                          const q = _credServiceSearch.toLowerCase().trim();
-                          if (!q) return true;
-                          return credServiceOptions.some(o => o.group === g && (o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q)));
-                        })" :key="group">
-                          <div>
-                            <div class="px-3 pt-3 pb-1.5 mt-1 first:mt-0 border-t border-gray-700/50 first:border-t-0 text-[11px] font-medium text-gray-500 uppercase tracking-wider" x-text="group"></div>
-                            <template x-for="o in credServiceOptions.filter(o => {
-                              if (o.group !== group) return false;
-                              const q = _credServiceSearch.toLowerCase().trim();
-                              return !q || o.label.toLowerCase().includes(q) || o.value.toLowerCase().includes(q);
-                            })" :key="o.value">
-                              <button type="button"
-                                @click="credService = o.value; _credServiceDropdownOpen = false; credAuthType = 'api_key'; if (o.value === 'ollama') credBaseUrl = credBaseUrl || 'http://localhost:11434'; if (o.value !== '__custom__') { credCustomService = ''; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''; }"
-                                class="w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center gap-2"
-                                :class="credService === o.value ? 'bg-indigo-600/20 text-indigo-300' : 'text-gray-300 hover:bg-gray-700/60'">
-                                <svg class="w-3 h-3 flex-shrink-0" :class="credService === o.value ? 'text-indigo-400' : 'text-transparent'" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
-                                <span x-text="o.label" class="truncate"></span>
-                              </button>
-                            </template>
-                          </div>
-                        </template>
-                        <!-- Custom option (always visible at bottom) -->
-                        <div class="border-t border-gray-700/50">
-                          <button type="button"
-                            @click="credService = '__custom__'; _credServiceDropdownOpen = false; credAuthType = 'api_key';"
-                            class="w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center gap-2"
-                            :class="credService === '__custom__' ? 'bg-indigo-600/20 text-indigo-300' : 'text-gray-300 hover:bg-gray-700/60'"
-                            x-show="!_credServiceSearch || 'custom'.includes(_credServiceSearch.toLowerCase().trim())">
-                            <svg class="w-3 h-3 flex-shrink-0" :class="credService === '__custom__' ? 'text-indigo-400' : 'text-transparent'" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
-                            Custom&hellip;
-                          </button>
-                        </div>
-                        <!-- No results -->
-                        <div x-show="_credServiceSearch && !credServiceOptions.some(o => o.label.toLowerCase().includes(_credServiceSearch.toLowerCase().trim()) || o.value.toLowerCase().includes(_credServiceSearch.toLowerCase().trim())) && !'custom'.includes(_credServiceSearch.toLowerCase().trim())"
-                          class="px-3 py-3 text-xs text-gray-500 text-center">No services match your search.</div>
-                      </div>
-                    </div>
-                  </div>
-                  <template x-if="credService === 'anthropic' || credService === 'openai'">
-                    <select x-model="credAuthType" :disabled="credSaving" class="dash-select text-xs w-48">
-                      <option value="api_key">API Key (recommended)</option>
-                      <option value="oauth" x-text="credService === 'openai' ? 'ChatGPT OAuth (JSON)' : 'Subscription Token'"></option>
-                    </select>
-                  </template>
-                  <input x-show="credService === '__custom__'" type="text" x-model="credCustomService" :disabled="credSaving" class="dash-input text-xs w-40" placeholder="credential_name">
-                  <select x-show="credService === '__custom__'" x-model="credTier" :disabled="credSaving" class="dash-select text-xs w-28">
-                    <option value="agent">Agent tier</option>
-                    <option value="system">System tier</option>
-                  </select>
-                  <input x-show="credService !== 'ollama'" type="password" x-model="credKey" :disabled="credSaving" class="dash-input flex-1"
-                    :placeholder="credAuthType === 'oauth' ? (credService === 'openai' ? '{&quot;access_token&quot;:...,&quot;refresh_token&quot;:...}' : 'sk-ant-oat01-...') : 'API key or value'">
-                </div>
-                <template x-if="credService === '__custom__'">
-                  <div class="text-[10px] text-gray-500 leading-snug mb-2 p-2 rounded bg-gray-800/60 border border-gray-700/40">
-                    <strong class="text-gray-400">Agent tier</strong>: agents can request this credential by name. Access is controlled per-agent via the Credential Access permission pattern. The agent receives an opaque handle &mdash; the raw value is never returned.
-                    <span class="mx-1">&middot;</span>
-                    <strong class="text-gray-400">System tier</strong>: held only by the mesh host. No agent can read or reference it. Use this for infrastructure tokens or secrets that agents should never touch.
-                  </div>
-                </template>
-                <template x-if="credService === '__custom__' && credTier === 'system'">
-                  <div class="space-y-2 mb-2">
-                    <label class="inline-flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
-                      <input type="checkbox" x-model="credIsLlmProvider" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
-                      This is an LLM provider
-                    </label>
-                    <template x-if="credIsLlmProvider">
-                      <div class="space-y-1.5">
-                        <input type="text" x-model="credCustomLabel" :disabled="credSaving" class="dash-input w-full text-xs" placeholder="Display name (e.g. My Provider)">
-                        <textarea x-model="credCustomModels" :disabled="credSaving" class="dash-input w-full text-xs" rows="2" placeholder="Model names, comma-separated (e.g. model-7b, model-70b)"></textarea>
-                        <div class="text-[10px] text-gray-500">Models will be available as <code class="bg-gray-800 px-0.5 rounded" x-text="(credCustomService || 'provider') + '/model-name'"></code> in the agent model selector. Must be OpenAI-compatible.</div>
-                      </div>
-                    </template>
-                  </div>
-                </template>
-                <template x-if="credAuthType === 'oauth' && credService === 'anthropic'">
-                  <div class="text-[10px] text-amber-400/80 leading-snug mb-2">
-                    Experimental — uses unofficial OAuth that may break without notice. Generate with: <code class="font-mono bg-gray-800 px-1 rounded">claude setup-token</code>
-                  </div>
-                </template>
-                <template x-if="credAuthType === 'oauth' && credService === 'openai'">
-                  <div class="text-[10px] text-amber-400/80 leading-snug mb-2">
-                    Paste the JSON blob from <code class="font-mono bg-gray-800 px-1 rounded">~/.codex/auth.json</code> containing <code class="font-mono bg-gray-800 px-1 rounded">access_token</code> and <code class="font-mono bg-gray-800 px-1 rounded">refresh_token</code>.
-                  </div>
-                </template>
-                <template x-if="credService === 'ollama'">
-                  <div>
-                    <input type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-1" placeholder="http://localhost:11434">
-                    <div class="text-[10px] text-gray-500 mb-3">Ollama URL — no API key needed. Make sure Ollama is running.</div>
-                  </div>
-                </template>
-                <input x-show="credService !== 'ollama' && credAuthType !== 'oauth'" type="text" x-model="credBaseUrl" :disabled="credSaving" class="dash-input w-full mb-3" placeholder="Custom API base URL (optional)">
-                <div class="flex justify-between">
-                  <button @click="showCredForm = false; credService = ''; credKey = ''; credBaseUrl = ''; credCustomService = ''; credTier = 'agent'; credAuthType = 'api_key'; credIsLlmProvider = false; credCustomModels = ''; credCustomLabel = ''; _credServiceDropdownOpen = false; _credServiceSearch = ''" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
-                  <button @click="addCredential()" :disabled="credSaving" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
-                    <svg x-show="credSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                    <span x-text="credSaving ? 'Saving...' : 'Save'"></span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        </div><!-- /apikeys sub-tab -->
+        </div><!-- /channels sub-tab -->
 
         <!-- ═══ WALLET SUB-TAB ═══ -->
         <div x-show="systemTab === 'wallet'" x-effect="if (systemTab === 'wallet') fetchWallet()">

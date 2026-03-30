@@ -5,7 +5,7 @@ OpenLegion is a container-isolated multi-agent runtime. LLM-powered agents run i
 ## System Overview
 
 ```
-User (CLI REPL / Telegram / Discord / Slack / WhatsApp / Webhook)
+User (CLI REPL / Telegram / Discord / Slack / WhatsApp / API Endpoint)
   -> Mesh Host (FastAPI :8420) -- routes messages, enforces permissions, proxies APIs
     -> Agent Containers (FastAPI :8400 each) -- isolated execution with private memory
 ```
@@ -48,7 +48,8 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 | `cron.py` | Cron scheduler with heartbeat support |
 | `lanes.py` | Per-agent FIFO task queues |
 | `failover.py` | Model health tracking and failover chains |
-| `webhooks.py` | Named webhook endpoints |
+| `api_endpoints.py` | Named API endpoints for inbound HTTP dispatch |
+| `outbound_webhooks.py` | Outbound webhook delivery to external URLs |
 | `watchers.py` | File watcher with polling |
 | `containers.py` | Backward-compat alias (`ContainerManager = DockerBackend`) |
 | `traces.py` | Request tracing and diagnostics |
