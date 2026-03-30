@@ -42,6 +42,8 @@ CategorizeFn = Callable[[str, str], Coroutine[Any, Any, str]]
 
 # Consecutive embedding failures before disabling vector search
 _EMBED_FAILURE_THRESHOLD = 3
+# Chat session checkpoint schema version (bump to invalidate old checkpoints)
+_CHECKPOINT_VERSION = 1
 # Category similarity threshold for auto-assignment
 _CATEGORY_SIM_THRESHOLD = 0.7
 # Recompute category embedding every N new members
@@ -140,6 +142,16 @@ class MemoryStore:
             );
             CREATE INDEX IF NOT EXISTS idx_tool_outcomes_name
                 ON tool_outcomes(tool_name, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS chat_checkpoint (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL DEFAULT 1,
+                messages TEXT NOT NULL,
+                total_rounds INTEGER NOT NULL DEFAULT 0,
+                auto_continues INTEGER NOT NULL DEFAULT 0,
+                flush_triggered INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
         """)
         # Lazy migration: add category_id FK to facts if not present
         try:
@@ -805,6 +817,54 @@ class MemoryStore:
             {"id": r[0], "name": r[1], "summary": r[2], "item_count": r[3], "updated_at": r[4]}
             for r in rows
         ]
+
+    # ── Chat session checkpoint ──────────────────────────────────
+
+    def save_chat_checkpoint(
+        self,
+        messages: list[dict],
+        total_rounds: int,
+        auto_continues: int,
+        flush_triggered: bool,
+    ) -> None:
+        """Persist chat session state for crash recovery (singleton row)."""
+        self.db.execute(
+            "INSERT OR REPLACE INTO chat_checkpoint"
+            " (id, version, messages, total_rounds, auto_continues,"
+            "  flush_triggered, updated_at)"
+            " VALUES (1, ?, ?, ?, ?, ?, datetime('now'))",
+            (
+                _CHECKPOINT_VERSION,
+                json.dumps(messages, separators=(",", ":")),
+                total_rounds,
+                auto_continues,
+                int(flush_triggered),
+            ),
+        )
+        self.db.commit()
+
+    def load_chat_checkpoint(self) -> dict | None:
+        """Load persisted chat session state.  Returns None if absent or version mismatch."""
+        row = self.db.execute(
+            "SELECT version, messages, total_rounds, auto_continues, flush_triggered"
+            " FROM chat_checkpoint WHERE id = 1",
+        ).fetchone()
+        if row is None:
+            return None
+        if row[0] != _CHECKPOINT_VERSION:
+            self.clear_chat_checkpoint()
+            return None
+        return {
+            "messages": json.loads(row[1]),
+            "total_rounds": row[2],
+            "auto_continues": row[3],
+            "flush_triggered": bool(row[4]),
+        }
+
+    def clear_chat_checkpoint(self) -> None:
+        """Remove persisted chat session state."""
+        self.db.execute("DELETE FROM chat_checkpoint")
+        self.db.commit()
 
     def close(self) -> None:
         """Close the database connection (thread-safe)."""
