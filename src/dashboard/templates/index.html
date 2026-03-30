@@ -3845,6 +3845,66 @@
               </p>
             </div>
 
+            <!-- Inter-action delay control -->
+            <div class="mt-4 pt-4 border-t border-gray-800">
+              <div class="space-y-3">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <div class="text-xs text-gray-400">Inter-Action Delay</div>
+                    <div class="text-[10px] text-gray-600 mt-0.5">Pause between browser actions to simulate human think time</div>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs font-medium px-2 py-0.5 rounded-full"
+                      :class="{
+                        'bg-green-500/10 text-green-400': browserDelay <= 0,
+                        'bg-yellow-500/10 text-yellow-400': browserDelay > 0 && browserDelay <= 4,
+                        'bg-orange-500/10 text-orange-400': browserDelay > 4
+                      }"
+                      x-text="browserDelayLabel"></span>
+                    <span class="text-xs text-gray-500 font-mono w-10 text-right" x-text="browserDelay.toFixed(1) + 's'"></span>
+                  </div>
+                </div>
+
+                <div class="flex items-center gap-3">
+                  <span class="text-[10px] text-gray-600 w-10">Off</span>
+                  <input type="range" min="0" max="10" step="0.5"
+                    :value="browserDelay"
+                    @input="saveBrowserDelay($event.target.value)"
+                    class="flex-1 h-1.5 bg-gray-700 rounded-full appearance-none cursor-pointer
+                      [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5
+                      [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-indigo-500 [&::-webkit-slider-thumb]:cursor-pointer
+                      [&::-webkit-slider-thumb]:hover:bg-indigo-400 [&::-webkit-slider-thumb]:transition-colors
+                      [&::-moz-range-thumb]:w-3.5 [&::-moz-range-thumb]:h-3.5 [&::-moz-range-thumb]:rounded-full
+                      [&::-moz-range-thumb]:bg-indigo-500 [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:cursor-pointer">
+                  <span class="text-[10px] text-gray-600 w-6 text-right">10s</span>
+                </div>
+
+                <!-- Preset buttons -->
+                <div class="flex gap-2 pt-1">
+                  <template x-for="preset in [
+                    { value: 0, label: 'Off' },
+                    { value: 1.5, label: 'Light' },
+                    { value: 3, label: 'Moderate' },
+                    { value: 6, label: 'Heavy' },
+                    { value: 10, label: 'Maximum' }
+                  ]" :key="preset.value">
+                    <button @click="saveBrowserDelay(preset.value)"
+                      class="px-2 py-1 text-[10px] rounded transition-all"
+                      :class="Math.abs(browserDelay - preset.value) < 0.3
+                        ? 'bg-indigo-500/20 text-indigo-300 ring-1 ring-indigo-500/30'
+                        : 'bg-gray-800 text-gray-500 hover:text-gray-300 hover:bg-gray-700'"
+                      x-text="preset.label"></button>
+                  </template>
+                </div>
+
+                <p class="text-[10px] text-gray-600 leading-relaxed pt-1">
+                  Adds a randomized pause after each browser action (click, type, navigate, etc.)
+                  to simulate human reading and decision time. Higher values are stealthier on
+                  bot-protected sites like X/Twitter. 0 = disabled.
+                </p>
+              </div>
+            </div>
+
             <!-- Idle timeout -->
             <div class="mt-4 pt-4 border-t border-gray-800" x-show="systemSettings">
               <div class="max-w-xs">

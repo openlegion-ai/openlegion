@@ -1395,6 +1395,16 @@ class TestSolveCaptcha:
 class TestHumanTiming:
     """Validate timing helper distributions stay within expected ranges."""
 
+    def setup_method(self):
+        from src.browser.timing import set_delay, set_speed
+        set_speed(1.0)
+        set_delay(0.0)
+
+    def teardown_method(self):
+        from src.browser.timing import set_delay, set_speed
+        set_speed(1.0)
+        set_delay(0.0)
+
     def test_action_delay_range(self):
         from src.browser.timing import action_delay
         samples = [action_delay() for _ in range(1000)]
@@ -1455,6 +1465,58 @@ class TestHumanTiming:
         assert all(80 <= s <= 200 for s in samples)
         mean = sum(samples) / len(samples)
         assert 120 <= mean <= 160
+
+    def test_default_delay(self):
+        from src.browser.timing import get_delay
+        assert get_delay() == 0.0
+
+    def test_set_delay(self):
+        from src.browser.timing import get_delay, set_delay
+        set_delay(3.0)
+        assert get_delay() == 3.0
+        set_delay(0.0)  # cleanup
+
+    def test_delay_clamped_low(self):
+        from src.browser.timing import get_delay, set_delay
+        set_delay(-5.0)
+        assert get_delay() == 0.0
+        set_delay(0.0)
+
+    def test_delay_clamped_high(self):
+        from src.browser.timing import get_delay, set_delay
+        set_delay(99.0)
+        assert get_delay() == 10.0
+        set_delay(0.0)
+
+    def test_inter_action_delay_zero_when_disabled(self):
+        from src.browser.timing import inter_action_delay, set_delay
+        set_delay(0.0)
+        for _ in range(100):
+            assert inter_action_delay() == 0.0
+
+    def test_inter_action_delay_positive_when_enabled(self):
+        from src.browser.timing import inter_action_delay, set_delay
+        set_delay(3.0)
+        samples = [inter_action_delay() for _ in range(500)]
+        mean = sum(samples) / len(samples)
+        assert 1.5 < mean < 5.0, f"Expected mean near 3.0, got {mean:.2f}"
+        assert all(s > 0 for s in samples)
+        set_delay(0.0)
+
+    def test_inter_action_delay_not_scaled_by_speed(self):
+        """Delay should be independent of the speed setting."""
+        from src.browser.timing import inter_action_delay, set_delay, set_speed
+        set_delay(3.0)
+        set_speed(1.0)
+        baseline = [inter_action_delay() for _ in range(1000)]
+        set_speed(4.0)
+        fast = [inter_action_delay() for _ in range(1000)]
+        set_speed(1.0)
+        set_delay(0.0)
+        baseline_mean = sum(baseline) / len(baseline)
+        fast_mean = sum(fast) / len(fast)
+        ratio = fast_mean / baseline_mean
+        assert 0.8 < ratio < 1.2, f"Delay should not change with speed, ratio={ratio:.2f}"
 
 
 class TestScroll:
@@ -3898,12 +3960,14 @@ class TestBrowserSettingsEndpoint:
     """Tests for GET/POST /browser/settings on the browser service."""
 
     def setup_method(self):
-        from src.browser.timing import set_speed
+        from src.browser.timing import set_delay, set_speed
         set_speed(1.0)
+        set_delay(0.0)
 
     def teardown_method(self):
-        from src.browser.timing import set_speed
+        from src.browser.timing import set_delay, set_speed
         set_speed(1.0)
+        set_delay(0.0)
 
     def test_get_settings_default(self):
         """GET /browser/settings should return default speed=1.0."""
@@ -3947,6 +4011,65 @@ class TestBrowserSettingsEndpoint:
         assert resp.status_code == 200
         assert resp.json()["speed"] == 4.0  # clamped to max
         assert get_speed() == 4.0
+
+    def test_get_settings_includes_delay(self):
+        """GET /browser/settings should include delay."""
+        from src.browser.server import create_browser_app
+        from src.browser.service import BrowserManager
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        app = create_browser_app(mgr)
+
+        from starlette.testclient import TestClient
+        client = TestClient(app)
+        resp = client.get("/browser/settings")
+        assert resp.status_code == 200
+        assert "delay" in resp.json()
+        assert resp.json()["delay"] == 0.0
+
+    def test_set_delay(self):
+        """POST /browser/settings should update the delay."""
+        from src.browser.server import create_browser_app
+        from src.browser.service import BrowserManager
+        from src.browser.timing import get_delay
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        app = create_browser_app(mgr)
+
+        from starlette.testclient import TestClient
+        client = TestClient(app)
+        resp = client.post("/browser/settings", json={"delay": 5.0})
+        assert resp.status_code == 200
+        assert resp.json()["delay"] == 5.0
+        assert get_delay() == 5.0
+
+    def test_set_delay_clamped(self):
+        """POST /browser/settings should clamp out-of-range delay."""
+        from src.browser.server import create_browser_app
+        from src.browser.service import BrowserManager
+        from src.browser.timing import get_delay
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        app = create_browser_app(mgr)
+
+        from starlette.testclient import TestClient
+        client = TestClient(app)
+        resp = client.post("/browser/settings", json={"delay": 100.0})
+        assert resp.status_code == 200
+        assert resp.json()["delay"] == 10.0
+        assert get_delay() == 10.0
+
+    def test_set_delay_only(self):
+        """POST /browser/settings with only delay should not affect speed."""
+        from src.browser.server import create_browser_app
+        from src.browser.service import BrowserManager
+        from src.browser.timing import get_speed, set_speed
+        set_speed(2.0)
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        app = create_browser_app(mgr)
+
+        from starlette.testclient import TestClient
+        client = TestClient(app)
+        resp = client.post("/browser/settings", json={"delay": 3.0})
+        assert resp.status_code == 200
+        assert get_speed() == 2.0  # unchanged
 
 
 # ── Dead code removal verification ────────────────────────────────────────
