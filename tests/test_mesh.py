@@ -158,6 +158,45 @@ def test_blackboard_cleanup_nonexistent_agent(tmp_path):
     bb.close()
 
 
+# === Blackboard Agent Profile Support ===
+
+
+def test_blackboard_get_agent_watches(tmp_path):
+    """get_agent_watches returns glob patterns registered by an agent."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    bb.add_watch("agent-a", "tasks/*")
+    bb.add_watch("agent-a", "status/*")
+    bb.add_watch("agent-b", "research/*")
+
+    assert sorted(bb.get_agent_watches("agent-a")) == ["status/*", "tasks/*"]
+    assert bb.get_agent_watches("agent-b") == ["research/*"]
+    assert bb.get_agent_watches("agent-c") == []
+    bb.close()
+
+
+def test_blackboard_recent_keys_by_agent(tmp_path):
+    """recent_keys_by_agent returns keys recently written by an agent."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    bb.write("k1", {"v": 1}, written_by="agent-a")
+    bb.write("k2", {"v": 2}, written_by="agent-a")
+    bb.write("k3", {"v": 3}, written_by="agent-b")
+    bb.write("k4", {"v": 4}, written_by="agent-a")
+
+    keys = bb.recent_keys_by_agent("agent-a")
+    assert "k1" in keys
+    assert "k2" in keys
+    assert "k4" in keys
+    assert "k3" not in keys  # written by agent-b
+
+    # Test limit
+    keys_limited = bb.recent_keys_by_agent("agent-a", limit=2)
+    assert len(keys_limited) <= 2
+
+    # Unknown agent returns empty
+    assert bb.recent_keys_by_agent("nobody") == []
+    bb.close()
+
+
 # === PubSub Tests ===
 
 
@@ -296,6 +335,42 @@ def test_pubsub_unsubscribe_agent_persistence(tmp_path):
     ps2 = PubSub(db_path=db)
     assert ps2.get_subscribers("t1") == ["a2"]
     assert ps2.get_subscribers("t2") == []
+    ps2.close()
+
+
+# === PubSub Agent Profile Support ===
+
+
+def test_pubsub_get_agent_subscriptions():
+    """get_agent_subscriptions returns topics an agent subscribes to."""
+    ps = PubSub()
+    ps.subscribe("topic-a", "agent-1")
+    ps.subscribe("topic-b", "agent-1")
+    ps.subscribe("topic-a", "agent-2")
+
+    subs = ps.get_agent_subscriptions("agent-1")
+    assert sorted(subs) == ["topic-a", "topic-b"]
+
+    subs2 = ps.get_agent_subscriptions("agent-2")
+    assert subs2 == ["topic-a"]
+
+    assert ps.get_agent_subscriptions("agent-3") == []
+    ps.close()
+
+
+def test_pubsub_get_agent_subscriptions_persistence(tmp_path):
+    """get_agent_subscriptions works after restart with persistence."""
+    db = str(tmp_path / "pubsub.db")
+    ps1 = PubSub(db_path=db)
+    ps1.subscribe("alerts", "agent-1")
+    ps1.subscribe("updates", "agent-1")
+    ps1.subscribe("alerts", "agent-2")
+    ps1.close()
+
+    ps2 = PubSub(db_path=db)
+    subs = ps2.get_agent_subscriptions("agent-1")
+    assert sorted(subs) == ["alerts", "updates"]
+    assert ps2.get_agent_subscriptions("agent-2") == ["alerts"]
     ps2.close()
 
 
