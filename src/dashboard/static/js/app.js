@@ -3265,10 +3265,13 @@ function dashboard() {
     async _loadChatHistory(agentId) {
       // Always fetch from server — the persistent transcript is the
       // source of truth, ensuring history is consistent across devices.
-      // Skip if streaming (avoid clobber) or fetched recently (debounce tab switches).
+      // Skip if streaming (avoid clobber), recently fetched (debounce), or
+      // a stream just finished (server may not have persisted the message yet).
       if (this.chatStreamingAgents[agentId]) return;
       const now = Date.now();
       if (this._chatFetchedAt[agentId] && (now - this._chatFetchedAt[agentId]) < 5000) return;
+      const lastEnd = this._chatStreamEndAt?.[agentId] || 0;
+      if (now - lastEnd < 3000) return;
       this._chatFetchedAt[agentId] = now;
       try {
         const resp = await fetch(`/dashboard/api/agents/${agentId}/chat/history`, { credentials: 'same-origin' });
@@ -3298,17 +3301,18 @@ function dashboard() {
         }));
         // Preserve local messages not yet on the server:
         // 1. User messages sent after the last server timestamp
-        // 2. Notifications injected via WebSocket not yet in the server transcript
+        // 2. Agent messages from just-completed streams not yet persisted
+        // 3. Notifications injected via WebSocket not yet in the server transcript
         const trailing = localMsgs.filter(m => {
           if (m.role === 'notification') {
-            // Keep local notifications not yet in server response
             return !serverMsgs.some(s =>
               s.role === 'notification' && s.content === m.content && Math.abs((s.ts || 0) - (m.ts || 0)) < 2000
             );
           }
-          if (m.role !== 'user' || (m.ts || 0) <= lastServerTs) return false;
+          if ((m.role !== 'user' && m.role !== 'agent') || (m.ts || 0) <= lastServerTs) return false;
+          if (m.role === 'agent' && !m.content) return false;  // Drop empty agent placeholders
           // Skip if server already has a message with matching content
-          return !serverMsgs.some(s => s.role === 'user' && s.content === m.content && Math.abs((s.ts || 0) - (m.ts || 0)) < 10000);
+          return !serverMsgs.some(s => s.role === m.role && s.content === m.content && Math.abs((s.ts || 0) - (m.ts || 0)) < 10000);
         });
         this.chatHistories[agentId] = trailing.length > 0
           ? [...serverMsgs, ...trailing]
@@ -3776,6 +3780,8 @@ function dashboard() {
         delete this._chatStreamTarget[agentId];
         this.chatLoadingAgents[agentId] = false;
         this.chatStreamingAgents[agentId] = false;
+        if (!this._chatStreamEndAt) this._chatStreamEndAt = {};
+        this._chatStreamEndAt[agentId] = Date.now();
         this.$nextTick(() => this._scrollChat(agentId));
         this._saveChatToSession();
         this.fetchQueues();
