@@ -345,6 +345,20 @@ class Blackboard:
         """Remove all watches for an agent (cleanup on deregister)."""
         self.remove_watch(agent_id)
 
+    def cleanup_agent_data(self, agent_id: str) -> int:
+        """Remove all data written by an agent: entries, event log, and watches."""
+        self.remove_agent_watches(agent_id)
+        with self._write_lock:
+            cursor = self.db.execute(
+                "DELETE FROM entries WHERE written_by = ?", (agent_id,),
+            )
+            deleted = cursor.rowcount
+            self.db.execute(
+                "DELETE FROM event_log WHERE agent_id = ?", (agent_id,),
+            )
+            self.db.commit()
+        return deleted
+
     def get_watchers_for_key(self, key: str, exclude: str | None = None) -> list[str]:
         """Return agent IDs watching a key, excluding the writer to prevent self-notify."""
         with self._write_lock:

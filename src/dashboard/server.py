@@ -513,10 +513,10 @@ def create_dashboard_router(
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-        # Stop container (best-effort — agent may already be gone)
+        # Stop container and remove data volume (best-effort — agent may already be gone)
         if runtime is not None:
             try:
-                runtime.stop_agent(agent_id)
+                runtime.stop_agent(agent_id, remove_data=True)
             except Exception as e:
                 logger.debug("Runtime cleanup for '%s' failed: %s", agent_id, e)
 
@@ -541,6 +541,29 @@ def create_dashboard_router(
                 logger.info(f"Removed {removed} cron job(s) for agent {agent_id}")
         if lane_manager is not None:
             lane_manager.remove_lane(agent_id)
+
+        # Clean up per-agent data: blackboard, costs, traces, wallet
+        try:
+            blackboard.cleanup_agent_data(agent_id)
+        except Exception as e:
+            logger.warning("Blackboard cleanup for '%s' failed: %s", agent_id, e)
+        if cost_tracker is not None:
+            try:
+                cost_tracker.cleanup_agent(agent_id)
+            except Exception as e:
+                logger.warning("Cost cleanup for '%s' failed: %s", agent_id, e)
+        if trace_store is not None:
+            try:
+                trace_store.cleanup_agent(agent_id)
+            except Exception as e:
+                logger.warning("Trace cleanup for '%s' failed: %s", agent_id, e)
+        _ws_ref_local = wallet_service_ref or [None]
+        _wallet_svc = _ws_ref_local[0]
+        if _wallet_svc is not None:
+            try:
+                _wallet_svc.cleanup_agent(agent_id)
+            except Exception as e:
+                logger.warning("Wallet cleanup for '%s' failed: %s", agent_id, e)
 
         # Remove from config and permissions (best-effort — don't fail if files are missing)
         try:

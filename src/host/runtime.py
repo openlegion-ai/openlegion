@@ -64,8 +64,8 @@ class RuntimeBackend(abc.ABC):
         """Start an agent. Returns a URL or identifier for reaching it."""
 
     @abc.abstractmethod
-    def stop_agent(self, agent_id: str) -> None:
-        """Stop and clean up an agent."""
+    def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
+        """Stop and clean up an agent. When remove_data is True, also remove persistent storage."""
 
     @abc.abstractmethod
     def health_check(self, agent_id: str) -> bool:
@@ -489,14 +489,22 @@ class DockerBackend(RuntimeBackend):
             self.browser_service_url = None
             self.browser_vnc_url = None
 
-    def stop_agent(self, agent_id: str) -> None:
+    def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
         if agent_id in self.agents:
+            safe_name = _docker_safe_name(agent_id)
             try:
                 self.agents[agent_id]["container"].stop(timeout=10)
                 self.agents[agent_id]["container"].remove()
                 logger.info(f"Stopped agent '{agent_id}'")
             except Exception as e:
                 logger.warning(f"Error stopping agent '{agent_id}': {e}")
+            if remove_data:
+                try:
+                    vol = self.client.volumes.get(f"openlegion_data_{safe_name}")
+                    vol.remove(force=True)
+                    logger.info(f"Removed data volume for agent '{agent_id}'")
+                except Exception as e:
+                    logger.debug(f"Volume cleanup for '{agent_id}': {e}")
             del self.agents[agent_id]
             if hasattr(self, "auth_tokens"):
                 self.auth_tokens.pop(agent_id, None)
@@ -764,10 +772,11 @@ class SandboxBackend(RuntimeBackend):
         logger.info(f"Started agent '{agent_id}' in sandbox '{sandbox_name}'")
         return url
 
-    def stop_agent(self, agent_id: str) -> None:
+    def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
         if agent_id not in self.agents:
             return
         sandbox_name = self.agents[agent_id]["sandbox_name"]
+        workspace = self.agents[agent_id].get("workspace")
         try:
             subprocess.run(
                 ["docker", "sandbox", "rm", "-f", sandbox_name],
@@ -776,6 +785,12 @@ class SandboxBackend(RuntimeBackend):
             logger.info(f"Removed sandbox '{sandbox_name}'")
         except Exception as e:
             logger.warning(f"Error removing sandbox '{sandbox_name}': {e}")
+        if remove_data and workspace:
+            try:
+                shutil.rmtree(workspace)
+                logger.info(f"Removed workspace for agent '{agent_id}'")
+            except Exception as e:
+                logger.debug(f"Workspace cleanup for '{agent_id}': {e}")
         del self.agents[agent_id]
         if hasattr(self, "auth_tokens"):
             self.auth_tokens.pop(agent_id, None)

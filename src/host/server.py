@@ -177,20 +177,38 @@ def create_mesh_app(
         """Clean up all per-agent state when an agent is deregistered.
 
         Covers: rate-limit buckets, credential vault locks, blackboard
-        watches, pub/sub subscriptions, lane workers, and cron jobs.
+        data, pub/sub subscriptions, lane workers, cron jobs, cost
+        records, trace records, and wallet records.
         """
         stale = [k for k in _rate_ts if k.endswith(f":{agent_id}")]
         for k in stale:
             del _rate_ts[k]
         if credential_vault is not None:
             credential_vault.cleanup_agent(agent_id)
-        blackboard.remove_agent_watches(agent_id)
+        blackboard.cleanup_agent_data(agent_id)
         if pubsub is not None:
             pubsub.unsubscribe_agent(agent_id)
         if lane_manager is not None:
             lane_manager.remove_lane(agent_id)
         if cron_scheduler is not None:
             cron_scheduler.remove_agent_jobs(agent_id)
+        if cost_tracker is not None:
+            try:
+                cost_tracker.cleanup_agent(agent_id)
+            except Exception as e:
+                logger.warning("Cost cleanup for '%s' failed: %s", agent_id, e)
+        if trace_store is not None:
+            try:
+                trace_store.cleanup_agent(agent_id)
+            except Exception as e:
+                logger.warning("Trace cleanup for '%s' failed: %s", agent_id, e)
+        _ws_ref = wallet_service_ref or [None]
+        wallet_service = _ws_ref[0]
+        if wallet_service is not None:
+            try:
+                wallet_service.cleanup_agent(agent_id)
+            except Exception as e:
+                logger.warning("Wallet cleanup for '%s' failed: %s", agent_id, e)
 
     app.cleanup_agent = _cleanup_agent  # type: ignore[attr-defined]
 

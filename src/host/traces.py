@@ -241,6 +241,12 @@ class TraceStore:
         )
         return [self._row_to_dict(row) for row in cur.fetchall()]
 
+    def cleanup_agent(self, agent_id: str) -> int:
+        """Delete all trace records for an agent. Returns rows deleted."""
+        cursor = self._conn.execute("DELETE FROM traces WHERE agent = ?", (agent_id,))
+        self._conn.commit()
+        return cursor.rowcount
+
     def close(self) -> None:
         """Close the database connection."""
         self._conn.close()
