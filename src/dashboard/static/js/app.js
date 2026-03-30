@@ -173,8 +173,10 @@ function dashboard() {
 
     // Browser settings
     browserSpeed: 1.0,
+    browserDelay: 0,
     browserSettingsLoading: false,
     _browserSettingsDebounce: null,
+    _browserDelayDebounce: null,
 
     // System settings
     systemSettings: null,
@@ -3096,6 +3098,7 @@ function dashboard() {
         if (resp.ok) {
           const data = await resp.json();
           this.browserSpeed = data.speed ?? 1.0;
+          this.browserDelay = data.delay ?? 0;
         }
       } catch (e) { console.warn('fetchBrowserSettings failed:', e); }
       this.browserSettingsLoading = false;
@@ -3124,6 +3127,29 @@ function dashboard() {
       if (f >= 0.8) return 'Normal';
       if (f >= 0.5) return 'Careful';
       return 'Stealth';
+    },
+
+    saveBrowserDelay(value) {
+      this.browserDelay = parseFloat(value);
+      if (this._browserDelayDebounce) clearTimeout(this._browserDelayDebounce);
+      this._browserDelayDebounce = setTimeout(async () => {
+        try {
+          await fetch(`${window.__config.apiBase}/browser-settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ delay: this.browserDelay }),
+          });
+        } catch (e) { console.warn('saveBrowserDelay failed:', e); }
+      }, 300);
+    },
+
+    get browserDelayLabel() {
+      const d = this.browserDelay;
+      if (d <= 0) return 'Off';
+      if (d <= 1.0) return 'Light';
+      if (d <= 3.0) return 'Moderate';
+      if (d <= 6.0) return 'Heavy';
+      return 'Maximum';
     },
 
     // ── System settings ─────────────────────────────────

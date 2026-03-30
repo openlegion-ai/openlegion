@@ -6,6 +6,7 @@ Exposes per-agent browser control endpoints. Auth via Bearer token
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import os
 
@@ -40,6 +41,13 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         if not header.startswith("Bearer ") or not hmac.compare_digest(header[7:], auth_token):
             raise HTTPException(401, "Unauthorized")
 
+    async def _apply_delay():
+        """Sleep for the configured inter-action delay after a browser action."""
+        from src.browser.timing import inter_action_delay
+        d = inter_action_delay()
+        if d > 0:
+            await asyncio.sleep(d)
+
     @app.get("/browser/status")
     async def service_status(request: Request):
         _verify_auth(request)
@@ -72,8 +80,10 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         wait_ms = body.get("wait_ms", 1000)
         wait_until = body.get("wait_until", "domcontentloaded")
         snapshot_after = body.get("snapshot_after", False)
-        return await manager.navigate(agent_id, url, wait_ms, wait_until,
-                                      snapshot_after=snapshot_after)
+        result = await manager.navigate(agent_id, url, wait_ms, wait_until,
+                                        snapshot_after=snapshot_after)
+        await _apply_delay()
+        return result
 
     @app.post("/browser/{agent_id}/snapshot")
     async def snapshot(agent_id: str, request: Request):
@@ -84,13 +94,15 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     async def click(agent_id: str, request: Request):
         _verify_auth(request)
         body = await request.json()
-        return await manager.click(
+        result = await manager.click(
             agent_id,
             ref=body.get("ref"),
             selector=body.get("selector"),
             force=body.get("force", False),
             snapshot_after=body.get("snapshot_after", False),
         )
+        await _apply_delay()
+        return result
 
     @app.post("/browser/{agent_id}/wait_for")
     async def wait_for(agent_id: str, request: Request):
@@ -110,17 +122,19 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     async def hover(agent_id: str, request: Request):
         _verify_auth(request)
         body = await request.json()
-        return await manager.hover(
+        result = await manager.hover(
             agent_id,
             ref=body.get("ref"),
             selector=body.get("selector"),
         )
+        await _apply_delay()
+        return result
 
     @app.post("/browser/{agent_id}/type")
     async def type_text(agent_id: str, request: Request):
         _verify_auth(request)
         body = await request.json()
-        return await manager.type_text(
+        result = await manager.type_text(
             agent_id,
             ref=body.get("ref"),
             selector=body.get("selector"),
@@ -130,6 +144,8 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             fast=body.get("fast", False),
             snapshot_after=body.get("snapshot_after", False),
         )
+        await _apply_delay()
+        return result
 
     # /browser/{agent_id}/evaluate endpoint intentionally removed —
     # arbitrary JS execution is an SSRF/sandbox-escape vector.
@@ -157,12 +173,14 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     async def scroll(agent_id: str, request: Request):
         _verify_auth(request)
         body = await request.json()
-        return await manager.scroll(
+        result = await manager.scroll(
             agent_id,
             direction=body.get("direction", "down"),
             amount=body.get("amount", 0),
             ref=body.get("ref"),
         )
+        await _apply_delay()
+        return result
 
     @app.post("/browser/{agent_id}/solve_captcha")
     async def solve_captcha(agent_id: str, request: Request):
@@ -176,46 +194,58 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         key = body.get("key", "")
         if not key:
             raise HTTPException(400, "key required")
-        return await manager.press_key(agent_id, key)
+        result = await manager.press_key(agent_id, key)
+        await _apply_delay()
+        return result
 
     @app.post("/browser/{agent_id}/go_back")
     async def go_back(agent_id: str, request: Request):
         _verify_auth(request)
-        return await manager.go_back(agent_id)
+        result = await manager.go_back(agent_id)
+        await _apply_delay()
+        return result
 
     @app.post("/browser/{agent_id}/go_forward")
     async def go_forward(agent_id: str, request: Request):
         _verify_auth(request)
-        return await manager.go_forward(agent_id)
+        result = await manager.go_forward(agent_id)
+        await _apply_delay()
+        return result
 
     @app.post("/browser/{agent_id}/switch_tab")
     async def switch_tab(agent_id: str, request: Request):
         _verify_auth(request)
         body = await request.json()
-        return await manager.switch_tab(
+        result = await manager.switch_tab(
             agent_id, tab_index=body.get("tab_index", -1),
         )
+        await _apply_delay()
+        return result
 
     # ── Settings ───────────────────────────────────────────────────────────
 
     @app.get("/browser/settings")
     async def get_settings(request: Request):
-        """Return current browser speed settings."""
+        """Return current browser speed and delay settings."""
         _verify_auth(request)
-        from src.browser.timing import get_speed
-        return {"speed": get_speed()}
+        from src.browser.timing import get_delay, get_speed
+        return {"speed": get_speed(), "delay": get_delay()}
 
     @app.post("/browser/settings")
     async def update_settings(request: Request):
-        """Update browser speed settings at runtime."""
+        """Update browser speed and delay settings at runtime."""
         _verify_auth(request)
         body = await request.json()
         speed = body.get("speed")
         if speed is not None:
             from src.browser.timing import set_speed
             set_speed(float(speed))
-        from src.browser.timing import get_speed
-        return {"speed": get_speed()}
+        delay = body.get("delay")
+        if delay is not None:
+            from src.browser.timing import set_delay
+            set_delay(float(delay))
+        from src.browser.timing import get_delay, get_speed
+        return {"speed": get_speed(), "delay": get_delay()}
 
     # ── User uploads file serving ─────────────────────────────────────────
     # Serves files from /app/uploads (user-managed, read-only mount).

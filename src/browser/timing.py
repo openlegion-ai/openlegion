@@ -35,6 +35,24 @@ def set_speed(speed: float) -> None:
     _speed = max(_SPEED_MIN, min(_SPEED_MAX, float(speed)))
 
 
+# ── Inter-action delay ───────────────────────────────────────
+
+_delay: float = 0.0
+_DELAY_MIN: float = 0.0
+_DELAY_MAX: float = 30.0
+
+
+def get_delay() -> float:
+    """Return the current inter-action delay mean (0.0–30.0 seconds, default 0.0)."""
+    return _delay
+
+
+def set_delay(delay: float) -> None:
+    """Set the inter-action delay mean, clamped to [0.0, 30.0]. 0 = disabled."""
+    global _delay
+    _delay = max(_DELAY_MIN, min(_DELAY_MAX, float(delay)))
+
+
 # ── Internal ──────────────────────────────────────────────────
 
 
@@ -135,3 +153,30 @@ def scroll_increment() -> int:
     Not scaled by speed factor — scroll speed is governed by scroll_pause timing.
     """
     return int(_clamped_gauss(140, 30, 80, 200))
+
+
+# ── Inter-action delay sampling ──────────────────────────────
+
+
+def inter_action_delay() -> float:
+    """Sample an inter-action delay (seconds).
+
+    Applied after stateful browser actions (click, type, navigate, etc.)
+    to simulate the natural human pause between actions — reading the page,
+    deciding what to do next, moving eyes to the target element.
+
+    Returns 0.0 when disabled.  Otherwise samples from a Gaussian centred
+    on the configured mean with 40 % relative stddev, clamped to
+    [mean * 0.3, mean * 2.0].  This produces natural variance: most pauses
+    cluster near the mean, with occasional short bursts and long dwells.
+
+    Not scaled by the speed setting — speed governs *intra*-action timing
+    (keystroke pace, click dwell) while delay governs *inter*-action pacing.
+    They are independent knobs.
+    """
+    if _delay <= 0:
+        return 0.0
+    stddev = _delay * 0.4
+    low = _delay * 0.3
+    high = _delay * 2.0
+    return _clamped_gauss(_delay, stddev, low, high)

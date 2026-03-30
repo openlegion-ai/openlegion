@@ -2429,28 +2429,50 @@ def create_dashboard_router(
 
     @api_router.get("/api/browser-settings")
     async def api_get_browser_settings() -> dict:
-        """Return saved browser speed settings."""
+        """Return saved browser speed and delay settings."""
         settings = _load_settings()
-        return {"speed": settings.get("browser_speed", 1.0)}
+        return {
+            "speed": settings.get("browser_speed", 1.0),
+            "delay": settings.get("browser_delay", 0.0),
+        }
 
     @api_router.post("/api/browser-settings")
     async def api_set_browser_settings(request: Request) -> dict:
-        """Save browser speed settings and push to browser service."""
+        """Save browser speed/delay settings and push to browser service."""
         body = await request.json()
         speed = body.get("speed")
-        if speed is None:
-            raise HTTPException(400, "speed is required")
-        try:
-            speed = float(speed)
-        except (ValueError, TypeError):
-            raise HTTPException(400, "speed must be a number")
-        if speed < 0.25 or speed > 4.0:
-            raise HTTPException(400, "speed must be between 0.25 and 4.0")
+        delay = body.get("delay")
+
+        if speed is None and delay is None:
+            raise HTTPException(400, "speed or delay is required")
+
+        payload: dict = {}
+
+        if speed is not None:
+            try:
+                speed = float(speed)
+            except (ValueError, TypeError):
+                raise HTTPException(400, "speed must be a number")
+            if speed < 0.25 or speed > 4.0:
+                raise HTTPException(400, "speed must be between 0.25 and 4.0")
+            payload["speed"] = speed
+
+        if delay is not None:
+            try:
+                delay = float(delay)
+            except (ValueError, TypeError):
+                raise HTTPException(400, "delay must be a number")
+            if delay < 0.0 or delay > 30.0:
+                raise HTTPException(400, "delay must be between 0.0 and 30.0")
+            payload["delay"] = delay
 
         # Persist to config file
         with _settings_lock:
             settings = _load_settings()
-            settings["browser_speed"] = speed
+            if "speed" in payload:
+                settings["browser_speed"] = payload["speed"]
+            if "delay" in payload:
+                settings["browser_delay"] = payload["delay"]
             _save_settings(settings)
 
         # Push to browser service immediately
@@ -2462,13 +2484,17 @@ def create_dashboard_router(
                     headers["Authorization"] = f"Bearer {browser_auth}"
                 await _dashboard_browser_client.post(
                     f"{runtime.browser_service_url}/browser/settings",
-                    json={"speed": speed},
+                    json=payload,
                     headers=headers,
                 )
             except Exception as e:
                 logger.debug("Failed to push browser settings: %s", e)
 
-        return {"speed": speed}
+        settings = _load_settings()
+        return {
+            "speed": settings.get("browser_speed", 1.0),
+            "delay": settings.get("browser_delay", 0.0),
+        }
 
     # ── System settings (consolidated) ────────────────────────
 
