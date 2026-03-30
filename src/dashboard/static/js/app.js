@@ -1404,12 +1404,17 @@ function dashboard() {
             last.tools.forEach(t => { if (t.status === 'running') t.status = 'done'; });
           }
         }
-        this.chatStreamingAgents[agent] = false;
-        this.chatLoadingAgents[agent] = false;
-        // Refresh from server to ensure consistency
-        delete this._chatFetchedAt[agent];
-        this._loadChatHistory(agent);
-        this._saveChatToSession();
+        // If the local session has an active SSE stream for this agent,
+        // don't clear streaming state or reload history — the SSE finally
+        // block will handle cleanup when the stream naturally completes.
+        if (!this._chatAborts[agent]) {
+          this.chatStreamingAgents[agent] = false;
+          this.chatLoadingAgents[agent] = false;
+          // Refresh from server to ensure consistency
+          delete this._chatFetchedAt[agent];
+          this._loadChatHistory(agent);
+          this._saveChatToSession();
+        }
       } else if (evt.type === 'chat_reset' && agent) {
         // Another session reset this agent's conversation — clear local history
         this.chatHistories[agent] = [];
