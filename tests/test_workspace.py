@@ -229,14 +229,14 @@ class TestBootstrapContent:
     def test_bootstrap_enforces_total_cap(self):
         root = Path(self._tmpdir)
         # Fill every file close to its per-file cap to exceed total
-        (root / "INSTRUCTIONS.md").write_text("A" * 8_000)
+        (root / "INSTRUCTIONS.md").write_text("A" * 12_000)
         (root / "SOUL.md").write_text("S" * 4_000)
         (root / "USER.md").write_text("U" * 4_000)
         (root / "MEMORY.md").write_text("M" * 16_000)
         (root / "PROJECT.md").write_text("P" * 15_000)
         ws = WorkspaceManager(workspace_dir=self._tmpdir)
         content = ws.get_bootstrap_content()
-        assert len(content) <= 40_000 + 100  # small margin for truncation text
+        assert len(content) <= 48_000 + 100  # small margin for truncation text
 
     def test_bootstrap_skips_empty_files(self):
         root = Path(self._tmpdir)
