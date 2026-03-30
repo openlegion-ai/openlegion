@@ -3272,10 +3272,7 @@ function dashboard() {
       // source of truth, ensuring history is consistent across devices.
       // Skip if streaming (avoid clobber), recently fetched (debounce), or
       // a stream just finished (server may not have persisted the message yet).
-      // Defense-in-depth: also check _chatAborts (active SSE fetch) in case
-      // chatStreamingAgents was cleared prematurely by a WebSocket event.
-      if (this.chatStreamingAgents[agentId]) return;
-      if (this._chatAborts && this._chatAborts[agentId]) return;
+      if (this.chatStreamingAgents[agentId] || this._chatAborts[agentId]) return;
       const now = Date.now();
       if (this._chatFetchedAt[agentId] && (now - this._chatFetchedAt[agentId]) < 5000) return;
       const lastEnd = this._chatStreamEndAt?.[agentId] || 0;
@@ -3291,9 +3288,8 @@ function dashboard() {
           // initialized. Preserve local messages to avoid losing visible history.
           return;
         }
-        // Re-check streaming state after await — guards at function entry
-        // ran before the fetch, but streaming may have started during it.
-        if (this.chatStreamingAgents[agentId] || (this._chatAborts && this._chatAborts[agentId])) return;
+        // Re-check after await — streaming may have started during the fetch.
+        if (this.chatStreamingAgents[agentId] || this._chatAborts[agentId]) return;
         const serverMsgs = data.messages.map(m => ({
           role: m.role === 'assistant' ? 'agent' : m.role,
           content: m.content,
@@ -3314,9 +3310,7 @@ function dashboard() {
         // 1. User messages sent after the last server timestamp
         // 2. Agent messages from just-completed streams not yet persisted
         // 3. Notifications injected via WebSocket not yet in the server transcript
-        // 4. Active streaming bubbles (may have tools but no text yet)
         const trailing = localMsgs.filter(m => {
-          if (m.streaming) return true;  // Never drop an active streaming bubble
           if (m.role === 'notification') {
             return !serverMsgs.some(s =>
               s.role === 'notification' && s.content === m.content && Math.abs((s.ts || 0) - (m.ts || 0)) < 2000
@@ -3656,10 +3650,17 @@ function dashboard() {
 
       const controller = new AbortController();
       this._chatAborts[agentId] = controller;
-      // Safety timeout: if stream doesn't complete in 120s, abort and recover
-      const streamTimeout = setTimeout(() => {
+      // Idle timeout: abort if no SSE data received for 120s.  Resets on
+      // each chunk so long-running tool chains stay alive indefinitely.
+      let streamTimeout = setTimeout(() => {
         if (this.chatStreamingAgents[agentId]) controller.abort();
       }, 120000);
+      const _resetStreamTimeout = () => {
+        clearTimeout(streamTimeout);
+        streamTimeout = setTimeout(() => {
+          if (this.chatStreamingAgents[agentId]) controller.abort();
+        }, 120000);
+      };
 
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/chat/stream`, {
@@ -3686,6 +3687,7 @@ function dashboard() {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          _resetStreamTimeout();
           buffer += decoder.decode(value, { stream: true });
 
           const lines = buffer.split('\n');
