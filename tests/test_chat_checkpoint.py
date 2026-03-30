@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.agent.memory import MemoryStore
-
 
 # ── MemoryStore checkpoint methods ────────────────────────────
 
