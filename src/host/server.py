@@ -1223,7 +1223,10 @@ def create_mesh_app(
 
     _CRED_NAME_RE = re.compile(r"^[a-zA-Z0-9_.\-]{1,128}$")
 
-    @app.post("/mesh/credentials", tags=["Credentials"], summary="Store a credential", dependencies=[Depends(_api_key_header)])
+    @app.post(
+        "/mesh/credentials", tags=["Credentials"],
+        summary="Store a credential", dependencies=[Depends(_api_key_header)],
+    )
     async def ext_store_credential(request: Request) -> dict:
         """Store an agent-tier credential. Returns an opaque $CRED{name} handle.
 
@@ -1248,7 +1251,10 @@ def create_mesh_app(
         handle = credential_vault.add_credential(name, value)
         return {"stored": True, "handle": handle, "name": name}
 
-    @app.delete("/mesh/credentials/{name}", tags=["Credentials"], summary="Remove a credential", dependencies=[Depends(_api_key_header)])
+    @app.delete(
+        "/mesh/credentials/{name}", tags=["Credentials"],
+        summary="Remove a credential", dependencies=[Depends(_api_key_header)],
+    )
     async def ext_remove_credential(name: str, request: Request) -> dict:
         """Remove an agent-tier credential by name."""
         kid = _require_api_key(request)
@@ -1262,7 +1268,10 @@ def create_mesh_app(
             raise HTTPException(404, f"Credential not found: {name}")
         return {"removed": True, "name": name}
 
-    @app.get("/mesh/credentials", tags=["Credentials"], summary="List credentials", dependencies=[Depends(_api_key_header)])
+    @app.get(
+        "/mesh/credentials", tags=["Credentials"],
+        summary="List credentials", dependencies=[Depends(_api_key_header)],
+    )
     async def ext_list_credentials(request: Request) -> dict:
         """List agent-tier credential names (never values)."""
         kid = _require_api_key(request)
@@ -1272,7 +1281,10 @@ def create_mesh_app(
         names = credential_vault.list_agent_credential_names()
         return {"credentials": names, "count": len(names)}
 
-    @app.get("/mesh/credentials/{name}/exists", tags=["Credentials"], summary="Check credential exists", dependencies=[Depends(_api_key_header)])
+    @app.get(
+        "/mesh/credentials/{name}/exists", tags=["Credentials"],
+        summary="Check credential exists", dependencies=[Depends(_api_key_header)],
+    )
     async def ext_credential_exists(name: str, request: Request) -> dict:
         """Check if a credential exists by name (never returns value)."""
         kid = _require_api_key(request)
@@ -1281,7 +1293,10 @@ def create_mesh_app(
             raise HTTPException(503, "Credential vault not configured")
         return {"name": name, "exists": credential_vault.has_credential(name)}
 
-    @app.get("/mesh/agents/{agent_id}/ext-status", tags=["Agent Status"], summary="Get agent status", dependencies=[Depends(_api_key_header)])
+    @app.get(
+        "/mesh/agents/{agent_id}/ext-status", tags=["Agent Status"],
+        summary="Get agent status", dependencies=[Depends(_api_key_header)],
+    )
     async def ext_agent_status(agent_id: str, request: Request) -> dict:
         """Query agent status from an external system.
 
