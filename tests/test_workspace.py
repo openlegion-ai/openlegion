@@ -31,6 +31,7 @@ class TestWorkspaceScaffold:
         assert (root / "USER.md").exists()
         assert (root / "MEMORY.md").exists()
         assert (root / "HEARTBEAT.md").exists()
+        assert (root / "INTERFACE.md").exists()
         assert (root / "memory").is_dir()
         assert (root / "learnings").is_dir()
 
@@ -573,9 +574,9 @@ class TestPerAgentSoul:
         assert "# Identity" in content
 
     def test_all_identity_files_scaffolded(self):
-        """All 5 identity files are created with default content."""
+        """All identity/workspace files are created with default content."""
         root = Path(self._tmpdir)
-        for filename in ("SOUL.md", "INSTRUCTIONS.md", "USER.md", "MEMORY.md", "HEARTBEAT.md"):
+        for filename in ("SOUL.md", "INSTRUCTIONS.md", "USER.md", "MEMORY.md", "HEARTBEAT.md", "INTERFACE.md"):
             assert (root / filename).exists(), f"{filename} not scaffolded"
             content = (root / filename).read_text()
             assert content.strip(), f"{filename} has empty scaffold"

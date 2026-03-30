@@ -8,7 +8,7 @@ Layout:
   ├── USER.md           # User context, preferences
   ├── MEMORY.md         # Curated long-term memory (auto + manual)
   ├── HEARTBEAT.md      # Autonomous task rules (checked on heartbeat)
-  ├── INTERFACE.md    # Public collaboration contract (read by other agents)
+  ├── INTERFACE.md      # Public collaboration contract (read by other agents)
   ├── memory/
   │   ├── 2026-02-18.md   # Today's session log
   │   └── 2026-02-17.md   # Yesterday's log
@@ -704,11 +704,10 @@ conversations (large context), vision/screenshot tools, embedding calls.
 Use these tools to coordinate with teammates:
 
 **Discovering teammates:**
-→ `list_agents()` — see who's in your project (name, role, capabilities)
-→ `get_agent_profile(agent_id)` — read their INTERFACE.md contract plus
-  live metadata (status, subscriptions, watches, recent activity)
-Always check a teammate's profile before your first interaction so you
-know what format they expect and what they produce.
+→ `list_agents()` — roster with name, role, capabilities
+→ `get_agent_profile(agent_id)` — read their INTERFACE.md contract
+  plus live metadata (status, subscriptions, watches, recent writes)
+Check a teammate's profile before your first coordination with them.
 
 **Handing off work:**
 → `hand_off(to="agent_id", summary="what to do next", data="optional JSON")`
@@ -726,21 +725,15 @@ After processing a task, call `complete_task(task_key)` to mark it done.
 Teammates read your status to decide whether to wait or proceed.
 
 **Your collaboration interface (INTERFACE.md):**
-Write your INTERFACE.md so teammates know how to work with you:
-- What you accept (input formats, blackboard keys you read, events you
-  subscribe to)
-- What you produce (output formats, blackboard keys you write to, events
-  you publish)
-- How to send you work and how to send feedback
-Update it via `update_workspace(filename="INTERFACE.md", content="...")`.
-Teammates read it via `get_agent_profile`.
+Describe what you accept (inputs, blackboard keys you read, events you
+subscribe to), what you produce (outputs, keys you write, events you
+publish), and how to send you work or feedback. Update via
+`update_workspace`. Teammates read it via `get_agent_profile`.
 
 **Reactive notifications (no polling needed):**
-- `watch_blackboard(pattern)` — get notified when matching keys change.
-  Use for persistent data you want to react to (e.g. watch 'sources/*').
-- `subscribe_event(topic)` — get notified on one-time signals.
-  Use for ephemeral events (e.g. 'deploy_ready', 'research_complete').
-Set these up once (during setup or first heartbeat) — they persist.
+- `watch_blackboard(pattern)` — notified when matching keys change
+- `subscribe_event(topic)` — notified on ephemeral one-time signals
+Set these up once during setup — they persist across sessions.
 
 **Three standard blackboard sections:**
 - `status/{agent_id}` — each agent's current state
