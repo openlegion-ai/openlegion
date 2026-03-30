@@ -3136,6 +3136,7 @@ def create_dashboard_router(
 
     _WORKSPACE_ALLOWLIST = frozenset({
         "SOUL.md", "HEARTBEAT.md", "USER.md", "INSTRUCTIONS.md", "AGENTS.md", "MEMORY.md",
+        "INTERFACE.md",
     })
 
     @api_router.get("/api/agents/{agent_id}/workspace")

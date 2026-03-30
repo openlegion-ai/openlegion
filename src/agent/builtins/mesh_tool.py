@@ -48,8 +48,10 @@ async def notify_user(message: str, *, mesh_client=None, workspace_manager=None)
     name="list_agents",
     description=(
         "List agents in your project (or just yourself if standalone). Returns "
-        "each agent's name and role. Use this to discover who else is working "
-        "in your project."
+        "each agent's name, role, and capabilities. Use this to discover who "
+        "else is working in your project. For detailed collaboration info "
+        "(what they accept/produce, their status, INTERFACE.md contract), "
+        "follow up with get_agent_profile(agent_id)."
     ),
     parameters={},
 )
@@ -251,11 +253,13 @@ async def publish_event(
 @skill(
     name="subscribe_event",
     description=(
-        "Subscribe to a pub/sub topic. Once subscribed, events published to "
-        "this topic by other agents arrive as steer messages between your "
-        "tool rounds — no polling needed. Use this to react to coordination "
-        "signals (e.g. 'research_complete', 'deploy_ready'). For watching "
-        "persistent blackboard changes, use watch_blackboard instead."
+        "Subscribe to a pub/sub topic for one-time signals. Once subscribed, "
+        "events published to this topic arrive as steer messages between your "
+        "tool rounds — no polling needed. Use for ephemeral notifications "
+        "where you need to react immediately (e.g. 'research_complete', "
+        "'deploy_ready'). Events are fire-and-forget — if you subscribe "
+        "after an event fires, you won't see it. For reacting to persistent "
+        "data changes, use watch_blackboard instead."
     ),
     parameters={
         "topic": {
@@ -280,10 +284,12 @@ async def subscribe_event(topic: str, *, mesh_client=None) -> dict:
     name="watch_blackboard",
     description=(
         "Watch blackboard keys matching a glob pattern. When any matching "
-        "key is written by another agent, you'll receive a notification "
-        "between tool rounds — no polling needed. Use this to react "
-        "when shared state changes (e.g. watch 'tasks/*' to know when "
-        "new tasks appear)."
+        "key is written by another agent, you receive a notification "
+        "between tool rounds — no polling needed. Use this to react to "
+        "persistent data changes (e.g. watch 'sources/*' for new research "
+        "briefs, 'feedback/*' for revision requests). Set up watches once "
+        "during setup or your first heartbeat — they persist across sessions. "
+        "For one-time event signals, use subscribe_event instead."
     ),
     parameters={
         "pattern": {

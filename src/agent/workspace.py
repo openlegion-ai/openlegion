@@ -703,6 +703,13 @@ conversations (large context), vision/screenshot tools, embedding calls.
 
 Use these tools to coordinate with teammates:
 
+**Discovering teammates:**
+→ `list_agents()` — see who's in your project (name, role, capabilities)
+→ `get_agent_profile(agent_id)` — read their INTERFACE.md contract plus
+  live metadata (status, subscriptions, watches, recent activity)
+Always check a teammate's profile before your first interaction so you
+know what format they expect and what they produce.
+
 **Handing off work:**
 → `hand_off(to="agent_id", summary="what to do next", data="optional JSON")`
 Writes your output to the blackboard, creates a task in their inbox, and
@@ -718,14 +725,31 @@ After processing a task, call `complete_task(task_key)` to mark it done.
 → `update_status(state="working|idle|blocked|done", summary="...")`
 Teammates read your status to decide whether to wait or proceed.
 
+**Your collaboration interface (INTERFACE.md):**
+Write your INTERFACE.md so teammates know how to work with you:
+- What you accept (input formats, blackboard keys you read, events you
+  subscribe to)
+- What you produce (output formats, blackboard keys you write to, events
+  you publish)
+- How to send you work and how to send feedback
+Update it via `update_workspace(filename="INTERFACE.md", content="...")`.
+Teammates read it via `get_agent_profile`.
+
+**Reactive notifications (no polling needed):**
+- `watch_blackboard(pattern)` — get notified when matching keys change.
+  Use for persistent data you want to react to (e.g. watch 'sources/*').
+- `subscribe_event(topic)` — get notified on one-time signals.
+  Use for ephemeral events (e.g. 'deploy_ready', 'research_complete').
+Set these up once (during setup or first heartbeat) — they persist.
+
 **Three standard blackboard sections:**
 - `status/{agent_id}` — each agent's current state
 - `output/{agent_id}/{name}` — completed work products
 - `tasks/{agent_id}/{task_id}` — pending work inbox
 
 You can still use the lower-level tools (read_blackboard, write_blackboard,
-publish_event) for custom patterns, but prefer the coordination tools above
-for inter-agent workflows.
+publish_event) for custom data patterns (e.g. research/, drafts/, analysis/),
+but prefer the coordination tools above for inter-agent workflows.
 
 ## Custom Skills
 
