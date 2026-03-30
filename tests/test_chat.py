@@ -16,6 +16,7 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None) -> AgentLoop:
     memory.get_high_salience_facts = MagicMock(return_value=[])
     memory.search = AsyncMock(return_value=[])
     memory.log_action = AsyncMock()
+    memory._run_db = AsyncMock(return_value=None)
 
     skills = MagicMock()
     skills.get_tool_definitions = MagicMock(return_value=[])

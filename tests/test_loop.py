@@ -40,6 +40,7 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
         memory.log_action = AsyncMock()
         memory.store_tool_outcome = AsyncMock()
         memory.get_tool_history = MagicMock(return_value=[])
+        memory._run_db = AsyncMock(return_value=None)
 
     skills = MagicMock()
     skills.get_tool_definitions = MagicMock(return_value=[])

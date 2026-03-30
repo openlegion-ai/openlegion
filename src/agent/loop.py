@@ -1341,6 +1341,50 @@ class AgentLoop:
                 f"Session continued — conversation summarized after {self.CHAT_MAX_TOTAL_ROUNDS} turns.",
             )
 
+    async def _maybe_restore_session(self) -> None:
+        """Restore chat state from checkpoint on first call after restart."""
+        if self._chat_messages or not self.memory:
+            return
+        try:
+            cp = await self.memory._run_db(self.memory.load_chat_checkpoint)
+        except Exception as e:
+            logger.warning("Failed to load chat checkpoint: %s", e)
+            return
+        if cp is None:
+            return
+        self._chat_messages = cp["messages"]
+        self._chat_total_rounds = cp["total_rounds"]
+        self._chat_auto_continues = cp["auto_continues"]
+        if self.context_manager:
+            self.context_manager._flush_triggered = cp["flush_triggered"]
+        logger.info(
+            "chat-session-restored messages=%d rounds=%d continues=%d",
+            len(self._chat_messages),
+            self._chat_total_rounds,
+            self._chat_auto_continues,
+        )
+
+    async def _checkpoint_chat_session(self) -> None:
+        """Persist current chat state for crash recovery."""
+        if not self.memory:
+            return
+        if not self._chat_messages:
+            try:
+                await self.memory._run_db(self.memory.clear_chat_checkpoint)
+            except Exception as e:
+                logger.debug("Failed to clear chat checkpoint: %s", e)
+            return
+        try:
+            await self.memory._run_db(
+                self.memory.save_chat_checkpoint,
+                self._chat_messages,
+                self._chat_total_rounds,
+                self._chat_auto_continues,
+                self.context_manager._flush_triggered if self.context_manager else False,
+            )
+        except Exception as e:
+            logger.warning("Failed to save chat checkpoint: %s", e)
+
     async def chat(self, user_message: str, *, trace_id: str | None = None) -> dict:
         """Handle a single chat turn with persistent conversation history.
 
@@ -1357,7 +1401,11 @@ class AgentLoop:
         from src.shared.trace import current_trace_id
         current_trace_id.set(trace_id)
         async with self._chat_lock:
-            return await self._chat_inner(user_message)
+            await self._maybe_restore_session()
+            try:
+                return await self._chat_inner(user_message)
+            finally:
+                await self._checkpoint_chat_session()
 
     # ── Chat helpers (shared by streaming and non-streaming) ────
 
@@ -1935,6 +1983,7 @@ class AgentLoop:
             self._loop_detector.reset()
             if self.context_manager:
                 self.context_manager.reset()
+            await self._checkpoint_chat_session()
 
     def _build_chat_system_prompt(
         self,
@@ -2093,8 +2142,12 @@ class AgentLoop:
         from src.shared.trace import current_trace_id
         current_trace_id.set(trace_id)
         async with self._chat_lock:
-            async for event in self._chat_stream_inner(user_message):
-                yield event
+            await self._maybe_restore_session()
+            try:
+                async for event in self._chat_stream_inner(user_message):
+                    yield event
+            finally:
+                await self._checkpoint_chat_session()
 
     async def _chat_stream_inner(self, user_message: str):
         self.state = "working"

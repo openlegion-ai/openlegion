@@ -32,6 +32,7 @@ def _make_loop_with_workspace(
     memory.get_high_salience_facts = MagicMock(return_value=[])
     memory.search = AsyncMock(return_value=[])
     memory.log_action = AsyncMock()
+    memory._run_db = AsyncMock(return_value=None)
 
     skills = MagicMock()
     skills.get_tool_definitions = MagicMock(return_value=[])
@@ -352,6 +353,7 @@ class TestChatTranscriptIntegration:
         memory.search = AsyncMock(return_value=[])
         memory.log_action = AsyncMock()
         memory.get_tool_history = MagicMock(return_value=[])
+        memory._run_db = AsyncMock(return_value=None)
 
         skills = MagicMock()
         skills.get_tool_definitions = MagicMock(return_value=[])
