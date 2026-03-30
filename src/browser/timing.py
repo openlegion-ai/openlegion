@@ -39,7 +39,7 @@ def set_speed(speed: float) -> None:
 
 _delay: float = 0.0
 _DELAY_MIN: float = 0.0
-_DELAY_MAX: float = 30.0
+_DELAY_MAX: float = 10.0
 
 
 def get_delay() -> float:
@@ -48,7 +48,7 @@ def get_delay() -> float:
 
 
 def set_delay(delay: float) -> None:
-    """Set the inter-action delay mean, clamped to [0.0, 30.0]. 0 = disabled."""
+    """Set the inter-action delay mean, clamped to [0.0, 10.0]. 0 = disabled."""
     global _delay
     _delay = max(_DELAY_MIN, min(_DELAY_MAX, float(delay)))
 

@@ -1485,7 +1485,7 @@ class TestHumanTiming:
     def test_delay_clamped_high(self):
         from src.browser.timing import get_delay, set_delay
         set_delay(99.0)
-        assert get_delay() == 30.0
+        assert get_delay() == 10.0
         set_delay(0.0)
 
     def test_inter_action_delay_zero_when_disabled(self):
@@ -4053,8 +4053,8 @@ class TestBrowserSettingsEndpoint:
         client = TestClient(app)
         resp = client.post("/browser/settings", json={"delay": 100.0})
         assert resp.status_code == 200
-        assert resp.json()["delay"] == 30.0
-        assert get_delay() == 30.0
+        assert resp.json()["delay"] == 10.0
+        assert get_delay() == 10.0
 
     def test_set_delay_only(self):
         """POST /browser/settings with only delay should not affect speed."""

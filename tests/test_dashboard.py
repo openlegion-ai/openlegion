@@ -3486,10 +3486,10 @@ class TestDashboardBrowserSettings:
         assert resp.json()["delay"] == 5.0
 
     def test_post_delay_validates_range(self):
-        """POST should reject delay above 30.0."""
+        """POST should reject delay above 10.0."""
         resp = self.client.post(
             "/dashboard/api/browser-settings",
-            json={"delay": 31.0},
+            json={"delay": 11.0},
         )
         assert resp.status_code == 400
 

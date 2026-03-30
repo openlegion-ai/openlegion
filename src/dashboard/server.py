@@ -329,6 +329,38 @@ def create_dashboard_router(
     import httpx as _httpx
     _dashboard_browser_client = _httpx.AsyncClient(timeout=10)
 
+    async def _push_browser_settings() -> None:
+        """Push saved browser speed/delay to the browser service.
+
+        Called after browser service (re)start so persisted settings
+        survive container restarts.  Failures are silently logged —
+        the browser service will simply use its defaults.
+        """
+        if not runtime or not getattr(runtime, 'browser_service_url', ''):
+            return
+        settings = _load_settings()
+        payload: dict = {}
+        speed = settings.get("browser_speed")
+        if speed is not None:
+            payload["speed"] = speed
+        delay = settings.get("browser_delay")
+        if delay is not None:
+            payload["delay"] = delay
+        if not payload:
+            return
+        try:
+            browser_auth = getattr(runtime, 'browser_auth_token', '')
+            headers = {}
+            if browser_auth:
+                headers["Authorization"] = f"Bearer {browser_auth}"
+            await _dashboard_browser_client.post(
+                f"{runtime.browser_service_url}/browser/settings",
+                json=payload,
+                headers=headers,
+            )
+        except Exception as e:
+            logger.debug("Failed to push browser settings on startup: %s", e)
+
     @api_router.post("/api/browser/{agent_id}/focus")
     async def api_browser_focus(agent_id: str, request: Request) -> dict:
         """Tell the browser service to bring this agent's browser to foreground."""
@@ -2462,8 +2494,8 @@ def create_dashboard_router(
                 delay = float(delay)
             except (ValueError, TypeError):
                 raise HTTPException(400, "delay must be a number")
-            if delay < 0.0 or delay > 30.0:
-                raise HTTPException(400, "delay must be between 0.0 and 30.0")
+            if delay < 0.0 or delay > 10.0:
+                raise HTTPException(400, "delay must be between 0.0 and 10.0")
             payload["delay"] = delay
 
         # Persist to config file
@@ -2647,6 +2679,8 @@ def create_dashboard_router(
             try:
                 await loop.run_in_executor(None, runtime.stop_browser_service)
                 await loop.run_in_executor(None, runtime.start_browser_service)
+                # Push saved speed/delay to the freshly started browser service
+                await _push_browser_settings()
             except Exception as e:
                 logger.warning("Browser service restart failed: %s", e)
 
