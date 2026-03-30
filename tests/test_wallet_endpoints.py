@@ -233,3 +233,91 @@ class TestWalletExecute:
             "contract": "0x1", "function": "foo()",
         })
         assert resp.status_code == 503
+
+
+# === WalletService.cleanup_agent Tests ===
+
+
+class TestWalletServiceCleanup:
+    """Verify cleanup_agent removes transaction and agent_index records."""
+
+    def setup_method(self):
+        import os
+        import tempfile
+
+        self._tmpdir = tempfile.mkdtemp()
+        self._db_path = os.path.join(self._tmpdir, "wallet.db")
+        # WalletService reads master seed from env; None is fine for DB tests
+        self._original_seed = os.environ.get("OPENLEGION_SYSTEM_WALLET_MASTER_SEED")
+        os.environ.pop("OPENLEGION_SYSTEM_WALLET_MASTER_SEED", None)
+        from src.host.wallet import WalletService
+        self.ws = WalletService(db_path=self._db_path)
+
+    def teardown_method(self):
+        import os
+        import shutil
+
+        self.ws.close()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+        if self._original_seed is not None:
+            os.environ["OPENLEGION_SYSTEM_WALLET_MASTER_SEED"] = self._original_seed
+
+    def test_cleanup_removes_transactions_and_index(self):
+        # Insert agent_index and transaction rows directly
+        self.ws.db.execute(
+            "INSERT INTO index_counter (id, next_idx) VALUES (1, 2) "
+            "ON CONFLICT(id) DO UPDATE SET next_idx = 2",
+        )
+        self.ws.db.execute(
+            "INSERT INTO agent_index (agent_id, idx) VALUES (?, ?)", ("agent1", 0),
+        )
+        self.ws.db.execute(
+            "INSERT INTO agent_index (agent_id, idx) VALUES (?, ?)", ("agent2", 1),
+        )
+        self.ws.db.execute(
+            "INSERT INTO transactions (agent_id, chain, to_address, value, status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("agent1", "evm:base", "0xABC", "1.0", "broadcast"),
+        )
+        self.ws.db.execute(
+            "INSERT INTO transactions (agent_id, chain, to_address, value, status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("agent1", "evm:base", "0xDEF", "2.0", "broadcast"),
+        )
+        self.ws.db.execute(
+            "INSERT INTO transactions (agent_id, chain, to_address, value, status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("agent2", "evm:base", "0xGHI", "3.0", "broadcast"),
+        )
+        self.ws.db.commit()
+
+        deleted = self.ws.cleanup_agent("agent1")
+        assert deleted == 2
+
+        # agent1 transactions gone
+        rows = self.ws.db.execute(
+            "SELECT COUNT(*) FROM transactions WHERE agent_id = ?", ("agent1",),
+        ).fetchone()
+        assert rows[0] == 0
+
+        # agent1 index gone
+        rows = self.ws.db.execute(
+            "SELECT COUNT(*) FROM agent_index WHERE agent_id = ?", ("agent1",),
+        ).fetchone()
+        assert rows[0] == 0
+
+        # agent2 untouched
+        rows = self.ws.db.execute(
+            "SELECT COUNT(*) FROM transactions WHERE agent_id = ?", ("agent2",),
+        ).fetchone()
+        assert rows[0] == 1
+
+        # index_counter NOT modified (key reuse protection)
+        next_idx = self.ws.db.execute(
+            "SELECT next_idx FROM index_counter WHERE id = 1",
+        ).fetchone()
+        assert next_idx[0] == 2
+
+    def test_cleanup_nonexistent_agent(self):
+        deleted = self.ws.cleanup_agent("ghost")
+        assert deleted == 0

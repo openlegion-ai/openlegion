@@ -238,6 +238,37 @@ class TestTraceStore:
             store.close()
 
 
+class TestTraceStoreCleanup:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self._tmpdir, "traces.db")
+        self.store = TraceStore(db_path=self.db_path)
+
+    def teardown_method(self):
+        self.store.close()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_cleanup_removes_agent_traces(self):
+        self.store.record("tr_1", "repl", "alpha", "chat", "hello")
+        self.store.record("tr_2", "repl", "alpha", "llm_call", "call")
+        self.store.record("tr_3", "repl", "beta", "chat", "world")
+
+        deleted = self.store.cleanup_agent("alpha")
+        assert deleted == 2
+
+        # alpha records gone
+        results = self.store.query(agent="alpha")
+        assert len(results) == 0
+
+        # beta records untouched
+        results = self.store.query(agent="beta")
+        assert len(results) == 1
+
+    def test_cleanup_nonexistent_agent(self):
+        deleted = self.store.cleanup_agent("ghost")
+        assert deleted == 0
+
+
 # ── _extract_prompt_preview ──────────────────────────────────
 
 class TestExtractPromptPreview:

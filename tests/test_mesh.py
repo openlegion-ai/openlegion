@@ -116,6 +116,48 @@ def test_ttl_gc_runs_once_under_concurrent_writes(tmp_path):
     bb.close()
 
 
+# === Blackboard Cleanup Tests ===
+
+
+def test_blackboard_cleanup_agent_data(tmp_path):
+    """cleanup_agent_data removes entries, event log, and watches for an agent."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    bb.write("context/a1", {"x": 1}, written_by="agent1")
+    bb.write("context/a2", {"x": 2}, written_by="agent1")
+    bb.write("context/b1", {"x": 3}, written_by="agent2")
+    bb.add_watch("agent1", "context/*")
+
+    deleted = bb.cleanup_agent_data("agent1")
+    assert deleted == 2
+
+    # agent1 entries gone
+    assert bb.read("context/a1") is None
+    assert bb.read("context/a2") is None
+
+    # agent2 entry untouched
+    assert bb.read("context/b1") is not None
+
+    # agent1 watches gone
+    watchers = bb.get_watchers_for_key("context/something")
+    assert "agent1" not in watchers
+
+    # event log for agent1 gone
+    rows = bb.db.execute(
+        "SELECT COUNT(*) FROM event_log WHERE agent_id = ?", ("agent1",),
+    ).fetchone()
+    assert rows[0] == 0
+
+    bb.close()
+
+
+def test_blackboard_cleanup_nonexistent_agent(tmp_path):
+    """cleanup_agent_data on a non-existent agent is a no-op."""
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    deleted = bb.cleanup_agent_data("ghost")
+    assert deleted == 0
+    bb.close()
+
+
 # === PubSub Tests ===
 
 

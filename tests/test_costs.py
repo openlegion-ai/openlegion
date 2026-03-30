@@ -225,6 +225,45 @@ class TestProjectCostAggregation:
         assert result["monthly_limit"] == 2000.0
 
 
+class TestCostTrackerCleanup:
+    """Verify cleanup_agent removes all records and budget for an agent."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self._tmpdir, "costs.db")
+        self.tracker = CostTracker(db_path=self.db_path)
+
+    def teardown_method(self):
+        self.tracker.close()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_cleanup_removes_usage_records(self):
+        self.tracker.track("agent1", "openai/gpt-4o-mini", 100, 50)
+        self.tracker.track("agent1", "openai/gpt-4o", 200, 100)
+        self.tracker.track("agent2", "openai/gpt-4o-mini", 300, 150)
+
+        deleted = self.tracker.cleanup_agent("agent1")
+        assert deleted == 2
+
+        # agent1 records gone
+        spend = self.tracker.get_spend("agent1", "today")
+        assert spend["total_tokens"] == 0
+
+        # agent2 records untouched
+        spend2 = self.tracker.get_spend("agent2", "today")
+        assert spend2["total_tokens"] == 450
+
+    def test_cleanup_removes_budget(self):
+        self.tracker.set_budget("agent1", daily_usd=5.0, monthly_usd=100.0)
+        assert "agent1" in self.tracker.budgets
+        self.tracker.cleanup_agent("agent1")
+        assert "agent1" not in self.tracker.budgets
+
+    def test_cleanup_nonexistent_agent(self):
+        deleted = self.tracker.cleanup_agent("ghost")
+        assert deleted == 0
+
+
 class TestCostTrackerWithVault:
     """Verify CostTracker integrates with CredentialVault."""
 

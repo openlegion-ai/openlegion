@@ -180,6 +180,20 @@ class WalletService:
         self._solana_clients.clear()
         self.db.close()
 
+    def cleanup_agent(self, agent_id: str) -> int:
+        """Delete wallet records for an agent. Returns transaction rows deleted.
+
+        Does NOT reuse the key derivation index — that would create a
+        different agent with the same wallet key (security issue).
+        """
+        cursor = self.db.execute(
+            "DELETE FROM transactions WHERE agent_id = ?", (agent_id,),
+        )
+        deleted = cursor.rowcount
+        self.db.execute("DELETE FROM agent_index WHERE agent_id = ?", (agent_id,))
+        self.db.commit()
+        return deleted
+
     # ── Schema ────────────────────────────────────────────────
 
     def _init_schema(self) -> None:

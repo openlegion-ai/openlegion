@@ -64,6 +64,13 @@ class CostTracker:
     def close(self) -> None:
         self.db.close()
 
+    def cleanup_agent(self, agent_id: str) -> int:
+        """Delete all cost records for an agent. Returns rows deleted."""
+        cursor = self.db.execute("DELETE FROM usage WHERE agent = ?", (agent_id,))
+        self.db.commit()
+        self.budgets.pop(agent_id, None)
+        return cursor.rowcount
+
     def set_budget(self, agent: str, daily_usd: float | None = None, monthly_usd: float | None = None) -> None:
         if daily_usd is None or monthly_usd is None:
             defaults = _default_budget()
