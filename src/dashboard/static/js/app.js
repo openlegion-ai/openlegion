@@ -313,12 +313,6 @@ function dashboard() {
     endpointEditInstructions: '',
     endpointEditRequireSig: false,
 
-    // Endpoint inline edit
-    editingEndpointId: null,
-    endpointEditName: '',
-    endpointEditAgent: '',
-    endpointEditInstructions: '',
-
     // Model health
     modelHealth: [],
 
@@ -382,6 +376,7 @@ function dashboard() {
     outboundCreating: false,
     outboundSaving: false,
     outboundDeliveries: [],
+    deliveriesFetching: false,
     showOutboundForm: false,
     showDeliveries: false,
 
@@ -4574,6 +4569,14 @@ function dashboard() {
       this.endpointEditRequireSig = false;
     },
 
+    resetEndpointForm() {
+      this.showEndpointForm = false;
+      this.endpointFormName = '';
+      this.endpointFormAgent = '';
+      this.endpointFormInstructions = '';
+      this.endpointFormRequireSig = false;
+    },
+
     async saveEndpointEdit() {
       if (this.endpointSaving) return;
       const id = this.editingEndpointId;
@@ -4665,6 +4668,10 @@ function dashboard() {
       const url = this.outboundFormUrl.trim();
       const events = this.outboundFormEvents;
       if (!name || !url || !events.length) { this.showToast('Name, URL, and at least one event required'); return; }
+      if (!url.startsWith('https://')) {
+          this.showToast('URL must use HTTPS');
+          return;
+      }
       this.outboundCreating = true;
       try {
         const body = { name, url, events, agent_filter: this.outboundFormAgentFilter };
@@ -4698,10 +4705,12 @@ function dashboard() {
     },
 
     async fetchDeliveries() {
+      this.deliveriesFetching = true;
       try {
         const resp = await fetch(`${window.__config.apiBase}/webhooks/deliveries`);
         if (resp.ok) this.outboundDeliveries = (await resp.json()).deliveries || [];
       } catch (e) { console.error('Failed to fetch deliveries', e); }
+      finally { this.deliveriesFetching = false; }
     },
 
     editOutboundWebhook(wh) {

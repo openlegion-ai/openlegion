@@ -855,6 +855,8 @@ def create_mesh_app(
         event_name = (body.get("event_name") or "").strip()
         if not event_name:
             raise HTTPException(400, "event_name is required")
+        if len(event_name) > 100:
+            raise HTTPException(status_code=400, detail="event_name too long (max 100 chars)")
         data = body.get("data", {})
         if event_bus:
             event_bus.emit("custom", agent=agent_id,

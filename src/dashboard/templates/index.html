@@ -2810,7 +2810,7 @@
                   Require HMAC signature
                 </label>
                 <div class="flex justify-between">
-                  <button @click="showEndpointForm = false; endpointFormName = ''; endpointFormAgent = ''; endpointFormInstructions = ''; endpointFormRequireSig = false" :disabled="endpointCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="resetEndpointForm()" :disabled="endpointCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
                   <button @click="createEndpoint()" :disabled="endpointCreating" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
                     <svg x-show="endpointCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                     <span x-text="endpointCreating ? 'Creating...' : 'Create Endpoint'"></span>
@@ -2937,7 +2937,8 @@
                       <span x-show="d.error" class="text-red-400/70 text-[10px] truncate max-w-[200px]" :title="d.error" x-text="d.error"></span>
                     </div>
                   </template>
-                  <div x-show="outboundDeliveries.length === 0" class="text-gray-600 text-sm py-2 text-center">No recent deliveries</div>
+                  <p x-show="deliveriesFetching" class="text-gray-400 text-sm">Loading...</p>
+                  <div x-show="!deliveriesFetching && outboundDeliveries.length === 0" class="text-gray-600 text-sm py-2 text-center">No recent deliveries</div>
                 </div>
               </div>
             </div>

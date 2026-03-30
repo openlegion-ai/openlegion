@@ -3057,7 +3057,7 @@ def create_dashboard_router(
     @api_router.post("/api/webhooks")
     async def api_webhooks_create(request: Request) -> dict:
         if outbound_webhook_manager is None:
-            raise HTTPException(503, "Outbound webhooks not available")
+            raise HTTPException(status_code=503, detail="Outbound webhooks not available")
         body = await request.json()
         name = body.get("name", "").strip()
         url = body.get("url", "").strip()
@@ -3076,7 +3076,7 @@ def create_dashboard_router(
     @api_router.delete("/api/webhooks/{sub_id}")
     async def api_webhooks_delete(sub_id: str) -> dict:
         if outbound_webhook_manager is None:
-            raise HTTPException(503, "Outbound webhooks not available")
+            raise HTTPException(status_code=503, detail="Outbound webhooks not available")
         removed = outbound_webhook_manager.remove_subscription(sub_id)
         if not removed:
             raise HTTPException(404, f"Webhook '{sub_id}' not found")
@@ -3085,7 +3085,7 @@ def create_dashboard_router(
     @api_router.patch("/api/webhooks/{sub_id}")
     async def api_webhooks_update(sub_id: str, request: Request) -> dict:
         if outbound_webhook_manager is None:
-            raise HTTPException(503, "Outbound webhooks not available")
+            raise HTTPException(status_code=503, detail="Outbound webhooks not available")
         body = await request.json()
         fields = {}
         for key in ("name", "url", "events", "agent_filter"):
@@ -3107,7 +3107,7 @@ def create_dashboard_router(
     @api_router.post("/api/webhooks/{sub_id}/test")
     async def api_webhooks_test(sub_id: str) -> dict:
         if outbound_webhook_manager is None:
-            raise HTTPException(503, "Outbound webhooks not available")
+            raise HTTPException(status_code=503, detail="Outbound webhooks not available")
         result = await outbound_webhook_manager.test_subscription(sub_id)
         if result is None:
             raise HTTPException(404, f"Webhook '{sub_id}' not found")
