@@ -3273,10 +3273,7 @@ function dashboard() {
       // source of truth, ensuring history is consistent across devices.
       // Skip if streaming (avoid clobber), recently fetched (debounce), or
       // a stream just finished (server may not have persisted the message yet).
-      // Defense-in-depth: also check _chatAborts (active SSE fetch) in case
-      // chatStreamingAgents was cleared prematurely by a WebSocket event.
-      if (this.chatStreamingAgents[agentId]) return;
-      if (this._chatAborts && this._chatAborts[agentId]) return;
+      if (this.chatStreamingAgents[agentId] || this._chatAborts[agentId]) return;
       const now = Date.now();
       if (this._chatFetchedAt[agentId] && (now - this._chatFetchedAt[agentId]) < 5000) return;
       const lastEnd = this._chatStreamEndAt?.[agentId] || 0;
@@ -3292,6 +3289,8 @@ function dashboard() {
           // initialized. Preserve local messages to avoid losing visible history.
           return;
         }
+        // Re-check after await — streaming may have started during the fetch.
+        if (this.chatStreamingAgents[agentId] || this._chatAborts[agentId]) return;
         const serverMsgs = data.messages.map(m => ({
           role: m.role === 'assistant' ? 'agent' : m.role,
           content: m.content,
@@ -3652,10 +3651,17 @@ function dashboard() {
 
       const controller = new AbortController();
       this._chatAborts[agentId] = controller;
-      // Safety timeout: if stream doesn't complete in 120s, abort and recover
-      const streamTimeout = setTimeout(() => {
+      // Idle timeout: abort if no SSE data received for 120s.  Resets on
+      // each chunk so long-running tool chains stay alive indefinitely.
+      let streamTimeout = setTimeout(() => {
         if (this.chatStreamingAgents[agentId]) controller.abort();
       }, 120000);
+      const _resetStreamTimeout = () => {
+        clearTimeout(streamTimeout);
+        streamTimeout = setTimeout(() => {
+          if (this.chatStreamingAgents[agentId]) controller.abort();
+        }, 120000);
+      };
 
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/chat/stream`, {
@@ -3682,6 +3688,7 @@ function dashboard() {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          _resetStreamTimeout();
           buffer += decoder.decode(value, { stream: true });
 
           const lines = buffer.split('\n');
@@ -3760,11 +3767,11 @@ function dashboard() {
           this.chatHistories[agentId][finalIdx].phase = 'done';
         }
       } catch (e) {
-        if (e.name !== 'AbortError') {
-          const entry = this.chatHistories[agentId][this._chatStreamTarget[agentId]];
-          const hadContent = !!(entry && (entry.content || (entry.tools && entry.tools.length > 0)));
-          if (entry && hadContent) {
-            // Stream interrupted (e.g. tab backgrounded on mobile) but we have partial data.
+        const entry = this.chatHistories[agentId]?.[this._chatStreamTarget[agentId]];
+        if (entry) {
+          const hadContent = !!(entry.content || (entry.tools && entry.tools.length > 0));
+          if (hadContent) {
+            // Stream interrupted (timeout, tab backgrounded, network) but we have partial data.
             // Mark any running tools as done and finalize the message gracefully.
             entry.streaming = false;
             entry.phase = 'done';
@@ -3774,9 +3781,11 @@ function dashboard() {
             if (Array.isArray(entry.timeline)) {
               entry.timeline.forEach(t => { if (t.status === 'running') t.status = 'done'; });
             }
-          } else if (entry) {
+          } else {
             // No content at all — show error but with a friendlier message
-            entry.content = 'Connection interrupted — please try again.';
+            entry.content = e.name === 'AbortError'
+              ? 'Response timed out — please try again.'
+              : 'Connection interrupted — please try again.';
             entry.role = 'error';
             entry.streaming = false;
             entry.phase = 'error';
