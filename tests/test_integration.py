@@ -2023,12 +2023,15 @@ def test_ext_store_and_remove_lifecycle(ext_api_components):
 def test_agent_profile_basic(mesh_components):
     """GET /mesh/agents/{id}/profile returns metadata for a registered agent."""
     client = mesh_components["client"]
-    router = mesh_components["router"]
     bb = mesh_components["blackboard"]
     pubsub = mesh_components["pubsub"]
 
     # Register the agent
-    client.post("/mesh/register", json={"agent_id": "research", "capabilities": ["web_search", "memory_save"], "port": 8401})
+    client.post("/mesh/register", json={
+        "agent_id": "research",
+        "capabilities": ["web_search", "memory_save"],
+        "port": 8401,
+    })
 
     # Set up some state the profile should reflect
     pubsub.subscribe("projects/teamA/research_complete", "research")
@@ -2062,7 +2065,6 @@ def test_agent_profile_not_found(mesh_components):
 def test_agent_profile_permission_denied(mesh_components):
     """GET /mesh/agents/{id}/profile returns 403 when agent lacks can_message."""
     client = mesh_components["client"]
-    router = mesh_components["router"]
 
     # Register both agents
     client.post("/mesh/register", json={"agent_id": "qualify", "capabilities": [], "port": 8402})
