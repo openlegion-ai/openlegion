@@ -373,6 +373,21 @@ class Blackboard:
                     break
         return matched
 
+    def get_agent_watches(self, agent_id: str) -> list[str]:
+        """Return glob patterns this agent is watching."""
+        with self._write_lock:
+            return list(self._watchers.get(agent_id, []))
+
+    def recent_keys_by_agent(self, agent_id: str, limit: int = 10) -> list[str]:
+        """Return recently written blackboard keys by this agent."""
+        rows = self.db.execute(
+            "SELECT DISTINCT key FROM event_log "
+            "WHERE agent_id = ? AND event_type IN ('write', 'cas_write') "
+            "ORDER BY id DESC LIMIT ?",
+            (agent_id, limit),
+        ).fetchall()
+        return [r[0] for r in rows]
+
 
 class PubSub:
     """In-process pub/sub for agent events with optional SQLite persistence.
@@ -476,6 +491,14 @@ class PubSub:
     def get_subscribers(self, topic: str) -> list[str]:
         with self._lock:
             return list(self.subscriptions.get(topic, []))
+
+    def get_agent_subscriptions(self, agent_id: str) -> list[str]:
+        """Return topics this agent is subscribed to."""
+        with self._lock:
+            return [
+                topic for topic, subs in self.subscriptions.items()
+                if agent_id in subs
+            ]
 
     def publish(self, topic: str, event: Any) -> list[str]:
         """Record an event and return the list of subscribers for it."""

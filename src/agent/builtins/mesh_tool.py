@@ -615,6 +615,34 @@ async def read_agent_history(agent_id: str, *, mesh_client=None) -> dict:
 
 
 @skill(
+    name="get_agent_profile",
+    description=(
+        "Read another agent's public profile — mesh-verified metadata plus "
+        "their collaboration interface. Use this to understand HOW to work "
+        "with another agent: what inputs they expect, what they produce, "
+        "what events they listen to, and their current status. More detailed "
+        "than list_agents — call this when you need to coordinate with a "
+        "specific peer. Permission-checked: you can only read profiles of "
+        "agents you're allowed to message."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "ID of the agent whose profile to read",
+        },
+    },
+)
+async def get_agent_profile(agent_id: str, *, mesh_client=None) -> dict:
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    try:
+        result = await mesh_client.get_agent_profile(agent_id)
+        return _sanitize_value(result)
+    except Exception as e:
+        return {"error": f"Failed to read profile of '{agent_id}': {e}"}
+
+
+@skill(
     name="update_workspace",
     description=(
         "Update one of your writable workspace files to get better over time. "
@@ -628,7 +656,10 @@ async def read_agent_history(agent_id: str, *, mesh_client=None) -> dict:
         "style, project background, and important facts so you serve them "
         "better in future sessions.\n"
         "- HEARTBEAT.md: your autonomous rules — what to check and do on "
-        "periodic wakeups. Drop wasteful checks, add useful ones.\n\n"
+        "periodic wakeups. Drop wasteful checks, add useful ones.\n"
+        "- INTERFACE.md: your public collaboration contract — what you accept, "
+        "what you produce, and how other agents should interact with you. "
+        "Other agents read this via get_agent_profile.\n\n"
         "Update these when you discover something lasting, not every turn. "
         "Read the current content first (via read_file) to avoid losing "
         "existing information — merge new knowledge in, don't overwrite blindly. "
@@ -637,7 +668,7 @@ async def read_agent_history(agent_id: str, *, mesh_client=None) -> dict:
     parameters={
         "filename": {
             "type": "string",
-            "enum": ["SOUL.md", "INSTRUCTIONS.md", "USER.md", "HEARTBEAT.md"],
+            "enum": ["SOUL.md", "INSTRUCTIONS.md", "USER.md", "HEARTBEAT.md", "INTERFACE.md"],
             "description": (
                 "File to update: SOUL.md (identity/tone), INSTRUCTIONS.md "
                 "(procedures/rules), USER.md (user prefs), or HEARTBEAT.md "
@@ -677,6 +708,7 @@ async def update_workspace(
                 "# Identity",
                 "# Instructions",
                 "# Long-Term Memory",
+                "# Interface",
             ) or old_stripped.startswith((
                 "# Heartbeat Rules\n\nYou are woken",
                 "# User Context\n\nYour user",

@@ -8,6 +8,7 @@ Layout:
   ├── USER.md           # User context, preferences
   ├── MEMORY.md         # Curated long-term memory (auto + manual)
   ├── HEARTBEAT.md      # Autonomous task rules (checked on heartbeat)
+  ├── INTERFACE.md    # Public collaboration contract (read by other agents)
   ├── memory/
   │   ├── 2026-02-18.md   # Today's session log
   │   └── 2026-02-17.md   # Yesterday's log
@@ -41,6 +42,7 @@ _SCAFFOLD_FILES: dict[str, str] = {
     "USER.md": "# User Context\n",
     "MEMORY.md": "# Long-Term Memory\n",
     "HEARTBEAT.md": "# Heartbeat Rules\n",
+    "INTERFACE.md": "# Interface\n",
 }
 
 _MAX_FILE_SIZE = 200_000
@@ -299,7 +301,7 @@ class WorkspaceManager:
         self._bootstrap_cache = None  # MEMORY.md is part of bootstrap
 
     # Files agents are allowed to update themselves
-    AGENT_WRITABLE = frozenset({"HEARTBEAT.md", "USER.md", "SOUL.md", "INSTRUCTIONS.md"})
+    AGENT_WRITABLE = frozenset({"HEARTBEAT.md", "USER.md", "SOUL.md", "INSTRUCTIONS.md", "INTERFACE.md"})
     _MAX_WRITABLE_SIZE = 32_000  # 32KB cap for agent-writable files
     _MAX_BACKUPS_PER_FILE = 20
 

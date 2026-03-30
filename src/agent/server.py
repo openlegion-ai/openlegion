@@ -279,6 +279,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
     _WORKSPACE_ALLOWLIST = frozenset({
         "SOUL.md", "HEARTBEAT.md", "USER.md", "INSTRUCTIONS.md", "AGENTS.md", "MEMORY.md",
+        "INTERFACE.md",
     })
     _DEFAULT_HEARTBEAT_HEADING = "# Heartbeat Rules"
 
@@ -289,6 +290,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         "USER.md": 4000,
         "MEMORY.md": 16000,
         "HEARTBEAT.md": None,
+        "INTERFACE.md": 4000,
     }
     _DEFAULT_HEADINGS = {
         "SOUL.md": "# Identity",
@@ -297,6 +299,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         "USER.md": "# User Context",
         "MEMORY.md": "# Long-Term Memory",
         "HEARTBEAT.md": "# Heartbeat Rules",
+        "INTERFACE.md": "# Interface",
     }
 
     @app.get("/workspace")
