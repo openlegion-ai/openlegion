@@ -1355,8 +1355,8 @@ class AgentLoop:
         self._chat_messages = cp["messages"]
         self._chat_total_rounds = cp["total_rounds"]
         self._chat_auto_continues = cp["auto_continues"]
-        if self.context_manager and cp["flush_triggered"]:
-            self.context_manager._flush_triggered = True
+        if self.context_manager:
+            self.context_manager._flush_triggered = cp["flush_triggered"]
         logger.info(
             "chat-session-restored messages=%d rounds=%d continues=%d",
             len(self._chat_messages),
@@ -1371,8 +1371,8 @@ class AgentLoop:
         if not self._chat_messages:
             try:
                 await self.memory._run_db(self.memory.clear_chat_checkpoint)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to clear chat checkpoint: %s", e)
             return
         try:
             await self.memory._run_db(

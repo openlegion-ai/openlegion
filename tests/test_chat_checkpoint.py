@@ -271,3 +271,59 @@ async def test_flush_triggered_restored(tmp_path):
     await loop2._maybe_restore_session()
     assert context_mgr2._flush_triggered is True
     memory2.close()
+
+
+@pytest.mark.asyncio
+async def test_corrupted_json_handled_gracefully(tmp_path):
+    """Corrupted JSON in checkpoint should not prevent starting a new session."""
+    loop, memory = _make_loop(tmp_path)
+
+    # Inject corrupt JSON directly into the DB
+    memory.db.execute(
+        "INSERT OR REPLACE INTO chat_checkpoint"
+        " (id, version, messages, total_rounds, auto_continues, flush_triggered, updated_at)"
+        " VALUES (1, 1, '{invalid json', 0, 0, 0, datetime('now'))",
+    )
+    memory.db.commit()
+
+    # Should recover gracefully — start with clean session
+    await loop._maybe_restore_session()
+    assert loop._chat_messages == []
+    memory.close()
+
+
+@pytest.mark.asyncio
+async def test_db_failure_during_save_handled(tmp_path):
+    """DB errors during checkpoint save should not crash the chat turn."""
+    loop, memory = _make_loop(tmp_path)
+    loop._chat_messages = [{"role": "user", "content": "test"}]
+
+    # Drop the table to simulate corruption
+    memory.db.execute("DROP TABLE chat_checkpoint")
+    memory.db.commit()
+
+    # Should not raise — error is caught and logged
+    await loop._checkpoint_chat_session()
+    # Messages should be unchanged
+    assert loop._chat_messages == [{"role": "user", "content": "test"}]
+    memory.close()
+
+
+@pytest.mark.asyncio
+async def test_flush_triggered_false_restored(tmp_path):
+    """flush_triggered=False in checkpoint should explicitly set False on context manager."""
+    loop1, memory = _make_loop(tmp_path)
+    loop1._chat_messages = [{"role": "user", "content": "hello"}]
+    # Save with flush_triggered=False (context_manager is None, so defaults to False)
+    await loop1._checkpoint_chat_session()
+    memory.close()
+
+    loop2, memory2 = _make_loop(tmp_path)
+    context_mgr = MagicMock()
+    context_mgr._flush_triggered = True  # Pre-set to True
+    loop2.context_manager = context_mgr
+
+    await loop2._maybe_restore_session()
+    # Should be explicitly set back to False
+    assert context_mgr._flush_triggered is False
+    memory2.close()
