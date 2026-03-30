@@ -160,7 +160,7 @@ class ApiEndpointManager:
 
     def create_router(self) -> APIRouter:
         """Create a FastAPI router for API inbound endpoints."""
-        router = APIRouter()
+        router = APIRouter(tags=["Inbound Dispatch"])
         manager = self
 
         _MAX_BODY = 1_048_576  # 1 MB
@@ -208,11 +208,17 @@ class ApiEndpointManager:
 
             return {"status": "processed", "hook": hook["name"]}
 
-        @router.post("/api/inbound/{endpoint_id}")
+        @router.post("/api/inbound/{endpoint_id}", summary="Dispatch payload to agent")
         async def receive_inbound(endpoint_id: str, request: Request) -> dict:
+            """POST a JSON payload to trigger the configured agent.
+
+            If the endpoint requires signature verification, include an
+            ``X-Signature`` header with the HMAC-SHA256 hex digest of the raw
+            request body signed with the endpoint secret.
+            """
             return await _handle_inbound(endpoint_id, request)
 
-        @router.post("/webhook/hook/{endpoint_id}")
+        @router.post("/webhook/hook/{endpoint_id}", deprecated=True, summary="Dispatch payload (deprecated)")
         async def receive_webhook_compat(endpoint_id: str, request: Request) -> JSONResponse:
             """Deprecated: use /api/inbound/{endpoint_id} instead."""
             result = await _handle_inbound(endpoint_id, request)

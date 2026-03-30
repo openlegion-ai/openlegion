@@ -2226,44 +2226,17 @@
         <!-- ─── Endpoints sub-tab ─── -->
         <div x-show="integrationsTab === 'endpoints'">
 
-        <!-- API Reference -->
-        <details open class="mb-6 bg-gray-900/50 border border-gray-800 rounded-lg group">
-          <summary class="px-4 py-3 cursor-pointer text-xs text-gray-500 uppercase tracking-wider flex items-center gap-1.5 select-none">
-            <svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-            API Reference
-          </summary>
-          <div class="px-4 pb-4 space-y-3">
-            <div class="text-[11px] text-gray-500 mb-2">All endpoints below require an <code class="bg-gray-800 px-1 rounded">X-API-Key</code> header. Inbound API endpoints use <code class="bg-gray-800 px-1 rounded">X-Signature</code> instead (HMAC-SHA256 of the raw body).</div>
-            <div class="space-y-2">
-              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">Credential Vault</div>
-              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
-                <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/mesh/credentials</code><span class="text-gray-500">Store a secret. Body: <code class="bg-gray-800 px-0.5 rounded">{"name":"...","value":"..."}</code> &rarr; returns <code class="bg-gray-800 px-0.5 rounded">$CRED{name}</code> handle</span>
-                <code class="text-red-400/70 font-mono">DELETE</code><code class="text-gray-400 font-mono">/mesh/credentials/{name}</code><span class="text-gray-500">Remove a secret by name</span>
-                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/credentials</code><span class="text-gray-500">List credential names (never values)</span>
-                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/credentials/{name}/exists</code><span class="text-gray-500">Check if a credential exists</span>
-              </div>
-            </div>
-            <div class="space-y-2">
-              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">Agent Status</div>
-              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
-                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/agents/{id}/ext-status</code><span class="text-gray-500">Health, queue depth, and budget for an agent</span>
-              </div>
-            </div>
-            <div class="space-y-2">
-              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">API Endpoints</div>
-              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
-                <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/api/inbound/{endpoint_id}</code><span class="text-gray-500">Trigger an agent workflow. Requires <code class="bg-gray-800 px-0.5 rounded">X-Signature</code> header (no API key needed)</span>
-              </div>
-            </div>
-            <div class="space-y-2">
-              <div class="text-[10px] text-gray-600 uppercase tracking-wider font-medium">Outbound Webhook Payload</div>
-              <div class="text-[11px] text-gray-500 leading-relaxed">
-                Events POST to your URL with <code class="bg-gray-800 px-0.5 rounded">X-OpenLegion-Signature: sha256=HMAC</code> and <code class="bg-gray-800 px-0.5 rounded">X-OpenLegion-Event</code> headers.
-                Body: <code class="bg-gray-800 px-1 rounded text-gray-400">{"event", "agent", "data", "timestamp", "delivery_id"}</code>
-              </div>
-            </div>
+        <!-- API Reference link -->
+        <div class="mb-6 bg-gray-900/50 border border-gray-800 rounded-lg px-4 py-3 flex items-center justify-between">
+          <div>
+            <div class="text-xs text-gray-300 font-medium mb-0.5">API Reference</div>
+            <div class="text-[11px] text-gray-500">Interactive documentation with authentication and request testing.</div>
           </div>
-        </details>
+          <a href="/docs" target="_blank" rel="noopener" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 shrink-0">
+            Open API Docs
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          </a>
+        </div>
 
         <!-- API Endpoints -->
         <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">API Endpoints<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Named HTTP endpoints that accept POST requests and route them to agents. Enable "Require HMAC signature" to secure the endpoint — your app signs the raw request body with HMAC-SHA256(body, secret) and sends it as the X-Signature header. The secret is shown once at creation time; use Regenerate Secret if you missed it.</span></span></div>
@@ -2360,6 +2333,65 @@
                   <button @click="createEndpoint()" :disabled="endpointCreating" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
                     <svg x-show="endpointCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                     <span x-text="endpointCreating ? 'Creating...' : 'Create Endpoint'"></span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Access Keys (inside endpoints sub-tab) -->
+        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5 mt-6">Access Keys
+          <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">API keys for authenticating server-to-server calls to the OpenLegion mesh. Send as X-API-Key header. Each key is hashed — the raw value is shown only once at creation.</span></span>
+        </div>
+        <div class="mb-6">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="text-[12px] text-gray-500 leading-relaxed mb-3">
+              Authenticate your backend for server-to-server API calls. Send as <code class="bg-gray-800 px-1 rounded text-gray-400">X-API-Key</code> header.
+              Create separate keys per environment or integration &mdash; each key is hashed and the raw value is shown only once at creation.
+            </div>
+            <div class="border-t border-gray-800 pt-3 mb-3"></div>
+            <!-- One-time new key display -->
+            <div x-show="apiKeyNewValue" x-transition class="mb-3 p-3 bg-emerald-950/40 border border-emerald-700/40 rounded-lg">
+              <div class="text-[11px] text-emerald-400 font-medium mb-2">New API Key &mdash; copy this now, it won't be shown again</div>
+              <div class="flex items-center gap-2">
+                <code class="text-[12px] text-emerald-200 bg-gray-950/80 px-3 py-2 rounded font-mono flex-1 break-all select-all tracking-wide" x-text="apiKeyNewValue"></code>
+                <button @click="copyToClipboard(apiKeyNewValue)" class="text-[10px] px-3 py-1.5 rounded bg-emerald-800/40 hover:bg-emerald-700/40 text-emerald-300 hover:text-emerald-200 border border-emerald-700/30 transition-colors shrink-0">Copy</button>
+                <button @click="apiKeyNewValue = null" class="text-[10px] px-2.5 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors shrink-0">Dismiss</button>
+              </div>
+            </div>
+            <!-- Legacy env var notice -->
+            <div x-show="apiKeysLegacy" x-cloak class="mb-3 px-3 py-2 bg-amber-950/30 border border-amber-800/25 rounded text-[11px] text-amber-400/90">
+              Legacy key detected from <code class="bg-gray-800/80 text-amber-300 px-1 rounded">OPENLEGION_API_KEY</code> env var. Create named keys below to replace it.
+            </div>
+            <!-- Key list -->
+            <div class="space-y-0.5 mb-3">
+              <template x-for="ak in apiKeys" :key="ak.id">
+                <div class="flex items-center gap-3 text-xs group py-2 px-2 rounded hover:bg-gray-800/30 transition-colors">
+                  <span class="w-2 h-2 rounded-full bg-emerald-500/60 shrink-0"></span>
+                  <span class="text-white font-medium" x-text="ak.name"></span>
+                  <span class="text-gray-500 font-mono text-[10px]" x-text="ak.id"></span>
+                  <span class="text-gray-500 text-[10px] flex-1 text-right" x-text="ak.last_used_at ? 'Used ' + ak.last_used_at.split('T')[0] : 'Never used'"></span>
+                  <span class="text-gray-600 text-[10px]" x-text="'Created ' + ak.created_at.split('T')[0]"></span>
+                  <button @click="revokeApiKey(ak.id, ak.name)"
+                    class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all">Revoke</button>
+                </div>
+              </template>
+              <div x-show="apiKeys.length === 0 && !apiKeysLegacy" class="text-gray-500 text-sm py-3 text-center">No API keys configured</div>
+            </div>
+            <!-- Create key form -->
+            <div class="border-t border-gray-800 pt-3">
+              <div x-show="!showApiKeyForm">
+                <button @click="showApiKeyForm = true; apiKeyNewName = ''" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Create API Key</button>
+              </div>
+              <div x-show="showApiKeyForm" x-transition>
+                <div class="text-xs text-gray-500 mb-2">New API key</div>
+                <div class="flex gap-2">
+                  <input type="text" x-model="apiKeyNewName" :disabled="apiKeyCreating" class="dash-input text-xs flex-1" placeholder="Key name (e.g. company-production)" @keydown.enter="createApiKey()">
+                  <button @click="showApiKeyForm = false" :disabled="apiKeyCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
+                  <button @click="createApiKey()" :disabled="apiKeyCreating || !apiKeyNewName.trim()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                    <svg x-show="apiKeyCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                    <span x-text="apiKeyCreating ? 'Creating...' : 'Create'"></span>
                   </button>
                 </div>
               </div>
@@ -2515,76 +2547,6 @@
 
         </div><!-- /webhooks sub-tab -->
 
-        <!-- ─── Access Keys sub-tab ─── -->
-        <div x-show="integrationsTab === 'accesskeys'">
-        <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">Access Keys
-          <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">API keys for authenticating server-to-server calls to the OpenLegion mesh. Send as X-API-Key header. Each key is hashed — the raw value is shown only once at creation.</span></span>
-        </div>
-        <div class="mb-6">
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-            <div class="text-[12px] text-gray-500 leading-relaxed mb-3">
-              Authenticate your backend for server-to-server API calls. Send as <code class="bg-gray-800 px-1 rounded text-gray-400">X-API-Key</code> header.
-              Create separate keys per environment or integration &mdash; each key is hashed and the raw value is shown only once at creation.
-            </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px] mb-4 chat-grid">
-              <div class="text-gray-500"><code class="text-gray-400 font-mono">POST</code> <code class="text-gray-400 font-mono">/mesh/credentials</code></div>
-              <div class="text-gray-600">Store a secret &rarr; returns <code class="bg-gray-800/60 px-0.5 rounded">$CRED{name}</code> handle</div>
-              <div class="text-gray-500"><code class="text-gray-400 font-mono">DELETE</code> <code class="text-gray-400 font-mono">/mesh/credentials/{name}</code></div>
-              <div class="text-gray-600">Remove a secret</div>
-              <div class="text-gray-500"><code class="text-gray-400 font-mono">GET</code> <code class="text-gray-400 font-mono">/mesh/credentials</code></div>
-              <div class="text-gray-600">List credential names (never values)</div>
-              <div class="text-gray-500"><code class="text-gray-400 font-mono">GET</code> <code class="text-gray-400 font-mono">/mesh/agents/{id}/ext-status</code></div>
-              <div class="text-gray-600">Agent health, queue depth, budget</div>
-            </div>
-            <div class="border-t border-gray-800 pt-3 mb-3"></div>
-            <!-- One-time new key display -->
-            <div x-show="apiKeyNewValue" x-transition class="mb-3 p-3 bg-emerald-950/40 border border-emerald-700/40 rounded-lg">
-              <div class="text-[11px] text-emerald-400 font-medium mb-2">New API Key &mdash; copy this now, it won't be shown again</div>
-              <div class="flex items-center gap-2">
-                <code class="text-[12px] text-emerald-200 bg-gray-950/80 px-3 py-2 rounded font-mono flex-1 break-all select-all tracking-wide" x-text="apiKeyNewValue"></code>
-                <button @click="copyToClipboard(apiKeyNewValue)" class="text-[10px] px-3 py-1.5 rounded bg-emerald-800/40 hover:bg-emerald-700/40 text-emerald-300 hover:text-emerald-200 border border-emerald-700/30 transition-colors shrink-0">Copy</button>
-                <button @click="apiKeyNewValue = null" class="text-[10px] px-2.5 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors shrink-0">Dismiss</button>
-              </div>
-            </div>
-            <!-- Legacy env var notice -->
-            <div x-show="apiKeysLegacy" x-cloak class="mb-3 px-3 py-2 bg-amber-950/30 border border-amber-800/25 rounded text-[11px] text-amber-400/90">
-              Legacy key detected from <code class="bg-gray-800/80 text-amber-300 px-1 rounded">OPENLEGION_API_KEY</code> env var. Create named keys below to replace it.
-            </div>
-            <!-- Key list -->
-            <div class="space-y-0.5 mb-3">
-              <template x-for="ak in apiKeys" :key="ak.id">
-                <div class="flex items-center gap-3 text-xs group py-2 px-2 rounded hover:bg-gray-800/30 transition-colors">
-                  <span class="w-2 h-2 rounded-full bg-emerald-500/60 shrink-0"></span>
-                  <span class="text-white font-medium" x-text="ak.name"></span>
-                  <span class="text-gray-500 font-mono text-[10px]" x-text="ak.id"></span>
-                  <span class="text-gray-500 text-[10px] flex-1 text-right" x-text="ak.last_used_at ? 'Used ' + ak.last_used_at.split('T')[0] : 'Never used'"></span>
-                  <span class="text-gray-600 text-[10px]" x-text="'Created ' + ak.created_at.split('T')[0]"></span>
-                  <button @click="revokeApiKey(ak.id, ak.name)"
-                    class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[10px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all">Revoke</button>
-                </div>
-              </template>
-              <div x-show="apiKeys.length === 0 && !apiKeysLegacy" class="text-gray-500 text-sm py-3 text-center">No API keys configured</div>
-            </div>
-            <!-- Create key form -->
-            <div class="border-t border-gray-800 pt-3">
-              <div x-show="!showApiKeyForm">
-                <button @click="showApiKeyForm = true; apiKeyNewName = ''" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Create API Key</button>
-              </div>
-              <div x-show="showApiKeyForm" x-transition>
-                <div class="text-xs text-gray-500 mb-2">New API key</div>
-                <div class="flex gap-2">
-                  <input type="text" x-model="apiKeyNewName" :disabled="apiKeyCreating" class="dash-input text-xs flex-1" placeholder="Key name (e.g. company-production)" @keydown.enter="createApiKey()">
-                  <button @click="showApiKeyForm = false" :disabled="apiKeyCreating" class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">Cancel</button>
-                  <button @click="createApiKey()" :disabled="apiKeyCreating || !apiKeyNewName.trim()" class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
-                    <svg x-show="apiKeyCreating" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                    <span x-text="apiKeyCreating ? 'Creating...' : 'Create'"></span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        </div><!-- /accesskeys sub-tab -->
 
         <!-- ─── Credentials sub-tab (LLM provider keys + agent credentials) ─── -->
         <div x-show="integrationsTab === 'apikeys'" x-effect="if (integrationsTab === 'apikeys') fetchSettings()">

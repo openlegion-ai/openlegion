@@ -277,7 +277,6 @@ function dashboard() {
     integrationsTabs: [
       { id: 'endpoints', label: 'API Endpoints' },
       { id: 'webhooks', label: 'Webhooks' },
-      { id: 'accesskeys', label: 'Access Keys' },
       { id: 'apikeys', label: 'Credentials' },
     ],
 
@@ -506,7 +505,7 @@ function dashboard() {
       else if (clean.startsWith('integrations')) {
         route.tab = 'integrations';
         const sub = clean.split('/')[1];
-        if (sub && ['endpoints', 'webhooks', 'accesskeys', 'apikeys'].includes(sub)) {
+        if (sub && ['endpoints', 'webhooks', 'apikeys'].includes(sub)) {
           route.integrationsTab = sub;
         }
       }
@@ -1182,9 +1181,8 @@ function dashboard() {
     switchIntegrationsTab(tabId) {
       this.integrationsTab = tabId;
       this._pushUrl(false);
-      if (tabId === 'endpoints') { this.fetchEndpoints(); }
+      if (tabId === 'endpoints') { this.fetchEndpoints(); this.fetchApiKeys(); }
       if (tabId === 'webhooks') { this.fetchOutboundWebhooks(); }
-      if (tabId === 'accesskeys') { this.fetchApiKeys(); }
       if (tabId === 'apikeys') { this.fetchSettings(); this.fetchApiKeys(); }
     },
 

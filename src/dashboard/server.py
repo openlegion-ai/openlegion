@@ -171,6 +171,7 @@ def create_dashboard_router(
     api_router = APIRouter(
         prefix="/dashboard",
         dependencies=[Depends(_verify_dashboard_auth), Depends(_csrf_check)],
+        include_in_schema=False,
     )
 
     jinja_env = Environment(
@@ -3462,7 +3463,7 @@ def create_spa_catchall_router() -> APIRouter:
         loader=FileSystemLoader(str(_TEMPLATES_DIR)),
         autoescape=True,
     )
-    catchall = APIRouter(dependencies=[Depends(_verify_dashboard_auth)])
+    catchall = APIRouter(dependencies=[Depends(_verify_dashboard_auth)], include_in_schema=False)
 
     @catchall.get("/{path:path}", response_class=HTMLResponse)
     async def spa_catchall(path: str) -> HTMLResponse:
