@@ -1398,6 +1398,20 @@ class AgentLoop:
 
         Returns {"response": str, "tool_outputs": list[dict], "tokens_used": int}.
         """
+        # Redirect to steer queue if a task is running — prevents concurrent
+        # state corruption (shared loop_detector, state, flush_triggered).
+        # Guard is BEFORE _chat_lock to avoid blocking on a held lock.
+        if self.current_task is not None:
+            await self._steer_queue.put(user_message)
+            return {
+                "response": (
+                    "Agent is working on a task. Your message has been delivered "
+                    "and will be processed between tool rounds."
+                ),
+                "tool_outputs": [],
+                "tokens_used": 0,
+            }
+
         from src.shared.trace import current_trace_id
         current_trace_id.set(trace_id)
         async with self._chat_lock:
@@ -2139,6 +2153,24 @@ class AgentLoop:
           {"type": "text_delta", "content": str}
           {"type": "done", "response": str, "tool_outputs": list, "tokens_used": int}
         """
+        # Redirect to steer queue if a task is running.
+        if self.current_task is not None:
+            await self._steer_queue.put(user_message)
+            yield {
+                "type": "text_delta",
+                "content": (
+                    "Agent is working on a task. Your message has been delivered "
+                    "and will be processed between tool rounds."
+                ),
+            }
+            yield {
+                "type": "done",
+                "response": "",
+                "tool_outputs": [],
+                "tokens_used": 0,
+            }
+            return
+
         from src.shared.trace import current_trace_id
         current_trace_id.set(trace_id)
         async with self._chat_lock:
