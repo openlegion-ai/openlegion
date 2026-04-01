@@ -37,7 +37,6 @@ from fastapi.responses import StreamingResponse
 
 from src.shared.types import (
     AgentMessage,
-    AgentStatus,
     ChatMessage,
     ChatResponse,
     SteerMessage,
@@ -98,10 +97,20 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
                 handle.cancel()
         return {"status": "cancelled"}
 
-    @app.get("/status", response_model=AgentStatus)
-    async def get_status() -> AgentStatus:
-        """Return current agent status."""
-        return loop.get_status()
+    @app.get("/status")
+    async def get_status() -> dict:
+        """Return current agent status, including task checkpoint info."""
+        s = loop.get_status()
+        s_dict = s.model_dump()
+        has_checkpoint = False
+        if loop.memory:
+            try:
+                cp = await loop.memory._run_db(loop.memory.load_task_checkpoint)
+                has_checkpoint = cp is not None
+            except Exception:
+                pass
+        s_dict["has_task_checkpoint"] = has_checkpoint
+        return s_dict
 
     @app.get("/result", response_model=TaskResult)
     async def get_result() -> TaskResult:
