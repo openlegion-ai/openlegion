@@ -277,7 +277,9 @@ def get_model_cost(model: str) -> tuple[float, float]:
         except (ImportError, KeyError):
             pass
 
-    return _FALLBACK_COSTS.get(model, _DEFAULT_COST)
+    # Strip openlegion/ for fallback lookup (fallback keys use provider/model format)
+    lookup = model[len("openlegion/"):] if model.startswith("openlegion/") else model
+    return _FALLBACK_COSTS.get(lookup, _DEFAULT_COST)
 
 
 _OLLAMA_DEFAULT_CONTEXT = 4096
@@ -304,7 +306,8 @@ def get_context_window(model: str) -> int:
     if model.startswith("ollama/") or model.startswith("ollama_chat/"):
         return _OLLAMA_DEFAULT_CONTEXT
 
-    return _FALLBACK_CONTEXT.get(model, _DEFAULT_CONTEXT_WINDOW)
+    lookup = model[len("openlegion/"):] if model.startswith("openlegion/") else model
+    return _FALLBACK_CONTEXT.get(lookup, _DEFAULT_CONTEXT_WINDOW)
 
 
 @lru_cache(maxsize=32)
