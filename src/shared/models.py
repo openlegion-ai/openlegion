@@ -24,6 +24,7 @@ from functools import lru_cache
 
 _PROVIDER_LABELS: dict[str, str] = {
     "anthropic": "Anthropic",
+    "openlegion": "OpenLegion Credits",
     "openrouter": "OpenRouter",
     "openai": "OpenAI",
     "gemini": "Google Gemini",
@@ -153,6 +154,19 @@ _FEATURED_MODELS: dict[str, list[str]] = {
         "openrouter/meta-llama/llama-3.1-70b-instruct",
         "openrouter/meta-llama/llama-3.1-8b-instruct",
         "openrouter/mistralai/mistral-large",
+    ],
+    "openlegion": [
+        "openlegion/anthropic/claude-sonnet-4-6",
+        "openlegion/anthropic/claude-haiku-4-5-20251001",
+        "openlegion/openai/gpt-4.1",
+        "openlegion/openai/gpt-4.1-mini",
+        "openlegion/google/gemini-2.5-pro",
+        "openlegion/google/gemini-2.5-flash",
+        "openlegion/deepseek/deepseek-chat-v3",
+        "openlegion/meta-llama/llama-3.1-405b-instruct",
+        "openlegion/meta-llama/llama-3.1-70b-instruct",
+        "openlegion/meta-llama/llama-3.1-8b-instruct",
+        "openlegion/mistralai/mistral-large",
     ],
     "mistral": [
         "mistral/mistral-large-latest",
