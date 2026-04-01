@@ -38,9 +38,12 @@ def _make_checkpoint(assignment: TaskAssignment | None = None, iteration: int = 
     return {
         "task_id": assignment.task_id,
         "assignment_json": assignment.model_dump_json(),
+        "messages": [],
         "iteration": iteration,
-        "messages_json": "[]",
-        "saved_at": "2026-04-01T00:00:00Z",
+        "tokens_used": 500,
+        "budget_used_tokens": 0,
+        "budget_estimated_cost": 0.0,
+        "flush_triggered": False,
     }
 
 

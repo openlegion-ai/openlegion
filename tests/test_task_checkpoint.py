@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.agent.context import ContextManager
 from src.agent.memory import MemoryStore, _TASK_CHECKPOINT_VERSION
 from src.agent.loop import AgentLoop
 from src.shared.types import LLMResponse, TaskAssignment, TaskResult, TokenBudget, ToolCallInfo
@@ -429,3 +430,93 @@ class TestTaskCheckpointLoop:
         assert last_msg["role"] == "user"
         assert last_msg["content"] == "here is more info"
         assert "interrupted" not in last_msg["content"]
+
+    @pytest.mark.asyncio
+    async def test_task_resume_budget_reconciliation(self):
+        """Verify TokenBudget.used_tokens is restored from checkpoint on resume."""
+        loop = _make_loop(real_memory=True)
+
+        task_id = "task_budget_test"
+        budget = TokenBudget(max_tokens=100_000, used_tokens=0)
+        assignment = TaskAssignment(
+            workflow_id="wf1", step_id="s1", task_type="research",
+            input_data={"q": "test"}, task_id=task_id,
+            token_budget=budget,
+        )
+
+        loop.memory.save_task_checkpoint(
+            task_id=task_id,
+            assignment_json=assignment.model_dump_json(),
+            messages=[{"role": "user", "content": "do research"}],
+            iteration=3,
+            tokens_used=8000,
+            budget_used_tokens=7500,
+            budget_estimated_cost=0.12,
+            flush_triggered=False,
+        )
+
+        loop.llm.chat = AsyncMock(
+            return_value=LLMResponse(content='{"result": {"done": true}}', tokens_used=50)
+        )
+
+        result = await loop.execute_task(assignment)
+        assert result.status == "complete"
+        # Budget should reflect the checkpoint values, not start from 0
+        assert assignment.token_budget.used_tokens >= 7500
+        assert assignment.token_budget.estimated_cost_usd >= 0.12
+
+    @pytest.mark.asyncio
+    async def test_task_resume_flush_triggered_restored(self):
+        """Verify context_manager._flush_triggered is restored from checkpoint."""
+        memory = MemoryStore(db_path=":memory:")
+        llm = MagicMock()
+        llm.chat = AsyncMock(
+            return_value=LLMResponse(content='{"result": {"done": true}}', tokens_used=50)
+        )
+        llm.default_model = "test-model"
+
+        skills = MagicMock()
+        skills.get_tool_definitions = MagicMock(return_value=[])
+        skills.get_descriptions = MagicMock(return_value="- no tools")
+        skills.list_skills = MagicMock(return_value=[])
+        skills.is_parallel_safe = MagicMock(return_value=True)
+        skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+
+        mesh_client = MagicMock()
+        mesh_client.is_standalone = False
+        mesh_client.send_system_message = AsyncMock(return_value={})
+        mesh_client.read_blackboard = AsyncMock(return_value=None)
+        mesh_client.list_agents = AsyncMock(return_value={})
+
+        context_mgr = MagicMock(spec=ContextManager)
+        context_mgr._flush_triggered = False
+        context_mgr.maybe_compact = AsyncMock(side_effect=lambda s, m: (m, False))
+        context_mgr.context_warning = MagicMock(return_value=None)
+
+        loop = AgentLoop(
+            agent_id="test_agent", role="research",
+            memory=memory, skills=skills, llm=llm,
+            mesh_client=mesh_client, context_manager=context_mgr,
+        )
+
+        task_id = "task_flush_test"
+        assignment = TaskAssignment(
+            workflow_id="wf1", step_id="s1", task_type="research",
+            input_data={"q": "test"}, task_id=task_id,
+        )
+
+        memory.save_task_checkpoint(
+            task_id=task_id,
+            assignment_json=assignment.model_dump_json(),
+            messages=[{"role": "user", "content": "do research"}],
+            iteration=1,
+            tokens_used=200,
+            budget_used_tokens=0,
+            budget_estimated_cost=0.0,
+            flush_triggered=True,  # Was already flushed before crash
+        )
+
+        result = await loop.execute_task(assignment)
+        assert result.status == "complete"
+        # flush_triggered should have been restored to True
+        assert context_mgr._flush_triggered is True
