@@ -227,8 +227,15 @@ def _resolve_litellm_key(model: str) -> str | None:
     ``claude-sonnet-4-6``) but prefixed names for others
     (``xai/grok-3``, ``gemini/gemini-2.5-pro``).
 
+    The ``openlegion/`` prefix is a routing wrapper (credit proxy) and
+    is stripped before lookup so cost/context data resolves correctly.
+
     Returns the matching key, or None if not found.
     """
+    # Strip the openlegion/ routing prefix — it wraps real provider/model names
+    if model.startswith("openlegion/"):
+        model = model[len("openlegion/"):]
+
     try:
         from litellm import model_cost
     except ImportError:
