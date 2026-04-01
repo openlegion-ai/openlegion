@@ -4,16 +4,14 @@ Tests the memory-layer persistence (save/load/clear) and the loop-layer
 integration (checkpoint after iterations, resume on restart, cleanup on exit).
 """
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.agent.context import ContextManager
-from src.agent.memory import MemoryStore, _TASK_CHECKPOINT_VERSION
 from src.agent.loop import AgentLoop
-from src.shared.types import LLMResponse, TaskAssignment, TaskResult, TokenBudget, ToolCallInfo
-
+from src.agent.memory import MemoryStore
+from src.shared.types import LLMResponse, TaskAssignment, TokenBudget, ToolCallInfo
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -367,7 +365,6 @@ class TestTaskCheckpointLoop:
 
         # Capture messages sent to LLM
         captured_messages = []
-        original_chat = loop.llm.chat
 
         async def capturing_chat(system, messages, tools=None, **kwargs):
             captured_messages.append([dict(m) for m in messages])

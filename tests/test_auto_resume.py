@@ -8,16 +8,14 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from src.agent.server import create_agent_app
 from src.shared.types import TaskAssignment
-
 
 # ── Helpers ──────────────────────────────────────────────────────
 
