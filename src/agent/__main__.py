@@ -193,18 +193,26 @@ def main() -> None:
                                 assignment, trace_id=_resume_trace_id,
                             )
                         except asyncio.CancelledError:
-                            # Defensive: execute_task catches CancelledError
-                            # internally and returns a TaskResult, so this
-                            # handler only fires if cancellation arrives during
-                            # the await before execute_task's own try/except
-                            # processes it (extremely rare edge case).
                             loop.state = "idle"
                             loop.current_task = None
+                        except Exception:
+                            # If execute_task raises before its own try/except
+                            # (e.g. during checkpoint restore or context build),
+                            # reset state so the agent doesn't stay stuck on
+                            # "working" permanently.
+                            loop.state = "idle"
+                            loop.current_task = None
+                            raise  # re-raise so _log_auto_resume_exception logs it
 
                     _resume_task = asyncio.create_task(_auto_resume())
                     _resume_task.add_done_callback(_log_auto_resume_exception)
                     loop._current_task_handle = _resume_task
             except Exception as e:
+                # Reset state if we set it to "working" but failed before
+                # launching the resume task.
+                if loop.state == "working" and loop._current_task_handle is None:
+                    loop.state = "idle"
+                    loop.current_task = None
                 logger.warning("Auto-resume check failed: %s", e)
 
         yield
