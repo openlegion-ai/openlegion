@@ -411,18 +411,72 @@ class AgentLoop:
         # this coroutine. Setting current_task is a no-op but documents intent.
         self.current_task = assignment.task_id
         start = time.time()
-        total_tokens = 0
+
+        # ── Check for existing checkpoint matching this task ──
+        checkpoint = None
+        if self.memory:
+            try:
+                checkpoint = await self.memory._run_db(self.memory.load_task_checkpoint)
+            except Exception as e:
+                logger.warning("Failed to load task checkpoint: %s", e)
+
+        if checkpoint and checkpoint["task_id"] == assignment.task_id:
+            # Resume from checkpoint
+            messages = checkpoint["messages"]
+            start_iteration = checkpoint["iteration"] + 1
+            total_tokens = checkpoint["tokens_used"]
+            assignment_json = checkpoint["assignment_json"]
+
+            # Reconcile TokenBudget mutable state
+            if assignment.token_budget:
+                assignment.token_budget.used_tokens = checkpoint["budget_used_tokens"]
+                assignment.token_budget.estimated_cost_usd = checkpoint["budget_estimated_cost"]
+
+            # Restore context manager flush state
+            if self.context_manager:
+                self.context_manager._flush_triggered = checkpoint["flush_triggered"]
+
+            # Inject continuation prompt — but only if last message isn't already
+            # a user message (avoids violating role alternation invariant).
+            if messages and messages[-1].get("role") != "user":
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "You were working on this task and your session was interrupted. "
+                        "Your conversation history above reflects your progress. "
+                        "Continue from where you left off. Do not repeat completed work."
+                    ),
+                })
+
+            logger.info(
+                "Resumed task %s from iteration %d (%d tokens used)",
+                assignment.task_id, start_iteration, total_tokens,
+            )
+        elif checkpoint:
+            # Stale checkpoint from a different task — clear it
+            logger.warning(
+                "Clearing stale task checkpoint (expected %s, found %s)",
+                assignment.task_id, checkpoint["task_id"],
+            )
+            if self.memory:
+                await self.memory._run_db(self.memory.clear_task_checkpoint)
+            checkpoint = None
+
+        if not checkpoint:
+            # Fresh start
+            total_tokens = 0
+            start_iteration = 0
+            assignment_json = assignment.model_dump_json()
+            messages = await self._build_initial_context(assignment)
+            # Decay salience scores only on fresh start (not resume, to avoid double-decay)
+            if self.memory:
+                await self.memory.decay_all()
 
         introspect_data = await self._fetch_introspect_cached()
         system_prompt = self._build_system_prompt(assignment, introspect_data=introspect_data)
-        messages = await self._build_initial_context(assignment)
-
-        # Decay salience scores so old facts don't dominate forever
-        if self.memory:
-            await self.memory.decay_all()
 
         try:
-            for iteration in range(self.MAX_ITERATIONS):
+            for iteration in range(start_iteration, self.MAX_ITERATIONS):
                 if self._cancel_requested:
                     self._cancel_requested = False
                     self.state = "idle"
@@ -549,6 +603,10 @@ class AgentLoop:
                     else:
                         messages = self._trim_context(messages, max_tokens=_FALLBACK_MAX_TOKENS)
 
+                    # Checkpoint after compaction — restored messages will already be
+                    # context-managed, preventing oversized context on resume.
+                    await self._checkpoint_task(assignment, assignment_json, messages, iteration, total_tokens)
+
                 else:
                     # LLM returned text with no tool calls.
                     # If this is iteration 0, the agent hasn't used any tools,
@@ -651,6 +709,13 @@ class AgentLoop:
             )
             self._last_result = result
             return result
+        finally:
+            # Clear task checkpoint on ANY exit (success, failure, cancel, exception).
+            if self.memory:
+                try:
+                    await self.memory._run_db(self.memory.clear_task_checkpoint)
+                except BaseException:
+                    logger.debug("Failed to clear task checkpoint", exc_info=True)
 
     _GOALS_NOT_FETCHED = object()  # sentinel distinct from None
 
@@ -1363,6 +1428,35 @@ class AgentLoop:
             self._chat_total_rounds,
             self._chat_auto_continues,
         )
+
+    async def _checkpoint_task(
+        self,
+        assignment: TaskAssignment,
+        assignment_json: str,
+        messages: list[dict],
+        iteration: int,
+        tokens_used: int,
+    ) -> None:
+        """Persist task state for crash recovery. Called after each iteration."""
+        if not self.memory:
+            return
+        try:
+            budget_used = assignment.token_budget.used_tokens if assignment.token_budget else 0
+            budget_cost = assignment.token_budget.estimated_cost_usd if assignment.token_budget else 0.0
+            flush_triggered = self.context_manager._flush_triggered if self.context_manager else False
+            await self.memory._run_db(
+                self.memory.save_task_checkpoint,
+                assignment.task_id,
+                assignment_json,
+                messages,
+                iteration,
+                tokens_used,
+                budget_used,
+                budget_cost,
+                flush_triggered,
+            )
+        except Exception as e:
+            logger.warning("Failed to save task checkpoint: %s", e)
 
     async def _checkpoint_chat_session(self) -> None:
         """Persist current chat state for crash recovery."""
