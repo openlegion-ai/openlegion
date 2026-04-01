@@ -1499,8 +1499,8 @@ class AgentLoop:
             await self._steer_queue.put(user_message)
             return {
                 "response": (
-                    "Agent is working on a task. Your message has been delivered "
-                    "and will be processed between tool rounds."
+                    "Agent is working on a task. Your message has been queued "
+                    "and will be included in the next conversation turn."
                 ),
                 "tool_outputs": [],
                 "tokens_used": 0,
@@ -2253,8 +2253,8 @@ class AgentLoop:
             yield {
                 "type": "text_delta",
                 "content": (
-                    "Agent is working on a task. Your message has been delivered "
-                    "and will be processed between tool rounds."
+                    "Agent is working on a task. Your message has been queued "
+                    "and will be included in the next conversation turn."
                 ),
             }
             yield {
