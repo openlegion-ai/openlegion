@@ -737,9 +737,16 @@ class CredentialVault:
         ContextWindowExceededError, UnsupportedParamsError, etc.
         NotFoundError means the model name itself is invalid — cascading
         would silently mask bad config.
+        402 Payment Required means the credit proxy rejected the call for
+        insufficient credits — all models route through the same proxy,
+        so failover to another model is pointless.
         """
         import litellm
-        return isinstance(error, (litellm.BadRequestError, litellm.NotFoundError))
+        if isinstance(error, (litellm.BadRequestError, litellm.NotFoundError)):
+            return True
+        if getattr(error, "status_code", 0) == 402:
+            return True
+        return False
 
     @staticmethod
     def _get_status_code(error: Exception) -> int:
