@@ -196,6 +196,14 @@ AGENT_PREFIX = "OPENLEGION_CRED_"
 # model registry (src/shared/models.py) so adding a provider in one
 # place propagates everywhere.
 SYSTEM_CREDENTIAL_PROVIDERS = get_known_provider_names()
+# Providers where LiteLLM handles routing natively (built-in support).
+# Custom providers like 'openlegion' are NOT in this set — they use
+# api_base with OpenAI-compatible rewrite in _rewrite_model_for_litellm().
+_LITELLM_NATIVE_PROVIDERS = frozenset({
+    "anthropic", "openai", "openrouter", "gemini", "mistral",
+    "deepseek", "groq", "together_ai", "fireworks_ai", "perplexity",
+    "minimax", "moonshot", "xai", "zai", "ollama",
+})
 SYSTEM_CREDENTIAL_SUFFIXES = ("_api_key", "_api_base")
 
 
@@ -719,7 +727,7 @@ class CredentialVault:
         if not api_base:
             return model
         provider = self._resolve_provider(model)
-        if provider and provider in SYSTEM_CREDENTIAL_PROVIDERS:
+        if provider and provider in _LITELLM_NATIVE_PROVIDERS:
             return model
         # Unknown provider with custom api_base → OpenAI-compatible
         if "/" in model:
@@ -737,9 +745,16 @@ class CredentialVault:
         ContextWindowExceededError, UnsupportedParamsError, etc.
         NotFoundError means the model name itself is invalid — cascading
         would silently mask bad config.
+        402 Payment Required means the credit proxy rejected the call for
+        insufficient credits — all models route through the same proxy,
+        so failover to another model is pointless.
         """
         import litellm
-        return isinstance(error, (litellm.BadRequestError, litellm.NotFoundError))
+        if isinstance(error, (litellm.BadRequestError, litellm.NotFoundError)):
+            return True
+        if getattr(error, "status_code", 0) == 402:
+            return True
+        return False
 
     @staticmethod
     def _get_status_code(error: Exception) -> int:

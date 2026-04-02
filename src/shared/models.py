@@ -24,6 +24,7 @@ from functools import lru_cache
 
 _PROVIDER_LABELS: dict[str, str] = {
     "anthropic": "Anthropic",
+    "openlegion": "OpenLegion Credits",
     "openrouter": "OpenRouter",
     "openai": "OpenAI",
     "gemini": "Google Gemini",
@@ -154,6 +155,19 @@ _FEATURED_MODELS: dict[str, list[str]] = {
         "openrouter/meta-llama/llama-3.1-8b-instruct",
         "openrouter/mistralai/mistral-large",
     ],
+    "openlegion": [
+        "openlegion/anthropic/claude-sonnet-4-6",
+        "openlegion/anthropic/claude-haiku-4-5-20251001",
+        "openlegion/openai/gpt-4.1",
+        "openlegion/openai/gpt-4.1-mini",
+        "openlegion/google/gemini-2.5-pro",
+        "openlegion/google/gemini-2.5-flash",
+        "openlegion/deepseek/deepseek-chat-v3",
+        "openlegion/meta-llama/llama-3.1-405b-instruct",
+        "openlegion/meta-llama/llama-3.1-70b-instruct",
+        "openlegion/meta-llama/llama-3.1-8b-instruct",
+        "openlegion/mistralai/mistral-large",
+    ],
     "mistral": [
         "mistral/mistral-large-latest",
         "mistral/mistral-medium-latest",
@@ -213,8 +227,15 @@ def _resolve_litellm_key(model: str) -> str | None:
     ``claude-sonnet-4-6``) but prefixed names for others
     (``xai/grok-3``, ``gemini/gemini-2.5-pro``).
 
+    The ``openlegion/`` prefix is a routing wrapper (credit proxy) and
+    is stripped before lookup so cost/context data resolves correctly.
+
     Returns the matching key, or None if not found.
     """
+    # Strip the openlegion/ routing prefix — it wraps real provider/model names
+    if model.startswith("openlegion/"):
+        model = model[len("openlegion/"):]
+
     try:
         from litellm import model_cost
     except ImportError:
@@ -256,7 +277,9 @@ def get_model_cost(model: str) -> tuple[float, float]:
         except (ImportError, KeyError):
             pass
 
-    return _FALLBACK_COSTS.get(model, _DEFAULT_COST)
+    # Strip openlegion/ for fallback lookup (fallback keys use provider/model format)
+    lookup = model[len("openlegion/"):] if model.startswith("openlegion/") else model
+    return _FALLBACK_COSTS.get(lookup, _DEFAULT_COST)
 
 
 _OLLAMA_DEFAULT_CONTEXT = 4096
@@ -283,7 +306,8 @@ def get_context_window(model: str) -> int:
     if model.startswith("ollama/") or model.startswith("ollama_chat/"):
         return _OLLAMA_DEFAULT_CONTEXT
 
-    return _FALLBACK_CONTEXT.get(model, _DEFAULT_CONTEXT_WINDOW)
+    lookup = model[len("openlegion/"):] if model.startswith("openlegion/") else model
+    return _FALLBACK_CONTEXT.get(lookup, _DEFAULT_CONTEXT_WINDOW)
 
 
 @lru_cache(maxsize=32)
