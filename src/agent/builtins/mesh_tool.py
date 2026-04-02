@@ -651,6 +651,7 @@ async def get_agent_profile(agent_id: str, *, mesh_client=None) -> dict:
         "- USER.md: user preferences, corrections, project context\n"
         "- HEARTBEAT.md: autonomous wakeup rules and checks\n"
         "- INTERFACE.md: public collaboration contract for other agents\n"
+        "Update when you discover something lasting, not every turn. "
         "Always read_file first — merge new knowledge, don't overwrite. "
         "When errors repeat, distill the pattern into INSTRUCTIONS.md."
     ),

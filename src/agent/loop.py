@@ -2021,7 +2021,10 @@ class AgentLoop:
             rules += "- Use notify_user to report results to the user.\n"
         else:
             rules += "- Use notify_user for the user; blackboard for other agents only.\n"
-        rules += "- Before answering from memory, run memory_search first.\n"
+        rules += (
+            "- Before answering from memory, run memory_search first.\n"
+            "- Use update_workspace to save lasting knowledge and user preferences.\n"
+        )
 
         if has_browser:
             rules += (
