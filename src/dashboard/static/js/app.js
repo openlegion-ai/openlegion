@@ -45,8 +45,9 @@ const _IDENTITY_FILE_MAP = {
 function dashboard() {
   return {
     // Navigation
-    activeTab: 'fleet',
+    activeTab: 'chat',
     tabs: [
+      { id: 'chat', label: 'Chat' },
       { id: 'fleet', label: 'Agents' },
       { id: 'system', label: 'System' },
     ],
@@ -207,6 +208,14 @@ function dashboard() {
     chatFullScreen: false,     // Whether the chat panel is expanded to full screen
     chatUnread: {},            // { agentId: count } — unread notifications while minimized
     _chatSessionId: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2),
+
+    // Master Chat
+    masterChatMessages: [],
+    masterChatLastAgent: '',
+    masterChatStreaming: false,
+    masterChatLoading: false,
+    masterChatAbort: null,
+    masterChatStreamIdx: -1,
 
     // Identity panel
     identityTabs: _IDENTITY_TABS,
@@ -422,6 +431,7 @@ function dashboard() {
     // ── URL Routing ──────────────────────────────────────────
 
     _buildPath() {
+      if (this.activeTab === 'chat') return '/chat';
       if (this.detailAgent) {
         const tab = this.identityTab || 'config';
         return tab === 'config'
@@ -440,6 +450,7 @@ function dashboard() {
     },
 
     _buildTitle() {
+      if (this.activeTab === 'chat') return 'Chat \u2014 OpenLegion';
       if (this.detailAgent) {
         const tabLabel = (_IDENTITY_TABS.find(t => t.id === this.identityTab) || _IDENTITY_TABS[0]).label;
         return `${this.detailAgent} \u00b7 ${tabLabel} \u2014 OpenLegion`;
@@ -458,8 +469,10 @@ function dashboard() {
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
+      const route = { tab: 'chat', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
       if (!clean) return route;
+
+      if (clean === 'chat') { route.tab = 'chat'; return route; }
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
       if (agentMatch) {
@@ -865,6 +878,15 @@ function dashboard() {
         console.debug('localStorage restore skipped:', e.message || e);
       }
 
+      try {
+        const mc = localStorage.getItem('ol_master_chat');
+        if (mc) {
+          const parsed = JSON.parse(mc);
+          if (Array.isArray(parsed.messages)) this.masterChatMessages = parsed.messages;
+          if (parsed.lastAgent) this.masterChatLastAgent = parsed.lastAgent;
+        }
+      } catch (e) {}
+
       // Sync restored open chats from server so cross-device history is fresh
       for (const agentId of this.openChats) {
         this._loadChatHistory(agentId);
@@ -900,7 +922,7 @@ function dashboard() {
 
       // Deep link restoration: parse initial URL and apply route
       const initRoute = this._parsePath(window.location.pathname);
-      const isDeepLink = initRoute.agentId || initRoute.tab !== 'fleet' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
+      const isDeepLink = initRoute.agentId || initRoute.tab !== 'chat' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
       if (isDeepLink) {
         this.$nextTick(() => {
           this._applyRoute(initRoute);
@@ -1080,6 +1102,12 @@ function dashboard() {
       this.detailAgent = null;
       // Clear tab-specific auto-refresh intervals
       this._stopActivityRefresh();
+      if (tab === 'chat') {
+        this.$nextTick(() => {
+          const el = document.getElementById('master-chat-input');
+          if (el) el.focus();
+        });
+      }
       if (tab === 'fleet') {
         this.fetchAgents();
         this.fetchQueues();
@@ -3890,6 +3918,157 @@ function dashboard() {
       }
       this._saveChatToSession();
       this.fetchQueues();
+    },
+
+    async sendMasterChat(inputValue) {
+      const msg = (inputValue || '').trim();
+      if (!msg || this.masterChatStreaming) return;
+
+      // Push user message
+      this.masterChatMessages.push({
+        role: 'user', content: msg, agentId: '', ts: Date.now(),
+      });
+
+      // Push placeholder agent response
+      const entry = {
+        role: 'agent', content: '', agentId: '',
+        streaming: true, phase: 'thinking',
+        tools: [], timeline: [], _sawTextDelta: false, ts: Date.now(),
+      };
+      this.masterChatMessages.push(entry);
+      const idx = this.masterChatMessages.length - 1;
+      this.masterChatStreamIdx = idx;
+      this.masterChatLoading = true;
+      this.masterChatStreaming = true;
+      this._saveMasterChat();
+      this.$nextTick(() => this._scrollMasterChat());
+
+      const controller = new AbortController();
+      this.masterChatAbort = controller;
+      let idleTimer = setTimeout(() => controller.abort(), 120000);
+      const resetIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => controller.abort(), 120000); };
+
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/chat/stream`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Chat-Session': this._chatSessionId || '',
+          },
+          body: JSON.stringify({ message: msg, last_agent: this.masterChatLastAgent }),
+          signal: controller.signal,
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          entry.role = 'error'; entry.content = err.detail || `Error ${resp.status}`; entry.streaming = false; entry.phase = 'error';
+          return;
+        }
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          resetIdle();
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop() || '';
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            let event;
+            try { event = JSON.parse(line.slice(6)); } catch { continue; }
+            const etype = event.type || '';
+            if (etype === 'agent_selected') {
+              entry.agentId = event.agent;
+              this.masterChatLastAgent = event.agent;
+            } else if (etype === 'text_delta') {
+              this.masterChatLoading = false;
+              entry.content += event.content || '';
+              entry.phase = 'responding';
+              entry._sawTextDelta = true;
+              this._appendMasterChatTimelineText(entry, event.content || '');
+              this.$nextTick(() => this._scrollMasterChat());
+            } else if (etype === 'tool_start') {
+              this.masterChatLoading = false;
+              entry.phase = 'tool';
+              entry.tools.push({
+                id: event.tool_call_id || '', name: event.name || event.tool || '',
+                status: 'running', input: event.input ?? null,
+                inputPreview: this.chatToolPreview(event.input),
+                output: null, outputPreview: '',
+              });
+              this._pushMasterChatTimelinePhase(entry, 'tool');
+            } else if (etype === 'tool_result') {
+              const tname = event.name || event.tool || '';
+              const ti = entry.tools.map(t => t.name).lastIndexOf(tname);
+              if (ti >= 0) {
+                entry.tools[ti].status = 'done';
+                entry.tools[ti].output = event.output ?? event.result ?? null;
+                entry.tools[ti].outputPreview = this.chatToolPreview(event.output ?? event.result);
+              }
+            } else if (etype === 'done') {
+              entry.streaming = false;
+              entry.phase = 'done';
+              if (event.response && !entry._sawTextDelta) entry.content = event.response;
+              if (event.tool_limit_reached) entry.tool_limit_reached = true;
+            } else if (etype === 'error') {
+              entry.role = 'error'; entry.streaming = false; entry.phase = 'error';
+              entry.content = event.message || 'Unknown error';
+            }
+          }
+        }
+        // Gracefully finalize if stream ended without done event
+        if (entry.streaming) { entry.streaming = false; entry.phase = entry.content ? 'done' : 'error'; }
+        if (!entry.content && entry.phase === 'error') entry.content = 'Response timed out — please try again.';
+      } catch (e) {
+        if (entry.content) { entry.streaming = false; entry.phase = 'done'; }
+        else { entry.role = 'error'; entry.streaming = false; entry.phase = 'error'; entry.content = 'Request failed — please try again.'; }
+      } finally {
+        clearTimeout(idleTimer);
+        this.masterChatAbort = null;
+        this.masterChatStreaming = false;
+        this.masterChatLoading = false;
+        this.masterChatStreamIdx = -1;
+        this._saveMasterChat();
+      }
+    },
+
+    _saveMasterChat() {
+      try {
+        const msgs = this.masterChatMessages.slice(-100);
+        localStorage.setItem('ol_master_chat', JSON.stringify({
+          messages: msgs, lastAgent: this.masterChatLastAgent,
+        }));
+      } catch (e) { /* quota exceeded — ignore */ }
+    },
+
+    _scrollMasterChat() {
+      const el = document.getElementById('master-chat-messages');
+      if (el) { clearTimeout(this._masterScrollTimer); this._masterScrollTimer = setTimeout(() => { el.scrollTop = el.scrollHeight; }, 50); }
+    },
+
+    clearMasterChat() {
+      this.masterChatMessages = [];
+      this.masterChatLastAgent = '';
+      this._saveMasterChat();
+    },
+
+    _pushMasterChatTimelinePhase(entry, phase) {
+      if (!entry.timeline) entry.timeline = [];
+      entry.timeline.push({ kind: 'phase', phase, ts: Date.now() });
+    },
+
+    _appendMasterChatTimelineText(entry, chunk) {
+      if (!entry.timeline) entry.timeline = [];
+      const last = entry.timeline[entry.timeline.length - 1];
+      if (last && last.kind === 'text') { last.content += chunk; }
+      else { entry.timeline.push({ kind: 'text', content: chunk, ts: Date.now() }); }
+    },
+
+    agentRole(agentId) {
+      if (!agentId) return '';
+      const agent = this.agents.find(a => a.id === agentId);
+      return agent && agent.role ? '\u00b7 ' + agent.role : '';
     },
 
     // ── Broadcast ────────────────────────────────────────
