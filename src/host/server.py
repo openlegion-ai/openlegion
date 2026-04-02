@@ -1176,6 +1176,122 @@ def create_mesh_app(
         except Exception as e:
             raise HTTPException(500, f"Failed to spawn agent: {e}") from e
 
+    # === Fleet Templates ===
+
+    @app.get("/mesh/fleet/templates")
+    async def list_fleet_templates(request: Request) -> dict:
+        """List available fleet templates with name, description, and agent count."""
+        _require_any_auth(request)
+        from src.cli.config import _load_templates
+        templates = _load_templates()
+        result = []
+        for name, tpl in templates.items():
+            result.append({
+                "name": name,
+                "description": tpl.get("description", ""),
+                "agent_count": len(tpl.get("agents", {})),
+                "agents": list(tpl.get("agents", {}).keys()),
+            })
+        return {"templates": result}
+
+    @app.post("/mesh/fleet/apply")
+    async def apply_fleet_template(data: dict, request: Request) -> dict:
+        """Apply a fleet template to create and start a team of agents.
+
+        Body: {"template": "sales", "model": "anthropic/claude-sonnet-4-20250514"}
+        model is optional (defaults to config default).
+        Requires can_spawn permission.
+        """
+        if container_manager is None:
+            raise HTTPException(503, "Container manager not available")
+        template_name = data.get("template", "")
+        if not isinstance(template_name, str) or not template_name:
+            raise HTTPException(400, "template is required and must be a non-empty string")
+        model_override = data.get("model", "")
+
+        agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        await _check_rate_limit("spawn", agent_id)
+        if not permissions.can_spawn(agent_id):
+            raise HTTPException(403, f"Agent {agent_id} is not allowed to spawn agents")
+
+        from src.cli.config import _load_config, _load_templates, _apply_template
+        templates = _load_templates()
+        tpl = templates.get(template_name)
+        if not tpl:
+            available = list(templates.keys())
+            raise HTTPException(404, f"Template '{template_name}' not found. Available: {available}")
+
+        # Override model in template agent definitions if requested
+        if model_override:
+            import copy
+            tpl = copy.deepcopy(tpl)
+            for agent_def in tpl.get("agents", {}).values():
+                agent_def["model"] = model_override
+
+        # Create agent configs via _apply_template
+        try:
+            created = _apply_template(template_name, tpl)
+        except Exception as e:
+            raise HTTPException(500, f"Failed to apply template: {e}") from e
+
+        if not created:
+            return {"created": [], "message": "No new agents created (all already exist)"}
+
+        # Start each created agent container
+        cfg = _load_config()
+        started = []
+        errors = []
+        for name in created:
+            acfg = cfg.get("agents", {}).get(name, {})
+            role = acfg.get("role", name)
+            skills_dir = acfg.get("skills_dir", "")
+            # Pass workspace seed values via extra_env
+            for env_key, cfg_key in (
+                ("INITIAL_INSTRUCTIONS", "initial_instructions"),
+                ("INITIAL_SOUL", "initial_soul"),
+                ("INITIAL_HEARTBEAT", "initial_heartbeat"),
+            ):
+                val = acfg.get(cfg_key, "")
+                if val:
+                    container_manager.extra_env[env_key] = val
+            try:
+                url = container_manager.start_agent(
+                    agent_id=name,
+                    role=role,
+                    skills_dir=skills_dir,
+                    model=acfg.get("model", ""),
+                    thinking=acfg.get("thinking", ""),
+                )
+                router.register_agent(name, url, role=role)
+                if transport is not None:
+                    from src.host.transport import HttpTransport
+                    if isinstance(transport, HttpTransport):
+                        transport.register(name, url)
+                if health_monitor is not None:
+                    health_monitor.register(name)
+                if cron_scheduler is not None:
+                    hb_schedule = cfg.get("mesh", {}).get("heartbeat_schedule")
+                    cron_scheduler.ensure_heartbeat(name, hb_schedule)
+                ready = await container_manager.wait_for_agent(name, timeout=60)
+                started.append({"agent_id": name, "role": role, "ready": ready})
+                if event_bus is not None:
+                    event_bus.emit("agent_state", agent=name,
+                        data={"state": "added", "role": role, "ready": ready})
+            except Exception as e:
+                logger.error("Failed to start agent '%s' from template: %s", name, e)
+                errors.append({"agent_id": name, "error": str(e)})
+            finally:
+                container_manager.extra_env.pop("INITIAL_INSTRUCTIONS", None)
+                container_manager.extra_env.pop("INITIAL_SOUL", None)
+                container_manager.extra_env.pop("INITIAL_HEARTBEAT", None)
+
+        return {
+            "template": template_name,
+            "created": [s["agent_id"] for s in started],
+            "started": started,
+            "errors": errors,
+        }
+
     # === Agent History Access ===
 
     @app.get("/mesh/agents/{agent_id}/history")

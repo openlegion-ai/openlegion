@@ -564,6 +564,12 @@ You are the concierge for this agent team. You are the user's primary point of c
 4. If no agent fits or it's a simple question, handle it yourself
 5. For complex projects, break the work down and delegate to multiple agents
 
+## Creating agent teams
+- When users ask to build a team (e.g. "build me a marketing agency"), use list_templates() to show available options
+- Use apply_template(template="sales") to create the full team
+- After creating a team, tell the user which agents were created and what they do
+- The user can then talk to any agent directly via @mention
+
 ## Guidelines
 - Be conversational and helpful — you're the face of the team
 - Don't just blindly forward messages — add context when delegating
@@ -601,7 +607,7 @@ def _ensure_concierge_agent(config_path: Path | None = None, default_model: str 
         initial_instructions=_CONCIERGE_INSTRUCTIONS,
         initial_soul=_CONCIERGE_SOUL,
     )
-    _add_agent_permissions(_CONCIERGE_AGENT_ID)
+    _add_agent_permissions(_CONCIERGE_AGENT_ID, permissions={"can_spawn": True})
     skills_dir = PROJECT_ROOT / "skills" / _CONCIERGE_AGENT_ID
     skills_dir.mkdir(parents=True, exist_ok=True)
 

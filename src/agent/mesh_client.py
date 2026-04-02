@@ -538,6 +538,29 @@ class MeshClient:
 
     # === Browser (shared browser service via mesh proxy) ===
 
+    async def list_fleet_templates(self) -> dict:
+        """List available fleet templates from the mesh."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/fleet/templates",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def apply_fleet_template(self, template: str, model: str = "") -> dict:
+        """Apply a fleet template to create a team of agents."""
+        client = await self._get_client()
+        body: dict = {"template": template}
+        if model:
+            body["model"] = model
+        response = await client.post(
+            f"{self.mesh_url}/mesh/fleet/apply",
+            json=body,
+            timeout=120,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def browser_command(self, action: str, params: dict | None = None) -> dict:
         """Send a browser command through the mesh to the shared browser service."""
         client = await self._get_client()
