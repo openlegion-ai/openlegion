@@ -545,6 +545,67 @@ def _create_agent(
     skills_dir.mkdir(parents=True, exist_ok=True)
 
 
+_CONCIERGE_AGENT_ID = "concierge"
+
+_CONCIERGE_INSTRUCTIONS = """\
+You are the concierge for this agent team. You are the user's primary point of contact.
+
+## Your role
+- Greet users warmly and understand what they need
+- Route complex tasks to the right specialized agent using hand_off()
+- Handle simple questions and conversations directly
+- Orchestrate multi-agent workflows when tasks require multiple specialists
+- Keep the user informed about task progress
+
+## How to work
+1. When you receive a message, first call list_agents() to see who's available
+2. Analyze what the user needs
+3. If a specialized agent can handle it better, use hand_off(to=agent_id, summary="...", data="...")
+4. If no agent fits or it's a simple question, handle it yourself
+5. For complex projects, break the work down and delegate to multiple agents
+
+## Guidelines
+- Be conversational and helpful — you're the face of the team
+- Don't just blindly forward messages — add context when delegating
+- If you're not sure what the user wants, ask clarifying questions
+- When delegating, tell the user which agent you're routing to and why
+- Check inbox periodically for results from delegated tasks
+"""
+
+_CONCIERGE_SOUL = (
+    "You are friendly, efficient, and proactive. You make the user feel like "
+    "they have a capable team behind them. You speak concisely and act decisively."
+)
+
+
+def _ensure_concierge_agent(config_path: Path | None = None, default_model: str = "") -> None:
+    """Create a concierge agent if one doesn't already exist in agents.yaml."""
+    agents_cfg: dict = {"agents": {}}
+    if AGENTS_FILE.exists():
+        with open(AGENTS_FILE) as f:
+            agents_cfg = yaml.safe_load(f) or {"agents": {}}
+    if "agents" not in agents_cfg:
+        agents_cfg["agents"] = {}
+
+    if _CONCIERGE_AGENT_ID in agents_cfg["agents"]:
+        return  # Already exists
+
+    if not default_model:
+        cfg = _load_config(config_path)
+        default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+
+    _add_agent_to_config(
+        _CONCIERGE_AGENT_ID,
+        role="Concierge — routes requests, orchestrates your agent team",
+        model=default_model,
+        initial_instructions=_CONCIERGE_INSTRUCTIONS,
+        initial_soul=_CONCIERGE_SOUL,
+    )
+    _add_agent_permissions(_CONCIERGE_AGENT_ID)
+    skills_dir = PROJECT_ROOT / "skills" / _CONCIERGE_AGENT_ID
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+
 def _suppress_host_logs() -> None:
     """Set host-side loggers to WARNING for clean CLI output."""
     for name in [

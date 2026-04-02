@@ -279,9 +279,23 @@ class RuntimeContext:
     def _start_agents(self) -> None:
         from src.host.runtime import DockerBackend, SandboxBackend
         from src.host.transport import HttpTransport
+        from src.cli.config import _ensure_concierge_agent, _CONCIERGE_AGENT_ID
+
+        # Auto-create a concierge agent if one doesn't exist yet
+        default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        _ensure_concierge_agent(default_model=default_model)
+        # Reload agents after possible concierge creation
+        from src.cli.config import _load_config
+        self.cfg = _load_config()
 
         agents_cfg = self.cfg.get("agents", {})
-        default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+
+        # Start concierge first so it's always available for routing
+        if _CONCIERGE_AGENT_ID in agents_cfg:
+            ordered = {_CONCIERGE_AGENT_ID: agents_cfg[_CONCIERGE_AGENT_ID]}
+            ordered.update({k: v for k, v in agents_cfg.items() if k != _CONCIERGE_AGENT_ID})
+            agents_cfg = ordered
+
         embedding_model = self.cfg.get("llm", {}).get(
             "embedding_model", _default_embedding_model(default_model),
         )
