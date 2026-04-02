@@ -89,52 +89,91 @@ def _sanitize_filename(name: str) -> str:
     return f"custom_{safe}.py"
 
 
+_SKILL_AUTHORING_GUIDE = """\
+# Skill Authoring Guide
+
+## mesh_client Methods (all async)
+
+- `browser_command(action, params)` — send browser commands.
+  Actions: navigate, snapshot, click, type, hover, scroll, screenshot,
+  press_key, wait_for, reset, go_back, go_forward, switch_tab.
+  Same API that browser_navigate/browser_click/etc use internally.
+- `notify_user(message)` — send notification to user
+- `read_blackboard(key)` / `write_blackboard(key, value)` — shared data store
+- `publish_event(topic, payload)` — pub/sub events
+- `vault_resolve(name)` — resolve a $CRED{name} handle to its value
+- `image_generate(prompt, size, provider)` — generate an image
+- `list_agents()` — list fleet agents
+
+## Example: Browser Automation Skill
+
+```python
+from src.agent.skills import skill
+
+@skill(
+    name="post_tweet",
+    description="Post a tweet",
+    parameters={"text": {"type": "string", "description": "Tweet text"}},
+)
+async def post_tweet(text: str, *, mesh_client=None) -> dict:
+    await mesh_client.browser_command(
+        "navigate", {"url": "https://x.com/compose/post", "wait_until": "networkidle"},
+    )
+    await mesh_client.browser_command(
+        "wait_for", {"selector": '[data-testid="tweetTextarea_0"]', "state": "visible"},
+    )
+    await mesh_client.browser_command(
+        "type", {"selector": '[data-testid="tweetTextarea_0"]', "text": text},
+    )
+    await mesh_client.browser_command(
+        "click", {"selector": '[data-testid="tweetButton"]'},
+    )
+    return {"posted": True}
+```
+
+## Example: Simple Skill (no dependencies)
+
+```python
+from src.agent.skills import skill
+
+@skill(
+    name="my_tool",
+    description="Does X",
+    parameters={"x": {"type": "string"}},
+)
+def my_tool(x: str) -> dict:
+    return {"result": x.upper()}
+```
+
+## Important
+- Do NOT import other tool modules — use injected parameters instead.
+- Functions using `await` must be `async def`.
+- Forbidden imports: os, subprocess, sys, socket, pathlib, etc. (sandbox enforced).
+"""
+
+
+def _ensure_skill_guide() -> None:
+    """Lazily write the skill authoring guide to /data/ if missing."""
+    guide_path = Path("/data/SKILL_AUTHORING.md")
+    if not guide_path.exists():
+        try:
+            guide_path.write_text(_SKILL_AUTHORING_GUIDE)
+        except OSError:
+            pass  # container may not have /data yet
+
+
 @skill(
     name="create_skill",
     description=(
-        "Create a new tool/skill for yourself. Write Python code with the @skill "
-        "decorator. The skill will be validated, saved, and immediately available. "
-        "You must import 'from src.agent.skills import skill' and decorate your "
-        "function with @skill(name=..., description=..., parameters=...). "
-        "Declare these keyword parameters to get framework-injected dependencies:\n"
-        "  mesh_client       → mesh API (see methods below)\n"
-        "  workspace_manager → agent workspace files\n"
-        "  memory_store      → agent memory DB\n"
-        "IMPORTANT: Do NOT import other tool modules. Use injected parameters instead. "
-        "Functions using await must be 'async def'.\n"
-        "\n"
-        "mesh_client methods (all async):\n"
-        "  browser_command(action, params) → send browser commands. "
-        "Actions: navigate, snapshot, click, type, hover, scroll, screenshot, "
-        "press_key, wait_for, reset, go_back, go_forward, switch_tab. "
-        "This is the SAME API that browser_navigate/browser_click/etc use internally.\n"
-        "  notify_user(message) → send notification to user\n"
-        "  read_blackboard(key) / write_blackboard(key, value) → shared data store\n"
-        "  publish_event(topic, payload) → pub/sub events\n"
-        "  vault_resolve(name) → resolve a $CRED{name} credential handle to its value\n"
-        "  image_generate(prompt, size, provider) → generate an image\n"
-        "  list_agents() → list fleet agents\n"
-        "\n"
-        "Example (browser automation skill):\n"
-        "  from src.agent.skills import skill\n"
-        "  @skill(name='post_tweet', description='Post a tweet', "
-        "parameters={'text': {'type': 'string', 'description': 'Tweet text'}})\n"
-        "  async def post_tweet(text: str, *, mesh_client=None) -> dict:\n"
-        "      await mesh_client.browser_command('navigate', "
-        "{'url': 'https://x.com/compose/post', 'wait_until': 'networkidle'})\n"
-        "      await mesh_client.browser_command('wait_for', "
-        "{'selector': '[data-testid=\"tweetTextarea_0\"]', 'state': 'visible'})\n"
-        "      await mesh_client.browser_command('type', "
-        "{'selector': '[data-testid=\"tweetTextarea_0\"]', 'text': text})\n"
-        "      await mesh_client.browser_command('click', "
-        "{'selector': '[data-testid=\"tweetButton\"]'})\n"
-        "      return {'posted': True}\n"
-        "\n"
-        "Example (simple, no dependencies):\n"
-        "  from src.agent.skills import skill\n"
-        "  @skill(name='my_tool', description='Does X', parameters={'x': {'type': 'string'}})\n"
-        "  def my_tool(x: str) -> dict:\n"
-        "      return {'result': x.upper()}"
+        "Create a new tool by writing Python code with the @skill decorator. "
+        "Import 'from src.agent.skills import skill' and decorate your function "
+        "with @skill(name=..., description=..., parameters=...). "
+        "Declare keyword parameters for injected dependencies: mesh_client "
+        "(mesh API — browser_command, notify_user, read/write_blackboard, "
+        "vault_resolve, image_generate, list_agents), workspace_manager, "
+        "or memory_store. Async functions must use 'async def'. "
+        "Call reload_skills after creation to activate. "
+        "Read /data/SKILL_AUTHORING.md for mesh_client API details and examples."
     ),
     parameters={
         "name": {
@@ -150,6 +189,8 @@ def _sanitize_filename(name: str) -> str:
 def create_skill(name: str, code: str, *, workspace_manager=None) -> dict:
     if workspace_manager is None:
         return {"error": "No workspace_manager available"}
+
+    _ensure_skill_guide()
 
     error = _validate_skill_code(code)
     if error:
