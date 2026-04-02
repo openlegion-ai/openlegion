@@ -1057,6 +1057,84 @@ def create_dashboard_router(
         from starlette.responses import StreamingResponse
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+    @api_router.post("/api/chat/stream")
+    async def api_master_chat_stream(request: Request):
+        """SSE streaming chat — auto-routes to the best available agent."""
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        if not agent_registry:
+            raise HTTPException(status_code=503, detail="No agents available")
+        body = await request.json()
+        message = body.get("message", "").strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="Message is required")
+        from src.shared.utils import sanitize_for_prompt
+        message = sanitize_for_prompt(message)
+        chat_session = request.headers.get("x-chat-session", "")
+
+        # --- Agent routing ---
+        target_agent = None
+        forward_message = message
+
+        # 1. @mention routing
+        import re
+        mention_match = re.match(r"^@([\w-]+)\s+([\s\S]+)", message)
+        if mention_match:
+            mentioned = mention_match.group(1)
+            if mentioned in agent_registry:
+                target_agent = mentioned
+                forward_message = mention_match.group(2).strip()
+
+        # 2. Conversation continuity
+        if not target_agent:
+            last_agent = body.get("last_agent", "")
+            if last_agent and last_agent in agent_registry:
+                target_agent = last_agent
+
+        # 3. Pick first idle agent
+        if not target_agent:
+            lane_status = lane_manager.get_status() if lane_manager else {}
+            for aid in agent_registry:
+                if not lane_status.get(aid, {}).get("busy", False):
+                    target_agent = aid
+                    break
+
+        # 4. Fallback: first agent in registry
+        if not target_agent:
+            target_agent = next(iter(agent_registry))
+
+        if event_bus:
+            event_bus.emit("chat_user_message", agent=target_agent,
+                data={"message": forward_message, "session": chat_session})
+
+        async def event_generator():
+            # Tell the frontend which agent was selected
+            yield f"data: {json.dumps({'type': 'agent_selected', 'agent': target_agent})}\n\n"
+            final_response = ""
+            try:
+                async for event in transport.stream_request(
+                    target_agent, "POST", "/chat/stream",
+                    json={"message": forward_message}, timeout=120,
+                ):
+                    if isinstance(event, dict):
+                        yield f"data: {json.dumps(event, default=str)}\n\n"
+                        etype = event.get("type", "")
+                        if event_bus:
+                            if etype in ("tool_start", "tool_result", "text_delta"):
+                                event_bus.emit(etype, agent=target_agent,
+                                    data={k: v for k, v in event.items()
+                                          if k != "type"} | {"session": chat_session})
+                            if etype == "done":
+                                final_response = event.get("response", "")
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'message': friendly_streaming_error(e)})}\n\n"
+            if event_bus:
+                event_bus.emit("chat_done", agent=target_agent,
+                    data={"response": final_response, "session": chat_session})
+
+        from starlette.responses import StreamingResponse
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
     @api_router.post("/api/broadcast")
     async def api_broadcast(request: Request) -> dict:
         if transport is None:
