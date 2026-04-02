@@ -955,7 +955,6 @@ class AgentLoop:
                     self._fetch_introspect_cached(),
                 )
 
-            tools_desc = self.skills.get_descriptions(exclude=self._excluded_tools)
             parts: list[str] = []
 
             # 1. Goals — the agent's north star
@@ -976,7 +975,6 @@ class AgentLoop:
             nothing_clause = "goals, or inbox" if not is_standalone else "goals"
             parts.append(
                 f"You are the '{self.role}' agent.\n\n"
-                f"## Available Tools\n\n{tools_desc}\n\n"
                 f"## Operating Rules\n"
                 f"- This is a HEARTBEAT wakeup. Check your HEARTBEAT.md rules and "
                 f"goals, then act on anything that needs attention.\n"
