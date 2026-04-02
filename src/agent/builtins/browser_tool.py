@@ -141,8 +141,10 @@ async def browser_navigate(
         "etc. as a structured list with ref IDs (e1, e2, ...). Pass these "
         "refs to browser_click(ref='e3') and browser_type(ref='e5'). Call "
         "this after browser_navigate and after any action that changes the "
-        "page. This returns structured text, NOT a visual image — use "
-        "browser_screenshot for that."
+        "page. Elements include structural context like (navigation), "
+        "(dialog: Name) — when duplicates exist, prefer the one inside the "
+        "relevant container. This returns structured text, NOT a visual "
+        "image — use browser_screenshot for that."
     ),
     parameters={},
     parallel_safe=False,

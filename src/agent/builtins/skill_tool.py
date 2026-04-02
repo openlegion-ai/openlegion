@@ -153,13 +153,30 @@ def my_tool(x: str) -> dict:
 
 
 def _ensure_skill_guide() -> None:
-    """Lazily write the skill authoring guide to /data/ if missing."""
+    """Lazily write the skill authoring guide to /data/ if missing.
+
+    Uses atomic write (temp file + rename) to avoid partial-write corruption.
+    """
+    import os
+    import tempfile
+
     guide_path = Path("/data/SKILL_AUTHORING.md")
     if not guide_path.exists():
+        tmp = None
         try:
-            guide_path.write_text(_SKILL_AUTHORING_GUIDE)
-        except OSError:
-            pass  # container may not have /data yet
+            fd, tmp = tempfile.mkstemp(dir="/data", suffix=".md")
+            with os.fdopen(fd, "w") as f:
+                f.write(_SKILL_AUTHORING_GUIDE)
+            os.replace(tmp, str(guide_path))
+            tmp = None  # rename succeeded, don't clean up
+        except (FileNotFoundError, PermissionError, OSError):
+            pass  # /data not mounted or not writable
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
 
 @skill(
