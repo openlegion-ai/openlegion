@@ -73,6 +73,11 @@ def main() -> None:
     initial_heartbeat = os.environ.get("INITIAL_HEARTBEAT", "")
 
     skills = SkillRegistry(skills_dir=skills_dir, mcp_client=mcp_client)
+
+    # Write skill authoring reference guide if not present
+    from src.agent.builtins.skill_tool import _ensure_skill_guide
+    _ensure_skill_guide()
+
     workspace = WorkspaceManager(
         workspace_dir="/data/workspace",
         initial_instructions=initial_instructions,

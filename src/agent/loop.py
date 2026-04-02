@@ -849,7 +849,6 @@ class AgentLoop:
     def _build_system_prompt(
         self, assignment: TaskAssignment, introspect_data: dict | None = None,
     ) -> str:
-        tools_desc = self.skills.get_descriptions(exclude=self._excluded_tools)
         parts = []
 
         # Load workspace identity + project files into system prompt
@@ -862,7 +861,6 @@ class AgentLoop:
         rules = (
             f"You are the '{self.role}' agent in the OpenLegion multi-agent system.\n"
             f"Your current task: {assignment.task_type}\n\n"
-            f"## Available Tools\n\n{tools_desc}\n\n"
             f"## Operating Rules\n"
             f"- Default: call tools without narration. Only narrate multi-step plans or risky actions.\n"
             f"- Be resourceful — read files, search memory, check context. "
@@ -957,7 +955,6 @@ class AgentLoop:
                     self._fetch_introspect_cached(),
                 )
 
-            tools_desc = self.skills.get_descriptions(exclude=self._excluded_tools)
             parts: list[str] = []
 
             # 1. Goals — the agent's north star
@@ -978,7 +975,6 @@ class AgentLoop:
             nothing_clause = "goals, or inbox" if not is_standalone else "goals"
             parts.append(
                 f"You are the '{self.role}' agent.\n\n"
-                f"## Available Tools\n\n{tools_desc}\n\n"
                 f"## Operating Rules\n"
                 f"- This is a HEARTBEAT wakeup. Check your HEARTBEAT.md rules and "
                 f"goals, then act on anything that needs attention.\n"
@@ -1991,7 +1987,6 @@ class AgentLoop:
         fleet_roster: list[dict] | None = None,
         introspect_data: dict | None = None,
     ) -> str:
-        tools_desc = self.skills.get_descriptions(exclude=self._excluded_tools)
         parts = []
 
         if goals:
@@ -2014,7 +2009,6 @@ class AgentLoop:
         is_standalone = self.mesh_client.is_standalone
         rules = (
             f"You are the '{self.role}' agent in the OpenLegion fleet.\n\n"
-            f"## Available Tools\n\n{tools_desc}\n\n"
             f"## Operating Rules\n"
             f"- Default: call tools without narration. Only narrate multi-step plans or risky actions.\n"
             f"- Be resourceful — read files, search memory, check context. "
@@ -2027,44 +2021,20 @@ class AgentLoop:
             rules += "- Use notify_user to report results to the user.\n"
         else:
             rules += "- Use notify_user for the user; blackboard for other agents only.\n"
-        rules += "- Before answering from memory, run memory_search first.\n"
+        rules += (
+            "- Before answering from memory, run memory_search first.\n"
+            "- Use update_workspace to save lasting knowledge and user preferences.\n"
+        )
 
         if has_browser:
             rules += (
                 "\n## Browser\n"
-                "browser_navigate → browser_get_elements (get refs) → "
-                "browser_click(ref=)/browser_type(ref=). **Always re-snapshot "
-                "after actions that change the page** (clicking, typing, scrolling).\n"
-                "- Elements show structural context like (navigation), (dialog: Name). "
-                "When duplicates exist, prefer the one inside the relevant container "
-                "(e.g. a button in a dialog over one in navigation).\n"
-                "- Use snapshot_after=true on navigate/click/type to combine the "
-                "action with a snapshot in one call.\n"
-                "- Use fast=true on browser_type for search queries, URLs, and "
-                "non-sensitive fields. Use normal speed for login forms and "
-                "social media composition.\n"
-                "- Use browser_screenshot when you need visual context: verifying "
-                "actions succeeded, reading visual content, or diagnosing failures.\n"
-                "- Use browser_wait_for before interacting with elements on SPAs "
-                "that animate content in after page load.\n"
-                "- For routine navigation (clicking, typing, scrolling), just call "
-                "the tool — do not narrate each step.\n"
+                "browser_navigate → browser_get_elements (read refs) → "
+                "browser_click(ref=)/browser_type(ref=). Always re-snapshot "
+                "after state-changing actions. Use snapshot_after=true to "
+                "combine action + snapshot in one call.\n"
             )
 
-        rules += (
-            "\n## Self-Evolution\n"
-            "You improve across sessions by updating your workspace files:\n"
-            "- **INSTRUCTIONS.md**: add procedures, rules, and domain knowledge "
-            "you discover.\n"
-            "- **SOUL.md**: refine your identity and communication style "
-            "based on feedback.\n"
-            "- **USER.md**: record user preferences, corrections, and context "
-            "immediately when given.\n"
-            "- **HEARTBEAT.md**: tune your autonomous wakeup behavior.\n\n"
-            "Read the file first before updating — merge, don't overwrite.\n"
-            "When errors repeat, distill the pattern into INSTRUCTIONS.md "
-            "and clear resolved entries from errors.md.\n"
-        )
         parts.append(rules)
 
         # Fleet collaboration context (only for multi-agent setups)

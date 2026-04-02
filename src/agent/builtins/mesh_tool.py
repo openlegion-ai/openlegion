@@ -409,22 +409,15 @@ async def save_artifact(
 @skill(
     name="set_cron",
     description=(
-        "Schedule a recurring job on a cron schedule or interval. Three modes:\n\n"
-        "1. TOOL MODE (tool_name set) — invoke one of your tools directly on each "
-        "tick. No LLM is involved: zero token cost, instant execution. Use this "
-        "whenever the action is deterministic and needs no reasoning — e.g. sending "
-        "a status notification, polling an API, writing to the blackboard. The tool "
-        "must accept mesh_client as a keyword arg if it needs to communicate with "
-        "the mesh (e.g. call notify_user). Set tool_params to a JSON string if the "
-        "tool needs arguments.\n\n"
-        "2. MESSAGE MODE (message set) — the mesh wakes you up with that message on "
-        "each tick and you handle it with the LLM. Use this when the action requires "
-        "judgment, reasoning, or reading dynamic context. Each trigger costs API "
-        "credits.\n\n"
-        "3. HEARTBEAT MODE (heartbeat=true) — updates your autonomous wakeup "
-        "schedule. Only change this if the USER explicitly asks.\n\n"
-        "Schedules: standard 5-field cron ('0 9 * * 1-5') or natural intervals "
-        "('every 30m', 'every 5s'). tool_name and message are mutually exclusive."
+        "Schedule a recurring job. Three modes:\n"
+        "1. TOOL MODE (tool_name set) — invoke a tool directly each tick, no LLM, zero token cost. "
+        "Use for deterministic actions (polling, notifications, blackboard writes).\n"
+        "2. MESSAGE MODE (message set) — wake you with a message each tick for LLM processing. "
+        "Use when the action needs reasoning. Costs API credits.\n"
+        "3. HEARTBEAT MODE (heartbeat=true) — update your autonomous wakeup schedule. "
+        "Only change if the USER explicitly asks.\n"
+        "Schedules: cron ('0 9 * * 1-5') or intervals ('every 30m'). "
+        "tool_name and message are mutually exclusive."
     ),
     parameters={
         "schedule": {
@@ -651,28 +644,16 @@ async def get_agent_profile(agent_id: str, *, mesh_client=None) -> dict:
 @skill(
     name="update_workspace",
     description=(
-        "Update one of your writable workspace files to get better over time. "
-        "These files persist across sessions and shape your future behavior.\n\n"
-        "- SOUL.md: your identity — communication style, tone, behavioral "
-        "principles. Refine based on user feedback about how you interact.\n"
-        "- INSTRUCTIONS.md: your operating manual — procedures, workflow "
-        "rules, tool patterns, domain knowledge. Update when you discover "
-        "better approaches or learn new domain constraints.\n"
-        "- USER.md: your user's context — their preferences, communication "
-        "style, project background, and important facts so you serve them "
-        "better in future sessions.\n"
-        "- HEARTBEAT.md: your autonomous rules — what to check and do on "
-        "periodic wakeups. Drop wasteful checks, add useful ones.\n"
-        "- INTERFACE.md: your public collaboration contract — what you accept, "
-        "what you produce, and how other agents should interact with you. "
-        "Other agents read this via get_agent_profile.\n\n"
-        "Update these when you discover something lasting, not every turn. "
-        "Read the current content first (via read_file) to avoid losing "
-        "existing information — merge new knowledge in, don't overwrite blindly. "
-        "A backup is saved automatically.\n\n"
-        "Files have bootstrap limits — content beyond the limit is saved "
-        "on disk but won't load into your active context. The write "
-        "response warns you if you exceed the limit."
+        "Update a workspace file to improve across sessions. These persist and "
+        "shape your future behavior.\n"
+        "- SOUL.md: identity, communication style, behavioral principles\n"
+        "- INSTRUCTIONS.md: procedures, workflow rules, domain knowledge\n"
+        "- USER.md: user preferences, corrections, project context\n"
+        "- HEARTBEAT.md: autonomous wakeup rules and checks\n"
+        "- INTERFACE.md: public collaboration contract for other agents\n"
+        "Update when you discover something lasting, not every turn. "
+        "Always read_file first — merge new knowledge, don't overwrite. "
+        "When errors repeat, distill the pattern into INSTRUCTIONS.md."
     ),
     parameters={
         "filename": {
