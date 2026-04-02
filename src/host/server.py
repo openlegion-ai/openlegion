@@ -1254,6 +1254,9 @@ def create_mesh_app(
                 val = acfg.get(cfg_key, "")
                 if val:
                     container_manager.extra_env[env_key] = val
+            excluded = acfg.get("excluded_tools")
+            if excluded and isinstance(excluded, list):
+                container_manager.extra_env["EXCLUDED_TOOLS"] = ",".join(excluded)
             try:
                 url = container_manager.start_agent(
                     agent_id=name,
@@ -1284,6 +1287,7 @@ def create_mesh_app(
                 container_manager.extra_env.pop("INITIAL_INSTRUCTIONS", None)
                 container_manager.extra_env.pop("INITIAL_SOUL", None)
                 container_manager.extra_env.pop("INITIAL_HEARTBEAT", None)
+                container_manager.extra_env.pop("EXCLUDED_TOOLS", None)
 
         return {
             "template": template_name,

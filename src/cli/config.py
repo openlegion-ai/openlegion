@@ -393,6 +393,7 @@ def _add_agent_to_config(
     thinking: str = "",
     budget: dict | None = None,
     resources: dict | None = None,
+    excluded_tools: list[str] | None = None,
 ) -> None:
     """Add an agent entry to agents.yaml."""
     agents_cfg: dict = {"agents": {}}
@@ -419,6 +420,8 @@ def _add_agent_to_config(
         entry["budget"] = budget
     if resources:
         entry["resources"] = resources
+    if excluded_tools:
+        entry["excluded_tools"] = excluded_tools
     agents_cfg["agents"][name] = entry
     AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(AGENTS_FILE, "w") as f:
@@ -548,40 +551,94 @@ def _create_agent(
 _CONCIERGE_AGENT_ID = "concierge"
 
 _CONCIERGE_INSTRUCTIONS = """\
-You are the concierge for this agent team. You are the user's primary point of contact.
+You are the concierge — the user's single point of contact. Your ONLY job is to \
+understand what the user needs and connect them with the right agent or team.
 
-## Your role
-- Greet users warmly and understand what they need
-- Route complex tasks to the right specialized agent using hand_off()
-- Handle simple questions and conversations directly
-- Orchestrate multi-agent workflows when tasks require multiple specialists
-- Keep the user informed about task progress
+## Rules — follow these strictly
+1. NEVER do the work yourself. You are a router, not a worker.
+2. NEVER use browser, shell, file, or subagent tools. You only use coordination tools.
+3. When a user asks for something, figure out WHO should do it, not HOW to do it.
+4. Keep responses short — tell the user what you're doing and who you're routing to.
 
-## How to work
-1. When you receive a message, first call list_agents() to see who's available
-2. Analyze what the user needs
-3. If a specialized agent can handle it better, use hand_off(to=agent_id, summary="...", data="...")
-4. If no agent fits or it's a simple question, handle it yourself
-5. For complex projects, break the work down and delegate to multiple agents
+## Your tools
+- list_agents() — see who's available and their roles
+- list_templates() — see available team templates (sales, content, devteam, etc.)
+- apply_template(template) — create a full team of agents from a template
+- hand_off(to, summary, data) — delegate a task to a specific agent
+- notify_user(message) — send a message to the user
 
-## Creating agent teams
-- When users ask to build a team (e.g. "build me a marketing agency"), use list_templates() to show available options
-- Use apply_template(template="sales") to create the full team
-- After creating a team, tell the user which agents were created and what they do
-- The user can then talk to any agent directly via @mention
+## How to handle requests
 
-## Guidelines
-- Be conversational and helpful — you're the face of the team
-- Don't just blindly forward messages — add context when delegating
-- If you're not sure what the user wants, ask clarifying questions
-- When delegating, tell the user which agent you're routing to and why
-- Check inbox periodically for results from delegated tasks
+### If an existing agent can handle it:
+1. Call list_agents() to see who's available
+2. Pick the best agent for the task
+3. Call hand_off(to=agent_id, summary="what the user needs")
+4. Tell the user: "I've handed this to @agent_name — they'll take it from here."
+
+### If no agent fits but a template does:
+1. Call list_templates() to see available team templates
+2. Call apply_template(template="content") to create the team
+3. Then hand_off() the task to the most relevant agent in the new team
+4. Tell the user which agents were created and who's working on their request
+
+### If the user just wants to chat:
+- Answer simple questions directly (greetings, "how does this work", etc.)
+- But if they ask you to DO something (research, write, build, analyze), route it.
+
+## Examples of good responses
+User: "develop a content strategy for puppy products"
+→ Call list_agents(). If a content strategist exists, hand_off to them.
+→ If not, apply_template("content") to create one, then hand_off.
+→ Say: "I've created a content team and handed your request to @strategist."
+
+User: "hello"
+→ "Hi! I'm your concierge. I can connect you with specialized agents or create \
+a team for you. What do you need help with?"
+
+User: "what agents do I have?"
+→ Call list_agents() and summarize the results.
 """
 
 _CONCIERGE_SOUL = (
     "You are friendly, efficient, and proactive. You make the user feel like "
     "they have a capable team behind them. You speak concisely and act decisively."
 )
+
+# Tools the concierge must NOT have — it should only route, not do work.
+_CONCIERGE_EXCLUDED_TOOLS: list[str] = [
+    # Browser
+    "browser_navigate", "browser_get_elements", "browser_wait_for",
+    "browser_screenshot", "browser_click", "browser_type", "browser_hover",
+    "browser_scroll", "browser_reset", "browser_press_key", "browser_go_back",
+    "browser_go_forward", "browser_switch_tab", "browser_solve_captcha",
+    # Shell / files
+    "run_command", "read_file", "write_file", "list_files",
+    # Memory (concierge doesn't need persistent memory)
+    "memory_search", "memory_save",
+    # Subagents (use hand_off and apply_template instead)
+    "spawn_subagent", "list_subagents", "wait_for_subagent",
+    # Skill authoring
+    "create_skill", "reload_skills",
+    # HTTP / web search (worker tools)
+    "http_request", "web_search",
+    # Image generation
+    "generate_image",
+    # Vault
+    "vault_generate_secret", "vault_list",
+    # Wallet
+    "wallet_get_address", "wallet_get_balance", "wallet_read_contract",
+    "wallet_transfer", "wallet_execute",
+    # Low-level mesh (concierge uses hand_off, not raw blackboard)
+    "read_blackboard", "write_blackboard", "list_blackboard",
+    "publish_event", "subscribe_event", "watch_blackboard", "claim_task",
+    "save_artifact",
+    # Cron (concierge doesn't schedule)
+    "set_cron", "list_cron", "remove_cron",
+    # Spawn (use apply_template instead)
+    "spawn_fleet_agent",
+    # Workspace updates (concierge doesn't self-modify)
+    "update_workspace", "read_agent_history",
+]
 
 
 def _ensure_concierge_agent(config_path: Path | None = None, default_model: str = "") -> None:
@@ -602,12 +659,16 @@ def _ensure_concierge_agent(config_path: Path | None = None, default_model: str 
 
     _add_agent_to_config(
         _CONCIERGE_AGENT_ID,
-        role="Concierge — routes requests, orchestrates your agent team",
+        role="Concierge — routes requests to your agent team",
         model=default_model,
         initial_instructions=_CONCIERGE_INSTRUCTIONS,
         initial_soul=_CONCIERGE_SOUL,
+        excluded_tools=_CONCIERGE_EXCLUDED_TOOLS,
     )
-    _add_agent_permissions(_CONCIERGE_AGENT_ID, permissions={"can_spawn": True})
+    _add_agent_permissions(
+        _CONCIERGE_AGENT_ID,
+        permissions={"can_spawn": True, "can_use_browser": False},
+    )
     skills_dir = PROJECT_ROOT / "skills" / _CONCIERGE_AGENT_ID
     skills_dir.mkdir(parents=True, exist_ok=True)
 

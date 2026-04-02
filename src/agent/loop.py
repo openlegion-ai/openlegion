@@ -185,6 +185,7 @@ class AgentLoop:
         mesh_client: MeshClient,
         workspace: WorkspaceManager | None = None,
         context_manager: ContextManager | None = None,
+        excluded_tools: frozenset[str] | None = None,
     ):
         # Override class defaults from env vars (set by dashboard system settings)
         def _clamp_env(name: str, default: int, lo: int, hi: int) -> int:
@@ -231,10 +232,12 @@ class AgentLoop:
         self._loop_detector = ToolLoopDetector(
             exempt_tools=skills.get_loop_exempt_tools(),
         )
-        # Standalone agents have no project blackboard — hide those tools
-        self._excluded_tools: frozenset[str] | None = (
-            _BLACKBOARD_TOOLS if mesh_client.is_standalone else None
-        )
+        # Merge tool exclusions: standalone agents lose blackboard tools,
+        # and agents may have config-level exclusions (e.g. concierge).
+        _base_excluded = _BLACKBOARD_TOOLS if mesh_client.is_standalone else frozenset()
+        _cfg_excluded = excluded_tools or frozenset()
+        _merged = _base_excluded | _cfg_excluded
+        self._excluded_tools: frozenset[str] | None = _merged if _merged else None
         self._skills_reloaded: bool = False
 
     async def _fetch_fleet_roster(self) -> list[dict]:

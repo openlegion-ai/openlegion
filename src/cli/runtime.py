@@ -358,6 +358,9 @@ class RuntimeContext:
             initial_heartbeat = agent_cfg.get("initial_heartbeat", "")
             if initial_heartbeat:
                 self.runtime.extra_env["INITIAL_HEARTBEAT"] = initial_heartbeat
+            excluded_tools = agent_cfg.get("excluded_tools")
+            if excluded_tools and isinstance(excluded_tools, list):
+                self.runtime.extra_env["EXCLUDED_TOOLS"] = ",".join(excluded_tools)
 
             # Set project-specific env vars for this agent
             project_name = agent_projects.get(agent_id)
@@ -411,6 +414,7 @@ class RuntimeContext:
                 self.runtime.extra_env.pop("INITIAL_INSTRUCTIONS", None)
                 self.runtime.extra_env.pop("INITIAL_SOUL", None)
                 self.runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
+                self.runtime.extra_env.pop("EXCLUDED_TOOLS", None)
                 self.runtime.extra_env.pop("PROJECT_MD_PATH", None)
                 self.runtime.extra_env.pop("PROJECT_NAME", None)
             self.router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
