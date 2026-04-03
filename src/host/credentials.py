@@ -560,7 +560,10 @@ class CredentialVault:
                 return response
             except Exception as e:
                 logger.error(f"API call failed for {request.service}/{request.action}: {e}")
-                return APIProxyResponse(success=False, error=str(e))
+                return APIProxyResponse(
+                    success=False, error=str(e),
+                    status_code=getattr(e, "status_code", None),
+                )
 
         if lock is not None:
             try:
@@ -2069,7 +2072,10 @@ class CredentialVault:
                 status_code = self._get_status_code(e)
                 self._health_tracker.record_failure(model, type(e).__name__, status_code)
                 if self._is_permanent_error(e):
-                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                    error_data: dict = {'error': str(e)}
+                    if getattr(e, 'status_code', 0) == 402:
+                        error_data['credit_exhausted'] = True
+                    yield f"data: {json.dumps(error_data)}\n\n"
                     return
                 last_error = e
 

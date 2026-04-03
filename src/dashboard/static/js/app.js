@@ -227,6 +227,10 @@ function dashboard() {
     agentActivity: [],
     agentActivityLoading: false,
 
+    // Credit exhausted state
+    creditExhausted: false,
+    creditExhaustedDismissed: false,
+
     // Connection state
     connectionError: false,
     identityLogsLoading: false,
@@ -1250,6 +1254,17 @@ function dashboard() {
       // Refresh model health on health_change events
       if (evt.type === 'health_change') {
         this.fetchModelHealth();
+      }
+
+      // Show credit exhausted banner when LLM call fails with 402
+      if (evt.type === 'credit_exhausted') {
+        this.creditExhausted = true;
+        this.creditExhaustedDismissed = false;
+      }
+
+      // Clear credit exhausted state on successful LLM call
+      if (evt.type === 'llm_call' && this.creditExhausted) {
+        this.creditExhausted = false;
       }
 
       // Highlight blackboard writes + update comms badge

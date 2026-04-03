@@ -531,6 +531,10 @@ def create_mesh_app(
                 error=trace_error,
                 meta=trace_meta,
             )
+        if event_bus is not None and not result.success and result.status_code == 402:
+            event_bus.emit("credit_exhausted", agent=agent_id, data={
+                "error": result.error or "Insufficient credits",
+            })
         if event_bus is not None and result.success and result.data:
             model = result.data.get("model", "")
             tokens = result.data.get("tokens_used", 0)
@@ -588,11 +592,16 @@ def create_mesh_app(
         async def _stream_with_events():
             start = time.monotonic()
             done_data: dict = {}
+            credit_error = False
             async for chunk in credential_vault.stream_llm(api_request, agent_id=agent_id):
                 yield chunk
-                if not done_data and chunk.startswith("data: {") and '"type": "done"' in chunk:
+                if chunk.startswith("data: {"):
                     try:
-                        done_data = json.loads(chunk[6:].rstrip("\n"))
+                        parsed = json.loads(chunk[6:].rstrip("\n"))
+                        if not done_data and parsed.get("type") == "done":
+                            done_data = parsed
+                        if parsed.get("credit_exhausted"):
+                            credit_error = True
                     except (json.JSONDecodeError, ValueError):
                         pass
             # Post-stream: emit llm_call event + trace completion
@@ -632,6 +641,10 @@ def create_mesh_app(
                         "streaming": True,
                     },
                 )
+            if event_bus is not None and credit_error:
+                event_bus.emit("credit_exhausted", agent=agent_id, data={
+                    "error": "Insufficient credits",
+                })
 
         return StreamingResponse(_stream_with_events(), media_type="text/event-stream")
 
