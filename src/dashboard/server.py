@@ -2367,6 +2367,7 @@ def create_dashboard_router(
         from src.host.credentials import SYSTEM_CREDENTIAL_PROVIDERS
         from src.shared.models import get_all_model_costs
 
+        app_url = os.environ.get("OPENLEGION_APP_URL", "")
         cred_names = credential_vault.list_credential_names() if credential_vault else []
         agent_cred_names = credential_vault.list_agent_credential_names() if credential_vault else []
         _llm_key_names = {f"{p}_api_key" for p in SYSTEM_CREDENTIAL_PROVIDERS}
@@ -2376,6 +2377,13 @@ def create_dashboard_router(
         if not has_llm and credential_vault:
             if credential_vault._has_anthropic_oauth() or credential_vault._has_openai_oauth():
                 has_llm = True
+
+        # Credit-awareness: distinguish BYOK keys from credit proxy
+        credit_proxy_configured = "openlegion_api_key" in cred_names
+        _curated_llm_names = set(cred_names) & _llm_key_names  # curated provider keys present
+        has_oauth = credential_vault._has_anthropic_oauth() or credential_vault._has_openai_oauth() if credential_vault else False
+        has_byok_keys = bool(_curated_llm_names) or has_oauth
+
         pubsub_subs = pubsub.subscriptions if pubsub else {}
 
         # Filtered models: only providers with credentials
@@ -2418,6 +2426,9 @@ def create_dashboard_router(
             "model_costs": {k: {"input_per_1k": v[0], "output_per_1k": v[1]} for k, v in all_costs.items()},
             "provider_models": dict(_PROVIDER_MODELS.items()),
             "available_provider_models": available_provider_models,
+            "credit_proxy_configured": credit_proxy_configured,
+            "has_byok_keys": has_byok_keys,
+            "app_url": app_url,
             "plan_limits": {
                 "max_agents": _max_agents,
                 "max_projects": _max_projects,
