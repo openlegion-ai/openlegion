@@ -18,18 +18,27 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
       - name: Install dependencies
+        run: uv pip install --system -e ".[dev]" Pillow
+      - name: Run tests
         run: |
-          pip install --upgrade pip
-          pip install -e ".[dev]" Pillow
-      - name: Run tests with coverage
-        run: |
-          pytest tests/ \
-            --ignore=tests/test_e2e.py \
-            --ignore=tests/test_e2e_chat.py \
-            --ignore=tests/test_e2e_memory.py \
-            --ignore=tests/test_e2e_triggering.py \
-            --cov=src --cov-report=term-missing --cov-report=xml
+          ARGS=(
+            tests/
+            --ignore=tests/test_e2e.py
+            --ignore=tests/test_e2e_chat.py
+            --ignore=tests/test_e2e_memory.py
+            --ignore=tests/test_e2e_triggering.py
+            -n auto
+          )
+          if [ "${{ github.event_name }}" = "push" ]; then
+            pytest "${ARGS[@]}" --cov=src --cov-report=term-missing --cov-report=xml
+          else
+            pytest "${ARGS[@]}"
+          fi
 
   lint:
     runs-on: ubuntu-latest
