@@ -2381,7 +2381,10 @@ def create_dashboard_router(
         # Credit-awareness: distinguish BYOK keys from credit proxy
         credit_proxy_configured = "openlegion_api_key" in cred_names
         _curated_llm_names = set(cred_names) & _llm_key_names  # curated provider keys present
-        has_oauth = credential_vault._has_anthropic_oauth() or credential_vault._has_openai_oauth() if credential_vault else False
+        has_oauth = (
+            (credential_vault._has_anthropic_oauth() or credential_vault._has_openai_oauth())
+            if credential_vault else False
+        )
         has_byok_keys = bool(_curated_llm_names) or has_oauth
 
         pubsub_subs = pubsub.subscriptions if pubsub else {}
