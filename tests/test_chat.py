@@ -819,3 +819,86 @@ class TestResolveContentThinkingFallback:
             content="", thinking_content=thinking, tokens_used=10,
         )
         assert AgentLoop._resolve_content(resp) == "extracted"
+
+
+# ── Chat/task isolation guard tests ─────────────────────────────
+
+
+class TestChatTaskIsolationGuard:
+    @pytest.mark.asyncio
+    async def test_chat_redirects_to_steer_during_task(self):
+        """chat() redirects to steer queue when a task is running."""
+        loop = _make_loop()
+        loop.current_task = "task_123"
+
+        result = await loop.chat("hello")
+
+        assert "working on a task" in result["response"]
+        assert result["tool_outputs"] == []
+        assert result["tokens_used"] == 0
+        # Message should be in the steer queue
+        assert loop._steer_queue.get_nowait() == "hello"
+
+    @pytest.mark.asyncio
+    async def test_chat_normal_when_idle(self):
+        """chat() executes normally when no task is running."""
+        loop = _make_loop()
+        loop.current_task = None
+
+        result = await loop.chat("hello")
+
+        assert result["response"] == "Hello!"
+        assert result["tokens_used"] == 50
+        assert loop._steer_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_chat_state_not_corrupted_during_task(self):
+        """chat() guard does not mutate agent state when a task is running."""
+        loop = _make_loop()
+        loop.state = "working"
+        loop.current_task = "task_123"
+
+        await loop.chat("hello")
+
+        assert loop.state == "working"
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_redirects_to_steer_during_task(self):
+        """chat_stream() redirects to steer queue when a task is running."""
+        loop = _make_loop()
+        loop.current_task = "task_123"
+
+        events = []
+        async for event in loop.chat_stream("hello stream"):
+            events.append(event)
+
+        text_events = [e for e in events if e.get("type") == "text_delta"]
+        done_events = [e for e in events if e.get("type") == "done"]
+        assert len(text_events) == 1
+        assert "working on a task" in text_events[0]["content"]
+        assert len(done_events) == 1
+        assert done_events[0]["tokens_used"] == 0
+        # Message should be in the steer queue
+        assert loop._steer_queue.get_nowait() == "hello stream"
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_normal_when_idle(self):
+        """chat_stream() executes normally when no task is running."""
+        loop = _make_loop()
+        loop.current_task = None
+
+        # Use non-streaming fallback path for simplicity
+        async def _no_stream(**kwargs):
+            raise RuntimeError("no streaming")
+            yield  # noqa: unreachable — makes this an async generator
+
+        loop.llm.chat_stream = _no_stream
+
+        events = []
+        async for event in loop.chat_stream("hello"):
+            events.append(event)
+
+        done_events = [e for e in events if e.get("type") == "done"]
+        assert len(done_events) == 1
+        assert done_events[0]["response"] == "Hello!"
+        assert loop._steer_queue.empty()

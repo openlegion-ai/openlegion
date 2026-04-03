@@ -44,6 +44,8 @@ CategorizeFn = Callable[[str, str], Coroutine[Any, Any, str]]
 _EMBED_FAILURE_THRESHOLD = 3
 # Chat session checkpoint schema version (bump to invalidate old checkpoints)
 _CHECKPOINT_VERSION = 1
+# Task execution checkpoint schema version (bump to invalidate old checkpoints)
+_TASK_CHECKPOINT_VERSION = 1
 # Category similarity threshold for auto-assignment
 _CATEGORY_SIM_THRESHOLD = 0.7
 # Recompute category embedding every N new members
@@ -149,6 +151,20 @@ class MemoryStore:
                 messages TEXT NOT NULL,
                 total_rounds INTEGER NOT NULL DEFAULT 0,
                 auto_continues INTEGER NOT NULL DEFAULT 0,
+                flush_triggered INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS task_checkpoint (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version INTEGER NOT NULL DEFAULT 1,
+                task_id TEXT NOT NULL,
+                assignment_json TEXT NOT NULL,
+                messages TEXT NOT NULL,
+                iteration INTEGER NOT NULL DEFAULT 0,
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                budget_used_tokens INTEGER NOT NULL DEFAULT 0,
+                budget_estimated_cost REAL NOT NULL DEFAULT 0.0,
                 flush_triggered INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
@@ -864,6 +880,73 @@ class MemoryStore:
     def clear_chat_checkpoint(self) -> None:
         """Remove persisted chat session state."""
         self.db.execute("DELETE FROM chat_checkpoint")
+        self.db.commit()
+
+    # ── Task execution checkpoint ────────────────────────────────
+
+    def save_task_checkpoint(
+        self,
+        task_id: str,
+        assignment_json: str,
+        messages: list[dict],
+        iteration: int,
+        tokens_used: int,
+        budget_used_tokens: int,
+        budget_estimated_cost: float,
+        flush_triggered: bool,
+    ) -> None:
+        """Persist task execution state for crash recovery (singleton row)."""
+        self.db.execute(
+            "INSERT OR REPLACE INTO task_checkpoint"
+            " (id, version, task_id, assignment_json, messages, iteration,"
+            "  tokens_used, budget_used_tokens, budget_estimated_cost,"
+            "  flush_triggered, updated_at)"
+            " VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            (
+                _TASK_CHECKPOINT_VERSION,
+                task_id,
+                assignment_json,
+                json.dumps(messages, separators=(",", ":")),
+                iteration,
+                tokens_used,
+                budget_used_tokens,
+                budget_estimated_cost,
+                int(flush_triggered),
+            ),
+        )
+        self.db.commit()
+
+    def load_task_checkpoint(self) -> dict | None:
+        """Load persisted task state. Returns None if absent or version mismatch."""
+        row = self.db.execute(
+            "SELECT version, task_id, assignment_json, messages, iteration,"
+            "  tokens_used, budget_used_tokens, budget_estimated_cost, flush_triggered"
+            " FROM task_checkpoint WHERE id = 1",
+        ).fetchone()
+        if row is None:
+            return None
+        if row[0] != _TASK_CHECKPOINT_VERSION:
+            self.clear_task_checkpoint()
+            return None
+        try:
+            messages = json.loads(row[3])
+        except json.JSONDecodeError:
+            self.clear_task_checkpoint()
+            return None
+        return {
+            "task_id": row[1],
+            "assignment_json": row[2],
+            "messages": messages,
+            "iteration": row[4],
+            "tokens_used": row[5],
+            "budget_used_tokens": row[6],
+            "budget_estimated_cost": row[7],
+            "flush_triggered": bool(row[8]),
+        }
+
+    def clear_task_checkpoint(self) -> None:
+        """Remove persisted task state."""
+        self.db.execute("DELETE FROM task_checkpoint")
         self.db.commit()
 
     def close(self) -> None:

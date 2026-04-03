@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import sys
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -166,6 +167,59 @@ def main() -> None:
                 logger.info(f"Generated SYSTEM.md for '{agent_id}'")
             except Exception as e:
                 logger.debug(f"Could not generate SYSTEM.md: {e}")
+
+        # Auto-resume: check for task checkpoint and restart the task
+        if loop.memory:
+            try:
+                cp = await loop.memory._run_db(loop.memory.load_task_checkpoint)
+                if cp:
+                    from src.shared.types import TaskAssignment
+                    _resume_trace_id = f"tr_{secrets.token_hex(6)}"
+                    assignment = TaskAssignment.model_validate_json(cp["assignment_json"])
+                    logger.info(
+                        "Auto-resuming task %s from checkpoint (iteration %d) trace=%s",
+                        cp["task_id"], cp["iteration"], _resume_trace_id,
+                    )
+
+                    # Set state BEFORE yield (before server accepts requests).
+                    # This prevents a race where an incoming POST /task sees
+                    # state="idle" and is accepted before the auto-resume
+                    # coroutine starts executing.
+                    loop.state = "working"
+                    loop.current_task = assignment.task_id
+
+                    def _log_auto_resume_exception(t: asyncio.Task) -> None:
+                        if not t.cancelled() and t.exception():
+                            logger.error("Auto-resume task failed: %s", t.exception())
+
+                    async def _auto_resume() -> None:
+                        try:
+                            await loop.execute_task(
+                                assignment, trace_id=_resume_trace_id,
+                            )
+                        except asyncio.CancelledError:
+                            loop.state = "idle"
+                            loop.current_task = None
+                        except Exception:
+                            # If execute_task raises before its own try/except
+                            # (e.g. during checkpoint restore or context build),
+                            # reset state so the agent doesn't stay stuck on
+                            # "working" permanently.
+                            loop.state = "idle"
+                            loop.current_task = None
+                            raise  # re-raise so _log_auto_resume_exception logs it
+
+                    _resume_task = asyncio.create_task(_auto_resume())
+                    _resume_task.add_done_callback(_log_auto_resume_exception)
+                    loop._current_task_handle = _resume_task
+            except Exception as e:
+                # Reset state if we set it to "working" but failed before
+                # launching the resume task.
+                if loop.state == "working" and loop._current_task_handle is None:
+                    loop.state = "idle"
+                    loop.current_task = None
+                logger.warning("Auto-resume check failed: %s", e)
+
         yield
         if loop.state == "working":
             loop._cancel_requested = True
