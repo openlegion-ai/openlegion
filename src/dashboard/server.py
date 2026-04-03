@@ -1144,6 +1144,8 @@ def create_dashboard_router(
                                 final_response = event.get("response", "")
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'message': friendly_streaming_error(e)})}\n\n"
+            # Always send a done event so the frontend clears loading state
+            yield f"data: {json.dumps({'type': 'done', 'response': final_response})}\n\n"
             if event_bus:
                 event_bus.emit("chat_done", agent=target_agent,
                     data={"response": final_response, "session": chat_session})

@@ -882,7 +882,16 @@ function dashboard() {
         const mc = localStorage.getItem('ol_master_chat');
         if (mc) {
           const parsed = JSON.parse(mc);
-          if (Array.isArray(parsed.messages)) this.masterChatMessages = parsed.messages;
+          if (Array.isArray(parsed.messages)) {
+            // Clean up stale streaming states from previous sessions
+            this.masterChatMessages = parsed.messages.map(m => {
+              if (m.streaming) {
+                return { ...m, streaming: false, phase: m.content ? 'done' : 'error',
+                  content: m.content || 'Response interrupted — please try again.' };
+              }
+              return m;
+            });
+          }
           if (parsed.lastAgent) this.masterChatLastAgent = parsed.lastAgent;
         }
       } catch (e) {}
@@ -3940,7 +3949,6 @@ function dashboard() {
       this.masterChatStreamIdx = idx;
       this.masterChatLoading = true;
       this.masterChatStreaming = true;
-      this._saveMasterChat();
       this.$nextTick(() => this._scrollMasterChat());
 
       const controller = new AbortController();
