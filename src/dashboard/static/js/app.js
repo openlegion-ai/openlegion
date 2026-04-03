@@ -3939,13 +3939,14 @@ function dashboard() {
       });
 
       // Push placeholder agent response
-      const entry = {
+      this.masterChatMessages.push({
         role: 'agent', content: '', agentId: '',
         streaming: true, phase: 'thinking',
         tools: [], timeline: [], _sawTextDelta: false, ts: Date.now(),
-      };
-      this.masterChatMessages.push(entry);
+      });
       const idx = this.masterChatMessages.length - 1;
+      // Use the proxied reference so Alpine detects mutations
+      const entry = this.masterChatMessages[idx];
       this.masterChatStreamIdx = idx;
       this.masterChatLoading = true;
       this.masterChatStreaming = true;
