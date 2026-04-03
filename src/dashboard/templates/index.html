@@ -1094,6 +1094,19 @@
             </template>
           </div>
         </div>
+        <!-- Credit exhausted banner -->
+        <div x-show="creditExhausted && !creditExhaustedDismissed" x-cloak class="mb-4 flex items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 px-5 py-4">
+          <svg class="size-5 shrink-0 text-amber-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/></svg>
+          <div class="flex-1">
+            <p class="text-sm font-medium text-amber-400">Credits depleted</p>
+            <p class="text-xs text-amber-400/70">LLM calls are failing due to insufficient credits.
+              <template x-if="settingsData?.app_url"><a :href="settingsData.app_url + '/credits'" target="_blank" rel="noopener noreferrer" class="underline hover:text-amber-300">Top up credits</a> or </template>add your own API key in <button @click="activeTab = 'system'; systemTab = 'apikeys'" class="underline hover:text-amber-300">Settings</button>.
+            </p>
+          </div>
+          <button @click="creditExhaustedDismissed = true" class="shrink-0 text-amber-400/50 hover:text-amber-400">
+            <svg class="size-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
         <!-- Onboarding banner (first-run) -->
         <div x-show="showOnboarding && !loading" x-cloak class="mb-6 bg-gray-900 border border-indigo-800/40 rounded-xl p-6">
           <h3 class="text-base font-semibold text-white mb-4">Get started</h3>
@@ -1106,7 +1119,7 @@
                 <span x-show="!settingsData?.has_llm_credentials">1</span>
               </div>
               <div class="flex-1">
-                <div class="text-sm font-medium text-gray-200 mb-2">Add an API key</div>
+                <div class="text-sm font-medium text-gray-200 mb-2" x-text="settingsData?.credit_proxy_configured && !settingsData?.has_byok_keys ? 'Configure LLM access' : 'Add an API key'"></div>
                 <div x-show="!settingsData?.has_llm_credentials" class="space-y-2">
                   <div class="flex flex-wrap gap-2">
                     <select x-model="onboardProvider" :disabled="onboardSaving" class="dash-select text-xs w-40" @change="onboardAuthType = 'api_key'; if ($event.target.value !== '__custom__') { onboardCustomService = ''; onboardIsLlmProvider = false; onboardCustomModels = ''; onboardCustomLabel = ''; }">
@@ -1164,7 +1177,13 @@
                     </button>
                   </div>
                 </div>
-                <div x-show="settingsData?.has_llm_credentials" class="text-xs text-emerald-400">API key configured</div>
+                <div x-show="settingsData?.has_llm_credentials" class="space-y-1">
+                  <div x-show="settingsData?.has_byok_keys" class="text-xs text-emerald-400">API key configured</div>
+                  <div x-show="settingsData?.credit_proxy_configured && !settingsData?.has_byok_keys" class="text-xs text-emerald-400">Credits configured</div>
+                  <div x-show="settingsData?.credit_proxy_configured && !settingsData?.has_byok_keys" class="text-[11px] text-gray-400">
+                    Add your own API key above for zero-markup access<template x-if="settingsData?.app_url"><span>, or <a :href="settingsData.app_url + '/credits'" target="_blank" rel="noopener noreferrer" class="text-indigo-400 hover:text-indigo-300">manage credits</a></span></template>
+                  </div>
+                </div>
               </div>
             </div>
             <!-- Step 2: Create agent -->
@@ -2887,6 +2906,9 @@
         <div x-show="systemTab === 'apikeys'" x-effect="if (systemTab === 'apikeys') fetchSettings()">
         <div class="text-xs text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">API Keys
           <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Credentials stored in the mesh vault. "system" keys (OPENLEGION_SYSTEM_*) are used by the mesh for LLM routing and never exposed to agents. "agent" keys (OPENLEGION_CRED_*) are available to agents as opaque handles for HTTP requests.</span></span>
+          <template x-if="settingsData?.credit_proxy_configured && settingsData?.app_url">
+            <a :href="settingsData.app_url + '/credits'" target="_blank" rel="noopener noreferrer" class="ml-auto text-[10px] text-indigo-400 hover:text-indigo-300 normal-case tracking-normal font-normal">Manage credits &rarr;</a>
+          </template>
         </div>
         <div class="mb-6" x-show="settingsData">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">

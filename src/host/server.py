@@ -531,6 +531,10 @@ def create_mesh_app(
                 error=trace_error,
                 meta=trace_meta,
             )
+        if event_bus is not None and not result.success and result.status_code == 402:
+            event_bus.emit("credit_exhausted", agent=agent_id, data={
+                "error": result.error or "Insufficient credits",
+            })
         if event_bus is not None and result.success and result.data:
             model = result.data.get("model", "")
             tokens = result.data.get("tokens_used", 0)
