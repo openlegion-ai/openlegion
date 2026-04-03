@@ -1371,6 +1371,18 @@ class TestDashboardSettings:
         data = resp.json()
         assert data["has_llm_credentials"] is False
 
+    def test_has_llm_credentials_openlegion_credit_proxy(self):
+        """has_llm_credentials is True when only the openlegion credit proxy key exists."""
+        self.components["credential_vault"].list_credential_names.return_value = [
+            "openlegion_api_key",
+        ]
+        self.components["credential_vault"].system_credentials = {"openlegion_api_key": "tok-test"}
+        self.components["credential_vault"].get_providers_with_credentials.return_value = {"openlegion"}
+        self.client = _make_client(self.components)
+        resp = self.client.get("/dashboard/api/settings")
+        data = resp.json()
+        assert data["has_llm_credentials"] is True
+
 
 # ── V2 Tests: Credential Base URL ────────────────────────────
 

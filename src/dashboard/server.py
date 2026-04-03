@@ -2371,6 +2371,8 @@ def create_dashboard_router(
         agent_cred_names = credential_vault.list_agent_credential_names() if credential_vault else []
         _llm_key_names = {f"{p}_api_key" for p in SYSTEM_CREDENTIAL_PROVIDERS}
         has_llm = bool(set(cred_names) & _llm_key_names)
+        if not has_llm and "openlegion_api_key" in cred_names:
+            has_llm = True
         if not has_llm and credential_vault:
             if credential_vault._has_anthropic_oauth() or credential_vault._has_openai_oauth():
                 has_llm = True
