@@ -23,6 +23,7 @@ from src.cli.config import (
     _load_config,
 )
 from src.cli.formatting import echo_fail, echo_header, echo_ok
+from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.shared.types import RESERVED_AGENT_IDS
 
 logger = logging.getLogger("cli")
@@ -355,6 +356,18 @@ class RuntimeContext:
                 self.runtime.extra_env.pop("PROJECT_MD_PATH", None)
                 self.runtime.extra_env.pop("PROJECT_NAME", None)
 
+            # Proxy env injection
+            proxy_url = resolve_agent_proxy(
+                agent_id,
+                self.cfg.get("agents", {}),
+                self.cfg.get("network", {}),
+            )
+            proxy_env = build_proxy_env_vars(
+                proxy_url,
+                no_proxy_user=self.cfg.get("network", {}).get("no_proxy", ""),
+            )
+            self.runtime.extra_env.update(proxy_env)
+
             try:
                 url = self.runtime.start_agent(
                     agent_id=agent_id,
@@ -399,6 +412,9 @@ class RuntimeContext:
                 self.runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
                 self.runtime.extra_env.pop("PROJECT_MD_PATH", None)
                 self.runtime.extra_env.pop("PROJECT_NAME", None)
+                self.runtime.extra_env.pop("HTTP_PROXY", None)
+                self.runtime.extra_env.pop("HTTPS_PROXY", None)
+                self.runtime.extra_env.pop("NO_PROXY", None)
             self.router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
             if isinstance(self.transport, HttpTransport):
                 self.transport.register(agent_id, url)

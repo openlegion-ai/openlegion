@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from jinja2 import Environment, FileSystemLoader
 
+from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.dashboard.auth import verify_session_cookie
 from src.shared.utils import friendly_streaming_error, sanitize_for_prompt, setup_logging
 
@@ -833,14 +834,27 @@ def create_dashboard_router(
             skills_dir = agent_cfg.get("skills_dir", "")
             if skills_dir:
                 skills_dir = str(Path(skills_dir).resolve())
-            url = runtime.start_agent(
-                agent_id=agent_id,
-                role=agent_cfg.get("role", "assistant"),
-                skills_dir=skills_dir,
-                model=agent_cfg.get("model", default_model),
-                mcp_servers=agent_cfg.get("mcp_servers") or None,
-                thinking=agent_cfg.get("thinking", ""),
+            # Resolve proxy for this agent
+            _proxy_url = resolve_agent_proxy(
+                agent_id, cfg.get("agents", {}), cfg.get("network", {}),
             )
+            _proxy_env = build_proxy_env_vars(
+                _proxy_url, cfg.get("network", {}).get("no_proxy", ""),
+            )
+            runtime.extra_env.update(_proxy_env)
+            try:
+                url = runtime.start_agent(
+                    agent_id=agent_id,
+                    role=agent_cfg.get("role", "assistant"),
+                    skills_dir=skills_dir,
+                    model=agent_cfg.get("model", default_model),
+                    mcp_servers=agent_cfg.get("mcp_servers") or None,
+                    thinking=agent_cfg.get("thinking", ""),
+                )
+            finally:
+                runtime.extra_env.pop("HTTP_PROXY", None)
+                runtime.extra_env.pop("HTTPS_PROXY", None)
+                runtime.extra_env.pop("NO_PROXY", None)
             if router is not None:
                 router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
             else:
@@ -2701,6 +2715,7 @@ def create_dashboard_router(
                 logger.warning("Browser service restart failed: %s", e)
 
         # Restart each agent
+        _network_cfg = cfg.get("network", {})
         for agent_id in list(agent_registry.keys()):
             agent_cfg = agents_cfg.get(agent_id, {})
             try:
@@ -2708,17 +2723,28 @@ def create_dashboard_router(
                 skills_dir = agent_cfg.get("skills_dir", "")
                 if skills_dir:
                     skills_dir = str(Path(skills_dir).resolve())
-                url = await loop.run_in_executor(
-                    None,
-                    lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir: runtime.start_agent(
-                        agent_id=aid,
-                        role=acfg.get("role", "assistant"),
-                        skills_dir=sd,
-                        model=acfg.get("model", default_model),
-                        mcp_servers=acfg.get("mcp_servers") or None,
-                        thinking=acfg.get("thinking", ""),
-                    ),
+                # Resolve proxy for this agent
+                _proxy_url = resolve_agent_proxy(agent_id, agents_cfg, _network_cfg)
+                _proxy_env = build_proxy_env_vars(
+                    _proxy_url, _network_cfg.get("no_proxy", ""),
                 )
+                runtime.extra_env.update(_proxy_env)
+                try:
+                    url = await loop.run_in_executor(
+                        None,
+                        lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir: runtime.start_agent(
+                            agent_id=aid,
+                            role=acfg.get("role", "assistant"),
+                            skills_dir=sd,
+                            model=acfg.get("model", default_model),
+                            mcp_servers=acfg.get("mcp_servers") or None,
+                            thinking=acfg.get("thinking", ""),
+                        ),
+                    )
+                finally:
+                    runtime.extra_env.pop("HTTP_PROXY", None)
+                    runtime.extra_env.pop("HTTPS_PROXY", None)
+                    runtime.extra_env.pop("NO_PROXY", None)
                 if router is not None:
                     router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
                 else:
