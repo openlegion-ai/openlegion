@@ -1502,6 +1502,11 @@ textarea.dash-input {
   font-weight: 500;
 }
 
+/* Master chat context panel — wider */
+.master-context-panel {
+  width: 320px;
+}
+
 /* Hide context panel on mobile and when chat panel is narrow */
 @media (max-width: 768px) {
   .context-panel {
