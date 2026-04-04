@@ -460,6 +460,10 @@ async def http_request(
                     content=resolved_body if resolved_body else None,
                     timeout=timeout,
                 )
+            else:
+                # Exhausted redirect budget — check if final response is still a redirect
+                if response.status_code in (301, 302, 303, 307, 308):
+                    return {"error": f"SSRF protection: exceeded {_MAX_REDIRECTS} redirects", "status_code": 0}
         else:
             # Existing DNS pinning path (unchanged)
             response = await _request_with_pinned_dns(

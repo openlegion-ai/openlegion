@@ -182,6 +182,30 @@ def create_dashboard_router(
         except Exception:
             return "***"
 
+    async def _push_browser_proxy_for_agent(agent_id: str) -> None:
+        """Push proxy config to browser service for an agent after restart."""
+        if not runtime or not hasattr(runtime, "browser_service_url") or not runtime.browser_service_url:
+            return
+        try:
+            from src.cli.proxy import resolve_agent_proxy, parse_proxy_url
+            from src.cli.config import _load_config
+            _cfg = _load_config()
+            proxy_url = resolve_agent_proxy(agent_id, _cfg.get("agents", {}), _cfg.get("network", {}))
+            body = None
+            if proxy_url:
+                parsed = parse_proxy_url(proxy_url)
+                if parsed:
+                    body = {"url": parsed["url"], "username": parsed["username"], "password": parsed["password"]}
+            import httpx as _httpx
+            async with _httpx.AsyncClient(timeout=10) as client:
+                headers = {}
+                svc_token = getattr(runtime, "browser_auth_token", "")
+                if svc_token:
+                    headers["Authorization"] = f"Bearer {svc_token}"
+                await client.put(f"{runtime.browser_service_url}/browser/{agent_id}/proxy", json=body, headers=headers)
+        except Exception as e:
+            logger.warning("Failed to push browser proxy for %s: %s", agent_id, e)
+
     api_router = APIRouter(
         prefix="/dashboard",
         dependencies=[Depends(_verify_dashboard_auth), Depends(_csrf_check)],
@@ -904,6 +928,8 @@ def create_dashboard_router(
                 if isinstance(transport, HttpTransport):
                     transport.register(agent_id, url)
             ready = await runtime.wait_for_agent(agent_id, timeout=60)
+            # Push proxy config to browser service
+            await _push_browser_proxy_for_agent(agent_id)
             return {"restarted": True, "ready": ready}
         except Exception as e:
             logger.error(f"Failed to restart agent {agent_id}: {e}")
@@ -1017,7 +1043,7 @@ def create_dashboard_router(
         """Set per-agent proxy config. Works for stopped agents (checks config, not registry)."""
         from src.cli.config import _load_config, _update_agent_field
         from src.host.credentials import _persist_to_env, _remove_from_env
-        from src.cli.proxy import validate_proxy_url, _assemble_proxy_url
+        from src.cli.proxy import validate_proxy_url, _assemble_proxy_url, sanitize_agent_id_for_env
 
         cfg = _load_config()
         agents_cfg = cfg.get("agents", {})
@@ -1030,6 +1056,7 @@ def create_dashboard_router(
             raise HTTPException(400, f"Invalid proxy mode: {mode}")
 
         proxy_yaml: dict[str, str] = {"mode": mode}
+        safe_id = sanitize_agent_id_for_env(agent_id)
 
         if mode == "custom":
             url = body.get("url", "")
@@ -1039,7 +1066,7 @@ def create_dashboard_router(
             if not validate_proxy_url(full_url):
                 raise HTTPException(400, "Invalid proxy URL")
 
-            cred_name = f"agent_{agent_id}_proxy"
+            cred_name = f"agent_{safe_id}_proxy"
             env_key = f"OPENLEGION_CRED_{cred_name}"
             _persist_to_env(env_key, full_url)
             os.environ[env_key] = full_url
@@ -2926,6 +2953,8 @@ def create_dashboard_router(
                     if isinstance(transport, HttpTransport):
                         transport.register(agent_id, url)
                 ready = await runtime.wait_for_agent(agent_id, timeout=60)
+                # Push proxy config to browser service
+                await _push_browser_proxy_for_agent(agent_id)
                 results[agent_id] = "ready" if ready else "started"
             except Exception as e:
                 logger.error("Failed to restart agent '%s': %s", agent_id, e)

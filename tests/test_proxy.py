@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.cli.proxy import resolve_agent_proxy, parse_proxy_url, validate_proxy_url
+from src.cli.proxy import resolve_agent_proxy, parse_proxy_url, validate_proxy_url, sanitize_agent_id_for_env
 
 
 class TestValidateProxyUrl:
@@ -148,3 +148,17 @@ class TestResolveAgentProxy:
         with patch.dict(os.environ, env, clear=False):
             result = resolve_agent_proxy("unknown-agent", agents_cfg, {})
         assert "system:8080" in result
+
+
+class TestSanitizeAgentIdForEnv:
+    def test_hyphens_replaced(self):
+        assert sanitize_agent_id_for_env("sales-bot") == "sales_bot"
+
+    def test_dots_replaced(self):
+        assert sanitize_agent_id_for_env("agent.v2") == "agent_v2"
+
+    def test_clean_id_unchanged(self):
+        assert sanitize_agent_id_for_env("researcher") == "researcher"
+
+    def test_multiple_special_chars(self):
+        assert sanitize_agent_id_for_env("my-agent.v2-beta") == "my_agent_v2_beta"

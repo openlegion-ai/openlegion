@@ -1474,9 +1474,10 @@ def create_mesh_app(
             return
 
         from src.cli.proxy import resolve_agent_proxy, parse_proxy_url
-        _cfg = cfg or {}
-        agents_cfg = _cfg.get("agents", {})
-        network_cfg = _cfg.get("network", {})
+        from src.cli.config import _load_config
+        _fresh_cfg = _load_config()
+        agents_cfg = _fresh_cfg.get("agents", {})
+        network_cfg = _fresh_cfg.get("network", {})
         proxy_url = resolve_agent_proxy(agent_id, agents_cfg, network_cfg)
 
         body = None
@@ -1529,19 +1530,25 @@ def create_mesh_app(
             pass
         return False
 
-    @app.on_event("startup")
-    async def _push_initial_browser_proxies() -> None:
-        """Push proxy config for all agents after mesh startup."""
-        # Small delay to let browser service start
-        await asyncio.sleep(2)
+    async def _deferred_push_browser_proxies() -> None:
+        """Push proxy config for all agents after a delay (non-blocking background task)."""
+        await asyncio.sleep(5)  # Wait for agents to register
         if not container_manager:
             return
         svc_url = getattr(container_manager, "browser_service_url", None)
         if not svc_url:
             return
-        for agent_id in list(router.agent_registry.keys()):
+        agents = list(router.agent_registry.keys())
+        if not agents:
+            return
+        for agent_id in agents:
             await _push_browser_proxy(agent_id)
-        logger.info("Pushed browser proxy config for %d agents", len(router.agent_registry))
+        logger.info("Pushed browser proxy config for %d agents", len(agents))
+
+    @app.on_event("startup")
+    async def _schedule_initial_proxy_push() -> None:
+        """Schedule initial browser proxy push as a background task (non-blocking)."""
+        asyncio.create_task(_deferred_push_browser_proxies())
 
     _ALLOWED_BROWSER_ACTIONS = frozenset({
         "navigate", "snapshot", "click", "type", "hover",

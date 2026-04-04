@@ -19,6 +19,12 @@ _VALID_SCHEMES = {"http", "https", "socks5"}
 _MANDATORY_NO_PROXY = "host.docker.internal,127.0.0.1,localhost"
 
 
+def sanitize_agent_id_for_env(agent_id: str) -> str:
+    """Sanitize an agent ID for use in env var names (replace non-alphanumeric with _)."""
+    import re
+    return re.sub(r"[^A-Za-z0-9_]", "_", agent_id)
+
+
 def validate_proxy_url(url: str) -> bool:
     """Return True if url is a valid proxy URL with supported scheme and port."""
     if not url:
