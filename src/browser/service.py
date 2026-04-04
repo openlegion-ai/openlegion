@@ -14,6 +14,7 @@ import random
 import re
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -284,6 +285,8 @@ class BrowserManager:
         self._js_snapshot_mode: bool = False  # True after page.accessibility fails
         self._user_focused_agent: str | None = None  # set by explicit focus() call
         self.redactor = CredentialRedactor()
+        self._proxy_configs: dict[str, dict | None] = {}
+        self.boot_id: str = str(uuid.uuid4())
 
     async def start_cleanup_loop(self):
         """Start background task that cleans up idle browsers."""
@@ -435,7 +438,16 @@ class BrowserManager:
         profile_dir = str(self.profiles_dir / agent_id)
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
-        options = build_launch_options(agent_id, profile_dir)
+        proxy_config = self.get_proxy_config(agent_id)
+        if proxy_config is not None:
+            proxy_arg = {"server": proxy_config["url"]}
+            if proxy_config.get("username"):
+                proxy_arg["username"] = proxy_config["username"]
+            if proxy_config.get("password"):
+                proxy_arg["password"] = proxy_config["password"]
+            options = build_launch_options(agent_id, profile_dir, proxy=proxy_arg)
+        else:
+            options = build_launch_options(agent_id, profile_dir)
         logger.info("Starting Camoufox for '%s' (profile=%s)", agent_id, profile_dir)
 
         # Snapshot existing Firefox windows so we can identify the new one
@@ -505,6 +517,17 @@ class BrowserManager:
         await self.stop(agent_id)
         # Next get_or_start will create a fresh instance with same profile
 
+    def set_proxy_config(self, agent_id: str, config: dict | None) -> None:
+        """Store proxy config for an agent. Pass None to clear."""
+        if config is None:
+            self._proxy_configs.pop(agent_id, None)
+        else:
+            self._proxy_configs[agent_id] = config
+
+    def get_proxy_config(self, agent_id: str) -> dict | None:
+        """Get stored proxy config for an agent, or None."""
+        return self._proxy_configs.get(agent_id)
+
     async def get_status(self, agent_id: str) -> dict:
         """Get status for a specific agent's browser."""
         async with self._lock:
@@ -525,6 +548,7 @@ class BrowserManager:
                 "active_browsers": len(self._instances),
                 "max_concurrent": self.max_concurrent,
                 "agents": list(self._instances.keys()),
+                "boot_id": self.boot_id,
             }
 
     async def focus(self, agent_id: str) -> bool:
