@@ -47,6 +47,7 @@ CONFIG_FILE = PROJECT_ROOT / "config" / "mesh.yaml"
 AGENTS_FILE = PROJECT_ROOT / "config" / "agents.yaml"
 PERMISSIONS_FILE = PROJECT_ROOT / "config" / "permissions.json"
 PROJECTS_DIR = PROJECT_ROOT / "config" / "projects"
+NETWORK_FILE = PROJECT_ROOT / "config" / "network.yaml"
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 DOCKER_IMAGE = "openlegion-agent:latest"
 BROWSER_IMAGE = "openlegion-browser:latest"
@@ -195,6 +196,13 @@ def _load_config(mesh_path: Path | None = None) -> dict:
         for member in pdata.get("members", []):
             agent_projects[member] = pname
     cfg["_agent_projects"] = agent_projects
+
+    # Load network config
+    network_cfg = {}
+    if NETWORK_FILE.exists():
+        with open(NETWORK_FILE) as f:
+            network_cfg = yaml.safe_load(f) or {}
+    cfg["network"] = network_cfg
     return cfg
 
 
@@ -1004,6 +1012,19 @@ def _update_agent_field(name: str, field: str, value) -> None:
         agents_cfg["agents"][name][field] = value
         with open(AGENTS_FILE, "w") as f:
             yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+
+
+def _update_network_config(field: str, value) -> None:
+    """Update a field in network.yaml."""
+    if NETWORK_FILE.exists():
+        with open(NETWORK_FILE) as f:
+            data = yaml.safe_load(f) or {}
+    else:
+        data = {}
+    data[field] = value
+    NETWORK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(NETWORK_FILE, "w") as f:
+        yaml.dump(data, f, default_flow_style=False)
 
 
 _THINKING_LEVELS = ["off", "low", "medium", "high"]
