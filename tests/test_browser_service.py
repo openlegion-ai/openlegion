@@ -5125,3 +5125,30 @@ class TestModalRetryRequery:
         # Full tree is shown as fallback
         assert "Post" in result["data"]["snapshot"]
         assert "could not be isolated" in result["data"]["snapshot"]
+
+
+class TestBrowserManagerProxyConfig:
+    def test_set_proxy_config(self):
+        manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy")
+        manager.set_proxy_config("agent-1", {
+            "url": "socks5://host:1080",
+            "username": "u",
+            "password": "p",
+        })
+        config = manager.get_proxy_config("agent-1")
+        assert config == {"url": "socks5://host:1080", "username": "u", "password": "p"}
+
+    def test_get_proxy_config_returns_none_for_unknown(self):
+        manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy2")
+        assert manager.get_proxy_config("unknown") is None
+
+    def test_clear_proxy_config(self):
+        manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy3")
+        manager.set_proxy_config("agent-1", {"url": "http://host:8080"})
+        manager.set_proxy_config("agent-1", None)
+        assert manager.get_proxy_config("agent-1") is None
+
+    def test_boot_id_is_stable_and_nonempty(self):
+        manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy4")
+        assert manager.boot_id
+        assert manager.boot_id == manager.boot_id
