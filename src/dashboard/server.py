@@ -187,8 +187,8 @@ def create_dashboard_router(
         if not runtime or not hasattr(runtime, "browser_service_url") or not runtime.browser_service_url:
             return
         try:
-            from src.cli.proxy import resolve_agent_proxy, parse_proxy_url
             from src.cli.config import _load_config
+            from src.cli.proxy import parse_proxy_url, resolve_agent_proxy
             _cfg = _load_config()
             proxy_url = resolve_agent_proxy(agent_id, _cfg.get("agents", {}), _cfg.get("network", {}))
             body = None
@@ -1017,8 +1017,8 @@ def create_dashboard_router(
             if browser_proxy_url:
                 raise HTTPException(400, "System proxy is managed by OpenLegion and cannot be changed here")
 
+            from src.cli.proxy import _assemble_proxy_url, validate_proxy_url
             from src.host.credentials import _persist_to_env, _remove_from_env
-            from src.cli.proxy import validate_proxy_url, _assemble_proxy_url
 
             sp = body["system_proxy"]
             if sp is None or sp == "":
@@ -1042,8 +1042,8 @@ def create_dashboard_router(
     async def api_put_agent_proxy(agent_id: str, request: Request):
         """Set per-agent proxy config. Works for stopped agents (checks config, not registry)."""
         from src.cli.config import _load_config, _update_agent_field
+        from src.cli.proxy import _assemble_proxy_url, sanitize_agent_id_for_env, validate_proxy_url
         from src.host.credentials import _persist_to_env, _remove_from_env
-        from src.cli.proxy import validate_proxy_url, _assemble_proxy_url, sanitize_agent_id_for_env
 
         cfg = _load_config()
         agents_cfg = cfg.get("agents", {})

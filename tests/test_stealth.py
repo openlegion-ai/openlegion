@@ -2,7 +2,7 @@
 
 from unittest.mock import patch
 
-from src.browser.stealth import build_launch_options, get_proxy_config, _PROXY_NOT_SET
+from src.browser.stealth import _PROXY_NOT_SET, build_launch_options
 
 
 class TestBuildLaunchOptionsProxy:

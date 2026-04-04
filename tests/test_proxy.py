@@ -3,9 +3,12 @@
 import os
 from unittest.mock import patch
 
-import pytest
-
-from src.cli.proxy import resolve_agent_proxy, parse_proxy_url, validate_proxy_url, sanitize_agent_id_for_env
+from src.cli.proxy import (
+    parse_proxy_url,
+    resolve_agent_proxy,
+    sanitize_agent_id_for_env,
+    validate_proxy_url,
+)
 
 
 class TestValidateProxyUrl:

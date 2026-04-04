@@ -1473,8 +1473,8 @@ def create_mesh_app(
         if not svc_url:
             return
 
-        from src.cli.proxy import resolve_agent_proxy, parse_proxy_url
         from src.cli.config import _load_config
+        from src.cli.proxy import parse_proxy_url, resolve_agent_proxy
         _fresh_cfg = _load_config()
         agents_cfg = _fresh_cfg.get("agents", {})
         network_cfg = _fresh_cfg.get("network", {})

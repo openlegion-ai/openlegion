@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
-from urllib.parse import urlparse, urlunparse, quote, unquote
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
 logger = logging.getLogger("proxy")
 
