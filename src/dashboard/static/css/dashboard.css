@@ -1410,3 +1410,113 @@ textarea.dash-input {
   line-height: 1.4;
   overflow-y: auto;
 }
+
+/* ── Context panel (chat 2-panel layout) ────────── */
+
+.chat-two-panel {
+  display: flex;
+  gap: 0;
+  height: 100%;
+}
+
+.chat-main-panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.context-panel {
+  width: 280px;
+  flex-shrink: 0;
+  border-left: 1px solid rgba(42, 42, 58, 0.8);
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.context-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(42, 42, 58, 0.6);
+  margin-bottom: 4px;
+}
+
+.context-agent-card {
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(30, 30, 46, 0.6);
+  border: 1px solid rgba(42, 42, 58, 0.6);
+  transition: border-color 0.15s;
+}
+
+.context-agent-card:hover {
+  border-color: rgba(99, 102, 241, 0.4);
+}
+
+.context-agent-active {
+  border-color: rgba(99, 102, 241, 0.6);
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.context-agent-btn {
+  flex: 1;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(42, 42, 58, 0.8);
+  border: 1px solid rgba(55, 55, 75, 0.6);
+  color: #d1d5db;
+  font-size: 0.625rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.context-agent-btn:hover {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.3);
+}
+
+.context-stats {
+  margin-top: auto;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(30, 30, 46, 0.4);
+  border: 1px solid rgba(42, 42, 58, 0.4);
+}
+
+.context-stat-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.6875rem;
+  color: #9ca3af;
+  padding: 3px 0;
+}
+
+.context-stat-row span:last-child {
+  color: #e5e7eb;
+  font-weight: 500;
+}
+
+/* Hide context panel on mobile and when chat panel is narrow */
+@media (max-width: 768px) {
+  .context-panel {
+    display: none;
+  }
+}
+
+/* Also hide when messenger is in half-screen mode on smaller screens
+   where 280px context panel would squeeze the chat too much */
+.messenger-half .context-panel {
+  display: none;
+}
+
+@media (min-width: 1280px) {
+  .messenger-half .context-panel {
+    display: flex;
+  }
+}
