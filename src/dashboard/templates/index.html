@@ -4324,8 +4324,10 @@
         </div>
       </div>
 
-      <!-- Right side: chat area -->
-      <div class="flex-1 flex flex-col min-w-0">
+      <!-- Right side: chat area + context panel -->
+      <div class="flex-1 flex min-w-0 chat-two-panel">
+        <!-- Chat main panel -->
+        <div class="chat-main-panel">
         <!-- Chat header -->
         <div class="flex items-center gap-2 px-3 py-2 border-b border-gray-800/80 shrink-0"
           :class="(chatStreamingAgents[activeChatId] || chatLoadingAgents[activeChatId]) && 'border-b-indigo-500/40'">
@@ -4640,6 +4642,66 @@
             </button>
           </div>
         </div>
+        </div><!-- /chat-main-panel -->
+
+        <!-- Context panel: agent list + fleet stats -->
+        <div class="context-panel">
+          <div class="context-panel-header">
+            <span style="font-weight:600; font-size:0.8125rem; color:#e5e7eb;">Your Team</span>
+            <span style="font-size:0.6875rem; color:#9ca3af;" x-text="agents.length + ' agents'"></span>
+          </div>
+
+          <!-- Agent list -->
+          <template x-for="agent in agents" :key="agent.id">
+            <div class="context-agent-card" :class="{'context-agent-active': activeChatId === agent.id}">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(agent.id)">
+                  <img :src="agentAvatarUrl(agent.id)" :alt="agent.id">
+                </div>
+                <div style="flex:1; min-width:0;">
+                  <div style="font-size:0.75rem; font-weight:600; color:#e5e7eb; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" x-text="agent.id"></div>
+                  <div style="font-size:0.625rem; color:#9ca3af; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" x-text="agent.role || ''"></div>
+                </div>
+                <div style="display:flex; align-items:center; gap:2px;">
+                  <div style="width:6px; height:6px; border-radius:50%;"
+                       :style="agent.health_status === 'healthy' ? 'background:#22c55e' : (agent.health_status === 'unhealthy' || agent.health_status === 'restarting' ? 'background:#f59e0b' : (agent.health_status === 'failed' ? 'background:#ef4444' : 'background:#6b7280'))"></div>
+                  <span style="font-size:0.5625rem; color:#9ca3af;" x-text="agent.health_status === 'healthy' ? 'Healthy' : (agent.health_status || 'Unknown')"></span>
+                </div>
+              </div>
+              <!-- Action buttons -->
+              <div style="display:flex; gap:4px; margin-top:6px;">
+                <button class="context-agent-btn" @click="openChat(agent.id)">
+                  Chat
+                </button>
+                <button class="context-agent-btn" @click="drillDown(agent.id)">
+                  View
+                </button>
+              </div>
+            </div>
+          </template>
+
+          <!-- Empty state -->
+          <div x-show="agents.length === 0" class="text-center py-6">
+            <div style="font-size:0.75rem; color:#6b7280;">No agents yet</div>
+          </div>
+
+          <!-- Fleet stats -->
+          <div class="context-stats">
+            <div class="context-stat-row">
+              <span>Fleet</span>
+              <span x-text="agents.length + ' agents'"></span>
+            </div>
+            <div class="context-stat-row">
+              <span>Healthy</span>
+              <span x-text="agents.filter(a => a.health_status === 'healthy').length"></span>
+            </div>
+            <div class="context-stat-row">
+              <span>Cost today</span>
+              <span x-text="formatCost(fleetTotalCost)"></span>
+            </div>
+          </div>
+        </div><!-- /context-panel -->
+
       </div>
     </div>
 
