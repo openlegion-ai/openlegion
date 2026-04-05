@@ -173,7 +173,7 @@ class SkillRegistry:
         mesh_client: Any = None,
         workspace_manager: Any = None,
         memory_store: Any = None,
-        _messages: Any = None,
+        _messages: list[dict] | None = None,
     ) -> Any:
         """Execute a skill by name with given arguments."""
         if self._mcp_client and self._mcp_client.has_tool(name):

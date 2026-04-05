@@ -583,6 +583,39 @@ class MeshClient:
 
     # === Browser (shared browser service via mesh proxy) ===
 
+    # === Operator agent config management ===
+
+    async def propose_config_change(self, agent_id: str, field: str, value) -> dict:
+        """Propose a config change for an agent. Returns preview + change_id."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/propose",
+            json={"field": field, "value": value, "proposed_by": self.agent_id},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def confirm_config_change(self, agent_id: str, change_id: str) -> dict:
+        """Confirm and apply a previously proposed config change."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/config",
+            json={"change_id": change_id, "confirmed_by": self.agent_id},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_agent_config(self, agent_id: str) -> dict:
+        """Get the current config for an agent."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/config",
+            params={"requesting_agent": self.agent_id},
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def browser_command(self, action: str, params: dict | None = None) -> dict:
         """Send a browser command through the mesh to the shared browser service."""
         client = await self._get_client()
