@@ -2033,6 +2033,8 @@ def create_mesh_app(
     async def get_agent_config(agent_id: str, request: Request) -> dict:
         """Read agent config from agents.yaml."""
         _require_any_auth(request)
+        if _resolve_agent_id("", request) != "operator":
+            raise HTTPException(403, "Only the operator can read agent configs")
         from src.cli.config import _load_config
         agent_cfg = _load_config()
         agents = agent_cfg.get("agents", {})
@@ -2044,6 +2046,8 @@ def create_mesh_app(
     async def propose_agent_config_change(agent_id: str, request: Request) -> dict:
         """Create a pending config change for review."""
         _require_any_auth(request)
+        if _resolve_agent_id("", request) != "operator":
+            raise HTTPException(403, "Only the operator can propose config changes")
         data = await request.json()
 
         field = data.get("field", "")
@@ -2096,6 +2100,8 @@ def create_mesh_app(
     async def update_agent_config(agent_id: str, request: Request) -> dict:
         """Apply a pending config change. Used by confirm_edit tool."""
         _require_any_auth(request)
+        if _resolve_agent_id("", request) != "operator":
+            raise HTTPException(403, "Only the operator can apply config changes")
         data = await request.json()
         change_id = data.get("change_id", "")
 
