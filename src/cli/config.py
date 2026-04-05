@@ -1205,7 +1205,7 @@ _OPERATOR_AGENT_ID = "operator"
 _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # Heartbeat tier (5)
     "list_agents", "get_agent_profile", "get_system_status", "notify_user", "save_observations",
-    # Chat tier (+15)
+    # Chat tier (+17)
     "list_templates", "apply_template", "hand_off", "check_inbox", "update_status",
     "read_agent_history", "propose_edit", "confirm_edit", "create_agent",
     "list_projects", "get_project", "create_project",
@@ -1245,14 +1245,19 @@ When the user wants agents (first run, or adding to an existing fleet):
    Nutsland, we sell premium nuts to health-conscious millennials"), skip \
    the question — you have everything you need.
 
-3. **Present a brief plan**, e.g.:
+3. **Check plan limits** via get_system_status() before suggesting anything. \
+   On Basic (1 agent), suggest a single versatile agent — never a template. \
+   On Growth (5 agents), suggest a focused 2-3 agent team. Adapt the plan \
+   to what the user's plan allows.
+
+4. **Present a brief plan**, e.g.:
    "I'll set up a **nutsland** project with 3 agents:
    • **researcher** — nut industry trends, health angles, competitor content
    • **writer** — blog posts and social content in a premium, playful voice
    • **editor** — brand consistency, SEO, health claim accuracy
    Go ahead?"
 
-4. **On confirmation, execute everything at once:**
+5. **On confirmation, execute everything at once:**
    a. apply_template() or create_agent() for each agent
    b. create_project() with the business name
    c. propose_edit() for each agent to replace generic instructions with \
@@ -1263,11 +1268,11 @@ When the user wants agents (first run, or adding to an existing fleet):
    d. update_project_context() with the business details
    e. add_agents_to_project() to assign the team
 
-5. **Set up credentials** (see Credentials section):
-   Check what APIs the agents will need, request any missing keys from \
-   the user via request_credential(), and wait for them to save each one.
+6. **Set up credentials** (see Credentials section):
+   Request all needed API keys at once via request_credential(). Tell the \
+   user to fill in the secure input cards, then ask them to confirm when done.
 
-6. **End with the team ready to work:**
+7. **End with the team ready to work:**
    "Your nutsland team is live and fully configured. The researcher is \
    set up to track nut industry trends, the writer will produce content \
    in your brand voice, and the editor will enforce quality. You can talk \
@@ -1354,13 +1359,18 @@ After creating a team, complete the setup by getting needed credentials:
 2. Call vault_list() to check what credentials already exist.
 3. For each missing credential, call request_credential() with a clear \
    description of what it's for and where to find it. A secure input card \
-   will appear right in this chat — the user enters the key there and it \
-   goes straight to the vault. You never see the value.
-4. After all credentials are saved, confirm the team is fully configured.
+   appears right in this chat — the user enters the key there and it goes \
+   straight to the vault. You never see the value.
+4. Request all needed credentials at once (don't wait between each one). \
+   Then tell the user: "Fill in the API keys above and let me know when \
+   you're done."
+5. When the user confirms, call vault_list() to verify everything is saved. \
+   If any are missing, mention which ones.
 
 Do this as the final step of team setup, not as a separate conversation. \
 The user should go from "I need a team" to "your team is live and ready" \
-in one session.
+in one session. If the user doesn't have a key yet, that's fine — agents \
+will request it again when they need it. Don't block setup on credentials.
 
 ## Tool Errors
 
