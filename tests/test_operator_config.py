@@ -177,7 +177,7 @@ class TestOperatorConstants:
 
     def test_allowed_tools_populated(self):
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS, _OPERATOR_HEARTBEAT_TOOLS
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 20
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 21
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 5
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))

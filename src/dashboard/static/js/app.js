@@ -1476,24 +1476,39 @@ function dashboard() {
 
       // Surface credential requests as secure input cards in chat.
       if (evt.type === 'credential_request' && agent && evt.data && evt.data.name) {
-        if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
         const evtTs = this._normalizeEventTs(evt);
+        const credCard = {
+          role: 'credential_request',
+          content: evt.data.description || '',
+          name: evt.data.name,
+          service: evt.data.service || '',
+          saved: false,
+          ts: evtTs,
+        };
+        // Show in the requesting agent's chat
+        if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
         const isDup = this.chatHistories[agent].some(m =>
           m.role === 'credential_request' && m.name === evt.data.name && Math.abs((m.ts || 0) - evtTs) < 5000
         );
         if (!isDup) {
-          this.chatHistories[agent].push({
-            role: 'credential_request',
-            content: evt.data.description || '',
-            name: evt.data.name,
-            service: evt.data.service || '',
-            saved: false,
-            ts: evtTs,
-          });
+          this.chatHistories[agent].push(credCard);
           if (this.activeChatId === agent) {
             this.$nextTick(() => this._scrollChat(agent));
           } else {
             this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
+          }
+        }
+        // Also surface in operator chat so users see it from the main Chat tab
+        if (agent !== 'operator') {
+          if (!this.chatHistories['operator']) this.chatHistories['operator'] = [];
+          const opDup = this.chatHistories['operator'].some(m =>
+            m.role === 'credential_request' && m.name === evt.data.name && Math.abs((m.ts || 0) - evtTs) < 5000
+          );
+          if (!opDup) {
+            this.chatHistories['operator'].push({ ...credCard, _from_agent: agent });
+            if (this.activeTab === 'chat') {
+              this.$nextTick(() => this._scrollChat('operator'));
+            }
           }
         }
       }

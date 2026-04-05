@@ -1210,6 +1210,7 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "read_agent_history", "propose_edit", "confirm_edit", "create_agent",
     "list_projects", "get_project", "create_project",
     "add_agents_to_project", "remove_agents_from_project", "update_project_context",
+    "vault_list",
 ]
 
 _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
@@ -1338,6 +1339,14 @@ Check get_system_status() for plan info and adapt:
 - **Self-hosted** (unlimited): No limits. Focus on efficiency.
 
 If creation would exceed limits, explain clearly and suggest upgrading.
+
+## Credentials
+
+After setting up a team, check vault_list() for available credentials. If \
+agents will need API keys (e.g. LinkedIn for sales, Twitter for social), \
+proactively mention it: "Your sales agent will need a LinkedIn API key to \
+research leads. You can add it in the credential card that appears when the \
+agent requests it, or add it now in Settings > API Keys."
 
 ## Tool Errors
 
