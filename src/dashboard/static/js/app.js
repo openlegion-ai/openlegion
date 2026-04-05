@@ -1246,7 +1246,14 @@ function dashboard() {
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'network') { this.loadNetworkProxy(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
-      if (tabId === 'audit') { this.fetchAuditLog(); }
+      if (tabId === 'audit') {
+        // Redirect to operator's activity page where audit log now lives
+        this.drillDown('operator');
+        this.identityTab = 'activity';
+        this.fetchAgentActivity('operator');
+        this.fetchAuditLog();
+        return;
+      }
       if (tabId === 'activity') {
         if (this.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
         else if (this.activityView === 'logs') { this.fetchSystemLogs(); }
@@ -1821,6 +1828,7 @@ function dashboard() {
       }
       if (tab.id === 'activity') {
         await this.fetchAgentActivity(agentId);
+        if (agentId === 'operator') this.fetchAuditLog();
       }
       if (tab.id === 'logs') {
         await this.fetchIdentityLogs(agentId);
@@ -4355,7 +4363,7 @@ function dashboard() {
         { label: 'Budget Settings', desc: 'Default daily and monthly budgets', keywords: ['budget', 'cost', 'daily', 'monthly', 'limit', 'spend'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
         { label: 'Agent Limits', desc: 'Max iterations, tool rounds, timeouts', keywords: ['iterations', 'rounds', 'timeout', 'limit', 'agent', 'execution'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
         { label: 'Health Settings', desc: 'Poll interval, failure thresholds, restart limits', keywords: ['health', 'poll', 'restart', 'failure', 'recovery', 'monitor'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
-        { label: 'Audit Log', desc: 'Operator modification history', keywords: ['audit', 'history', 'changes', 'operator', 'log'], action: () => { this.switchSystemTab('audit'); this.switchTab('system'); } },
+        { label: 'Audit Log', desc: 'Operator modification history', keywords: ['audit', 'history', 'changes', 'operator', 'log'], action: () => { this.drillDown('operator'); this.identityTab = 'activity'; this.fetchAgentActivity('operator'); this.fetchAuditLog(); } },
       ];
       for (const act of sysActions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
