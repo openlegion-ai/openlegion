@@ -392,6 +392,24 @@ class MeshClient:
 
     # === Vault (credential management) ===
 
+    async def request_credential_from_user(
+        self, name: str, description: str, service: str = "",
+    ) -> dict:
+        """Emit a credential request event to the dashboard."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/credential-request",
+            json={
+                "agent_id": self.agent_id,
+                "name": name,
+                "description": description,
+                "service": service,
+            },
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def vault_store(self, name: str, value: str) -> dict:
         """Store a credential in the mesh vault. Returns handle."""
         client = await self._get_client()

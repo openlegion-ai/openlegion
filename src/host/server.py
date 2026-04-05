@@ -963,6 +963,39 @@ def create_mesh_app(
             raise HTTPException(500, f"Notification failed: {e}")
         return {"sent": True}
 
+    @app.post("/mesh/credential-request")
+    async def credential_request(data: dict, request: Request) -> dict:
+        """Agent requests a credential from the user via dashboard UI.
+
+        Emits a ``credential_request`` event so the dashboard renders a
+        secure input card.  The credential value is never part of the
+        event — only name, description, and service travel over the wire.
+        """
+        agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        await _check_rate_limit("notify", agent_id)
+
+        name = data.get("name", "")
+        description = data.get("description", "")
+        service = data.get("service", name)
+
+        if not name:
+            raise HTTPException(400, "Credential name is required")
+        if not re.match(r"^[a-zA-Z0-9_.\-]{1,128}$", name):
+            raise HTTPException(400, "Invalid credential name")
+
+        if event_bus:
+            event_bus.emit(
+                "credential_request",
+                agent=agent_id,
+                data={
+                    "name": name,
+                    "description": description[:500],
+                    "service": service[:128],
+                },
+            )
+
+        return {"requested": True, "name": name}
+
     @app.get("/mesh/agents")
     async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:
         """List registered agents, optionally scoped by project or agent_id.
@@ -2021,7 +2054,6 @@ def create_mesh_app(
         _create_project(name, description=context, members=members)
         return {"updated": True, "project": name}
 
-
     # === Operator Config Endpoints ===
 
     _VALID_CONFIG_FIELDS = {"instructions", "soul", "model", "role", "heartbeat", "thinking", "budget", "permissions"}
@@ -2243,7 +2275,6 @@ def create_mesh_app(
         )
 
         return {"success": True, "agent_id": agent_id, "field": field}
-
 
     # === Browser Service Proxy ===
 
