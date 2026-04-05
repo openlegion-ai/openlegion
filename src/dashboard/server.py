@@ -448,8 +448,10 @@ def create_dashboard_router(
         if name in agent_registry:
             raise HTTPException(status_code=409, detail=f"Agent '{name}' already exists")
         # Limit based on running agents (resource usage), not config definitions.
-        # A stopped agent frees a slot.
-        if _max_agents > 0 and len(agent_registry) >= _max_agents:
+        # A stopped agent frees a slot.  Operator does not count toward plan limit.
+        from src.cli.config import _OPERATOR_AGENT_ID
+        _non_op_running = sum(1 for a in agent_registry if a != _OPERATOR_AGENT_ID)
+        if _max_agents > 0 and _non_op_running >= _max_agents:
             raise HTTPException(
                 status_code=403,
                 detail=f"Agent limit reached ({_max_agents}). Upgrade your plan for more agents.",
