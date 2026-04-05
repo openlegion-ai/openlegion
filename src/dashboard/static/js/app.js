@@ -1823,7 +1823,6 @@ function dashboard() {
       }
       if (tab.id === 'activity') {
         await this.fetchAgentActivity(agentId);
-        if (agentId === 'operator') this.fetchAuditLog();
       }
       if (tab.id === 'logs') {
         await this.fetchIdentityLogs(agentId);
