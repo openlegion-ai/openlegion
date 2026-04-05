@@ -21,6 +21,11 @@ def sanitize_for_provider(messages: list[dict], model: str) -> list[dict]:
     provider = _detect_provider(model)
     msgs = _deep_copy_messages(messages)
 
+    # 0. Strip internal metadata fields (e.g. _origin provenance tags)
+    #    These are used by the engine internally and must not reach LLM APIs.
+    for msg in msgs:
+        msg.pop("_origin", None)
+
     # 1. Orphaned tool call/result cleanup (all providers)
     msgs = _ensure_tool_call_pairing(msgs)
 

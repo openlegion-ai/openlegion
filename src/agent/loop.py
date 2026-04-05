@@ -94,6 +94,18 @@ def _extract_json_response(text: str) -> str:
     return text
 
 
+def _last_message_is_user_origin(messages: list[dict]) -> bool:
+    """Check if the most recent user message has origin='user'.
+
+    Used by provenance-gated tools to verify the user explicitly
+    confirmed an action in the conversation.
+    """
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return msg.get("_origin") == "user"
+    return False
+
+
 # Files already injected via bootstrap — skip in first-message auto-search
 # to avoid duplicate content.  Matches WorkspaceManager._BOOTSTRAP_FILES.
 _BOOTSTRAP_SEARCH_EXCLUDE = frozenset({
@@ -244,6 +256,9 @@ class AgentLoop:
                 _BLACKBOARD_TOOLS if mesh_client.is_standalone else None
             )
         self._skills_reloaded: bool = False
+        # Reference to the active messages list — set during tool execution
+        # so skills.execute() can inject it into provenance-gated tools.
+        self._current_messages: list[dict] = []
 
     @property
     def _skill_filter_kw(self) -> dict:
@@ -600,15 +615,22 @@ class AgentLoop:
                     })
 
                     # Execute tools — parallel-safe tools run concurrently
+                    self._current_messages = messages
                     tool_results = await self._run_tools_parallel(
                         llm_response.tool_calls,
                     )
                     for i, (result_str, _result) in enumerate(tool_results):
-                        messages.append({
+                        tool_msg = {
                             "role": "tool",
                             "tool_call_id": tool_call_entries[i]["id"],
                             "content": result_str,
-                        })
+                        }
+                        # Tag tool results from coordination tools with agent provenance
+                        _tc_name = llm_response.tool_calls[i].name
+                        if _tc_name in ("check_inbox",):
+                            _from = _result.get("from_agent", "unknown") if isinstance(_result, dict) else "unknown"
+                            tool_msg["_origin"] = f"agent:{_from}"
+                        messages.append(tool_msg)
 
                     # Rebuild system prompt after skill hot-reload
                     if self._skills_reloaded:
@@ -1114,7 +1136,7 @@ class AgentLoop:
                 )
 
             # Stateless message list — fresh each heartbeat
-            messages: list[dict] = [{"role": "user", "content": message}]
+            messages: list[dict] = [{"role": "user", "content": message, "_origin": "system:heartbeat"}]
 
             for _iteration in range(HEARTBEAT_MAX_ITERATIONS):
                 if self._cancel_requested:
@@ -1152,6 +1174,7 @@ class AgentLoop:
                             "Start wrapping up — use notify_user to report "
                             "your results, then give your final answer."
                         ),
+                        "_origin": "system:heartbeat",
                     })
                 elif _remaining == 1:
                     messages.append({
@@ -1160,6 +1183,7 @@ class AgentLoop:
                             "[SYSTEM] LAST iteration. Give your final answer "
                             "now. Do NOT call any more tools."
                         ),
+                        "_origin": "system:heartbeat",
                     })
 
                 # On the very last iteration, withhold tools so the LLM is
@@ -1298,15 +1322,22 @@ class AgentLoop:
                             notifications.append(msg_arg)
 
                 # Execute tools — parallel-safe tools run concurrently
+                self._current_messages = messages
                 tool_results = await self._run_tools_parallel(
                     llm_response.tool_calls,
                 )
                 for i, (result_str, _result) in enumerate(tool_results):
-                    messages.append({
+                    hb_tool_msg = {
                         "role": "tool",
                         "tool_call_id": tool_call_entries[i]["id"],
                         "content": result_str,
-                    })
+                    }
+                    # Tag tool results from coordination tools with agent provenance
+                    _hb_tc_name = llm_response.tool_calls[i].name
+                    if _hb_tc_name in ("check_inbox",):
+                        _hb_from = _result.get("from_agent", "unknown") if isinstance(_result, dict) else "unknown"
+                        hb_tool_msg["_origin"] = f"agent:{_hb_from}"
+                    messages.append(hb_tool_msg)
 
                 # Clear reload flag if set (heartbeat rarely creates skills,
                 # but the flag must be consumed to avoid stale state).
@@ -1579,7 +1610,7 @@ class AgentLoop:
         # The plain-text message was already persisted to the transcript above;
         # the enriched form is only used for the LLM call.
         llm_content = enrich_message_with_attachments(user_message)
-        self._chat_messages.append({"role": "user", "content": llm_content})
+        self._chat_messages.append({"role": "user", "content": llm_content, "_origin": "user"})
         steered = self._drain_steer_messages()
         if steered:
             combined = "\n\n".join(steered)
@@ -1663,6 +1694,7 @@ class AgentLoop:
                     mesh_client=self.mesh_client,
                     workspace_manager=self.workspace,
                     memory_store=self.memory,
+                    _messages=self._current_messages,
                 ),
                 timeout=_TOOL_TIMEOUT,
             )
@@ -1787,15 +1819,22 @@ class AgentLoop:
 
         Appends results to ``self._chat_messages`` in the original order.
         """
+        self._current_messages = self._chat_messages
         tool_results = await self._run_tools_parallel(tool_calls)
         for i, (result_str, result) in enumerate(tool_results):
-            self._chat_messages.append({
+            msg = {
                 "role": "tool",
                 "tool_call_id": entries[i]["id"],
                 "content": result_str,
-            })
+            }
+            # Tag tool results from coordination tools with agent provenance
+            tool_name = tool_calls[i].name
+            if tool_name in ("check_inbox",):
+                from_agent = result.get("from_agent", "unknown") if isinstance(result, dict) else "unknown"
+                msg["_origin"] = f"agent:{from_agent}"
+            self._chat_messages.append(msg)
             tool_outputs.append({
-                "tool": tool_calls[i].name,
+                "tool": tool_name,
                 "input": tool_calls[i].arguments,
                 "output": result,
             })

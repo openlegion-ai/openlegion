@@ -173,6 +173,7 @@ class SkillRegistry:
         mesh_client: Any = None,
         workspace_manager: Any = None,
         memory_store: Any = None,
+        _messages: Any = None,
     ) -> Any:
         """Execute a skill by name with given arguments."""
         if self._mcp_client and self._mcp_client.has_tool(name):
@@ -241,6 +242,8 @@ class SkillRegistry:
             call_args["workspace_manager"] = workspace_manager
         if "memory_store" in sig_params:
             call_args["memory_store"] = memory_store
+        if "_messages" in sig_params:
+            call_args["_messages"] = _messages
 
         # Filter out LLM-hallucinated parameters that the function doesn't
         # accept.  Without this, an LLM sending e.g. {"raw": ""} to a
@@ -277,7 +280,7 @@ class SkillRegistry:
                 req_parts = []
                 opt_parts = []
                 for k, v in param_schemas.items():
-                    if k in {"mesh_client", "workspace_manager", "memory_store"}:
+                    if k in {"mesh_client", "workspace_manager", "memory_store", "_messages"}:
                         continue
                     ptype = v.get("type", "any")
                     desc = v.get("description", "")
