@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from jinja2 import Environment, FileSystemLoader
 
+from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.dashboard.auth import verify_session_cookie
 from src.shared.utils import friendly_streaming_error, sanitize_for_prompt, setup_logging
 
@@ -166,6 +167,47 @@ def create_dashboard_router(
             return
         if not request.headers.get("X-Requested-With"):
             raise HTTPException(403, "Missing X-Requested-With header")
+
+    def _mask_proxy_url(url: str) -> str:
+        """Mask credentials in a proxy URL for display."""
+        if not url:
+            return ""
+        from urllib.parse import urlparse, urlunparse
+        try:
+            parsed = urlparse(url)
+            if parsed.username:
+                masked_netloc = f"{parsed.username[:2]}***@{parsed.hostname}:{parsed.port}"
+                return urlunparse((parsed.scheme, masked_netloc, "", "", "", ""))
+            return f"{parsed.scheme}://{parsed.hostname}:{parsed.port}" if parsed.port else url
+        except Exception:
+            return "***"
+
+    async def _push_browser_proxy_for_agent(agent_id: str) -> None:
+        """Push proxy config to browser service for an agent after restart."""
+        if not runtime or not hasattr(runtime, "browser_service_url") or not runtime.browser_service_url:
+            return
+        try:
+            from src.cli.config import _load_config
+            from src.cli.proxy import parse_proxy_url, resolve_agent_proxy
+            _cfg = _load_config()
+            proxy_url = resolve_agent_proxy(agent_id, _cfg.get("agents", {}), _cfg.get("network", {}))
+            if proxy_url:
+                parsed = parse_proxy_url(proxy_url)
+                if parsed:
+                    body = {"url": parsed["url"], "username": parsed["username"], "password": parsed["password"]}
+                else:
+                    body = {}  # explicit no-proxy
+            else:
+                body = {}  # explicit no-proxy (direct mode or no system proxy)
+            import httpx as _httpx
+            async with _httpx.AsyncClient(timeout=10) as client:
+                headers = {}
+                svc_token = getattr(runtime, "browser_auth_token", "")
+                if svc_token:
+                    headers["Authorization"] = f"Bearer {svc_token}"
+                await client.put(f"{runtime.browser_service_url}/browser/{agent_id}/proxy", json=body, headers=headers)
+        except Exception as e:
+            logger.warning("Failed to push browser proxy for %s: %s", agent_id, e)
 
     api_router = APIRouter(
         prefix="/dashboard",
@@ -610,6 +652,20 @@ def create_dashboard_router(
             except Exception as e:
                 logger.warning("Wallet cleanup for '%s' failed: %s", agent_id, e)
 
+        # Clean up proxy credential if exists
+        try:
+            from src.cli.config import _load_config as _load_cfg_for_delete
+            _del_cfg = _load_cfg_for_delete()
+            _del_agent_cfg = _del_cfg.get("agents", {}).get(agent_id, {})
+            _del_proxy = _del_agent_cfg.get("proxy", {})
+            if _del_proxy.get("credential"):
+                from src.host.credentials import _remove_from_env
+                _cred_env_key = f"OPENLEGION_CRED_{_del_proxy['credential']}"
+                _remove_from_env(_cred_env_key)
+                os.environ.pop(_cred_env_key, None)
+        except Exception as e:
+            logger.warning("Proxy credential cleanup for '%s' failed: %s", agent_id, e)
+
         # Remove from config and permissions (best-effort — don't fail if files are missing)
         try:
             import yaml
@@ -734,25 +790,15 @@ def create_dashboard_router(
                 cfg_result["wallet_addresses"] = None
         else:
             cfg_result["wallet_addresses"] = None
+
         # Proxy configuration
         proxy_cfg = agent_cfg.get("proxy", {})
         proxy_mode = proxy_cfg.get("mode", "inherit")
-        proxy_info: dict = {"mode": proxy_mode}
+        proxy_info: dict[str, Any] = {"mode": proxy_mode}
         if proxy_mode == "custom":
             cred = proxy_cfg.get("credential", "")
             raw = os.environ.get(f"OPENLEGION_CRED_{cred}", "")
-            if raw:
-                from urllib.parse import urlparse, urlunparse
-                try:
-                    p = urlparse(raw)
-                    masked = f"{p.scheme}://{p.hostname}:{p.port}" if p.port else raw
-                    if p.username:
-                        masked = f"{p.scheme}://{p.username[:2]}***@{p.hostname}:{p.port}"
-                except Exception:
-                    masked = "***"
-                proxy_info["url"] = masked
-            else:
-                proxy_info["url"] = ""
+            proxy_info["url"] = _mask_proxy_url(raw) if raw else ""
             proxy_info["has_credential"] = bool(raw)
         cfg_result["proxy"] = proxy_info
 
@@ -873,15 +919,28 @@ def create_dashboard_router(
             restart_env: dict[str, str] = {}
             if agent_id == _OPERATOR_AGENT_ID:
                 restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
-            url = runtime.start_agent(
-                agent_id=agent_id,
-                role=agent_cfg.get("role", "assistant"),
-                skills_dir=skills_dir,
-                model=agent_cfg.get("model", default_model),
-                mcp_servers=agent_cfg.get("mcp_servers") or None,
-                thinking=agent_cfg.get("thinking", ""),
-                env_overrides=restart_env,
+            # Resolve proxy for this agent
+            _proxy_url = resolve_agent_proxy(
+                agent_id, cfg.get("agents", {}), cfg.get("network", {}),
             )
+            _proxy_env = build_proxy_env_vars(
+                _proxy_url, cfg.get("network", {}).get("no_proxy", ""),
+            )
+            runtime.extra_env.update(_proxy_env)
+            try:
+                url = runtime.start_agent(
+                    agent_id=agent_id,
+                    role=agent_cfg.get("role", "assistant"),
+                    skills_dir=skills_dir,
+                    model=agent_cfg.get("model", default_model),
+                    mcp_servers=agent_cfg.get("mcp_servers") or None,
+                    thinking=agent_cfg.get("thinking", ""),
+                    env_overrides=restart_env,
+                )
+            finally:
+                runtime.extra_env.pop("HTTP_PROXY", None)
+                runtime.extra_env.pop("HTTPS_PROXY", None)
+                runtime.extra_env.pop("NO_PROXY", None)
             if router is not None:
                 router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
             else:
@@ -891,6 +950,8 @@ def create_dashboard_router(
                 if isinstance(transport, HttpTransport):
                     transport.register(agent_id, url)
             ready = await runtime.wait_for_agent(agent_id, timeout=60)
+            # Push proxy config to browser service
+            await _push_browser_proxy_for_agent(agent_id)
             return {"restarted": True, "ready": ready}
         except Exception as e:
             logger.error(f"Failed to restart agent {agent_id}: {e}")
@@ -913,13 +974,97 @@ def create_dashboard_router(
         _update_agent_field(agent_id, "budget", {"daily_usd": daily_usd, "monthly_usd": monthly_usd})
         return {"updated": True, "agent": agent_id, "daily_usd": daily_usd, "monthly_usd": monthly_usd}
 
-    @api_router.put("/api/agents/{agent_id}/proxy")
-    async def api_put_agent_proxy(agent_id: str, request: Request) -> dict:
-        """Set per-agent proxy config. Works for stopped agents."""
-        import re
-        from urllib.parse import quote, urlparse, urlunparse
+    # ── Network / Proxy ─────────────────────────────────────
 
+    @api_router.get("/api/network/proxy")
+    async def api_get_network_proxy(request: Request):
+        """Return system proxy info (masked), NO_PROXY, and per-agent proxy summary."""
+        from src.cli.config import _load_config
+        from src.cli.proxy import _assemble_proxy_url
+
+        cfg = _load_config()
+        browser_proxy_url = os.environ.get("BROWSER_PROXY_URL", "")
+        system_proxy = os.environ.get("OPENLEGION_SYSTEM_PROXY", "")
+        is_managed = bool(browser_proxy_url)
+
+        masked_url = ""
+        if browser_proxy_url:
+            full = _assemble_proxy_url(
+                browser_proxy_url,
+                os.environ.get("BROWSER_PROXY_USER", ""),
+                os.environ.get("BROWSER_PROXY_PASS", ""),
+            )
+            masked_url = _mask_proxy_url(full)
+        elif system_proxy:
+            masked_url = _mask_proxy_url(system_proxy)
+
+        network_cfg = cfg.get("network", {})
+        no_proxy = network_cfg.get("no_proxy", "")
+
+        agents_cfg = cfg.get("agents", {})
+        agent_summary = []
+        for aid, acfg in agents_cfg.items():
+            proxy = acfg.get("proxy", {})
+            mode = proxy.get("mode", "inherit")
+            agent_proxy_url = ""
+            if mode == "custom":
+                cred = proxy.get("credential", "")
+                raw = os.environ.get(f"OPENLEGION_CRED_{cred}", "")
+                agent_proxy_url = _mask_proxy_url(raw) if raw else "(credential missing)"
+            agent_summary.append({"agent_id": aid, "mode": mode, "proxy_url": agent_proxy_url})
+
+        return {
+            "system_proxy": {
+                "configured": bool(masked_url),
+                "managed": is_managed,
+                "url": masked_url,
+            },
+            "no_proxy": no_proxy,
+            "agents": agent_summary,
+        }
+
+    @api_router.put("/api/network/proxy")
+    async def api_put_network_proxy(request: Request):
+        """Update system proxy (self-hosted only) and/or NO_PROXY."""
+        body = await request.json()
+        updated = []
+
+        if "no_proxy" in body:
+            from src.cli.config import _update_network_config
+            _update_network_config("no_proxy", body["no_proxy"])
+            updated.append("no_proxy")
+
+        if "system_proxy" in body:
+            browser_proxy_url = os.environ.get("BROWSER_PROXY_URL", "")
+            if browser_proxy_url:
+                raise HTTPException(400, "System proxy is managed by OpenLegion and cannot be changed here")
+
+            from src.cli.proxy import _assemble_proxy_url, validate_proxy_url
+            from src.host.credentials import _persist_to_env, _remove_from_env
+
+            sp = body["system_proxy"]
+            if sp is None or sp == "":
+                _remove_from_env("OPENLEGION_SYSTEM_PROXY")
+                os.environ.pop("OPENLEGION_SYSTEM_PROXY", None)
+                updated.append("system_proxy_removed")
+            else:
+                url = sp.get("url", "")
+                username = sp.get("username", "")
+                password = sp.get("password", "")
+                full_url = _assemble_proxy_url(url, username, password) if username else url
+                if not validate_proxy_url(full_url):
+                    raise HTTPException(400, "Invalid proxy URL")
+                _persist_to_env("OPENLEGION_SYSTEM_PROXY", full_url)
+                os.environ["OPENLEGION_SYSTEM_PROXY"] = full_url
+                updated.append("system_proxy")
+
+        return {"updated": updated, "restart_required": bool(updated)}
+
+    @api_router.put("/api/agents/{agent_id}/proxy")
+    async def api_put_agent_proxy(agent_id: str, request: Request):
+        """Set per-agent proxy config. Works for stopped agents (checks config, not registry)."""
         from src.cli.config import _load_config, _update_agent_field
+        from src.cli.proxy import _assemble_proxy_url, sanitize_agent_id_for_env, validate_proxy_url
         from src.host.credentials import _persist_to_env, _remove_from_env
 
         cfg = _load_config()
@@ -932,26 +1077,15 @@ def create_dashboard_router(
         if mode not in ("inherit", "custom", "direct"):
             raise HTTPException(400, f"Invalid proxy mode: {mode}")
 
-        proxy_yaml: dict = {"mode": mode}
-        safe_id = re.sub(r"[^A-Za-z0-9_]", "_", agent_id)
+        proxy_yaml: dict[str, str] = {"mode": mode}
+        safe_id = sanitize_agent_id_for_env(agent_id)
 
         if mode == "custom":
             url = body.get("url", "")
             username = body.get("username", "")
             password = body.get("password", "")
-            # Assemble full URL with credentials
-            if username:
-                parsed = urlparse(url)
-                user_part = quote(username, safe="")
-                if password:
-                    user_part += ":" + quote(password, safe="")
-                netloc = f"{user_part}@{parsed.hostname}:{parsed.port}"
-                full_url = urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
-            else:
-                full_url = url
-            # Validate
-            parsed = urlparse(full_url)
-            if parsed.scheme not in ("http", "https", "socks5") or not parsed.hostname or not parsed.port:
+            full_url = _assemble_proxy_url(url, username, password) if username else url
+            if not validate_proxy_url(full_url):
                 raise HTTPException(400, "Invalid proxy URL")
 
             cred_name = f"agent_{safe_id}_proxy"
@@ -959,6 +1093,7 @@ def create_dashboard_router(
             _persist_to_env(env_key, full_url)
             os.environ[env_key] = full_url
             proxy_yaml["credential"] = cred_name
+
         elif mode in ("inherit", "direct"):
             # Clean up any existing custom credential
             old_proxy = agents_cfg.get(agent_id, {}).get("proxy", {})
@@ -969,6 +1104,7 @@ def create_dashboard_router(
                 os.environ.pop(env_key, None)
 
         _update_agent_field(agent_id, "proxy", proxy_yaml)
+
         return {"updated": ["proxy"], "restart_required": True}
 
     @api_router.get("/api/agents/{agent_id}/permissions")
@@ -2815,6 +2951,7 @@ def create_dashboard_router(
                 logger.warning("Browser service restart failed: %s", e)
 
         # Restart each agent
+        _network_cfg = cfg.get("network", {})
         for agent_id in list(agent_registry.keys()):
             agent_cfg = agents_cfg.get(agent_id, {})
             try:
@@ -2827,18 +2964,29 @@ def create_dashboard_router(
                 _restart_env: dict[str, str] = {}
                 if agent_id == _OPERATOR_AGENT_ID:
                     _restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
-                url = await loop.run_in_executor(
-                    None,
-                    lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir, re=_restart_env: runtime.start_agent(
-                        agent_id=aid,
-                        role=acfg.get("role", "assistant"),
-                        skills_dir=sd,
-                        model=acfg.get("model", default_model),
-                        mcp_servers=acfg.get("mcp_servers") or None,
-                        thinking=acfg.get("thinking", ""),
-                        env_overrides=re,
-                    ),
+                # Resolve proxy for this agent
+                _proxy_url = resolve_agent_proxy(agent_id, agents_cfg, _network_cfg)
+                _proxy_env = build_proxy_env_vars(
+                    _proxy_url, _network_cfg.get("no_proxy", ""),
                 )
+                runtime.extra_env.update(_proxy_env)
+                try:
+                    url = await loop.run_in_executor(
+                        None,
+                        lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir, re=_restart_env: runtime.start_agent(
+                            agent_id=aid,
+                            role=acfg.get("role", "assistant"),
+                            skills_dir=sd,
+                            model=acfg.get("model", default_model),
+                            mcp_servers=acfg.get("mcp_servers") or None,
+                            thinking=acfg.get("thinking", ""),
+                            env_overrides=re,
+                        ),
+                    )
+                finally:
+                    runtime.extra_env.pop("HTTP_PROXY", None)
+                    runtime.extra_env.pop("HTTPS_PROXY", None)
+                    runtime.extra_env.pop("NO_PROXY", None)
                 if router is not None:
                     router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
                 else:
@@ -2848,6 +2996,8 @@ def create_dashboard_router(
                     if isinstance(transport, HttpTransport):
                         transport.register(agent_id, url)
                 ready = await runtime.wait_for_agent(agent_id, timeout=60)
+                # Push proxy config to browser service
+                await _push_browser_proxy_for_agent(agent_id)
                 results[agent_id] = "ready" if ready else "started"
             except Exception as e:
                 logger.error("Failed to restart agent '%s': %s", agent_id, e)

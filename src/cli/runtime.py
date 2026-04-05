@@ -23,6 +23,7 @@ from src.cli.config import (
     _load_config,
 )
 from src.cli.formatting import echo_fail, echo_header, echo_ok
+from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.shared.types import RESERVED_AGENT_IDS
 
 logger = logging.getLogger("cli")
@@ -373,6 +374,18 @@ class RuntimeContext:
                 agent_env["PROJECT_MD_PATH"] = str(project_md)
                 agent_env["PROJECT_NAME"] = project_name
 
+            # Proxy env injection
+            proxy_url = resolve_agent_proxy(
+                agent_id,
+                self.cfg.get("agents", {}),
+                self.cfg.get("network", {}),
+            )
+            proxy_env = build_proxy_env_vars(
+                proxy_url,
+                no_proxy_user=self.cfg.get("network", {}).get("no_proxy", ""),
+            )
+            self.runtime.extra_env.update(proxy_env)
+
             try:
                 url = self.runtime.start_agent(
                     agent_id=agent_id,
@@ -412,6 +425,16 @@ class RuntimeContext:
                     )
                 else:
                     raise
+            finally:
+                # Clean up per-agent env vars so they don't leak to the next agent
+                self.runtime.extra_env.pop("INITIAL_INSTRUCTIONS", None)
+                self.runtime.extra_env.pop("INITIAL_SOUL", None)
+                self.runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
+                self.runtime.extra_env.pop("PROJECT_MD_PATH", None)
+                self.runtime.extra_env.pop("PROJECT_NAME", None)
+                self.runtime.extra_env.pop("HTTP_PROXY", None)
+                self.runtime.extra_env.pop("HTTPS_PROXY", None)
+                self.runtime.extra_env.pop("NO_PROXY", None)
             self.router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
             if isinstance(self.transport, HttpTransport):
                 self.transport.register(agent_id, url)
@@ -538,6 +561,7 @@ class RuntimeContext:
             dispatch_loop=self._dispatch_loop,
             wallet_service_ref=wallet_ref,
             api_key_manager=self._api_key_manager,
+            cfg=self.cfg,
         )
         app.include_router(webhook_manager.create_router())
         self.health_monitor._cleanup_agent = app.cleanup_agent  # type: ignore[attr-defined]

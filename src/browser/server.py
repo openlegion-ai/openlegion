@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import os
 
 from fastapi import FastAPI, HTTPException, Request
@@ -162,6 +163,16 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         _verify_auth(request)
         await manager.reset(agent_id)
         return {"success": True, "data": {"message": f"Browser reset for {agent_id}"}}
+
+    @app.put("/browser/{agent_id}/proxy")
+    async def set_agent_proxy(agent_id: str, request: Request):
+        _verify_auth(request)
+        body_bytes = await request.body()
+        body = None
+        if body_bytes:
+            body = json.loads(body_bytes)
+        manager.set_proxy_config(agent_id, body)
+        return {"success": True}
 
     @app.post("/browser/{agent_id}/focus")
     async def focus(agent_id: str, request: Request):
