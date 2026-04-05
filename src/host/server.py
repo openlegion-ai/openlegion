@@ -1230,6 +1230,7 @@ def create_mesh_app(
         except Exception as e:
             raise HTTPException(500, f"Failed to spawn agent: {e}") from e
 
+
     # === Fleet Templates ===
 
     @app.get("/mesh/fleet/templates")
@@ -1386,6 +1387,117 @@ def create_mesh_app(
             "failed": failed_agents,
             "skipped": [n for n in tpl_agents if n not in created_names],
         }
+
+    # === Create Custom Agent ===
+
+    @app.post("/mesh/agents/create")
+    async def create_custom_agent(data: dict, request: Request) -> dict:
+        """Create a new custom agent. Used by the operator."""
+        if container_manager is None:
+            raise HTTPException(503, "Container manager not available")
+
+        # Auth + spawn permission
+        agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        await _check_rate_limit("spawn", agent_id)
+        if not permissions.can_spawn(agent_id):
+            raise HTTPException(403, f"Agent {agent_id} is not allowed to create agents")
+
+        # Validate inputs
+        name = data.get("name", "")
+        role = data.get("role", "")
+        model = data.get("model", "")
+        instructions = data.get("instructions", "")
+        soul = data.get("soul", "")
+
+        if not name or not isinstance(name, str):
+            raise HTTPException(400, "name is required")
+
+        # Validate agent name format
+        from src.cli.config import _validate_agent_name
+        try:
+            name = _validate_agent_name(name)
+        except Exception as e:
+            raise HTTPException(400, f"Invalid agent name: {e}") from e
+
+        # Check if agent already exists
+        from src.cli.config import AGENTS_FILE, _load_config
+        config = _load_config()
+        if name in config.get("agents", {}):
+            raise HTTPException(409, f"Agent '{name}' already exists")
+
+        # Check plan limits (exclude operator)
+        import os
+        max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
+        if max_agents > 0:
+            current = len([a for a in config.get("agents", {}) if a != "operator"])
+            if current >= max_agents:
+                raise HTTPException(
+                    409,
+                    f"Plan limit reached ({current}/{max_agents} agents). "
+                    "Remove an agent or upgrade your plan.",
+                )
+
+        # Default model
+        if not model:
+            model = config.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+
+        # Create agent config
+        from src.cli.config import (
+            PROJECT_ROOT,
+            _add_agent_permissions,
+            _add_agent_to_config,
+        )
+        _add_agent_to_config(
+            name=name, role=role or name, model=model,
+            initial_instructions=instructions, initial_soul=soul,
+        )
+        _add_agent_permissions(name)
+        skills_dir = PROJECT_ROOT / "skills" / name
+        skills_dir.mkdir(parents=True, exist_ok=True)
+
+        # Start container using env_overrides pattern
+        agent_env: dict[str, str] = {}
+        if instructions:
+            agent_env["INITIAL_INSTRUCTIONS"] = instructions
+        if soul:
+            agent_env["INITIAL_SOUL"] = soul
+
+        try:
+            url = container_manager.start_agent(
+                agent_id=name, role=role or name,
+                skills_dir=str(skills_dir), model=model,
+                env_overrides=agent_env,
+            )
+            router.register_agent(name, url, role=role or name)
+            if transport is not None:
+                from src.host.transport import HttpTransport
+                if isinstance(transport, HttpTransport):
+                    transport.register(name, url)
+            if health_monitor is not None:
+                health_monitor.register(name)
+            if cron_scheduler is not None:
+                hb_schedule = config.get("mesh", {}).get("heartbeat_schedule")
+                cron_scheduler.ensure_heartbeat(name, hb_schedule)
+
+            ready = await container_manager.wait_for_agent(name, timeout=60)
+
+            if event_bus is not None:
+                event_bus.emit("agent_state", agent=name,
+                    data={"state": "added", "role": role, "ready": ready})
+
+            # Audit log via trace store
+            if trace_store:
+                from src.shared.trace import new_trace_id as _new_trace_id
+                trace_store.record(
+                    trace_id=_new_trace_id(), source="mesh.create_agent",
+                    agent=name, event_type="create_agent",
+                    detail=f"role={role}, model={model}, created_by={data.get('created_by', 'operator')}",
+                )
+
+            return {"agent_id": name, "role": role or name, "ready": ready}
+        except Exception as e:
+            raise HTTPException(500, f"Failed to start agent: {e}") from e
+
 
     # === Agent History Access ===
 
