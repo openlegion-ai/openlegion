@@ -1525,3 +1525,361 @@ textarea.dash-input {
     display: flex;
   }
 }
+
+/* ── Master Chat redesign ────────────────────────── */
+
+/* Thinking dots animation */
+.thinking-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #818cf8;
+  display: inline-block;
+  animation: thinking-bounce 1.4s infinite ease-in-out both;
+}
+
+@keyframes thinking-bounce {
+  0%, 80%, 100% { transform: scale(0); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+/* Welcome / empty state */
+.mc-welcome-title {
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  background: linear-gradient(135deg, #e0e7ff 0%, #818cf8 50%, #6366f1 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 0.5rem;
+}
+
+.mc-welcome-subtitle {
+  font-size: 0.9375rem;
+  color: #6b7280;
+  font-weight: 400;
+}
+
+.mc-quick-action {
+  padding: 0.4rem 1rem;
+  font-size: 0.75rem;
+  color: #d1d5db;
+  background: transparent;
+  border: 1px solid rgba(75, 85, 99, 0.4);
+  border-radius: 9999px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.mc-quick-action:hover {
+  border-color: rgba(99, 102, 241, 0.5);
+  color: #e5e7eb;
+  background: rgba(99, 102, 241, 0.08);
+  transform: translateY(-1px);
+}
+
+/* User message bubble */
+.mc-user-bubble {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+/* Agent message turn — full-width card style */
+.mc-agent-turn {
+  padding: 16px 0;
+  border-top: 1px solid rgba(42, 42, 58, 0.4);
+}
+
+.mc-agent-turn:first-child,
+.mc-agent-turn-error {
+  border-top-color: transparent;
+}
+
+.mc-agent-turn-error {
+  background: rgba(127, 29, 29, 0.06);
+  border-radius: 8px;
+  padding: 16px;
+  border: 1px solid rgba(239, 68, 68, 0.15);
+}
+
+/* Tool call chips */
+.mc-tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: rgba(31, 41, 55, 0.5);
+  border: 1px solid rgba(55, 65, 81, 0.4);
+  font-size: 10px;
+  color: #9ca3af;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+/* Input area */
+.mc-input-area {
+  border-top: 1px solid rgba(42, 42, 58, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  background: rgba(17, 17, 24, 0.6);
+}
+
+.mc-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 4px 4px 4px;
+  width: 100%;
+  background: rgba(17, 17, 24, 0.9);
+  border: 1px solid rgba(55, 65, 81, 0.5);
+  border-radius: 0.875rem;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+.mc-input-wrap:focus-within {
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow:
+    0 0 0 3px rgba(99, 102, 241, 0.1),
+    0 0 20px -4px rgba(99, 102, 241, 0.15);
+}
+
+.mc-textarea {
+  max-height: 120px;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  flex: 1;
+  min-width: 0;
+  padding: 0.5rem 0.25rem 0.5rem 0.75rem;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: #e5e7eb;
+  overflow-y: auto;
+}
+
+.mc-textarea::placeholder {
+  color: #4b5563;
+}
+
+.mc-send-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  border-radius: 9999px;
+  border: none;
+  padding: 0;
+  margin: 0 2px;
+  color: #fff;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mc-send-btn-active {
+  background: #4f46e5;
+}
+
+.mc-send-btn-active:hover {
+  background: #4338ca;
+  transform: scale(1.05);
+}
+
+.mc-send-btn-inactive {
+  background: #374151;
+  opacity: 0.35;
+  cursor: default;
+}
+
+.mc-send-btn:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.6);
+  outline-offset: 2px;
+}
+
+/* Context panel refinements */
+.mc-context-panel {
+  position: relative;
+}
+
+.mc-context-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(42, 42, 58, 0.4);
+  margin-bottom: 8px;
+}
+
+.mc-context-count {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.mc-context-stats {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.mc-stat-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #22c55e;
+}
+
+.mc-stat-healthy {
+  background: #22c55e;
+}
+
+/* Agent list with scroll fade */
+.mc-agent-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  mask-image: linear-gradient(to bottom, transparent 0%, black 8px, black calc(100% - 16px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 8px, black calc(100% - 16px), transparent 100%);
+  padding: 4px 0;
+}
+
+/* Agent card — clickable */
+.mc-agent-card {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(30, 30, 46, 0.4);
+  border: 1px solid rgba(42, 42, 58, 0.5);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mc-agent-card:hover {
+  border-color: rgba(99, 102, 241, 0.35);
+  background: rgba(99, 102, 241, 0.05);
+}
+
+.mc-agent-name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #e5e7eb;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mc-agent-role {
+  font-size: 0.625rem;
+  color: #6b7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mc-agent-model {
+  font-size: 0.5625rem;
+  color: #4b5563;
+  margin-top: 4px;
+  padding-left: 42px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Chat icon on agent card — appears on hover */
+.mc-agent-chat-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: #6b7280;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.15s ease;
+}
+
+.group\/card:hover .mc-agent-chat-btn {
+  opacity: 1;
+}
+
+.mc-agent-chat-btn:hover {
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+}
+
+/* Status dots with pulse for online */
+.mc-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+
+.mc-status-online {
+  background: #22c55e;
+  animation: status-pulse 2s ease-in-out infinite;
+}
+
+.mc-status-busy {
+  background: #f59e0b;
+}
+
+.mc-status-failed {
+  background: #ef4444;
+}
+
+.mc-status-offline {
+  background: #4b5563;
+}
+
+@keyframes status-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
+  50% { box-shadow: 0 0 0 3px rgba(34, 197, 94, 0); }
+}
+
+/* Custom thin scrollbar for messages + context panel */
+.mc-messages-scroll::-webkit-scrollbar,
+.mc-context-panel::-webkit-scrollbar,
+.mc-agent-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.mc-messages-scroll::-webkit-scrollbar-track,
+.mc-context-panel::-webkit-scrollbar-track,
+.mc-agent-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.mc-messages-scroll::-webkit-scrollbar-thumb,
+.mc-context-panel::-webkit-scrollbar-thumb,
+.mc-agent-list::-webkit-scrollbar-thumb {
+  background: rgba(75, 85, 99, 0.3);
+  border-radius: 4px;
+}
+
+.mc-messages-scroll::-webkit-scrollbar-thumb:hover,
+.mc-context-panel::-webkit-scrollbar-thumb:hover,
+.mc-agent-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(75, 85, 99, 0.5);
+}
+
+/* Firefox scrollbar */
+.mc-messages-scroll,
+.mc-context-panel,
+.mc-agent-list {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(75, 85, 99, 0.3) transparent;
+}
