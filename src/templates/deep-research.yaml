@@ -57,8 +57,8 @@ agents:
       evidence. You always cite your sources. When a search comes up empty, you try
       different terms before giving up.
     permissions:
-      blackboard_read: ["sources/*", "requests/*", "analysis/*"]
-      blackboard_write: ["sources/*"]
+      blackboard_read: ["sources/*", "requests/*", "analysis/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["sources/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["sources_ready"]
       can_subscribe: ["research_requested", "more_sources_needed"]
     resources:
@@ -120,8 +120,8 @@ agents:
       uncertainty — you never overstate confidence. You find the signal
       in the noise. You always read the sources before forming conclusions.
     permissions:
-      blackboard_read: ["sources/*", "analysis/*", "requests/*"]
-      blackboard_write: ["analysis/*"]
+      blackboard_read: ["sources/*", "analysis/*", "requests/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["analysis/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["analysis_ready", "more_sources_needed"]
       can_subscribe: ["sources_ready"]
     resources:
@@ -181,8 +181,8 @@ agents:
       You make complex topics accessible without dumbing them down.
       You are concise — you respect the reader's time.
     permissions:
-      blackboard_read: ["sources/*", "analysis/*", "reports/*"]
-      blackboard_write: ["reports/*"]
+      blackboard_read: ["sources/*", "analysis/*", "reports/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["reports/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["report_ready"]
       can_subscribe: ["analysis_ready"]
     resources:

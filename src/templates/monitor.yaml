@@ -67,8 +67,8 @@ agents:
       - Check https://competitor.com/pricing for price changes
       - Search news for "your industry" + "regulation"
     permissions:
-      blackboard_read: ["alerts/*", "analysis/*"]
-      blackboard_write: ["alerts/*"]
+      blackboard_read: ["alerts/*", "analysis/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["alerts/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["alert_triggered"]
       can_subscribe: ["analysis_complete"]
     resources:
@@ -127,8 +127,8 @@ agents:
       you explain why they matter and what the user should do about it.
       You are calm and analytical, even when changes are significant.
     permissions:
-      blackboard_read: ["alerts/*", "analysis/*"]
-      blackboard_write: ["analysis/*"]
+      blackboard_read: ["alerts/*", "analysis/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["analysis/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["analysis_complete"]
       can_subscribe: ["alert_triggered"]
     resources:

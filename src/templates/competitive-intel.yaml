@@ -214,8 +214,8 @@ agents:
       If nothing requires action, respond HEARTBEAT_OK immediately.
 
     permissions:
-      blackboard_read: ["competitors/*", "artifacts/*", "requests/*"]
-      blackboard_write: ["competitors/*", "artifacts/*"]
+      blackboard_read: ["competitors/*", "artifacts/*", "requests/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["competitors/*", "artifacts/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["competitor_updated", "index_updated", "new_competitor_found"]
       can_subscribe: ["research_requested", "competitor_update_requested"]
 

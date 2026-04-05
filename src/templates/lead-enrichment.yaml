@@ -165,8 +165,8 @@ agents:
       - Call update_status() with your current state
 
     permissions:
-      blackboard_read: ["leads/*"]
-      blackboard_write: ["leads/*"]
+      blackboard_read: ["leads/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["leads/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["lead_enriched", "batch_complete"]
       can_subscribe: ["enrich_requested"]
     resources:
@@ -263,8 +263,8 @@ agents:
       - Call update_status() with your current state
 
     permissions:
-      blackboard_read: ["leads/*"]
-      blackboard_write: ["leads/exports/*"]
+      blackboard_read: ["leads/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["leads/exports/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["export_ready"]
       can_subscribe: ["lead_enriched", "batch_complete"]
     resources:

@@ -163,8 +163,8 @@ agents:
         extract: current Buy Box price and availability
 
     permissions:
-      blackboard_read: ["prices/*"]
-      blackboard_write: ["prices/*"]
+      blackboard_read: ["prices/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["prices/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["price_change", "extraction_failed"]
       can_subscribe: ["check_requested"]
     resources:
@@ -287,8 +287,8 @@ agents:
       - Call update_status() with your current state
 
     permissions:
-      blackboard_read: ["prices/*"]
-      blackboard_write: ["prices/*/analysis"]
+      blackboard_read: ["prices/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["prices/*/analysis", "tasks/*", "output/*", "status/*"]
       can_publish: ["price_report_ready"]
       can_subscribe: ["price_change"]
     resources:

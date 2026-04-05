@@ -144,8 +144,8 @@ agents:
       Rotate through these during each heartbeat cycle.
 
     permissions:
-      blackboard_read: ["signals/*", "drafts/*"]
-      blackboard_write: ["signals/*"]
+      blackboard_read: ["signals/*", "drafts/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["signals/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["signal_found"]
       can_subscribe: ["draft_complete"]
     resources:
@@ -290,8 +290,8 @@ agents:
       - Call update_status() with your current state
 
     permissions:
-      blackboard_read: ["signals/*", "drafts/*"]
-      blackboard_write: ["drafts/*"]
+      blackboard_read: ["signals/*", "drafts/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["drafts/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["draft_complete"]
       can_subscribe: ["signal_found"]
     resources:
