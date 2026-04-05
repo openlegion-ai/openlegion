@@ -56,6 +56,9 @@ function dashboard() {
     lastRefresh: 0,
     toastQueue: [],
 
+    // Operator readiness
+    operatorReady: false,
+
     // Fleet Digest (parsed from operator's OBSERVATIONS.md)
     fleetDigest: null,
     _fleetDigestTimer: null,
@@ -1158,6 +1161,13 @@ function dashboard() {
       }
     },
 
+    // ── Operator readiness ───────────────────────────────
+
+    checkOperatorReady() {
+      const op = this.agents.find(a => a.id === 'operator');
+      this.operatorReady = op && op.health_status === 'healthy';
+    },
+
     // ── Tab switching ─────────────────────────────────────
 
     switchTab(tab) {
@@ -1665,6 +1675,8 @@ function dashboard() {
           }
           // Fetch coordination status from blackboard
           this._fetchCoordination();
+          // Update operator readiness for the Chat tab
+          this.checkOperatorReady();
         }
       } catch (e) {
         console.warn('fetchAgents failed:', e);

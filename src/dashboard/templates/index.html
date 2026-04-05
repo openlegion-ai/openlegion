@@ -263,8 +263,20 @@
                 </div>
               </div>
 
+              <!-- Operator not ready -->
+              <div x-show="!operatorReady" class="flex-1 flex items-center justify-center">
+                <div class="text-center">
+                  <svg class="animate-spin h-8 w-8 text-indigo-400 mx-auto mb-3" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                  </svg>
+                  <div class="text-sm text-gray-400">Your operator is starting up...</div>
+                  <div class="text-[10px] text-gray-600 mt-1">This usually takes about 15&ndash;30 seconds.</div>
+                </div>
+              </div>
+
               <!-- Messages area — reuses existing chatHistories binding -->
-              <div id="chat-messages-operator" class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-3">
+              <div x-show="operatorReady" id="chat-messages-operator" class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-3">
                 <!-- Render messages from chatHistories['operator'] -->
                 <template x-for="(msg, i) in (chatHistories['operator'] || [])" :key="i">
                   <div>
@@ -373,16 +385,42 @@
                   </div>
                 </div>
 
-                <!-- Empty state -->
-                <div x-show="!(chatHistories['operator'] || []).length && !chatLoadingAgents['operator']" class="empty-state h-full justify-center">
+                <!-- First-run: no agents yet -->
+                <div x-show="!(chatHistories['operator'] || []).length && !chatLoadingAgents['operator'] && agents.filter(a => a.id !== 'operator').length === 0"
+                  class="empty-state h-full justify-center">
+                  <div class="text-2xl mb-2">&#128640;</div>
+                  <div class="empty-state-title">Welcome to OpenLegion</div>
+                  <div class="empty-state-desc mb-4">
+                    I'm your operator &mdash; I'll help you build your agent workforce.
+                    <br>Tell me what you need help with:
+                  </div>
+                  <!-- Dynamic quick-start buttons from templates -->
+                  <div x-data="{ templates: [] }" x-init="fetch(`${window.__config.apiBase}/fleet/templates`).then(r => r.ok ? r.json() : {templates:[]}).then(d => templates = (d.templates || []).slice(0, 4)).catch(() => {})"
+                    class="flex flex-wrap gap-2 justify-center max-w-md">
+                    <template x-for="tpl in templates" :key="tpl.name">
+                      <button @click="let inp = document.getElementById('operator-chat-input'); if (inp) { let scope = Alpine.$data(inp.closest('[x-data]')); if (scope && 'opInput' in scope) { scope.opInput = (maxAgents > 0 && maxAgents <= 1) ? ('I need a ' + (tpl.description || tpl.name).toLowerCase() + ' agent') : ('I need a ' + (tpl.description || tpl.name).toLowerCase() + ' team'); inp.focus(); } }"
+                        class="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:border-indigo-500/50 hover:bg-indigo-600/10 transition-colors">
+                        <span x-text="tpl.description || tpl.name"></span>
+                      </button>
+                    </template>
+                    <button @click="let inp = document.getElementById('operator-chat-input'); if (inp) { inp.focus(); }"
+                      class="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:border-indigo-500/50 hover:bg-indigo-600/10 transition-colors">
+                      Something else...
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Regular empty state (has agents but no chat yet) -->
+                <div x-show="!(chatHistories['operator'] || []).length && !chatLoadingAgents['operator'] && agents.filter(a => a.id !== 'operator').length > 0"
+                  class="empty-state h-full justify-center">
                   <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                  <div class="empty-state-title">Start chatting</div>
-                  <div class="empty-state-desc">Ask anything &mdash; your operator will connect you with the right agent or create a team for you.</div>
+                  <div class="empty-state-title">Chat with your operator</div>
+                  <div class="empty-state-desc">Ask about fleet status, optimize agents, or build new teams.</div>
                 </div>
               </div>
 
               <!-- Input area -->
-              <div class="px-4 py-3 border-t border-gray-800/80 shrink-0" x-data="{ opInput: '' }">
+              <div x-show="operatorReady" class="px-4 py-3 border-t border-gray-800/80 shrink-0" x-data="{ opInput: '' }">
                 <div class="chat-input-wrap">
                   <textarea x-model="opInput" id="operator-chat-input" rows="1"
                     :disabled="chatStreamingAgents['operator']"
