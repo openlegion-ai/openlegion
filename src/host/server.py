@@ -1906,6 +1906,8 @@ def create_mesh_app(
     async def mesh_list_projects(request: Request) -> dict:
         """List all projects (mesh-authed proxy)."""
         _require_any_auth(request)
+        if _resolve_agent_id("", request) != "operator":
+            raise HTTPException(403, "Only the operator can manage projects")
         from src.cli.config import _load_projects
         projects = _load_projects()
         result = []
@@ -1922,6 +1924,8 @@ def create_mesh_app(
     async def mesh_create_project(request: Request) -> dict:
         """Create a new project (mesh-authed proxy)."""
         _require_any_auth(request)
+        if _resolve_agent_id("", request) != "operator":
+            raise HTTPException(403, "Only the operator can manage projects")
         from src.cli.config import _create_project, _load_config, _load_projects
         import os as _os
 
@@ -1957,6 +1961,8 @@ def create_mesh_app(
     async def mesh_add_project_member(name: str, request: Request) -> dict:
         """Add an agent to a project (mesh-authed proxy)."""
         _require_any_auth(request)
+        if _resolve_agent_id("", request) != "operator":
+            raise HTTPException(403, "Only the operator can manage projects")
         from src.cli.config import _add_agent_to_project
         body = await request.json()
         agent = body.get("agent", "").strip()
@@ -1972,6 +1978,8 @@ def create_mesh_app(
     async def mesh_remove_project_member(name: str, agent: str, request: Request) -> dict:
         """Remove an agent from a project (mesh-authed proxy)."""
         _require_any_auth(request)
+        if _resolve_agent_id("", request) != "operator":
+            raise HTTPException(403, "Only the operator can manage projects")
         from src.cli.config import _remove_agent_from_project
         try:
             _remove_agent_from_project(name, agent)
@@ -1983,6 +1991,8 @@ def create_mesh_app(
     async def mesh_delete_project(name: str, request: Request) -> dict:
         """Delete a project (mesh-authed proxy)."""
         _require_any_auth(request)
+        if _resolve_agent_id("", request) != "operator":
+            raise HTTPException(403, "Only the operator can manage projects")
         from src.cli.config import _delete_project
         try:
             _delete_project(name)
@@ -1994,6 +2004,8 @@ def create_mesh_app(
     async def mesh_update_project_context(name: str, request: Request) -> dict:
         """Update a project's description/context (mesh-authed proxy)."""
         _require_any_auth(request)
+        if _resolve_agent_id("", request) != "operator":
+            raise HTTPException(403, "Only the operator can manage projects")
         from src.cli.config import _load_projects, _delete_project, _create_project
         body = await request.json()
         context = sanitize_for_prompt(body.get("context", "")).strip()
@@ -2157,6 +2169,8 @@ def create_mesh_app(
         ``confirm_edit`` tool.
         """
         _require_any_auth(request)
+        if _resolve_agent_id("", request) != "operator":
+            raise HTTPException(403, "Only the operator can confirm config changes")
         data = await request.json()
         change_id = data.get("change_id", "")
 
