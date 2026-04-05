@@ -12,11 +12,6 @@ def _is_operator() -> bool:
     return os.environ.get("ALLOWED_TOOLS", "") != ""
 
 
-def _is_operator() -> bool:
-    """Defence-in-depth: only the operator agent has ALLOWED_TOOLS set."""
-    return os.environ.get("ALLOWED_TOOLS", "") != ""
-
-
 @skill(
     name="list_templates",
     description=(
@@ -67,7 +62,7 @@ async def apply_template(
     # Provenance check -- require user confirmation
     from src.agent.loop import _last_message_is_user_origin
 
-    if _messages is not None and not _last_message_is_user_origin(_messages):
+    if _messages is None or not _last_message_is_user_origin(_messages):
         return {
             "error": "provenance_check_failed",
             "detail": "User confirmation required to create agents.",

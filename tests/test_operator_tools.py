@@ -248,14 +248,14 @@ async def test_confirm_edit_no_mesh_client():
 
 
 @pytest.mark.asyncio
-async def test_confirm_edit_no_messages_passes():
-    """When _messages is None (not injected), provenance check is skipped."""
+async def test_confirm_edit_no_messages_fails_closed():
+    """When _messages is None, provenance fails closed (security: no bypass via cron/invoke)."""
     from src.agent.builtins.operator_tools import confirm_edit
 
     mc = MagicMock()
     mc.confirm_config_change = AsyncMock(return_value={"success": True})
     result = await confirm_edit("abc", mesh_client=mc, _messages=None)
-    assert result["success"] is True
+    assert result["error"] == "provenance_check_failed"
 
 
 @pytest.mark.asyncio
@@ -541,8 +541,8 @@ async def test_create_agent_conflict():
 
 
 @pytest.mark.asyncio
-async def test_create_agent_no_messages_passes():
-    """When _messages is None, provenance check is skipped."""
+async def test_create_agent_no_messages_fails_closed():
+    """When _messages is None, provenance fails closed (security: no bypass via cron/invoke)."""
     from src.agent.builtins.operator_tools import create_agent
 
     mc = MagicMock()
@@ -553,7 +553,7 @@ async def test_create_agent_no_messages_passes():
         "mybot", "helper", "do things",
         mesh_client=mc, _messages=None,
     )
-    assert result["created"] is True
+    assert result["error"] == "provenance_check_failed"
 
 
 # ── list_projects tests ─────────────────────────────────────
