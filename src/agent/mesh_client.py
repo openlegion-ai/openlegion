@@ -538,6 +538,180 @@ class MeshClient:
 
     # === Browser (shared browser service via mesh proxy) ===
 
+    # === Operator agent config management ===
+
+    async def propose_config_change(self, agent_id: str, field: str, value) -> dict:
+        """Propose a config change for an agent. Returns preview + change_id."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/propose",
+            json={"field": field, "value": value, "proposed_by": self.agent_id},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def confirm_config_change(self, agent_id: str, change_id: str) -> dict:
+        """Confirm and apply a previously proposed config change."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/config",
+            json={"change_id": change_id, "confirmed_by": self.agent_id},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_agent_config(self, agent_id: str) -> dict:
+        """Get the current config for an agent."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/config",
+            params={"requesting_agent": self.agent_id},
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def create_custom_agent(
+        self,
+        name: str,
+        role: str,
+        model: str = "",
+        instructions: str = "",
+        soul: str = "",
+    ) -> dict:
+        """Create a new custom agent via the dashboard API.
+
+        The dashboard API is mounted on the same host as the mesh server,
+        so we can call /api/agents directly.
+        """
+        client = await self._get_client()
+        body: dict = {"name": name, "role": role}
+        if model:
+            body["model"] = model
+        if instructions:
+            body["instructions"] = instructions
+        if soul:
+            body["soul"] = soul
+        response = await client.post(
+            f"{self.mesh_url}/api/agents",
+            json=body,
+            headers={
+                **self._trace_headers(),
+                "X-Requested-With": "MeshClient",
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    # === Project management (dashboard API) ===
+
+    async def list_projects(self) -> dict:
+        """List all projects."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/api/projects",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def create_project(
+        self, name: str, description: str, members: list[str] | None = None,
+    ) -> dict:
+        """Create a new project."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/api/projects",
+            json={
+                "name": name,
+                "description": description,
+                "members": members or [],
+            },
+            headers={
+                **self._trace_headers(),
+                "X-Requested-With": "MeshClient",
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def add_agent_to_project(self, project_name: str, agent_id: str) -> dict:
+        """Add an agent to a project."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/api/projects/{project_name}/members",
+            json={"agent": agent_id},
+            headers={
+                **self._trace_headers(),
+                "X-Requested-With": "MeshClient",
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def remove_agent_from_project(
+        self, project_name: str, agent_id: str,
+    ) -> dict:
+        """Remove an agent from a project."""
+        client = await self._get_client()
+        response = await client.delete(
+            f"{self.mesh_url}/api/projects/{project_name}/members/{agent_id}",
+            headers={
+                **self._trace_headers(),
+                "X-Requested-With": "MeshClient",
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def update_project_context(
+        self, project_name: str, context: str,
+    ) -> dict:
+        """Update a project's description/context.
+
+        Uses a DELETE + re-create pattern since there's no PATCH endpoint.
+        We first fetch the current project data, delete it, and recreate
+        with the new description while preserving members.
+        """
+        # Get current project data
+        projects_resp = await self._get_with_retry(
+            f"{self.mesh_url}/api/projects",
+        )
+        projects_resp.raise_for_status()
+        projects = projects_resp.json().get("projects", [])
+        current = None
+        for p in projects:
+            if p.get("name") == project_name:
+                current = p
+                break
+        if current is None:
+            raise RuntimeError(f"Project '{project_name}' not found")
+
+        # Delete and recreate with new description
+        client = await self._get_client()
+        del_resp = await client.delete(
+            f"{self.mesh_url}/api/projects/{project_name}",
+            headers={
+                **self._trace_headers(),
+                "X-Requested-With": "MeshClient",
+            },
+        )
+        del_resp.raise_for_status()
+
+        create_resp = await client.post(
+            f"{self.mesh_url}/api/projects",
+            json={
+                "name": project_name,
+                "description": context,
+                "members": current.get("members", []),
+            },
+            headers={
+                **self._trace_headers(),
+                "X-Requested-With": "MeshClient",
+            },
+        )
+        create_resp.raise_for_status()
+        return {"updated": True, "project": project_name}
+
     async def browser_command(self, action: str, params: dict | None = None) -> dict:
         """Send a browser command through the mesh to the shared browser service."""
         client = await self._get_client()

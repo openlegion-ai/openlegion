@@ -32,6 +32,20 @@ if TYPE_CHECKING:
 
 logger = setup_logging("agent.loop")
 
+
+def _last_message_is_user_origin(messages: list[dict]) -> bool:
+    """Check if the most recent user message has genuine user origin.
+
+    Returns True when the last message with role='user' was sent by
+    a real user (``_origin`` is ``"user"`` or absent — legacy compat).
+    Returns False for system-injected messages (heartbeats, steers, etc.).
+    """
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            origin = msg.get("_origin", "user")
+            return origin == "user"
+    return False
+
 # Status codes that indicate transient server-side errors worth retrying
 _RETRYABLE_STATUS_CODES = {429, 502, 503}
 _MAX_RETRIES = 3
@@ -1640,6 +1654,7 @@ class AgentLoop:
                     mesh_client=self.mesh_client,
                     workspace_manager=self.workspace,
                     memory_store=self.memory,
+                    _messages=self._chat_messages,
                 ),
                 timeout=_TOOL_TIMEOUT,
             )
