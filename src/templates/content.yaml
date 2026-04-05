@@ -4,8 +4,31 @@ agents:
   researcher:
     role: Content researcher — finds data, sources, and trends
     model: "{default_model}"
+
+    initial_interface: |
+      # Interface: researcher
+
+      ## Role
+      Content researcher that gathers data, sources, and trending angles for the writer.
+
+      ## Accepts
+      - Hand-offs with: topic requests specifying target audience and content format
+
+      ## Produces
+      - Researched briefs with sources, handed off to the writer as structured JSON
+
+      ## Workflow Position
+      User → **researcher** → writer → editor
+
+      ## Key Tools
+      - web_search, browser for source discovery
+      - hand_off to send briefs to the writer
+      - notify_user to confirm research completion
+
     instructions: |
       You are a content researcher. You gather information for the writer.
+
+      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() for content briefs and requests
@@ -23,8 +46,8 @@ agents:
       searches fall short, you try different angles. You organize findings
       clearly so the writer can work efficiently.
     permissions:
-      blackboard_read: ["sources/*", "drafts/*", "requests/*"]
-      blackboard_write: ["sources/*"]
+      blackboard_read: ["sources/*", "drafts/*", "requests/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["sources/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["research_complete"]
       can_subscribe: ["content_requested"]
     resources:
@@ -37,8 +60,31 @@ agents:
   writer:
     role: Content writer — creates articles, posts, and documentation
     model: "{default_model}"
+
+    initial_interface: |
+      # Interface: writer
+
+      ## Role
+      Content writer that turns research briefs into polished articles, posts, and documentation.
+
+      ## Accepts
+      - Hand-offs from researcher with: completed research briefs containing sources, audience, and angles
+
+      ## Produces
+      - Polished content drafts saved as artifacts, handed off to the editor for review
+
+      ## Workflow Position
+      researcher → **writer** → editor
+
+      ## Key Tools
+      - save_artifact to persist drafts
+      - hand_off to send drafts to the editor
+      - notify_user to report draft completion
+
     instructions: |
       You are a content writer. You turn research briefs into polished content.
+
+      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() to get research briefs
@@ -64,8 +110,8 @@ agents:
       You use concrete examples and avoid filler. Your writing is clear,
       scannable, and backed by the research brief.
     permissions:
-      blackboard_read: ["sources/*", "drafts/*", "feedback/*"]
-      blackboard_write: ["drafts/*"]
+      blackboard_read: ["sources/*", "drafts/*", "feedback/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["drafts/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["draft_ready"]
       can_subscribe: ["research_complete", "revision_requested"]
     resources:
@@ -78,8 +124,30 @@ agents:
   editor:
     role: Editor — reviews content for clarity, accuracy, and engagement
     model: "{default_model}"
+
+    initial_interface: |
+      # Interface: editor
+
+      ## Role
+      Editor that reviews drafts for clarity, accuracy, factual correctness, and engagement.
+
+      ## Accepts
+      - Hand-offs from writer with: completed drafts and their associated research briefs
+
+      ## Produces
+      - Approved content or revision feedback handed back to the writer
+
+      ## Workflow Position
+      researcher → writer → **editor** → writer (revision loop) or User (approved)
+
+      ## Key Tools
+      - hand_off to send revision feedback back to the writer
+      - notify_user to deliver approved content summaries
+
     instructions: |
       You are an editor. You review drafts for quality.
+
+      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() for draft review requests
@@ -104,8 +172,8 @@ agents:
       rewrites, not vague critiques. You catch factual errors, weak arguments,
       and unclear phrasing. You approve strong work quickly.
     permissions:
-      blackboard_read: ["sources/*", "drafts/*", "feedback/*"]
-      blackboard_write: ["feedback/*"]
+      blackboard_read: ["sources/*", "drafts/*", "feedback/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["feedback/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["edit_complete", "revision_requested"]
       can_subscribe: ["draft_ready"]
     resources:

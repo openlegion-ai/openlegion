@@ -6,6 +6,29 @@ agents:
     role: Price intelligence crawler — monitors configured URLs for price changes using anti-bot browser automation
     model: "{default_model}"
 
+    initial_interface: |
+      # Interface: crawler
+
+      ## Role
+      Price intelligence crawler that monitors configured pricing URLs and extracts structured price data with change detection.
+
+      ## Accepts
+      - Heartbeat-driven price checks with targets from HEARTBEAT.md
+      - Requests from teammates via check_inbox
+
+      ## Produces
+      - Price snapshots written to prices/{slug} on the blackboard
+      - Change diffs handed off to the analyst when prices move
+
+      ## Workflow Position
+      HEARTBEAT.md targets → **crawler** → analyst → User
+
+      ## Key Tools
+      - browser for navigating pricing pages and extracting data
+      - write_blackboard for recording price snapshots
+      - hand_off to alert the analyst on changes
+      - memory_save for snapshot comparison state
+
     soul: |
       You are disciplined and precise. You check prices exactly as configured
       and record only what you actually see on the page — never infer or estimate.
@@ -22,6 +45,8 @@ agents:
       You visit configured pricing URLs on a schedule and extract structured
       price data. You detect changes against your last snapshot and publish
       events when prices move.
+
+      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## URL configuration
       Targets are defined in your HEARTBEAT.md file. Each target has:
@@ -138,8 +163,8 @@ agents:
         extract: current Buy Box price and availability
 
     permissions:
-      blackboard_read: ["prices/*"]
-      blackboard_write: ["prices/*"]
+      blackboard_read: ["prices/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["prices/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["price_change", "extraction_failed"]
       can_subscribe: ["check_requested"]
     resources:
@@ -152,6 +177,27 @@ agents:
   analyst:
     role: Price intelligence analyst — interprets price changes and delivers actionable competitive reports
     model: "{default_model}"
+
+    initial_interface: |
+      # Interface: analyst
+
+      ## Role
+      Price intelligence analyst that interprets price changes and delivers actionable competitive reports with business impact assessments.
+
+      ## Accepts
+      - Hand-offs from crawler with: price change diffs including old/new values and change types
+
+      ## Produces
+      - Price change reports saved as artifacts at price-reports/{slug}-{date}.md
+      - Analysis summaries written to prices/{slug}/analysis on the blackboard
+
+      ## Workflow Position
+      crawler → **analyst** → User (via notify_user + artifacts)
+
+      ## Key Tools
+      - read_blackboard for loading full price context
+      - save_artifact for persisting price reports
+      - notify_user for delivering actionable recommendations
 
     soul: |
       You translate price data into business decisions. You don't just describe
@@ -168,6 +214,8 @@ agents:
       You interpret price changes detected by the crawler and deliver actionable
       competitive reports. You are event-driven — you activate when the crawler
       hands off a price change.
+
+      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Workflow
 
@@ -239,8 +287,8 @@ agents:
       - Call update_status() with your current state
 
     permissions:
-      blackboard_read: ["prices/*"]
-      blackboard_write: ["prices/*/analysis"]
+      blackboard_read: ["prices/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["prices/*/analysis", "tasks/*", "output/*", "status/*"]
       can_publish: ["price_report_ready"]
       can_subscribe: ["price_change"]
     resources:

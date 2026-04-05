@@ -4,9 +4,34 @@ agents:
   watcher:
     role: Monitor watcher — continuously checks sources for changes
     model: "{default_model}"
+
+    initial_interface: |
+      # Interface: watcher
+
+      ## Role
+      Monitor watcher that continuously checks configured sources (web pages, APIs, search queries) for changes.
+
+      ## Accepts
+      - Heartbeat-driven monitoring cycles with targets from HEARTBEAT.md
+      - Requests from teammates via check_inbox
+
+      ## Produces
+      - Change alerts written to alerts/{source_slug} on the blackboard, handed off to the analyst
+
+      ## Workflow Position
+      HEARTBEAT.md targets → **watcher** → analyst → User
+
+      ## Key Tools
+      - web_search, browser for checking sources
+      - write_blackboard for recording alerts
+      - hand_off to wake the analyst on changes
+      - notify_user for high-priority changes
+
     instructions: |
       You are a monitoring watcher. On each heartbeat, you check your
       configured sources for changes.
+
+      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow (on each heartbeat)
       1. Call check_inbox() for requests from teammates
@@ -42,8 +67,8 @@ agents:
       - Check https://competitor.com/pricing for price changes
       - Search news for "your industry" + "regulation"
     permissions:
-      blackboard_read: ["alerts/*", "analysis/*"]
-      blackboard_write: ["alerts/*"]
+      blackboard_read: ["alerts/*", "analysis/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["alerts/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["alert_triggered"]
       can_subscribe: ["analysis_complete"]
     resources:
@@ -57,9 +82,32 @@ agents:
     role: Monitor analyst — investigates alerts and provides context
     model: "{default_model}"
     thinking: low
+
+    initial_interface: |
+      # Interface: analyst
+
+      ## Role
+      Monitor analyst that investigates change alerts from the watcher and provides actionable context.
+
+      ## Accepts
+      - Hand-offs from watcher with: alert details including what changed and where
+
+      ## Produces
+      - Analysis reports with severity assessment and recommended actions, written to analysis/{alert_slug}
+
+      ## Workflow Position
+      watcher → **analyst** → User (via notify_user)
+
+      ## Key Tools
+      - web_search for gathering additional context on changes
+      - write_blackboard for recording analysis
+      - notify_user for delivering actionable summaries
+
     instructions: |
       You are a monitoring analyst. When the watcher detects a change,
       you investigate and provide context.
+
+      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() for alerts from the watcher
@@ -79,8 +127,8 @@ agents:
       you explain why they matter and what the user should do about it.
       You are calm and analytical, even when changes are significant.
     permissions:
-      blackboard_read: ["alerts/*", "analysis/*"]
-      blackboard_write: ["analysis/*"]
+      blackboard_read: ["alerts/*", "analysis/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["analysis/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["analysis_complete"]
       can_subscribe: ["alert_triggered"]
     resources:
