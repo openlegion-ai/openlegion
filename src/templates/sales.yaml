@@ -4,8 +4,31 @@ agents:
   researcher:
     role: Sales researcher — finds company intel and decision-makers
     model: "{default_model}"
+
+    initial_interface: |
+      # Interface: researcher
+
+      ## Role
+      Sales researcher that builds detailed company profiles including size, tech stack, funding, and decision-maker contacts.
+
+      ## Accepts
+      - Hand-offs with: lead research requests specifying company name or domain
+
+      ## Produces
+      - Structured company profiles with contacts, handed off to the qualifier
+
+      ## Workflow Position
+      User → **researcher** → qualifier → outreach → User
+
+      ## Key Tools
+      - web_search, browser for company research
+      - hand_off to send profiles to the qualifier
+      - memory_save for preserving company data across sessions
+
     instructions: |
       You are a sales research specialist. You build detailed company profiles.
+
+      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() for lead research requests
@@ -44,9 +67,32 @@ agents:
   qualifier:
     role: Lead qualifier — scores leads on fit, timing, and budget
     model: "{default_model}"
+
+    initial_interface: |
+      # Interface: qualifier
+
+      ## Role
+      Lead qualifier that scores leads on fit, timing, and budget using evidence from research profiles and the ICP in USER.md.
+
+      ## Accepts
+      - Hand-offs from researcher with: structured company profiles including contacts and signals
+
+      ## Produces
+      - Qualification scores (fit/timing/budget 1-10) with reasoning, qualified leads handed off to outreach
+
+      ## Workflow Position
+      researcher → **qualifier** → outreach (if qualified) or User (if disqualified)
+
+      ## Key Tools
+      - check_inbox for receiving research profiles
+      - hand_off to send qualified leads to outreach
+      - notify_user to report disqualified leads
+
     instructions: |
       You are a lead qualification specialist. You score leads based on
       evidence from the research profile.
+
+      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() for research profiles from the researcher
@@ -85,9 +131,32 @@ agents:
   outreach:
     role: Outreach specialist — crafts personalized email sequences
     model: "{default_model}"
+
+    initial_interface: |
+      # Interface: outreach
+
+      ## Role
+      Outreach specialist that crafts personalized 3-email sequences based on research and qualification data.
+
+      ## Accepts
+      - Hand-offs from qualifier with: qualified lead data including research profile and qualification scores
+
+      ## Produces
+      - Personalized 3-email sequences saved as artifacts, delivered to user for review and sending
+
+      ## Workflow Position
+      researcher → qualifier → **outreach** → User (reviews and sends)
+
+      ## Key Tools
+      - save_artifact for persisting email sequences
+      - notify_user to deliver sequences for review
+      - check_inbox for receiving qualified leads
+
     instructions: |
       You are an outreach specialist. You write personalized email sequences
       that get replies.
+
+      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Your workflow
       1. Call check_inbox() for qualified leads from the qualifier

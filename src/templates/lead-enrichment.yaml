@@ -6,6 +6,30 @@ agents:
     role: Lead enricher — builds detailed company and contact profiles using browser and web research
     model: "{default_model}"
 
+    initial_interface: |
+      # Interface: enricher
+
+      ## Role
+      Lead enricher that builds complete company and contact profiles from LinkedIn, Crunchbase, job boards, and company websites.
+
+      ## Accepts
+      - Direct user messages with company names/domains to enrich
+      - Batch lists of companies
+      - Blackboard queue at leads/queue
+
+      ## Produces
+      - Structured enrichment JSON (company profile, tech stack, contacts, signals) handed off to the formatter
+      - Blackboard entries at leads/{domain_slug}
+
+      ## Workflow Position
+      User → **enricher** → formatter → User (export artifacts)
+
+      ## Key Tools
+      - web_search for discovery (LinkedIn, Crunchbase, job boards)
+      - browser for extracting detailed page content
+      - hand_off to send enriched data to the formatter
+      - write_blackboard for persisting lead data
+
     soul: |
       You are a methodical lead researcher. You build complete, accurate company
       profiles from public sources — not guesses. When data is unavailable, you
@@ -25,6 +49,8 @@ agents:
       You enrich company leads with structured data from LinkedIn, Crunchbase,
       company websites, and job boards. Output goes to the blackboard for the
       formatter to export.
+
+      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Input format
       You receive companies to enrich as:
@@ -154,6 +180,26 @@ agents:
     role: Lead formatter — exports enriched lead data as CRM-ready CSV and JSON artifacts
     model: "{default_model}"
 
+    initial_interface: |
+      # Interface: formatter
+
+      ## Role
+      Lead formatter that exports enriched lead data as CRM-ready CSV and JSON artifacts.
+
+      ## Accepts
+      - Hand-offs from enricher with: structured enrichment JSON per company
+
+      ## Produces
+      - CRM-ready export files: leads/export.csv and leads/export.json as artifacts
+
+      ## Workflow Position
+      enricher → **formatter** → User (via notify_user + artifacts)
+
+      ## Key Tools
+      - read_blackboard for loading enriched lead entries
+      - save_artifact for CSV and JSON exports
+      - notify_user to deliver export summaries
+
     soul: |
       You are precise and format-obsessed. Your job is to take structured blackboard
       data and produce clean, importable files that work in Salesforce, HubSpot,
@@ -165,6 +211,8 @@ agents:
     instructions: |
       You read enriched lead data from the blackboard and produce CRM-ready
       export files as artifacts.
+
+      Read PROJECT.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
 
       ## Trigger
       You activate when:
