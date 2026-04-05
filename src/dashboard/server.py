@@ -597,6 +597,8 @@ def create_dashboard_router(
     @api_router.delete("/api/agents/{agent_id}")
     async def api_remove_agent(agent_id: str) -> dict:
         """Remove an agent: stop container, unregister, remove config."""
+        if agent_id == "operator":
+            raise HTTPException(status_code=403, detail="The operator is a system agent and cannot be deleted")
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
 
