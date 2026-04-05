@@ -336,7 +336,7 @@ class RuntimeContext:
                 pass
 
         for agent_id, agent_cfg in agents_cfg.items():
-            if agent_id in RESERVED_AGENT_IDS:
+            if agent_id in RESERVED_AGENT_IDS and agent_id != _OPERATOR_AGENT_ID:
                 raise click.ClickException(
                     f"Agent ID '{agent_id}' is reserved for internal use"
                 )
