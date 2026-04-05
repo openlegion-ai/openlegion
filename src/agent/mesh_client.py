@@ -554,3 +554,21 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    # ── Operator metrics ─────────────────────────────────────────
+
+    async def get_system_metrics(self) -> dict:
+        """Get fleet-wide pre-computed metrics from the mesh."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/system/metrics",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def get_agent_metrics(self, agent_id: str) -> dict:
+        """Get per-agent pre-computed metrics from the mesh."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/metrics",
+        )
+        response.raise_for_status()
+        return response.json()
+

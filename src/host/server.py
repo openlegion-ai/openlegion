@@ -1456,6 +1456,144 @@ def create_mesh_app(
             result["budget"] = cost_tracker.check_budget(agent_id)
         return result
 
+    # === Pre-computed Metrics (for operator heartbeat) ===
+
+    @app.get("/mesh/system/metrics")
+    async def system_metrics(request: Request) -> dict:
+        """Fleet-wide aggregate metrics for operator heartbeat.
+
+        Pre-computes ratios and flags so the operator LLM doesn't need
+        to do arithmetic.  Read-only — no mutations.
+        """
+        _require_any_auth(request)
+
+        # -- Agent counts --
+        agents = dict(router.agent_registry)
+        total = len(agents)
+
+        # -- Health breakdown --
+        health_list = health_monitor.get_status() if health_monitor else []
+        health_by_agent = {s["agent"]: s for s in health_list}
+        healthy = sum(1 for s in health_list if s.get("status") == "healthy")
+        failed = sum(1 for s in health_list if s.get("status") == "failed")
+
+        # -- Busy count from lane manager --
+        lane_status = lane_manager.get_status() if lane_manager else {}
+        busy = sum(1 for ls in lane_status.values() if ls.get("busy", False))
+
+        # -- Cost data --
+        cost_today = 0.0
+        cost_yesterday = 0.0
+        if cost_tracker:
+            today_spend = cost_tracker.get_spend(None, "today")
+            cost_today = today_spend.get("total_cost", 0.0)
+            # "yesterday" returns spend since yesterday midnight (includes today).
+            # Subtract today's spend to get yesterday-only spend.
+            since_yesterday = cost_tracker.get_spend(None, "yesterday")
+            cost_yesterday = max(since_yesterday.get("total_cost", 0.0) - cost_today, 0.0)
+
+        cost_ratio = round(cost_today / cost_yesterday, 2) if cost_yesterday > 0 else 0
+
+        # -- Per-agent failure rates (placeholder — needs task tracking) --
+        failure_rates: dict[str, float] = {}
+
+        # -- Agents needing attention --
+        agents_attention: list[dict] = []
+        for status_entry in health_list:
+            agent_status = status_entry.get("status", "unknown")
+            if agent_status in ("failed", "unhealthy"):
+                agents_attention.append({
+                    "agent_id": status_entry["agent"],
+                    "issue": agent_status,
+                    "failures": status_entry.get("failures", 0),
+                    "restarts": status_entry.get("restarts", 0),
+                })
+
+        # -- Plan limits from env vars --
+        import os
+        max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
+        max_projects = int(os.environ.get("OPENLEGION_MAX_PROJECTS", "0"))
+
+        return {
+            "total_agents": total,
+            "healthy": healthy,
+            "failed": failed,
+            "busy": busy,
+            "total_cost_today_usd": round(cost_today, 4),
+            "cost_vs_yesterday_ratio": cost_ratio,
+            "failure_rate_by_agent": failure_rates,
+            "agents_needing_attention": agents_attention,
+            "plan_limits": {
+                "max_agents": max_agents,
+                "current_agents": total,
+                "max_projects": max_projects,
+                "current_projects": 0,
+            },
+        }
+
+    @app.get("/mesh/agents/{agent_id}/metrics")
+    async def agent_metrics(agent_id: str, request: Request) -> dict:
+        """Per-agent pre-computed metrics for operator heartbeat.
+
+        Returns health, cost, and queue data for a single agent.
+        Read-only — no mutations.
+        """
+        _require_any_auth(request)
+        _validate_agent_id(agent_id)
+
+        if agent_id not in router.agent_registry:
+            raise HTTPException(404, f"Agent not found: {agent_id}")
+
+        # -- Health --
+        health_status = "unknown"
+        failures = 0
+        restarts = 0
+        if health_monitor:
+            statuses = health_monitor.get_status()
+            match = next((s for s in statuses if s["agent"] == agent_id), None)
+            if match:
+                health_status = match.get("status", "unknown")
+                failures = match.get("failures", 0)
+                restarts = match.get("restarts", 0)
+
+        # -- Cost --
+        cost_today = 0.0
+        cost_yesterday = 0.0
+        if cost_tracker:
+            today_spend = cost_tracker.get_spend(agent_id, "today")
+            cost_today = today_spend.get("total_cost", 0.0)
+            since_yesterday = cost_tracker.get_spend(agent_id, "yesterday")
+            cost_yesterday = max(since_yesterday.get("total_cost", 0.0) - cost_today, 0.0)
+
+        cost_ratio = round(cost_today / cost_yesterday, 2) if cost_yesterday > 0 else 0
+
+        # -- Queue / busy --
+        queued = 0
+        is_busy = False
+        if lane_manager:
+            ls = lane_manager.get_status().get(agent_id, {})
+            queued = ls.get("queued", 0)
+            is_busy = ls.get("busy", False)
+
+        # -- Budget --
+        budget = cost_tracker.check_budget(agent_id) if cost_tracker else {}
+
+        return {
+            "agent_id": agent_id,
+            "health_status": health_status,
+            "consecutive_failures": failures,
+            "restart_count": restarts,
+            "cost_today_usd": round(cost_today, 4),
+            "cost_vs_yesterday_ratio": cost_ratio,
+            "budget": budget,
+            "queued_tasks": queued,
+            "busy": is_busy,
+            "tasks_completed_24h": 0,
+            "tasks_failed_24h": 0,
+            "failure_rate": 0.0,
+            "avg_task_duration_s": 0,
+        }
+
     # === Browser Service Proxy ===
 
     import httpx as _httpx
