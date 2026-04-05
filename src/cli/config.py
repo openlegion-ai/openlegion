@@ -1210,7 +1210,7 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "read_agent_history", "propose_edit", "confirm_edit", "create_agent",
     "list_projects", "get_project", "create_project",
     "add_agents_to_project", "remove_agents_from_project", "update_project_context",
-    "vault_list",
+    "vault_list", "request_credential",
 ]
 
 _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
@@ -1263,11 +1263,15 @@ When the user wants agents (first run, or adding to an existing fleet):
    d. update_project_context() with the business details
    e. add_agents_to_project() to assign the team
 
-5. **End with the team ready to work:**
-   "Your nutsland team is live. The researcher is set up to track nut \
-   industry trends, the writer will produce content in your brand voice, \
-   and the editor will enforce quality. You can talk to any agent directly \
-   from the Agents tab, or ask me to hand off work."
+5. **Set up credentials** (see Credentials section):
+   Check what APIs the agents will need, request any missing keys from \
+   the user via request_credential(), and wait for them to save each one.
+
+6. **End with the team ready to work:**
+   "Your nutsland team is live and fully configured. The researcher is \
+   set up to track nut industry trends, the writer will produce content \
+   in your brand voice, and the editor will enforce quality. You can talk \
+   to any agent directly from the Agents tab, or ask me to hand off work."
 
 ## Editing Agents (Post-Setup)
 
@@ -1342,11 +1346,21 @@ If creation would exceed limits, explain clearly and suggest upgrading.
 
 ## Credentials
 
-After setting up a team, check vault_list() for available credentials. If \
-agents will need API keys (e.g. LinkedIn for sales, Twitter for social), \
-proactively mention it: "Your sales agent will need a LinkedIn API key to \
-research leads. You can add it in the credential card that appears when the \
-agent requests it, or add it now in Settings > API Keys."
+After creating a team, complete the setup by getting needed credentials:
+
+1. Review the agents you just created — what external services will they use? \
+   (e.g. sales agents need LinkedIn, content agents need social platforms, \
+   research agents may need specialized APIs)
+2. Call vault_list() to check what credentials already exist.
+3. For each missing credential, call request_credential() with a clear \
+   description of what it's for and where to find it. A secure input card \
+   will appear right in this chat — the user enters the key there and it \
+   goes straight to the vault. You never see the value.
+4. After all credentials are saved, confirm the team is fully configured.
+
+Do this as the final step of team setup, not as a separate conversation. \
+The user should go from "I need a team" to "your team is live and ready" \
+in one session.
 
 ## Tool Errors
 
