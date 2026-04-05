@@ -315,12 +315,18 @@
                       <div class="flex justify-end">
                         <div class="max-w-[80%] px-3 py-2 rounded-2xl rounded-br-md bg-indigo-600 text-white text-xs">
                           <div class="whitespace-pre-wrap break-words" x-text="msg.content"></div>
+                          <div x-show="formatRelativeTime(msg.ts)" class="text-[11px] mt-0.5 opacity-40 text-indigo-200"
+                            x-text="formatRelativeTime(msg.ts)"></div>
                         </div>
                       </div>
                     </template>
                     <!-- Agent/error/notification response -->
                     <template x-if="msg.role === 'agent' || msg.role === 'error' || msg.role === 'notification'">
                       <div class="flex justify-start gap-2.5">
+                        <!-- Operator avatar -->
+                        <div class="shrink-0 mt-1">
+                          <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
+                        </div>
                         <div class="max-w-[80%] min-w-0">
                           <div class="px-3 py-2 rounded-2xl rounded-bl-md text-xs"
                             :class="{
@@ -438,34 +444,9 @@
                 </div>
               </div>
 
-            <!-- Input area — identical to per-agent messenger input -->
+            <!-- Input area -->
             <div x-show="operatorReady" class="px-3 py-3 border-t border-gray-800/80 shrink-0"
-              @dragover.prevent="dragOver = true"
-              @dragleave.prevent="dragOver = false"
-              @drop.prevent="dragOver = false; if ($event.dataTransfer.files[0]) attachFile($event.dataTransfer.files[0])">
-              <!-- Pending file attachment -->
-              <template x-if="pendingFile">
-                <div class="chat-pending-file">
-                  <div class="flex items-center gap-1.5 min-w-0 flex-1 text-[11px] text-indigo-300">
-                    <template x-if="!pendingFileUploading">
-                      <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/></svg>
-                    </template>
-                    <span class="truncate" x-text="pendingFileUploading ? 'Uploading…' : pendingFile"></span>
-                    <button x-show="!pendingFileUploading" @click="pendingFile = null" class="ml-1 shrink-0 text-indigo-500 hover:text-indigo-300 transition-colors" aria-label="Remove attachment">
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-                    </button>
-                  </div>
-                </div>
-              </template>
-              <!-- Drag-over overlay -->
-              <template x-if="dragOver">
-                <div class="absolute inset-0 flex items-center justify-center rounded-lg bg-indigo-900/25 border-2 border-dashed border-indigo-500/60 pointer-events-none z-10 mx-1 my-1">
-                  <div class="flex items-center gap-1.5 text-indigo-300 text-xs font-medium select-none">
-                    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
-                    Drop to attach
-                  </div>
-                </div>
-              </template>
+              x-data="{ opMsg: '', opPendingFile: '', opSpeechActive: false, _opRecognition: null }">
               <!-- Steer mode indicator -->
               <div x-show="isAgentBusy('operator')" x-cloak class="flex items-center gap-2 mb-2 px-1">
                 <span class="steer-badge">
@@ -474,10 +455,18 @@
                 </span>
                 <span class="text-[11px] text-gray-600">Operator is working &mdash; your message will redirect it</span>
               </div>
+              <!-- Pending file indicator -->
+              <div x-show="opPendingFile" x-cloak class="flex items-center gap-1.5 mb-2 px-1 py-1 rounded-md bg-gray-800/50 border border-gray-700/50 text-[11px] text-indigo-300">
+                <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/></svg>
+                <span class="truncate flex-1" x-text="opPendingFile"></span>
+                <button @click="opPendingFile = ''" class="shrink-0 text-indigo-500 hover:text-indigo-300 transition-colors" aria-label="Remove">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+              </div>
               <!-- Input row -->
-              <div class="chat-input-wrap" x-data="{ opMsg: '', opDragOver: false, opSpeechActive: false, _opRecognition: null }">
+              <div class="chat-input-wrap">
                 <!-- Attach file button -->
-                <button @click="let fi = document.createElement('input'); fi.type = 'file'; fi.onchange = e => { if (e.target.files[0]) { let f = e.target.files[0]; let name = f.name; fetch(window.__config.apiBase + '/uploads/' + encodeURIComponent(name), { method: 'POST', body: f, headers: { 'Content-Type': f.type || 'application/octet-stream' } }).then(r => { if (r.ok) { sendChatTo('operator', (opMsg.trim() ? opMsg.trim() + '\n\n' : '') + '📎 File attached: ' + name + ' (available at /data/uploads/' + name + ')'); opMsg = ''; } }); } }; fi.click();"
+                <button @click="let fi = document.createElement('input'); fi.type = 'file'; fi.onchange = e => { if (e.target.files[0]) { let f = e.target.files[0]; opPendingFile = f.name; fetch(window.__config.apiBase + '/uploads/' + encodeURIComponent(f.name), { method: 'POST', body: f, headers: { 'Content-Type': f.type || 'application/octet-stream' } }).then(r => { if (!r.ok) opPendingFile = ''; }); } }; fi.click();"
                   title="Attach file" aria-label="Attach file"
                   class="chat-input-btn">
                   <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
@@ -498,12 +487,12 @@
                 </button>
                 <textarea x-model="opMsg" id="operator-chat-input" rows="1"
                   :disabled="chatLoadingAgents['operator'] === true"
-                  @keydown.enter="if (!$event.shiftKey && opMsg.trim()) { $event.preventDefault(); if (isAgentBusy('operator')) steerAgent('operator', opMsg.trim()); else sendChatTo('operator', opMsg.trim()); opMsg = ''; $el.style.height = 'auto'; }"
+                  @keydown.enter="if (!$event.shiftKey && (opMsg.trim() || opPendingFile)) { $event.preventDefault(); let msg = opMsg.trim(); if (opPendingFile) msg = (msg ? msg + '\n\n' : '') + '📎 ' + opPendingFile + ' (at /data/uploads/' + opPendingFile + ')'; if (isAgentBusy('operator')) steerAgent('operator', msg); else sendChatTo('operator', msg); opMsg = ''; opPendingFile = ''; $el.style.height = 'auto'; }"
                   @input="$el.style.height = 'auto'; $el.style.height = Math.min($el.scrollHeight, 120) + 'px'"
                   class="chat-slide-textarea"
                   :placeholder="opSpeechActive ? 'Listening…' : (isAgentBusy('operator') ? 'Steer operator…' : 'Message your operator...')"></textarea>
-                <button @click="if (opMsg.trim()) { if (isAgentBusy('operator')) steerAgent('operator', opMsg.trim()); else sendChatTo('operator', opMsg.trim()); opMsg = ''; }"
-                  :disabled="!opMsg.trim()"
+                <button @click="if (opMsg.trim() || opPendingFile) { let msg = opMsg.trim(); if (opPendingFile) msg = (msg ? msg + '\n\n' : '') + '📎 ' + opPendingFile + ' (at /data/uploads/' + opPendingFile + ')'; if (isAgentBusy('operator')) steerAgent('operator', msg); else sendChatTo('operator', msg); opMsg = ''; opPendingFile = ''; }"
+                  :disabled="!(opMsg.trim() || opPendingFile)"
                   class="chat-input-send"
                   :class="opMsg.trim() ? (isAgentBusy('operator') ? 'bg-amber-600 hover:bg-amber-500' : 'bg-indigo-600 hover:bg-indigo-500') : 'bg-gray-700 opacity-40'"
                   aria-label="Send">
@@ -4130,7 +4119,7 @@
         <!-- ═══ OPERATOR SUB-TAB ═══ -->
         <div x-show="systemTab === 'operator'" x-cloak class="space-y-4"
           x-data="{ opAgent: null, opModelEditing: false, opModelValue: '' }"
-          x-init="$watch('systemTab', v => { if (v === 'operator') { opAgent = agents.find(a => a.id === 'operator') || null; } })">
+          x-init="opAgent = agents.find(a => a.id === 'operator') || null; $watch('systemTab', v => { if (v === 'operator') { opAgent = agents.find(a => a.id === 'operator') || null; } }); $watch('agents', () => { if (systemTab === 'operator') opAgent = agents.find(a => a.id === 'operator') || null; })">
 
           <!-- Status card -->
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
@@ -4177,12 +4166,25 @@
               </div>
             </div>
 
-            <!-- Chat shortcut -->
-            <div class="pt-2 border-t border-gray-800/60">
+            <!-- Resources -->
+            <div class="flex items-center justify-between py-2 border-t border-gray-800/60">
+              <div>
+                <div class="text-xs text-gray-400">Resources</div>
+                <div class="text-sm text-gray-300 mt-0.5">128 MB · 0.05 CPU</div>
+              </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="flex items-center gap-2 pt-2 border-t border-gray-800/60">
               <button @click="switchTab('chat')"
                 class="text-xs px-3 py-1.5 rounded bg-indigo-600/10 border border-indigo-600/30 text-indigo-400 hover:bg-indigo-600/20 transition-colors flex items-center gap-1.5">
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                Chat with operator
+                Chat
+              </button>
+              <button @click="restartAgent('operator')"
+                class="text-xs px-3 py-1.5 rounded bg-gray-800 border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors flex items-center gap-1.5">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                Restart
               </button>
             </div>
           </div>
