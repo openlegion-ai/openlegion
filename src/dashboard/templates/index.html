@@ -413,26 +413,38 @@
                 <!-- First-run: no agents yet -->
                 <div x-show="!(chatHistories['operator'] || []).length && !chatLoadingAgents['operator'] && agents.filter(a => a.id !== 'operator').length === 0"
                   class="empty-state h-full justify-center">
-                  <div class="text-2xl mb-2">&#128640;</div>
-                  <div class="empty-state-title">Welcome to OpenLegion</div>
-                  <div class="empty-state-desc mb-4">
-                    I'm your operator &mdash; I'll help you build your agent workforce.
-                    <br>Tell me what you need help with:
+                  <div class="mb-6 text-center">
+                    <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-12 h-12 rounded-full mx-auto mb-3 opacity-80">
+                    <div class="empty-state-title">What are you building?</div>
+                    <div class="empty-state-desc">Tell me about your business and I'll set up the right team.</div>
                   </div>
-                  <!-- Dynamic quick-start buttons from templates -->
-                  <div x-data="{ templates: [] }" x-init="fetch(`${window.__config.apiBase}/fleet/templates`).then(r => r.ok ? r.json() : {templates:[]}).then(d => templates = (d.templates || []).slice(0, 4)).catch(() => {})"
-                    class="flex flex-wrap gap-2 justify-center max-w-md">
-                    <template x-for="tpl in templates" :key="tpl.name">
-                      <button @click="let msg = (maxAgents > 0 && maxAgents <= 1) ? ('I need a ' + (tpl.description || tpl.name).toLowerCase() + ' agent') : ('I need a ' + (tpl.description || tpl.name).toLowerCase() + ' team'); let el = document.getElementById('operator-chat-input'); if (el) { let scope = Alpine.$data(el.closest('[x-data]')); if (scope) scope.opMsg = msg; el.focus(); }"
-                        class="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:border-indigo-500/50 hover:bg-indigo-600/10 transition-colors">
-                        <span x-text="tpl.description || tpl.name"></span>
-                      </button>
-                    </template>
-                    <button @click="$nextTick(() => { let el = document.getElementById('operator-chat-input'); if (el) el.focus(); })"
-                      class="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:border-indigo-500/50 hover:bg-indigo-600/10 transition-colors">
-                      Something else...
+                  <!-- Curated intent-based options -->
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 max-w-lg w-full">
+                    <button @click="let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) s.opMsg = 'I need a content team — writing, editing, and research'; el.focus(); }"
+                      class="text-left px-4 py-3 rounded-xl bg-gray-800/60 border border-gray-700/60 hover:border-indigo-500/40 hover:bg-indigo-600/5 transition-all group">
+                      <div class="text-xs font-medium text-gray-200 group-hover:text-white">Content &amp; Marketing</div>
+                      <div class="text-[10px] text-gray-500 mt-0.5">Research, write, and edit content</div>
+                    </button>
+                    <button @click="let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) s.opMsg = 'I need a research team to gather intelligence and produce reports'; el.focus(); }"
+                      class="text-left px-4 py-3 rounded-xl bg-gray-800/60 border border-gray-700/60 hover:border-indigo-500/40 hover:bg-indigo-600/5 transition-all group">
+                      <div class="text-xs font-medium text-gray-200 group-hover:text-white">Research &amp; Analysis</div>
+                      <div class="text-[10px] text-gray-500 mt-0.5">Scout sources, analyze data, write reports</div>
+                    </button>
+                    <button @click="let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) s.opMsg = 'I need a sales team for prospecting and outreach'; el.focus(); }"
+                      class="text-left px-4 py-3 rounded-xl bg-gray-800/60 border border-gray-700/60 hover:border-indigo-500/40 hover:bg-indigo-600/5 transition-all group">
+                      <div class="text-xs font-medium text-gray-200 group-hover:text-white">Sales &amp; Outreach</div>
+                      <div class="text-[10px] text-gray-500 mt-0.5">Find leads, enrich profiles, send outreach</div>
+                    </button>
+                    <button @click="let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) s.opMsg = 'I need a development team — planning, coding, and code review'; el.focus(); }"
+                      class="text-left px-4 py-3 rounded-xl bg-gray-800/60 border border-gray-700/60 hover:border-indigo-500/40 hover:bg-indigo-600/5 transition-all group">
+                      <div class="text-xs font-medium text-gray-200 group-hover:text-white">Software Development</div>
+                      <div class="text-[10px] text-gray-500 mt-0.5">Plan features, write code, review PRs</div>
                     </button>
                   </div>
+                  <button @click="$nextTick(() => { let el = document.getElementById('operator-chat-input'); if (el) el.focus(); })"
+                    class="mt-3 text-xs text-gray-500 hover:text-gray-300 transition-colors">
+                    or describe what you need &darr;
+                  </button>
                 </div>
 
                 <!-- Regular empty state (has agents but no chat yet) -->
