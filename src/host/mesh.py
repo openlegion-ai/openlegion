@@ -85,6 +85,21 @@ class Blackboard:
                 pattern TEXT NOT NULL,
                 PRIMARY KEY (agent_id, pattern)
             );
+
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                action TEXT NOT NULL,
+                actor TEXT NOT NULL DEFAULT 'operator',
+                target TEXT NOT NULL,
+                field TEXT,
+                before_value TEXT,
+                after_value TEXT,
+                change_id TEXT,
+                provenance TEXT DEFAULT 'user'
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target);
         """)
         self.db.commit()
         self._load_watchers()
@@ -303,6 +318,57 @@ class Blackboard:
                 return
             self._last_ttl_gc = now
             self._gc_expired_unlocked()
+
+    # ── Audit Trail ──────────────────────────────────────────────
+
+    def log_audit(self, action: str, target: str, field: str = "",
+                  before_value: str = "", after_value: str = "",
+                  change_id: str = "", actor: str = "operator",
+                  provenance: str = "user") -> None:
+        """Log an operator action to the audit trail."""
+        with self._write_lock:
+            self.db.execute(
+                "INSERT INTO audit_log (action, actor, target, field, before_value, after_value, change_id, provenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (action, actor, target, field, before_value, after_value, change_id, provenance),
+            )
+            self.db.commit()
+
+    def get_audit_log(self, page: int = 1, per_page: int = 20,
+                      agent_id: str = "", action: str = "", since: str = "") -> dict:
+        """Query audit log with pagination and filters."""
+        where: list[str] = []
+        params: list = []
+        if agent_id:
+            where.append("target = ?")
+            params.append(agent_id)
+        if action:
+            where.append("action = ?")
+            params.append(action)
+        if since:
+            where.append("timestamp >= ?")
+            params.append(since)
+
+        where_sql = f" WHERE {' AND '.join(where)}" if where else ""
+
+        count = self.db.execute(
+            f"SELECT COUNT(*) FROM audit_log{where_sql}", params,
+        ).fetchone()[0]
+        offset = (page - 1) * per_page
+        rows = self.db.execute(
+            f"SELECT * FROM audit_log{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+            params + [per_page, offset],
+        ).fetchall()
+
+        entries = []
+        for row in rows:
+            entries.append({
+                "id": row[0], "timestamp": row[1], "action": row[2],
+                "actor": row[3], "target": row[4], "field": row[5],
+                "before_value": row[6], "after_value": row[7],
+                "change_id": row[8], "provenance": row[9],
+            })
+
+        return {"entries": entries, "total": count, "page": page, "per_page": per_page}
 
     def close(self) -> None:
         self.db.close()
