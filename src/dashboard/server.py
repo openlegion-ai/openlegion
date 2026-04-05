@@ -524,8 +524,8 @@ def create_dashboard_router(
             if template:
                 role = acfg.get("role", role)
             skills_dir = os.path.abspath(acfg.get("skills_dir", ""))
-            # Pass workspace seed values via extra_env so the agent
-            # container writes template content into SOUL.md etc.
+            # Build per-agent env overrides for workspace seed values
+            _agent_env: dict[str, str] = {}
             for env_key, cfg_key in (
                 ("INITIAL_INSTRUCTIONS", "initial_instructions"),
                 ("INITIAL_SOUL", "initial_soul"),
@@ -533,19 +533,15 @@ def create_dashboard_router(
             ):
                 val = acfg.get(cfg_key, "")
                 if val:
-                    runtime.extra_env[env_key] = val
-            try:
-                url = runtime.start_agent(
-                    agent_id=name,
-                    role=role,
-                    skills_dir=skills_dir,
-                    model=acfg.get("model", model),
-                    thinking=acfg.get("thinking", ""),
-                )
-            finally:
-                runtime.extra_env.pop("INITIAL_INSTRUCTIONS", None)
-                runtime.extra_env.pop("INITIAL_SOUL", None)
-                runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
+                    _agent_env[env_key] = val
+            url = runtime.start_agent(
+                agent_id=name,
+                role=role,
+                skills_dir=skills_dir,
+                model=acfg.get("model", model),
+                thinking=acfg.get("thinking", ""),
+                env_overrides=_agent_env,
+            )
             if router is not None:
                 router.register_agent(name, url, role=role)
             else:
@@ -908,20 +904,15 @@ def create_dashboard_router(
             _proxy_env = build_proxy_env_vars(
                 _proxy_url, cfg.get("network", {}).get("no_proxy", ""),
             )
-            runtime.extra_env.update(_proxy_env)
-            try:
-                url = runtime.start_agent(
-                    agent_id=agent_id,
-                    role=agent_cfg.get("role", "assistant"),
-                    skills_dir=skills_dir,
-                    model=agent_cfg.get("model", default_model),
-                    mcp_servers=agent_cfg.get("mcp_servers") or None,
-                    thinking=agent_cfg.get("thinking", ""),
-                )
-            finally:
-                runtime.extra_env.pop("HTTP_PROXY", None)
-                runtime.extra_env.pop("HTTPS_PROXY", None)
-                runtime.extra_env.pop("NO_PROXY", None)
+            url = runtime.start_agent(
+                agent_id=agent_id,
+                role=agent_cfg.get("role", "assistant"),
+                skills_dir=skills_dir,
+                model=agent_cfg.get("model", default_model),
+                mcp_servers=agent_cfg.get("mcp_servers") or None,
+                thinking=agent_cfg.get("thinking", ""),
+                env_overrides=_proxy_env,
+            )
             if router is not None:
                 router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
             else:
@@ -2930,23 +2921,18 @@ def create_dashboard_router(
                 _proxy_env = build_proxy_env_vars(
                     _proxy_url, _network_cfg.get("no_proxy", ""),
                 )
-                runtime.extra_env.update(_proxy_env)
-                try:
-                    url = await loop.run_in_executor(
-                        None,
-                        lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir: runtime.start_agent(
-                            agent_id=aid,
-                            role=acfg.get("role", "assistant"),
-                            skills_dir=sd,
-                            model=acfg.get("model", default_model),
-                            mcp_servers=acfg.get("mcp_servers") or None,
-                            thinking=acfg.get("thinking", ""),
-                        ),
-                    )
-                finally:
-                    runtime.extra_env.pop("HTTP_PROXY", None)
-                    runtime.extra_env.pop("HTTPS_PROXY", None)
-                    runtime.extra_env.pop("NO_PROXY", None)
+                url = await loop.run_in_executor(
+                    None,
+                    lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir, pe=_proxy_env: runtime.start_agent(
+                        agent_id=aid,
+                        role=acfg.get("role", "assistant"),
+                        skills_dir=sd,
+                        model=acfg.get("model", default_model),
+                        mcp_servers=acfg.get("mcp_servers") or None,
+                        thinking=acfg.get("thinking", ""),
+                        env_overrides=pe,
+                    ),
+                )
                 if router is not None:
                     router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
                 else:

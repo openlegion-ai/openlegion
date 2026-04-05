@@ -335,26 +335,26 @@ class RuntimeContext:
             agent_mcp_servers = agent_cfg.get("mcp_servers") or None
             agent_thinking = agent_cfg.get("thinking", "")
 
+            # Build per-agent env overrides (not shared state — safe for concurrency)
+            agent_env: dict[str, str] = {}
+
             # Seed workspace files from template on first boot
             initial_instructions = agent_cfg.get("initial_instructions", "")
             if initial_instructions:
-                self.runtime.extra_env["INITIAL_INSTRUCTIONS"] = initial_instructions
+                agent_env["INITIAL_INSTRUCTIONS"] = initial_instructions
             initial_soul = agent_cfg.get("initial_soul", "")
             if initial_soul:
-                self.runtime.extra_env["INITIAL_SOUL"] = initial_soul
+                agent_env["INITIAL_SOUL"] = initial_soul
             initial_heartbeat = agent_cfg.get("initial_heartbeat", "")
             if initial_heartbeat:
-                self.runtime.extra_env["INITIAL_HEARTBEAT"] = initial_heartbeat
+                agent_env["INITIAL_HEARTBEAT"] = initial_heartbeat
 
             # Set project-specific env vars for this agent
             project_name = agent_projects.get(agent_id)
             if project_name:
                 project_md = PROJECTS_DIR / project_name / "project.md"
-                self.runtime.extra_env["PROJECT_MD_PATH"] = str(project_md)
-                self.runtime.extra_env["PROJECT_NAME"] = project_name
-            else:
-                self.runtime.extra_env.pop("PROJECT_MD_PATH", None)
-                self.runtime.extra_env.pop("PROJECT_NAME", None)
+                agent_env["PROJECT_MD_PATH"] = str(project_md)
+                agent_env["PROJECT_NAME"] = project_name
 
             # Proxy env injection
             proxy_url = resolve_agent_proxy(
@@ -366,7 +366,7 @@ class RuntimeContext:
                 proxy_url,
                 no_proxy_user=self.cfg.get("network", {}).get("no_proxy", ""),
             )
-            self.runtime.extra_env.update(proxy_env)
+            agent_env.update(proxy_env)
 
             try:
                 url = self.runtime.start_agent(
@@ -376,6 +376,7 @@ class RuntimeContext:
                     model=agent_model,
                     mcp_servers=agent_mcp_servers,
                     thinking=agent_thinking,
+                    env_overrides=agent_env,
                 )
             except (subprocess.TimeoutExpired, RuntimeError) as exc:
                 if isinstance(self.runtime, SandboxBackend):
@@ -402,19 +403,10 @@ class RuntimeContext:
                         model=agent_model,
                         mcp_servers=agent_mcp_servers,
                         thinking=agent_thinking,
+                        env_overrides=agent_env,
                     )
                 else:
                     raise
-            finally:
-                # Clean up per-agent env vars so they don't leak to the next agent
-                self.runtime.extra_env.pop("INITIAL_INSTRUCTIONS", None)
-                self.runtime.extra_env.pop("INITIAL_SOUL", None)
-                self.runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
-                self.runtime.extra_env.pop("PROJECT_MD_PATH", None)
-                self.runtime.extra_env.pop("PROJECT_NAME", None)
-                self.runtime.extra_env.pop("HTTP_PROXY", None)
-                self.runtime.extra_env.pop("HTTPS_PROXY", None)
-                self.runtime.extra_env.pop("NO_PROXY", None)
             self.router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
             if isinstance(self.transport, HttpTransport):
                 self.transport.register(agent_id, url)

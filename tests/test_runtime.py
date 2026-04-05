@@ -758,3 +758,153 @@ class TestContainerHardening:
         assert run_call.kwargs.get("read_only") is True
         assert run_call.kwargs.get("security_opt") == ["no-new-privileges"]
 
+
+# ── env_overrides ──────────────────────────────────────────────
+
+
+class TestEnvOverrides:
+    """Tests for the env_overrides parameter on start_agent."""
+
+    def test_docker_env_overrides_applied(self):
+        """env_overrides are merged into container environment."""
+        import docker as _docker
+
+        backend = _make_docker_backend(extra_env={"EMBEDDING_MODEL": "text-embedding-3-small"})
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        backend.start_agent(
+            agent_id="test-agent",
+            role="test",
+            skills_dir="",
+            env_overrides={"INITIAL_INSTRUCTIONS": "Be helpful.", "PROJECT_NAME": "myproj"},
+        )
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert env["INITIAL_INSTRUCTIONS"] == "Be helpful."
+        assert env["PROJECT_NAME"] == "myproj"
+        assert env["EMBEDDING_MODEL"] == "text-embedding-3-small"
+
+    def test_docker_env_overrides_do_not_mutate_extra_env(self):
+        """Passing env_overrides must not modify the shared extra_env dict."""
+        import docker as _docker
+
+        backend = _make_docker_backend(extra_env={"EMBEDDING_MODEL": "text-embedding-3-small"})
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        original_extra_env = dict(backend.extra_env)
+
+        backend.start_agent(
+            agent_id="agent-a",
+            role="test",
+            skills_dir="",
+            env_overrides={"INITIAL_INSTRUCTIONS": "Agent A instructions", "INITIAL_SOUL": "A soul"},
+        )
+
+        # extra_env must be unchanged
+        assert backend.extra_env == original_extra_env
+        assert "INITIAL_INSTRUCTIONS" not in backend.extra_env
+        assert "INITIAL_SOUL" not in backend.extra_env
+
+    def test_docker_env_overrides_take_precedence(self):
+        """env_overrides win over extra_env for the same key."""
+        import docker as _docker
+
+        backend = _make_docker_backend(extra_env={"LLM_MODEL": "system-default"})
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        backend.start_agent(
+            agent_id="test-agent",
+            role="test",
+            skills_dir="",
+            env_overrides={"LLM_MODEL": "per-agent-model"},
+        )
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert env["LLM_MODEL"] == "per-agent-model"
+
+    def test_sandbox_env_overrides_in_env_file(self, tmp_path):
+        """SandboxBackend merges env_overrides into the .agent.env file."""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+
+        backend = SandboxBackend.__new__(SandboxBackend)
+        backend.project_root = project_root
+        backend.mesh_host_port = 8420
+        backend.agents = {}
+        backend.auth_tokens = {}
+        backend.extra_env = {"EMBEDDING_MODEL": "text-embedding-3-small"}
+        backend._workspace_root = tmp_path / ".openlegion" / "agents"
+        backend._workspace_root.mkdir(parents=True)
+
+        ws = backend._prepare_workspace(
+            agent_id="test-agent",
+            role="test",
+            skills_dir="",
+            system_prompt="",
+            model="openai/gpt-4o-mini",
+            env_overrides={"INITIAL_INSTRUCTIONS": "Override instruction", "PROJECT_NAME": "proj1"},
+        )
+
+        env_content = (ws / ".agent.env").read_text()
+        assert "INITIAL_INSTRUCTIONS=Override instruction" in env_content
+        assert "PROJECT_NAME=proj1" in env_content
+        assert "EMBEDDING_MODEL=text-embedding-3-small" in env_content
+
+        # extra_env must be unchanged
+        assert "INITIAL_INSTRUCTIONS" not in backend.extra_env
+        assert "PROJECT_NAME" not in backend.extra_env
+
+    def test_sandbox_env_overrides_do_not_mutate_extra_env(self, tmp_path):
+        """Passing env_overrides to _prepare_workspace must not modify extra_env."""
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+
+        backend = SandboxBackend.__new__(SandboxBackend)
+        backend.project_root = project_root
+        backend.mesh_host_port = 8420
+        backend.agents = {}
+        backend.auth_tokens = {}
+        backend.extra_env = {"EMBEDDING_MODEL": "text-embedding-3-small"}
+        backend._workspace_root = tmp_path / ".openlegion" / "agents"
+        backend._workspace_root.mkdir(parents=True)
+
+        original_extra_env = dict(backend.extra_env)
+
+        backend._prepare_workspace(
+            agent_id="agent-b",
+            role="test",
+            skills_dir="",
+            env_overrides={"INITIAL_SOUL": "B soul", "HTTP_PROXY": "http://proxy:8080"},
+        )
+
+        assert backend.extra_env == original_extra_env
+
+    def test_docker_none_env_overrides_is_safe(self):
+        """Passing None for env_overrides works fine (no crash)."""
+        import docker as _docker
+
+        backend = _make_docker_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        # Should not raise
+        backend.start_agent(
+            agent_id="test-agent",
+            role="test",
+            skills_dir="",
+            env_overrides=None,
+        )
+

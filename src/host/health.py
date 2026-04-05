@@ -224,23 +224,18 @@ class HealthMonitor:
             _proxy_env = build_proxy_env_vars(
                 _proxy_url, _network_cfg.get("no_proxy", ""),
             )
-            self.runtime.extra_env.update(_proxy_env)
-            try:
-                url = await loop.run_in_executor(
-                    None,
-                    lambda: self.runtime.start_agent(
-                        agent_id=agent_id,
-                        role=info.get("role", ""),
-                        skills_dir=info.get("skills_dir", ""),
-                        model=info.get("model", ""),
-                        mcp_servers=info.get("mcp_servers"),
-                        thinking=info.get("thinking", ""),
-                    ),
-                )
-            finally:
-                self.runtime.extra_env.pop("HTTP_PROXY", None)
-                self.runtime.extra_env.pop("HTTPS_PROXY", None)
-                self.runtime.extra_env.pop("NO_PROXY", None)
+            url = await loop.run_in_executor(
+                None,
+                lambda: self.runtime.start_agent(
+                    agent_id=agent_id,
+                    role=info.get("role", ""),
+                    skills_dir=info.get("skills_dir", ""),
+                    model=info.get("model", ""),
+                    mcp_servers=info.get("mcp_servers"),
+                    thinking=info.get("thinking", ""),
+                    env_overrides=_proxy_env,
+                ),
+            )
 
             self.router.register_agent(agent_id, url)
             health.consecutive_failures = 0
