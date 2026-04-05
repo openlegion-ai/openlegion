@@ -296,13 +296,16 @@ class DockerBackend(RuntimeBackend):
         # Slim agent containers (no browser). 384MB / 0.15 CPU.
         # Agents are mostly I/O-bound (waiting on LLM APIs).
         # Browser ops are handled by the shared browser service container.
+        # Operator gets reduced limits (128MB / 0.05 CPU) — it only does
+        # LLM chat and mesh API calls, no browser/shell/file processing.
+        is_operator = bool(env_overrides and env_overrides.get("ALLOWED_TOOLS"))
         run_kwargs: dict[str, Any] = {
             "detach": True,
             "name": f"openlegion_{safe_name}",
             "environment": environment,
             "volumes": volumes,
-            "mem_limit": "384m",
-            "cpu_quota": 15000,
+            "mem_limit": "128m" if is_operator else "384m",
+            "cpu_quota": 5000 if is_operator else 15000,
             "security_opt": ["no-new-privileges"],
             "cap_drop": ["ALL"],
             "read_only": True,
