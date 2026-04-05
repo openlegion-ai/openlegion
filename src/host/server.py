@@ -1863,9 +1863,9 @@ def create_mesh_app(
         healthy = sum(1 for s in health_list_user if s.get("status") == "healthy")
         failed = sum(1 for s in health_list_user if s.get("status") == "failed")
 
-        # -- Busy count from lane manager --
+        # -- Busy count from lane manager (exclude operator) --
         lane_status = lane_manager.get_status() if lane_manager else {}
-        busy = sum(1 for ls in lane_status.values() if ls.get("busy", False))
+        busy = sum(1 for aid, ls in lane_status.items() if ls.get("busy", False) and aid != "operator")
 
         # -- Cost data --
         cost_today = 0.0
@@ -2288,9 +2288,11 @@ def create_mesh_app(
         data = await request.json()
         change_id = data.get("change_id", "")
 
-        change = _consume_pending_change(change_id)
+        change = _get_pending_change(change_id)
         if not change:
             raise HTTPException(404, "Change not found or expired")
+        # Consume only after validation — if apply fails, the change survives for retry
+        _consume_pending_change(change_id)
 
         return await _apply_pending_change(change_id, change)
 
