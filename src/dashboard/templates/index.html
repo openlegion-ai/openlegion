@@ -185,6 +185,9 @@
               role="tab"
               :aria-selected="activeTab === tab.id"
             >
+              <template x-if="tab.id === 'chat'">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              </template>
               <template x-if="tab.id === 'fleet'">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
               </template>
@@ -235,7 +238,7 @@
     </nav>
 
     <!-- Main content -->
-    <main class="flex-1 overflow-auto p-2 sm:p-4 lg:p-6 transition-[margin] duration-200" :class="openChats.length > 0 && !chatPanelMinimized && (chatFullScreen ? 'hidden' : 'messenger-margin chat-side-open')">
+    <main class="flex-1 overflow-auto p-2 sm:p-4 lg:p-6 transition-[margin] duration-200" :class="activeTab !== 'chat' && openChats.length > 0 && !chatPanelMinimized && (chatFullScreen ? 'hidden' : 'messenger-margin chat-side-open')">
 
       <!-- Connection error banner -->
       <div x-show="connectionError" x-cloak class="mb-4 bg-red-900/30 border border-red-800 rounded-lg px-4 py-3 flex items-center gap-3">
@@ -244,6 +247,320 @@
           <div class="text-sm text-red-300 font-medium">Connection lost</div>
           <div class="text-xs text-red-400/70">Unable to reach the mesh host. Is the runtime running?</div>
         </div>
+      </div>
+
+      <!-- Operator Chat Tab -->
+      <div x-show="activeTab === 'chat'" x-cloak class="h-full flex flex-col" style="min-height: calc(100vh - 8rem);">
+        <div class="flex-1 flex min-h-0 chat-two-panel">
+          <!-- Chat main panel -->
+          <div class="chat-main-panel">
+            <div class="flex-1 flex flex-col max-w-4xl mx-auto w-full h-full">
+              <!-- Header -->
+              <div class="flex items-center justify-between px-4 py-3 shrink-0 border-b border-gray-800/60">
+                <div>
+                  <h2 class="text-sm font-semibold text-white">Chat</h2>
+                  <p class="text-[10px] text-gray-600 mt-0.5">Your operator helps you build and manage your agent workforce</p>
+                </div>
+              </div>
+
+              <!-- Operator not ready -->
+              <div x-show="!operatorReady" class="flex-1 flex items-center justify-center">
+                <div class="text-center">
+                  <svg class="animate-spin h-8 w-8 text-indigo-400 mx-auto mb-3" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                  </svg>
+                  <div class="text-sm text-gray-400">Your operator is starting up...</div>
+                  <div class="text-[10px] text-gray-600 mt-1">This usually takes about 15&ndash;30 seconds.</div>
+                </div>
+              </div>
+
+              <!-- Messages area — reuses existing chatHistories binding -->
+              <div x-show="operatorReady" id="chat-messages-operator" class="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3 space-y-3">
+                <!-- Render messages from chatHistories['operator'] -->
+                <template x-for="(msg, i) in (chatHistories['operator'] || [])" :key="i">
+                  <div>
+                    <!-- System event: compaction / session divider -->
+                    <template x-if="msg.role === 'system'">
+                      <div class="flex items-center gap-2 py-1 select-none">
+                        <div class="flex-1 border-t border-dashed border-gray-800"></div>
+                        <span class="text-[11px] text-gray-600 uppercase tracking-wider whitespace-nowrap flex items-center gap-1">
+                          <svg class="w-2.5 h-2.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                          <span x-text="msg.content"></span>
+                        </span>
+                        <div class="flex-1 border-t border-dashed border-gray-800"></div>
+                      </div>
+                    </template>
+                    <!-- User message -->
+                    <template x-if="msg.role === 'user'">
+                      <div class="flex justify-end">
+                        <div class="max-w-[80%] px-3 py-2 rounded-2xl rounded-br-md bg-indigo-600 text-white text-xs">
+                          <div class="whitespace-pre-wrap break-words" x-text="msg.content"></div>
+                        </div>
+                      </div>
+                    </template>
+                    <!-- Agent/error/notification response -->
+                    <template x-if="msg.role === 'agent' || msg.role === 'error' || msg.role === 'notification'">
+                      <div class="flex justify-start gap-2.5">
+                        <div class="max-w-[80%] min-w-0">
+                          <div class="px-3 py-2 rounded-2xl rounded-bl-md text-xs"
+                            :class="{
+                              'bg-gray-800 text-gray-200': msg.role === 'agent',
+                              'bg-red-900/40 text-red-300': msg.role === 'error',
+                              'bg-amber-900/40 text-amber-200 border border-amber-700/50': msg.role === 'notification',
+                            }">
+                            <!-- Tool calls -->
+                            <template x-if="msg.tools && msg.tools.length > 0">
+                              <div class="mb-1.5 space-y-0.5">
+                                <template x-for="(tool, ti) in msg.tools" :key="ti">
+                                  <div x-data="{ open: false }">
+                                    <div class="flex items-center gap-1 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 select-none transition-colors"
+                                      :class="chatToolHasDetail(tool) ? 'cursor-pointer hover:bg-gray-900/80' : ''"
+                                      @click="chatToolHasDetail(tool) && (open = !open)" :title="tool.name">
+                                      <template x-if="tool.status === 'running'">
+                                        <svg class="animate-spin h-2.5 w-2.5 text-indigo-400 shrink-0" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                                      </template>
+                                      <template x-if="tool.status === 'done'">
+                                        <span class="text-emerald-400 shrink-0">&#10003;</span>
+                                      </template>
+                                      <span class="font-mono truncate" x-text="tool.name"></span>
+                                      <svg x-show="chatToolHasDetail(tool)" class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600 transition-transform duration-200" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                                    </div>
+                                    <template x-if="open">
+                                      <div class="mt-0.5 rounded bg-gray-950/80 border border-gray-800/50 px-2 py-1.5 text-[10px] space-y-1.5">
+                                        <div x-show="tool.input || tool.inputPreview">
+                                          <div class="text-gray-600 uppercase tracking-wider text-[11px] mb-0.5">Input</div>
+                                          <pre class="text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar" x-text="chatToolDetailText(tool.input, tool.inputPreview)"></pre>
+                                        </div>
+                                        <div x-show="tool.status === 'done' && (tool.output || tool.outputPreview)">
+                                          <div class="text-gray-600 uppercase tracking-wider text-[11px] mb-0.5">Output</div>
+                                          <pre class="text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar" x-text="chatToolDetailText(tool.output, tool.outputPreview)"></pre>
+                                        </div>
+                                        <div x-show="tool.status === 'running'" class="text-gray-600 italic">Running&hellip;</div>
+                                      </div>
+                                    </template>
+                                  </div>
+                                </template>
+                              </div>
+                            </template>
+                            <!-- Inline thinking indicator -->
+                            <div x-show="msg.streaming && msg.phase === 'thinking' && !chatLoadingAgents['operator'] && (!msg.tools || msg.tools.length === 0 || msg.tools.every(t => t.status === 'done'))"
+                              class="flex items-center gap-1.5 text-[10px] text-purple-400/80 py-0.5 mb-1">
+                              <svg class="animate-spin h-2.5 w-2.5 shrink-0" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                              <span>Thinking&hellip;</span>
+                            </div>
+                            <!-- Notification label -->
+                            <template x-if="msg.role === 'notification'">
+                              <div class="text-[10px] font-semibold text-amber-400/70 uppercase tracking-wide mb-0.5">Notification</div>
+                            </template>
+                            <!-- Content -->
+                            <div class="chat-markdown break-words" x-html="renderMarkdown(msg.content)"></div>
+                            <span x-show="msg.streaming" class="inline-block w-1 h-3 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
+                            <div x-show="formatRelativeTime(msg.ts)"
+                              class="text-[11px] mt-0.5 opacity-40 text-gray-500"
+                              x-text="formatRelativeTime(msg.ts)"></div>
+                            <!-- Tool limit reached -->
+                            <template x-if="msg.tool_limit_reached">
+                              <div class="mt-2 flex items-center gap-1.5 border-t border-gray-700/50 pt-1.5">
+                                <svg class="w-2.5 h-2.5 text-yellow-600 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M12 3a9 9 0 100 18A9 9 0 0012 3z"/></svg>
+                                <span class="text-[11px] text-gray-600">Tool limit reached mid-task.</span>
+                                <button @click="sendChatTo('operator', 'Continue')"
+                                  class="text-[11px] text-indigo-400 hover:text-indigo-300 transition-colors font-medium">
+                                  Continue &rarr;
+                                </button>
+                              </div>
+                            </template>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+
+                <!-- Loading indicator -->
+                <div x-show="chatLoadingAgents['operator']" class="flex justify-start">
+                  <div class="bg-gray-800 rounded-2xl rounded-bl-md px-3 py-2 text-gray-500 text-[10px] flex items-center gap-1.5">
+                    <svg class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                    Thinking&hellip;
+                  </div>
+                </div>
+
+                <!-- First-run: no agents yet -->
+                <div x-show="!(chatHistories['operator'] || []).length && !chatLoadingAgents['operator'] && agents.filter(a => a.id !== 'operator').length === 0"
+                  class="empty-state h-full justify-center">
+                  <div class="text-2xl mb-2">&#128640;</div>
+                  <div class="empty-state-title">Welcome to OpenLegion</div>
+                  <div class="empty-state-desc mb-4">
+                    I'm your operator &mdash; I'll help you build your agent workforce.
+                    <br>Tell me what you need help with:
+                  </div>
+                  <!-- Dynamic quick-start buttons from templates -->
+                  <div x-data="{ templates: [] }" x-init="fetch(`${window.__config.apiBase}/fleet/templates`).then(r => r.ok ? r.json() : {templates:[]}).then(d => templates = (d.templates || []).slice(0, 4)).catch(() => {})"
+                    class="flex flex-wrap gap-2 justify-center max-w-md">
+                    <template x-for="tpl in templates" :key="tpl.name">
+                      <button @click="let inp = document.getElementById('operator-chat-input'); if (inp) { let scope = Alpine.$data(inp.closest('[x-data]')); if (scope && 'opInput' in scope) { scope.opInput = (maxAgents > 0 && maxAgents <= 1) ? ('I need a ' + (tpl.description || tpl.name).toLowerCase() + ' agent') : ('I need a ' + (tpl.description || tpl.name).toLowerCase() + ' team'); inp.focus(); } }"
+                        class="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:border-indigo-500/50 hover:bg-indigo-600/10 transition-colors">
+                        <span x-text="tpl.description || tpl.name"></span>
+                      </button>
+                    </template>
+                    <button @click="let inp = document.getElementById('operator-chat-input'); if (inp) { inp.focus(); }"
+                      class="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:border-indigo-500/50 hover:bg-indigo-600/10 transition-colors">
+                      Something else...
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Regular empty state (has agents but no chat yet) -->
+                <div x-show="!(chatHistories['operator'] || []).length && !chatLoadingAgents['operator'] && agents.filter(a => a.id !== 'operator').length > 0"
+                  class="empty-state h-full justify-center">
+                  <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                  <div class="empty-state-title">Chat with your operator</div>
+                  <div class="empty-state-desc">Ask about fleet status, optimize agents, or build new teams.</div>
+                </div>
+              </div>
+
+              <!-- Input area -->
+              <div x-show="operatorReady" class="px-4 py-3 border-t border-gray-800/80 shrink-0" x-data="{ opInput: '' }">
+                <div class="chat-input-wrap">
+                  <textarea x-model="opInput" id="operator-chat-input" rows="1"
+                    :disabled="chatStreamingAgents['operator']"
+                    @keydown.enter="if (!$event.shiftKey && opInput.trim()) { $event.preventDefault(); sendChatTo('operator', opInput); opInput = ''; $el.style.height = 'auto'; }"
+                    @input="$el.style.height = 'auto'; $el.style.height = Math.min($el.scrollHeight, 120) + 'px'"
+                    class="chat-slide-textarea"
+                    placeholder="Message your operator..."></textarea>
+                  <button @click="if (opInput.trim()) { sendChatTo('operator', opInput); opInput = ''; }"
+                    :disabled="!opInput.trim()"
+                    class="chat-input-send"
+                    :class="opInput.trim() ? 'bg-indigo-600 hover:bg-indigo-500' : 'bg-gray-700 opacity-40'"
+                    aria-label="Send">
+                    <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 10a.75.75 0 0 1 .75-.75h10.638L10.23 5.29a.75.75 0 1 1 1.04-1.08l5.5 5.25a.75.75 0 0 1 0 1.08l-5.5 5.25a.75.75 0 1 1-1.04-1.08l4.158-3.96H3.75A.75.75 0 0 1 3 10Z" clip-rule="evenodd"/></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div><!-- /chat-main-panel -->
+
+          <!-- Context panel -->
+          <div class="context-panel master-context-panel">
+            <!-- Fleet Digest -->
+            <div x-show="fleetDigest" class="context-stats" style="margin-top:0;">
+              <div style="font-size:0.6875rem; font-weight:600; color:#e5e7eb; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;">
+                <span>Fleet Digest</span>
+                <span style="font-size:0.5625rem; color:#6b7280; font-weight:400;" x-text="fleetDigest && fleetDigest.timestamp ? 'Updated ' + formatRelativeTime(new Date(fleetDigest.timestamp).getTime()) : ''"></span>
+              </div>
+              <div x-show="fleetDigest" class="text-[10px] space-y-1">
+                <div class="flex items-center gap-1.5" x-show="fleetDigest?.fleet_summary">
+                  <span style="color:#22c55e;">&#10003;</span>
+                  <span style="color:#d1d5db;" x-text="fleetDigest?.fleet_summary"></span>
+                </div>
+                <template x-for="alert in (fleetDigest?.agents_attention || [])" :key="alert.agent_id">
+                  <div class="flex items-center gap-1.5">
+                    <span :style="alert.severity === 'critical' ? 'color:#ef4444' : 'color:#f59e0b'">&#9888;</span>
+                    <span style="color:#d1d5db;">
+                      <span class="font-medium" x-text="'@' + alert.agent_id"></span>:
+                      <span x-text="alert.issue"></span>
+                    </span>
+                  </div>
+                </template>
+                <div class="flex items-center gap-1.5" x-show="fleetDigest?.cost_trend">
+                  <span style="color:#9ca3af;">$</span>
+                  <span style="color:#d1d5db;" x-text="fleetDigest?.cost_trend"></span>
+                </div>
+              </div>
+            </div>
+
+            <!-- No digest yet -->
+            <div x-show="!fleetDigest" class="text-[10px] text-gray-600 py-3 text-center">
+              Fleet digest will appear after the operator's first health check.
+            </div>
+
+            <!-- Header -->
+            <div class="context-panel-header">
+              <span style="font-weight:600; font-size:0.8125rem; color:#e5e7eb;">Fleet</span>
+              <span style="font-size:0.6875rem; color:#9ca3af;" x-text="agents.length + ' agent' + (agents.length !== 1 ? 's' : '')"></span>
+            </div>
+
+            <!-- Operator card (pinned, distinct) -->
+            <template x-for="agent in agents.filter(a => a.id === 'operator')" :key="agent.id">
+              <div class="context-agent-card" style="border-color: rgba(99, 102, 241, 0.3); background: rgba(99, 102, 241, 0.05);">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(agent.id)">
+                    <img :src="agentAvatarUrl(agent.id)" :alt="agent.id">
+                  </div>
+                  <div style="flex:1; min-width:0;">
+                    <div style="font-size:0.75rem; font-weight:600; color:#e5e7eb; display:flex; align-items:center; gap:4px;">
+                      <span x-text="agent.id"></span>
+                      <span style="font-size:0.5rem; background:rgba(99,102,241,0.2); color:#818cf8; padding:1px 4px; border-radius:3px;">System</span>
+                    </div>
+                    <div style="font-size:0.625rem; color:#9ca3af;" x-text="agent.role || ''"></div>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:2px;">
+                    <div style="width:6px; height:6px; border-radius:50%;"
+                         :style="agent.health_status === 'healthy' ? 'background:#22c55e' : 'background:#6b7280'"></div>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- Worker agent cards -->
+            <template x-for="agent in agents.filter(a => a.id !== 'operator')" :key="agent.id">
+              <div class="context-agent-card">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(agent.id)">
+                    <img :src="agentAvatarUrl(agent.id)" :alt="agent.id">
+                  </div>
+                  <div style="flex:1; min-width:0;">
+                    <div style="font-size:0.75rem; font-weight:600; color:#e5e7eb; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" x-text="agent.id"></div>
+                    <div style="font-size:0.625rem; color:#9ca3af; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" x-text="agent.role || ''"></div>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:2px;">
+                    <div style="width:6px; height:6px; border-radius:50%;"
+                         :style="agent.status === 'busy' ? 'background:#f59e0b' : (agent.health_status === 'healthy' ? 'background:#22c55e' : (agent.health_status === 'failed' ? 'background:#ef4444' : 'background:#6b7280'))"></div>
+                    <span style="font-size:0.5625rem; color:#9ca3af;" x-text="agent.status === 'busy' ? 'Busy' : (agent.health_status === 'healthy' ? 'Online' : (agent.health_status || 'Offline'))"></span>
+                  </div>
+                </div>
+                <div style="display:flex; gap:4px; margin-top:6px;">
+                  <button class="context-agent-btn" @click="openChat(agent.id)">Chat</button>
+                  <button class="context-agent-btn" @click="drillDown(agent.id)">View</button>
+                </div>
+              </div>
+            </template>
+
+            <!-- Empty -->
+            <div x-show="agents.filter(a => a.id !== 'operator').length === 0" class="text-center py-6">
+              <div style="font-size:0.75rem; color:#6b7280;">No agents yet</div>
+              <div style="font-size:0.625rem; color:#4b5563; margin-top:4px;">Chat with your operator to create agents</div>
+            </div>
+
+            <!-- Fleet stats -->
+            <div class="context-stats">
+              <div class="context-stat-row">
+                <span>Healthy</span>
+                <span style="color:#22c55e;" x-text="agents.filter(a => a.health_status === 'healthy').length + ' / ' + agents.length"></span>
+              </div>
+              <div class="context-stat-row">
+                <span>Busy</span>
+                <span x-text="agents.filter(a => a.status === 'busy').length"></span>
+              </div>
+              <div class="context-stat-row">
+                <span>Cost today</span>
+                <span x-text="formatCost(fleetTotalCost)"></span>
+              </div>
+            </div>
+
+            <!-- Activity -->
+            <div x-show="agents.some(a => a.status === 'busy')" style="margin-top:auto;">
+              <div style="font-size:0.6875rem; font-weight:600; color:#9ca3af; margin-bottom:6px; padding-top:8px; border-top:1px solid rgba(42,42,58,0.6);">Activity</div>
+              <template x-for="agent in agents.filter(a => a.status === 'busy')" :key="'activity-' + agent.id">
+                <div style="display:flex; align-items:center; gap:6px; padding:4px 0; font-size:0.625rem;">
+                  <svg class="animate-spin shrink-0" style="width:10px; height:10px; color:#818cf8;" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                  <span style="color:#e5e7eb; font-weight:500;" x-text="agent.id"></span>
+                  <span style="color:#6b7280;">is working&hellip;</span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div><!-- /chat-two-panel -->
       </div>
 
       <!-- Fleet Overview (merged: Fleet + Agents + Queues) -->
@@ -4293,8 +4610,8 @@
 
     </main>
 
-    <!-- Messenger-style chat panel (outside main so fullscreen toggle works) -->
-    <div x-show="openChats.length > 0 && !chatPanelMinimized" x-cloak
+    <!-- Messenger-style chat panel (outside main so fullscreen toggle works; hidden on Chat tab) -->
+    <div x-show="activeTab !== 'chat' && openChats.length > 0 && !chatPanelMinimized" x-cloak
       x-transition:enter="transition ease-out duration-200"
       x-transition:enter-start="translate-x-full opacity-0"
       x-transition:enter-end="translate-x-0 opacity-100"
@@ -4666,7 +4983,7 @@
     </div>
 
     <!-- Minimized chat pill -->
-    <div x-show="openChats.length > 0 && chatPanelMinimized" x-cloak
+    <div x-show="activeTab !== 'chat' && openChats.length > 0 && chatPanelMinimized" x-cloak
       @click="chatPanelMinimized = false; _saveChatToSession(); if (activeChatId) { chatUnread = { ...chatUnread, [activeChatId]: 0 }; $nextTick(() => _scrollChat(activeChatId, true)); }"
       class="fixed bottom-4 right-4 z-40 cursor-pointer bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2.5 rounded-full shadow-xl flex items-center gap-2 transition-all hover:scale-105">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
