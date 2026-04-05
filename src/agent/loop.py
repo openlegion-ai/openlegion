@@ -2200,7 +2200,10 @@ class AgentLoop:
             "browser_navigate" in self.skills.skills
             and (
                 (self._allowed_tools is not None and "browser_navigate" in self._allowed_tools)
-                or (self._allowed_tools is None and (not self._excluded_tools or "browser_navigate" not in self._excluded_tools))
+                or (
+                    self._allowed_tools is None
+                    and (not self._excluded_tools or "browser_navigate" not in self._excluded_tools)
+                )
             )
         )
 

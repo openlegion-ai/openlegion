@@ -328,7 +328,9 @@ class Blackboard:
         """Log an operator action to the audit trail."""
         with self._write_lock:
             self.db.execute(
-                "INSERT INTO audit_log (action, actor, target, field, before_value, after_value, change_id, provenance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO audit_log"
+                " (action, actor, target, field, before_value, after_value, change_id, provenance)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (action, actor, target, field, before_value, after_value, change_id, provenance),
             )
             self.db.commit()

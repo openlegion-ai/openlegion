@@ -82,7 +82,8 @@ class TestListTemplates:
         mock_client = AsyncMock()
         mock_client.list_fleet_templates.return_value = {
             "templates": [
-                {"name": "sales", "description": "Sales team", "agent_count": 3, "agents": ["sdr", "closer", "analyst"]},
+                {"name": "sales", "description": "Sales team",
+                 "agent_count": 3, "agents": ["sdr", "closer", "analyst"]},
             ]
         }
         result = await list_templates(mesh_client=mock_client)
@@ -145,7 +146,9 @@ class TestApplyTemplate:
         from src.agent.builtins.fleet_tool import apply_template
 
         mock_client = AsyncMock()
-        mock_client.apply_fleet_template.return_value = {"template": "sales", "created": [], "failed": [], "skipped": []}
+        mock_client.apply_fleet_template.return_value = {
+            "template": "sales", "created": [], "failed": [], "skipped": [],
+        }
         result = await apply_template(template="sales", mesh_client=mock_client, _messages=None)
         assert "error" not in result
         mock_client.apply_fleet_template.assert_awaited_once()
@@ -155,9 +158,11 @@ class TestApplyTemplate:
         from src.agent.builtins.fleet_tool import apply_template
 
         mock_client = AsyncMock()
-        mock_client.apply_fleet_template.return_value = {"template": "sales", "created": [], "failed": [], "skipped": []}
+        mock_client.apply_fleet_template.return_value = {
+            "template": "sales", "created": [], "failed": [], "skipped": [],
+        }
         messages = [{"role": "user", "content": "go"}]
-        result = await apply_template(template="sales", model="openai/gpt-4o", mesh_client=mock_client, _messages=messages)
+        await apply_template(template="sales", model="openai/gpt-4o", mesh_client=mock_client, _messages=messages)
         mock_client.apply_fleet_template.assert_awaited_once_with("sales", model="openai/gpt-4o")
 
     @pytest.mark.asyncio
@@ -224,7 +229,7 @@ class TestMeshClientFleetMethods:
         mock_http.post.return_value = mock_response
 
         with patch.object(client, "_get_client", new_callable=AsyncMock, return_value=mock_http):
-            result = await client.apply_fleet_template("starter")
+            await client.apply_fleet_template("starter")
             call_kwargs = mock_http.post.call_args
             # model not included when empty
             assert call_kwargs.kwargs["json"] == {"template": "starter"}
@@ -373,6 +378,7 @@ class TestMeshFleetApplyEndpoint:
     def test_apply_no_container_manager(self):
         """Without container manager, apply returns 503."""
         from fastapi.testclient import TestClient
+
         from src.host.mesh import Blackboard, MessageRouter, PubSub
         from src.host.permissions import PermissionMatrix
         from src.host.server import create_mesh_app
@@ -402,6 +408,7 @@ class TestDashboardFleetTemplatesProxy:
     def _make_dashboard(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
+
         from src.dashboard.server import create_dashboard_router
         from src.host.costs import CostTracker
         from src.host.mesh import Blackboard

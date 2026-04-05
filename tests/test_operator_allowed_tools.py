@@ -1,7 +1,7 @@
 """Tests for the allowed_tools allowlist mechanism."""
-import pytest
-import tempfile
 import os
+import tempfile
+
 from src.agent.skills import SkillRegistry
 
 

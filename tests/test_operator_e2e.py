@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,7 +24,6 @@ import yaml
 from src.agent.loop import AgentLoop, _last_message_is_user_origin
 from src.agent.skills import SkillRegistry
 from src.shared.types import LLMResponse
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -342,7 +340,7 @@ class TestOperatorAutoCreation:
 
     def test_ensure_operator_creates_entry(self, tmp_path):
         """Test that _add_agent_to_config creates valid agent entries."""
-        from src.cli.config import _add_agent_to_config, AGENTS_FILE
+        from src.cli.config import _add_agent_to_config
 
         # Create a temp agents.yaml
         agents_file = tmp_path / "config" / "agents.yaml"
@@ -364,7 +362,7 @@ class TestOperatorAutoCreation:
 
     def test_operator_entry_not_duplicated(self, tmp_path):
         """Adding an agent twice should overwrite, not duplicate."""
-        from src.cli.config import _add_agent_to_config, AGENTS_FILE
+        from src.cli.config import _add_agent_to_config
 
         agents_file = tmp_path / "config" / "agents.yaml"
         agents_file.parent.mkdir(parents=True, exist_ok=True)
@@ -388,7 +386,6 @@ class TestOperatorAutoCreation:
         """Verify _add_agent_permissions creates correct permission entry."""
         from src.cli.config import (
             _add_agent_permissions,
-            _load_permissions,
         )
 
         perms_file = tmp_path / "config" / "permissions.json"

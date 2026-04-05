@@ -1,10 +1,10 @@
 """Tests for operator heartbeat tool restriction."""
+from unittest.mock import AsyncMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock
 
-from src.agent.loop import AgentLoop, _HEARTBEAT_TOOLS
+from src.agent.loop import _HEARTBEAT_TOOLS
 from src.shared.types import LLMResponse
-
 from tests.test_loop import _make_loop
 
 

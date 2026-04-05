@@ -1,5 +1,4 @@
 """Tests for message provenance tagging."""
-import pytest
 from src.agent.loop import _last_message_is_user_origin
 
 

@@ -5,7 +5,6 @@ import json
 import os
 from datetime import datetime, timezone
 
-
 from src.agent.skills import skill
 from src.shared.utils import setup_logging
 

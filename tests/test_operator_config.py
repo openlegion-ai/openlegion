@@ -8,7 +8,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 import yaml
 
 
@@ -170,7 +169,7 @@ class TestOperatorConstants:
     """Verify operator constants are populated, not placeholder."""
 
     def test_instructions_not_empty(self):
-        from src.cli.config import _OPERATOR_INSTRUCTIONS, _OPERATOR_SOUL, _OPERATOR_HEARTBEAT
+        from src.cli.config import _OPERATOR_HEARTBEAT, _OPERATOR_INSTRUCTIONS, _OPERATOR_SOUL
         assert len(_OPERATOR_INSTRUCTIONS) > 100
         assert len(_OPERATOR_SOUL) > 50
         assert len(_OPERATOR_HEARTBEAT) > 100

@@ -1270,7 +1270,7 @@ def create_mesh_app(
         if not template_name:
             raise HTTPException(400, "template is required")
 
-        from src.cli.config import _load_templates, _apply_template, _load_config
+        from src.cli.config import _apply_template, _load_config, _load_templates
 
         templates = _load_templates()
         tpl = templates.get(template_name)
@@ -1414,7 +1414,7 @@ def create_mesh_app(
             raise HTTPException(400, f"Invalid agent name: {e}") from e
 
         # Check if agent already exists
-        from src.cli.config import AGENTS_FILE, _load_config
+        from src.cli.config import _load_config
         config = _load_config()
         if name in config.get("agents", {}):
             raise HTTPException(409, f"Agent '{name}' already exists")
@@ -1777,7 +1777,7 @@ def create_mesh_app(
 
         # -- Health breakdown --
         health_list = health_monitor.get_status() if health_monitor else []
-        health_by_agent = {s["agent"]: s for s in health_list}
+        {s["agent"]: s for s in health_list}
         healthy = sum(1 for s in health_list if s.get("status") == "healthy")
         failed = sum(1 for s in health_list if s.get("status") == "failed")
 
@@ -1926,8 +1926,9 @@ def create_mesh_app(
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage projects")
-        from src.cli.config import _create_project, _load_config, _load_projects
         import os as _os
+
+        from src.cli.config import _create_project, _load_config, _load_projects
 
         _max_projects = int(_os.environ.get("OPENLEGION_MAX_PROJECTS", "0"))
         if _max_projects > 0:
@@ -2006,7 +2007,7 @@ def create_mesh_app(
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage projects")
-        from src.cli.config import _load_projects, _delete_project, _create_project
+        from src.cli.config import _create_project, _delete_project, _load_projects
         body = await request.json()
         context = sanitize_for_prompt(body.get("context", "")).strip()
 
@@ -2111,8 +2112,9 @@ def create_mesh_app(
         if change["agent_id"] != agent_id:
             raise HTTPException(400, "Agent ID mismatch")
 
-        from src.cli.config import AGENTS_FILE, _load_config
         import yaml
+
+        from src.cli.config import AGENTS_FILE, _load_config
 
         # Read current config
         agent_cfg = _load_config()
@@ -2187,8 +2189,9 @@ def create_mesh_app(
         # Resolve agent_id from the change itself
         agent_id = change["agent_id"]
 
-        from src.cli.config import AGENTS_FILE, _load_config
         import yaml
+
+        from src.cli.config import AGENTS_FILE, _load_config
 
         agent_cfg = _load_config()
         agents = agent_cfg.get("agents", {})
