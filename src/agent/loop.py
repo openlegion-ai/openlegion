@@ -95,14 +95,19 @@ def _extract_json_response(text: str) -> str:
 
 
 def _last_message_is_user_origin(messages: list[dict]) -> bool:
-    """Check if the most recent user message has origin='user'.
+    """Check whether the most recent user message was genuinely user-originated.
 
-    Used by provenance-gated tools to verify the user explicitly
-    confirmed an action in the conversation.
+    Returns True when the last ``role=user`` message in *messages* does not
+    carry an ``_origin`` metadata key **or** when ``_origin == "user"``.
+    Returns False when it is tagged with a non-user origin (e.g. ``"system"``,
+    ``"auto_continue"``, ``"heartbeat"``).
+
+    If there are no user messages at all, returns False as a safe default.
     """
     for msg in reversed(messages):
-        if msg.get("role") == "user":
-            return msg.get("_origin") == "user"
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            origin = msg.get("_origin", "user")
+            return origin == "user"
     return False
 
 
