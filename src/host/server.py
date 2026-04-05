@@ -19,7 +19,7 @@ import time
 import uuid as _uuid
 from collections import defaultdict
 from collections.abc import Callable, Coroutine
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
@@ -84,7 +84,7 @@ _CHANGE_TTL_SECONDS = 300
 
 
 def _cleanup_expired_changes() -> None:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expired = [k for k, v in _pending_changes.items() if v["expires_at"] < now]
     for k in expired:
         del _pending_changes[k]
@@ -99,7 +99,7 @@ def _store_pending_change(agent_id: str, field: str, old_value: object, new_valu
     _pending_changes[change_id] = {
         "agent_id": agent_id, "field": field,
         "old_value": old_value, "new_value": new_value,
-        "expires_at": datetime.utcnow() + timedelta(seconds=_CHANGE_TTL_SECONDS),
+        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=_CHANGE_TTL_SECONDS),
     }
     return change_id
 
@@ -1495,6 +1495,18 @@ def create_mesh_app(
                 skills_dir=str(skills_dir), model=model,
                 env_overrides=agent_env,
             )
+        except Exception as e:
+            # Roll back: remove config and permissions so the name isn't blocked
+            from src.cli.config import _remove_agent
+            try:
+                _remove_agent(name)
+            except Exception:
+                pass
+            import shutil
+            shutil.rmtree(skills_dir, ignore_errors=True)
+            raise HTTPException(500, f"Failed to start agent container: {e}") from e
+
+        try:
             router.register_agent(name, url, role=role or name)
             if transport is not None:
                 from src.host.transport import HttpTransport
@@ -1512,7 +1524,6 @@ def create_mesh_app(
                 event_bus.emit("agent_state", agent=name,
                     data={"state": "added", "role": role, "ready": ready})
 
-            # Audit log via trace store
             if trace_store:
                 from src.shared.trace import new_trace_id as _new_trace_id
                 trace_store.record(
@@ -1523,36 +1534,53 @@ def create_mesh_app(
 
             return {"agent_id": name, "role": role or name, "ready": ready}
         except Exception as e:
-            raise HTTPException(500, f"Failed to start agent: {e}") from e
+            # Roll back: stop container, remove config so the name isn't blocked
+            try:
+                container_manager.stop_agent(name)
+            except Exception:
+                pass
+            from src.cli.config import _remove_agent
+            try:
+                _remove_agent(name)
+            except Exception:
+                pass
+            import shutil
+            shutil.rmtree(skills_dir, ignore_errors=True)
+            raise HTTPException(500, f"Failed to register agent: {e}") from e
 
 
     # === Agent History Access ===
 
+    _PERIOD_TO_DAYS = {"today": 1, "yesterday": 2, "week": 7}
+
     @app.get("/mesh/agents/{agent_id}/history")
-    async def get_agent_history(agent_id: str, request: Request, requesting_agent: str = "") -> dict:
+    async def get_agent_history(
+        agent_id: str, request: Request,
+        requesting_agent: str = "", period: str = "",
+    ) -> dict:
         """Retrieve an agent's daily logs. Permission-checked."""
         if requesting_agent:
             requesting_agent = _resolve_agent_id(requesting_agent, request)
             if not permissions.can_message(requesting_agent, agent_id):
                 raise HTTPException(403, f"Agent {requesting_agent} cannot read history of {agent_id}")
         else:
-            # Internal/dashboard callers: require any valid auth token.
             _require_any_auth(request)
             logger.debug("History access for %s without requesting_agent (mesh-internal)", agent_id)
         agent_entry = router.agent_registry.get(agent_id)
         if not agent_entry:
             raise HTTPException(404, f"Agent not found: {agent_id}")
+        days = _PERIOD_TO_DAYS.get(period, 3)
+        history_qs = f"/history?days={days}"
         if transport is not None:
             try:
-                return await transport.request(agent_id, "GET", "/history", timeout=10)
+                return await transport.request(agent_id, "GET", history_qs, timeout=10)
             except Exception as e:
                 raise HTTPException(502, f"Failed to fetch history from {agent_id}: {e}") from e
-        # Fallback: direct HTTP if no transport provided
         agent_url = agent_entry.get("url", agent_entry) if isinstance(agent_entry, dict) else agent_entry
         import httpx
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(f"{agent_url}/history")
+                resp = await client.get(f"{agent_url}/history", params={"days": days})
                 resp.raise_for_status()
                 return resp.json()
         except Exception as e:
@@ -1810,7 +1838,6 @@ def create_mesh_app(
 
         # -- Health breakdown --
         health_list = health_monitor.get_status() if health_monitor else []
-        {s["agent"]: s for s in health_list}
         healthy = sum(1 for s in health_list if s.get("status") == "healthy")
         failed = sum(1 for s in health_list if s.get("status") == "failed")
 
@@ -1851,6 +1878,10 @@ def create_mesh_app(
         max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
         max_projects = int(os.environ.get("OPENLEGION_MAX_PROJECTS", "0"))
 
+        # Count actual projects
+        from src.cli.config import _load_projects
+        current_projects = len(_load_projects())
+
         return {
             "total_agents": total,
             "healthy": healthy,
@@ -1864,7 +1895,7 @@ def create_mesh_app(
                 "max_agents": max_agents,
                 "current_agents": total,
                 "max_projects": max_projects,
-                "current_projects": 0,
+                "current_projects": current_projects,
             },
         }
 
@@ -2040,18 +2071,28 @@ def create_mesh_app(
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage projects")
-        from src.cli.config import _create_project, _delete_project, _load_projects
+        from src.cli.config import PROJECTS_DIR, _load_projects
         body = await request.json()
         context = sanitize_for_prompt(body.get("context", "")).strip()
 
         projects = _load_projects()
         if name not in projects:
             raise HTTPException(404, f"Project '{name}' not found")
-        current = projects[name]
-        members = current.get("members", [])
 
-        _delete_project(name)
-        _create_project(name, description=context, members=members)
+        # Update metadata.yaml description in place (never delete the project)
+        import yaml
+        meta_file = PROJECTS_DIR / name / "metadata.yaml"
+        if meta_file.exists():
+            with open(meta_file) as f:
+                meta = yaml.safe_load(f) or {}
+            meta["description"] = context
+            with open(meta_file, "w") as f:
+                yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
+
+        # Update project.md in place
+        project_md = PROJECTS_DIR / name / "project.md"
+        project_md.write_text(f"# {name}\n\n{context}\n")
+
         return {"updated": True, "project": name}
 
     # === Operator Config Endpoints ===
@@ -2130,36 +2171,22 @@ def create_mesh_app(
             "expires_at": _pending_changes[change_id]["expires_at"].isoformat(),
         }
 
-    @app.post("/mesh/agents/{agent_id}/config")
-    async def update_agent_config(agent_id: str, request: Request) -> dict:
-        """Apply a pending config change. Used by confirm_edit tool."""
-        _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
-            raise HTTPException(403, "Only the operator can apply config changes")
-        data = await request.json()
-        change_id = data.get("change_id", "")
-
-        change = _consume_pending_change(change_id)
-        if not change:
-            raise HTTPException(404, "Change not found or expired")
-        if change["agent_id"] != agent_id:
-            raise HTTPException(400, "Agent ID mismatch")
+    async def _apply_pending_change(change_id: str, change: dict) -> dict:
+        """Apply a consumed pending change — shared by both config endpoints."""
+        agent_id = change["agent_id"]
+        field = change["field"]
+        old_value = change["old_value"]
+        new_value = change["new_value"]
 
         import yaml
 
         from src.cli.config import AGENTS_FILE, _load_config
 
-        # Read current config
         agent_cfg = _load_config()
         agents = agent_cfg.get("agents", {})
         if agent_id not in agents:
             raise HTTPException(404, f"Agent '{agent_id}' not found")
 
-        field = change["field"]
-        old_value = change["old_value"]
-        new_value = change["new_value"]
-
-        # Apply change
         if field == "permissions":
             from src.cli.config import _load_permissions, _save_permissions
             perms = _load_permissions()
@@ -2190,7 +2217,6 @@ def create_mesh_app(
                 except Exception:
                     pass  # Agent might not be running
 
-        # Log to audit trail
         blackboard.log_audit(
             action="edit_agent", target=agent_id, field=field,
             before_value=json.dumps(old_value) if not isinstance(old_value, str) else old_value,
@@ -2199,6 +2225,25 @@ def create_mesh_app(
         )
 
         return {"success": True, "agent_id": agent_id, "field": field}
+
+    @app.post("/mesh/agents/{agent_id}/config")
+    async def update_agent_config(agent_id: str, request: Request) -> dict:
+        """Apply a pending config change. Used by confirm_edit tool."""
+        _require_any_auth(request)
+        if _resolve_agent_id("", request) != "operator":
+            raise HTTPException(403, "Only the operator can apply config changes")
+        data = await request.json()
+        change_id = data.get("change_id", "")
+
+        change = _get_pending_change(change_id)
+        if not change:
+            raise HTTPException(404, "Change not found or expired")
+        if change["agent_id"] != agent_id:
+            raise HTTPException(400, "Agent ID mismatch")
+        # Consume only after validation passes
+        _consume_pending_change(change_id)
+
+        return await _apply_pending_change(change_id, change)
 
     @app.post("/mesh/config/confirm")
     async def confirm_config_change(request: Request) -> dict:
@@ -2219,62 +2264,7 @@ def create_mesh_app(
         if not change:
             raise HTTPException(404, "Change not found or expired")
 
-        # Resolve agent_id from the change itself
-        agent_id = change["agent_id"]
-
-        import yaml
-
-        from src.cli.config import AGENTS_FILE, _load_config
-
-        agent_cfg = _load_config()
-        agents = agent_cfg.get("agents", {})
-        if agent_id not in agents:
-            raise HTTPException(404, f"Agent '{agent_id}' not found")
-
-        field = change["field"]
-        old_value = change["old_value"]
-        new_value = change["new_value"]
-
-        # Apply change
-        if field == "permissions":
-            from src.cli.config import _load_permissions, _save_permissions
-            perms = _load_permissions()
-            if agent_id in perms.get("permissions", {}):
-                perms["permissions"][agent_id].update(new_value)
-                _save_permissions(perms)
-        else:
-            yaml_key = _CONFIG_FIELD_MAP.get(field, field)
-            agents[agent_id][yaml_key] = new_value
-            with open(AGENTS_FILE, "w") as f:
-                yaml.dump(agent_cfg, f, default_flow_style=False, sort_keys=False)
-
-        # Hot-reload: push to running agent's workspace
-        if transport and agent_id in router.agent_registry:
-            workspace_map = {
-                "instructions": "INSTRUCTIONS.md",
-                "soul": "SOUL.md",
-                "heartbeat": "HEARTBEAT.md",
-            }
-            ws_file = workspace_map.get(field)
-            if ws_file and isinstance(new_value, str):
-                try:
-                    await transport.request(
-                        agent_id, "PUT", f"/workspace/{ws_file}",
-                        json={"content": f"# {field.title()}\n\n{new_value}"},
-                        timeout=10,
-                    )
-                except Exception:
-                    pass  # Agent might not be running
-
-        # Log to audit trail
-        blackboard.log_audit(
-            action="edit_agent", target=agent_id, field=field,
-            before_value=json.dumps(old_value) if not isinstance(old_value, str) else old_value,
-            after_value=json.dumps(new_value) if not isinstance(new_value, str) else new_value,
-            change_id=change_id,
-        )
-
-        return {"success": True, "agent_id": agent_id, "field": field}
+        return await _apply_pending_change(change_id, change)
 
     # === Browser Service Proxy ===
 

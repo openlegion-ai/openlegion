@@ -5620,6 +5620,10 @@ function dashboard() {
     },
 
     agentAvatarUrl(agentId) {
+      if (agentId === 'operator') {
+        const v = window.__config.assetVersion || '';
+        return `/dashboard/static/avatars/operator.png` + (v ? `?v=${v}` : '');
+      }
       const num = this.agentAvatarNum(agentId);
       const v = window.__config.assetVersion || '';
       return `/dashboard/static/avatars/${num}.svg` + (v ? `?v=${v}` : '');

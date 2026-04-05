@@ -1731,6 +1731,38 @@ def create_dashboard_router(
         tier = "system" if is_system else "agent"
         return {"stored": True, "service": service, "tier": tier}
 
+    @api_router.post("/api/credentials/agent")
+    async def api_add_agent_credential(request: Request) -> dict:
+        """Store an agent-tier credential from a chat credential-request card.
+
+        Unlike POST /api/credentials, this endpoint:
+        - Always stores as agent-tier (never promotes to system credentials)
+        - Rejects system credential names
+        - Preserves the exact submitted value (only trims leading/trailing whitespace)
+        """
+        if credential_vault is None:
+            raise HTTPException(status_code=503, detail="Credential vault not available")
+        body = await request.json()
+        service = body.get("service", "").strip()
+        key = body.get("key", "").strip()
+        if not service or not key:
+            raise HTTPException(status_code=400, detail="service and key are required")
+        if not re.match(r"^[a-zA-Z0-9_.-]{1,128}$", service):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid credential name (alphanumeric, _, ., - only, max 128 chars)",
+            )
+        if len(key) > 10_000:
+            raise HTTPException(status_code=400, detail="Key value too long (max 10000 chars)")
+        from src.host.credentials import is_system_credential
+        if is_system_credential(service):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Cannot store system credential via chat card: {service}",
+            )
+        credential_vault.add_credential(service, key)
+        return {"stored": True, "service": service, "tier": "agent"}
+
     @api_router.post("/api/credentials/upload-env")
     async def api_upload_env(request: Request, file: UploadFile = File(...)) -> dict:
         """Bulk-import credentials from an uploaded .env file.

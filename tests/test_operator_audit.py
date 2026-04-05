@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -185,7 +185,7 @@ def test_expired_changes_cleaned_up():
     """Expired changes are removed during cleanup."""
     change_id = _store_pending_change("alpha", "model", "old", "new")
     # Manually expire it
-    _pending_changes[change_id]["expires_at"] = datetime.utcnow() - timedelta(seconds=1)
+    _pending_changes[change_id]["expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
 
     _cleanup_expired_changes()
     assert change_id not in _pending_changes
@@ -218,7 +218,7 @@ def test_change_ttl():
     """Changes have a TTL matching _CHANGE_TTL_SECONDS."""
     change_id = _store_pending_change("alpha", "model", "old", "new")
     change = _pending_changes[change_id]
-    expected = datetime.utcnow() + timedelta(seconds=_CHANGE_TTL_SECONDS)
+    expected = datetime.now(timezone.utc) + timedelta(seconds=_CHANGE_TTL_SECONDS)
     # Allow 5 seconds tolerance
     assert abs((change["expires_at"] - expected).total_seconds()) < 5
 

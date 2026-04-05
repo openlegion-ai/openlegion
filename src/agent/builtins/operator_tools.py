@@ -26,7 +26,7 @@ _OPERATOR_PERMISSION_CEILING = {
     "can_manage_cron": True,
     "can_use_wallet": False,  # Requires explicit user setup
     "blackboard_read": ["*"],
-    "blackboard_write": ["tasks/*", "context/*", "status/*"],
+    "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*"],
 }
 
 _VALID_FIELDS = frozenset({
@@ -170,7 +170,7 @@ async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_k
     # Provenance check: require user confirmation
     from src.agent.loop import _last_message_is_user_origin
 
-    if _messages is not None and not _last_message_is_user_origin(_messages):
+    if _messages is None or not _last_message_is_user_origin(_messages):
         return {
             "error": "provenance_check_failed",
             "detail": (
@@ -391,7 +391,7 @@ async def create_agent(
     # Provenance check
     from src.agent.loop import _last_message_is_user_origin
 
-    if _messages is not None and not _last_message_is_user_origin(_messages):
+    if _messages is None or not _last_message_is_user_origin(_messages):
         return {
             "error": "provenance_check_failed",
             "detail": "User confirmation required to create an agent.",
@@ -495,7 +495,7 @@ async def create_project(
 
     from src.agent.loop import _last_message_is_user_origin
 
-    if _messages is not None and not _last_message_is_user_origin(_messages):
+    if _messages is None or not _last_message_is_user_origin(_messages):
         return {
             "error": "provenance_check_failed",
             "detail": "User confirmation required to create a project.",
@@ -540,7 +540,7 @@ async def add_agents_to_project(
 
     from src.agent.loop import _last_message_is_user_origin
 
-    if _messages is not None and not _last_message_is_user_origin(_messages):
+    if _messages is None or not _last_message_is_user_origin(_messages):
         return {
             "error": "provenance_check_failed",
             "detail": "User confirmation required to add agents to a project.",
@@ -587,7 +587,7 @@ async def remove_agents_from_project(
 
     from src.agent.loop import _last_message_is_user_origin
 
-    if _messages is not None and not _last_message_is_user_origin(_messages):
+    if _messages is None or not _last_message_is_user_origin(_messages):
         return {
             "error": "provenance_check_failed",
             "detail": "User confirmation required to remove agents from a project.",
@@ -636,7 +636,7 @@ async def update_project_context(
 
     from src.agent.loop import _last_message_is_user_origin
 
-    if _messages is not None and not _last_message_is_user_origin(_messages):
+    if _messages is None or not _last_message_is_user_origin(_messages):
         return {
             "error": "provenance_check_failed",
             "detail": "User confirmation required to update project context.",

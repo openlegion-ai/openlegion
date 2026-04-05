@@ -141,8 +141,8 @@ class TestApplyTemplate:
         mock_client.apply_fleet_template.assert_awaited_once_with("sales", model="")
 
     @pytest.mark.asyncio
-    async def test_provenance_allows_when_no_messages(self):
-        """When _messages is None, provenance check is skipped."""
+    async def test_provenance_fails_closed_when_no_messages(self):
+        """When _messages is None, provenance fails closed (security: no bypass via cron/invoke)."""
         from src.agent.builtins.fleet_tool import apply_template
 
         mock_client = AsyncMock()
@@ -150,8 +150,8 @@ class TestApplyTemplate:
             "template": "sales", "created": [], "failed": [], "skipped": [],
         }
         result = await apply_template(template="sales", mesh_client=mock_client, _messages=None)
-        assert "error" not in result
-        mock_client.apply_fleet_template.assert_awaited_once()
+        assert result["error"] == "provenance_check_failed"
+        mock_client.apply_fleet_template.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_model_override(self):
