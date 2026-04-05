@@ -381,6 +381,9 @@ function dashboard() {
       saved: false,
       removingSystemProxy: false,
     },
+    agentProxyForm: { mode: 'inherit', url: '', username: '', password: '' },
+    agentProxySaving: false,
+    agentProxySaved: false,
 
     // Workflow cancel tracking
     _cancellingWorkflows: {},
@@ -659,7 +662,7 @@ function dashboard() {
       return this.settingsData?.plan_limits?.max_projects ?? 0;
     },
     get runningAgents() {
-      return this.agents.filter(a => a.running !== false && a.id !== 'operator');
+      return this.agents.filter(a => a.running !== false);
     },
     get atAgentLimit() {
       if (this.maxAgents === 0) return false;
@@ -1469,6 +1472,30 @@ function dashboard() {
           if (this.activeChatId === agent) {
             this.$nextTick(() => this._scrollChat(agent));
           } else if (!isReplay) {
+            this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
+          }
+        }
+      }
+
+      // Surface credential requests as secure input cards in chat.
+      if (evt.type === 'credential_request' && agent && evt.data && evt.data.name) {
+        if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
+        const evtTs = this._normalizeEventTs(evt);
+        const isDup = this.chatHistories[agent].some(m =>
+          m.role === 'credential_request' && m.name === evt.data.name && Math.abs((m.ts || 0) - evtTs) < 5000
+        );
+        if (!isDup) {
+          this.chatHistories[agent].push({
+            role: 'credential_request',
+            content: evt.data.description || '',
+            name: evt.data.name,
+            service: evt.data.service || '',
+            saved: false,
+            ts: evtTs,
+          });
+          if (this.activeChatId === agent) {
+            this.$nextTick(() => this._scrollChat(agent));
+          } else {
             this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
           }
         }
@@ -2509,6 +2536,7 @@ function dashboard() {
         if (resp.ok) {
           const cfg = await resp.json();
           this.agentConfigs[agentId] = cfg;
+          if (this.selectedAgent === agentId) this.initAgentProxyForm(agentId);
           return cfg;
         }
       } catch (e) { console.warn('fetchAgentConfig failed:', e); }
@@ -3428,6 +3456,52 @@ function dashboard() {
         this.showToast(`Error: ${e.message || String(e)}`);
       }
       this.networkProxy.saving = false;
+    },
+
+    initAgentProxyForm(agentId) {
+      const cfg = this.agentConfigs[agentId];
+      if (cfg?.proxy) {
+        this.agentProxyForm = {
+          mode: cfg.proxy.mode || 'inherit',
+          url: cfg.proxy.url || '',
+          username: '',
+          password: '',
+        };
+      } else {
+        this.agentProxyForm = { mode: 'inherit', url: '', username: '', password: '' };
+      }
+      this.agentProxySaved = false;
+    },
+
+    async saveAgentProxy(agentId) {
+      this.agentProxySaving = true;
+      try {
+        const body = { mode: this.agentProxyForm.mode };
+        if (this.agentProxyForm.mode === 'custom') {
+          body.url = this.agentProxyForm.url;
+          if (this.agentProxyForm.username) body.username = this.agentProxyForm.username;
+          if (this.agentProxyForm.password) body.password = this.agentProxyForm.password;
+        }
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/proxy`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+          this.agentProxySaved = true;
+          this.showToast('Agent proxy updated — restart required');
+          setTimeout(() => this.agentProxySaved = false, 3000);
+          // Refresh agent config to pick up new proxy state
+          await this.fetchAgentConfig(agentId);
+          this.initAgentProxyForm(agentId);
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Save failed'}`);
+        }
+      } catch (e) {
+        this.showToast(`Error: ${e.message || String(e)}`);
+      }
+      this.agentProxySaving = false;
     },
 
     proxyModeLabel(mode) {
@@ -5546,11 +5620,8 @@ function dashboard() {
     },
 
     agentAvatarUrl(agentId) {
-      const v = window.__config.assetVersion || '';
-      if (agentId === 'operator') {
-        return `/dashboard/static/avatars/operator.png` + (v ? `?v=${v}` : '');
-      }
       const num = this.agentAvatarNum(agentId);
+      const v = window.__config.assetVersion || '';
       return `/dashboard/static/avatars/${num}.svg` + (v ? `?v=${v}` : '');
     },
 
