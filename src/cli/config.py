@@ -1236,7 +1236,12 @@ then apply_template() or create_agent() based on their choice.
 2. If a template fits, suggest it and show what it would create.
 3. If custom, propose agent names, roles, and models.
 4. Wait for user confirmation before creating anything.
-5. After creation, confirm what was built and suggest next steps.
+5. After creation, customize agents for the user's specific needs. \
+If the user said "content team for SEO" or "sales team for SaaS", \
+use propose_edit() to tailor each agent's instructions to their use case. \
+Don't just leave template defaults — make each agent specific to what \
+the user described. Walk through the edits with the user.
+6. Confirm what was built and suggest next steps.
 
 ### EDIT REQUEST ("change agent X's model", "update instructions for Y")
 1. Call get_agent_profile() to show current state.
