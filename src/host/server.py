@@ -2021,6 +2021,7 @@ def create_mesh_app(
         _create_project(name, description=context, members=members)
         return {"updated": True, "project": name}
 
+
     # === Operator Config Endpoints ===
 
     _VALID_CONFIG_FIELDS = {"instructions", "soul", "model", "role", "heartbeat", "thinking", "budget", "permissions"}
@@ -2242,6 +2243,7 @@ def create_mesh_app(
         )
 
         return {"success": True, "agent_id": agent_id, "field": field}
+
 
     # === Browser Service Proxy ===
 

@@ -2029,23 +2029,6 @@
                             <span x-show="agentConfigs[selectedAgent]?.proxy?.has_credential" class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/30 text-emerald-400 border border-emerald-800/50">authenticated</span>
                           </div>
                         </div>
-                        <!-- Proxy -->
-                        <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
-                          <div class="text-xs text-gray-500 mb-1 flex items-center gap-1">Proxy
-                            <span class="setting-hint setting-hint-sm" tabindex="0">?<span class="setting-hint-text">How this agent connects to the internet. "System proxy" inherits the fleet-wide proxy. "Custom" uses a per-agent proxy URL. "No proxy" connects directly.</span></span>
-                          </div>
-                          <div class="flex items-center gap-3">
-                            <span class="text-sm font-mono"
-                              :class="{
-                                'text-gray-400': (agentConfigs[selectedAgent]?.proxy?.mode || 'inherit') === 'inherit',
-                                'text-indigo-400': (agentConfigs[selectedAgent]?.proxy?.mode) === 'custom',
-                                'text-amber-400': (agentConfigs[selectedAgent]?.proxy?.mode) === 'direct',
-                              }"
-                              x-text="proxyModeLabel(agentConfigs[selectedAgent]?.proxy?.mode || 'inherit')"></span>
-                            <span x-show="agentConfigs[selectedAgent]?.proxy?.url" class="text-xs text-gray-500 font-mono" x-text="agentConfigs[selectedAgent]?.proxy?.url"></span>
-                            <span x-show="agentConfigs[selectedAgent]?.proxy?.has_credential" class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/30 text-emerald-400 border border-emerald-800/50">authenticated</span>
-                          </div>
-                        </div>
                       </div>
                     </div>
                     <!-- Edit mode -->
