@@ -94,6 +94,23 @@ def _extract_json_response(text: str) -> str:
     return text
 
 
+def _last_message_is_user_origin(messages: list[dict]) -> bool:
+    """Check whether the most recent user message was genuinely user-originated.
+
+    Returns True when the last ``role=user`` message in *messages* does not
+    carry an ``_origin`` metadata key **or** when ``_origin == "user"``.
+    Returns False when it is tagged with a non-user origin (e.g. ``"system"``,
+    ``"auto_continue"``, ``"heartbeat"``).
+
+    If there are no user messages at all, returns False as a safe default.
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            origin = msg.get("_origin", "user")
+            return origin == "user"
+    return False
+
+
 # Files already injected via bootstrap — skip in first-message auto-search
 # to avoid duplicate content.  Matches WorkspaceManager._BOOTSTRAP_FILES.
 _BOOTSTRAP_SEARCH_EXCLUDE = frozenset({

@@ -1189,6 +1189,163 @@ def create_mesh_app(
         except Exception as e:
             raise HTTPException(500, f"Failed to spawn agent: {e}") from e
 
+    # === Fleet Templates ===
+
+    @app.get("/mesh/fleet/templates")
+    async def list_fleet_templates(request: Request) -> dict:
+        """List available fleet templates."""
+        _require_any_auth(request)
+        from src.cli.config import _load_templates
+
+        templates = _load_templates()
+        result = []
+        for name, tpl in templates.items():
+            result.append({
+                "name": name,
+                "description": tpl.get("description", ""),
+                "agent_count": len(tpl.get("agents", {})),
+                "agents": list(tpl.get("agents", {}).keys()),
+            })
+        return {"templates": result}
+
+    @app.post("/mesh/fleet/apply")
+    async def apply_fleet_template(data: dict, request: Request) -> dict:
+        """Create a team of agents from a fleet template.
+
+        Body: {template: str, model?: str}
+        """
+        if container_manager is None:
+            raise HTTPException(503, "Container manager not available")
+
+        # Auth + permission check
+        spawned_by = _resolve_agent_id(data.get("spawned_by", "unknown"), request)
+        if _auth_tokens:
+            # In authenticated mode, require spawn permission
+            if not permissions.can_spawn(spawned_by):
+                raise HTTPException(403, f"Agent {spawned_by} is not allowed to spawn agents")
+
+        template_name = data.get("template", "").strip()
+        if not template_name:
+            raise HTTPException(400, "template is required")
+
+        from src.cli.config import _load_templates, _apply_template, _load_config
+
+        templates = _load_templates()
+        tpl = templates.get(template_name)
+        if tpl is None:
+            raise HTTPException(404, f"Template not found: {template_name}")
+
+        tpl_agents = tpl.get("agents", {})
+        if not tpl_agents:
+            raise HTTPException(400, f"Template '{template_name}' has no agents")
+
+        # Check plan limits (exclude operator from count)
+        import os as _os
+        max_agents = int(_os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
+        if max_agents > 0:
+            current_count = sum(
+                1 for aid in router.agent_registry
+                if aid != "operator"
+            )
+            if current_count + len(tpl_agents) > max_agents:
+                raise HTTPException(
+                    403,
+                    f"Would exceed agent limit ({current_count} + {len(tpl_agents)} > {max_agents}). "
+                    "Upgrade your plan for more agents.",
+                )
+
+        # Optional model override
+        model_override = data.get("model", "")
+
+        # Apply template to create config entries
+        created_names = _apply_template(template_name, tpl)
+        if not created_names:
+            return {
+                "template": template_name,
+                "created": [],
+                "skipped": list(tpl_agents.keys()),
+                "message": "All agents already exist",
+            }
+
+        # Load config to get per-agent settings
+        cfg = _load_config()
+        agents_cfg = cfg.get("agents", {})
+        default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        hb_schedule = cfg.get("mesh", {}).get("heartbeat_schedule")
+
+        created_agents = []
+        failed_agents = []
+
+        for agent_name in created_names:
+            acfg = agents_cfg.get(agent_name, {})
+            agent_model = model_override or acfg.get("model", default_model)
+            skills_dir = str(
+                (container_manager.project_root / "skills" / agent_name).resolve()
+            ) if container_manager.project_root else ""
+
+            # Build per-agent env_overrides (NOT shared extra_env)
+            env_overrides: dict[str, str] = {}
+            for env_key, cfg_key in (
+                ("INITIAL_INSTRUCTIONS", "initial_instructions"),
+                ("INITIAL_SOUL", "initial_soul"),
+                ("INITIAL_HEARTBEAT", "initial_heartbeat"),
+            ):
+                val = acfg.get(cfg_key, "")
+                if val:
+                    env_overrides[env_key] = val
+
+            try:
+                # Start container with env_overrides
+                old_extra = dict(container_manager.extra_env)
+                container_manager.extra_env.update(env_overrides)
+                try:
+                    url = container_manager.start_agent(
+                        agent_id=agent_name,
+                        role=acfg.get("role", agent_name),
+                        skills_dir=skills_dir,
+                        model=agent_model,
+                        thinking=acfg.get("thinking", ""),
+                    )
+                finally:
+                    # Restore extra_env — remove only the keys we added
+                    for k in env_overrides:
+                        container_manager.extra_env.pop(k, None)
+
+                # Register with router, transport, health, cron
+                router.register_agent(agent_name, url, role=acfg.get("role", ""))
+                if transport is not None:
+                    from src.host.transport import HttpTransport
+                    if isinstance(transport, HttpTransport):
+                        transport.register(agent_name, url)
+                if health_monitor is not None:
+                    health_monitor.register(agent_name)
+                if cron_scheduler is not None:
+                    cron_scheduler.ensure_heartbeat(agent_name, hb_schedule)
+
+                # Wait for readiness
+                ready = await container_manager.wait_for_agent(agent_name, timeout=60)
+
+                if event_bus is not None:
+                    event_bus.emit("agent_state", agent=agent_name, data={
+                        "state": "added", "role": acfg.get("role", ""), "ready": ready,
+                    })
+
+                created_agents.append({
+                    "agent_id": agent_name,
+                    "role": acfg.get("role", agent_name),
+                    "ready": ready,
+                })
+            except Exception as e:
+                logger.error("Failed to start agent '%s' from template: %s", agent_name, e)
+                failed_agents.append({"agent_id": agent_name, "error": str(e)})
+
+        return {
+            "template": template_name,
+            "created": created_agents,
+            "failed": failed_agents,
+            "skipped": [n for n in tpl_agents if n not in created_names],
+        }
+
     # === Agent History Access ===
 
     @app.get("/mesh/agents/{agent_id}/history")

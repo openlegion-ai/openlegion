@@ -387,6 +387,22 @@ def create_dashboard_router(
         from src.cli.config import _load_skill_templates
         return _load_skill_templates()
 
+    @api_router.get("/api/fleet/templates")
+    async def api_fleet_templates() -> dict:
+        """List fleet templates for frontend (first-run quick-start buttons)."""
+        from src.cli.config import _load_templates
+
+        templates = _load_templates()
+        result = []
+        for name, tpl in templates.items():
+            result.append({
+                "name": name,
+                "description": tpl.get("description", ""),
+                "agent_count": len(tpl.get("agents", {})),
+                "agents": list(tpl.get("agents", {}).keys()),
+            })
+        return {"templates": result}
+
     @api_router.post("/api/agents")
     async def api_add_agent(request: Request) -> dict:
         """Add a new agent: create config, start container, register."""
