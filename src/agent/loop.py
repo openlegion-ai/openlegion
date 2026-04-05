@@ -1730,7 +1730,11 @@ class AgentLoop:
                     mesh_client=self.mesh_client,
                     workspace_manager=self.workspace,
                     memory_store=self.memory,
+<<<<<<< HEAD
                     _messages=self._current_messages,
+=======
+                    _messages=self._chat_messages,
+>>>>>>> worktree-agent-a8d9bef0
                 ),
                 timeout=_TOOL_TIMEOUT,
             )
