@@ -18,8 +18,11 @@ from src.cli.config import (
     ENV_FILE,
     PROJECT_ROOT,
     PROJECTS_DIR,
+    _OPERATOR_AGENT_ID,
+    _OPERATOR_ALLOWED_TOOLS,
     _check_docker_running,
     _ensure_docker_image,
+    _ensure_operator_agent,
     _load_config,
 )
 from src.cli.formatting import echo_fail, echo_header, echo_ok
@@ -280,8 +283,14 @@ class RuntimeContext:
         from src.host.runtime import DockerBackend, SandboxBackend
         from src.host.transport import HttpTransport
 
-        agents_cfg = self.cfg.get("agents", {})
+        # Auto-create operator agent if it doesn't exist
         default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        _ensure_operator_agent(default_model=default_model)
+
+        # Reload config after possible operator creation
+        self.cfg = _load_config()
+
+        agents_cfg = self.cfg.get("agents", {})
         embedding_model = self.cfg.get("llm", {}).get(
             "embedding_model", _default_embedding_model(default_model),
         )
@@ -289,14 +298,31 @@ class RuntimeContext:
         agent_projects = self.cfg.get("_agent_projects", {})
 
         # Respect plan limits on startup — only start up to max_agents.
-        # Prevents OOM on downsized servers after a plan downgrade.
+        # Operator does not count toward the plan limit.
         max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
-        if max_agents > 0 and len(agents_cfg) > max_agents:
-            logger.warning(
-                "Agent limit is %d but %d agents configured — only starting first %d",
-                max_agents, len(agents_cfg), max_agents,
-            )
-            agents_cfg = dict(list(agents_cfg.items())[:max_agents])
+        if max_agents > 0:
+            non_operator_count = len([a for a in agents_cfg if a != _OPERATOR_AGENT_ID])
+            if non_operator_count > max_agents:
+                logger.warning(
+                    "Agent limit is %d but %d non-operator agents configured — only starting first %d",
+                    max_agents, non_operator_count, max_agents,
+                )
+                # Keep operator + first max_agents non-operator agents
+                kept: dict = {}
+                non_op_added = 0
+                for aid, acfg in agents_cfg.items():
+                    if aid == _OPERATOR_AGENT_ID:
+                        kept[aid] = acfg
+                    elif non_op_added < max_agents:
+                        kept[aid] = acfg
+                        non_op_added += 1
+                agents_cfg = kept
+
+        # Start operator first so it's always available as the user's entry point
+        if _OPERATOR_AGENT_ID in agents_cfg:
+            ordered = {_OPERATOR_AGENT_ID: agents_cfg[_OPERATOR_AGENT_ID]}
+            ordered.update({k: v for k, v in agents_cfg.items() if k != _OPERATOR_AGENT_ID})
+            agents_cfg = ordered
 
         self.runtime.extra_env["EMBEDDING_MODEL"] = embedding_model
 
@@ -344,6 +370,10 @@ class RuntimeContext:
             initial_heartbeat = agent_cfg.get("initial_heartbeat", "")
             if initial_heartbeat:
                 self.runtime.extra_env["INITIAL_HEARTBEAT"] = initial_heartbeat
+
+            # For the operator, restrict tools via ALLOWED_TOOLS allowlist
+            if agent_id == _OPERATOR_AGENT_ID:
+                self.runtime.extra_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
 
             # Set project-specific env vars for this agent
             project_name = agent_projects.get(agent_id)
@@ -399,6 +429,7 @@ class RuntimeContext:
                 self.runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
                 self.runtime.extra_env.pop("PROJECT_MD_PATH", None)
                 self.runtime.extra_env.pop("PROJECT_NAME", None)
+                self.runtime.extra_env.pop("ALLOWED_TOOLS", None)
             self.router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
             if isinstance(self.transport, HttpTransport):
                 self.transport.register(agent_id, url)
