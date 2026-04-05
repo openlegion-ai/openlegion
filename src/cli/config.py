@@ -1421,7 +1421,21 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         return
 
     if has_operator:
-        return  # Already exists
+        # Ensure permissions are correct even for existing operator
+        # (handles upgrades where operator was created before permissions were set)
+        perms = _load_permissions()
+        op_perms = perms.get("permissions", {}).get(_OPERATOR_AGENT_ID, {})
+        needs_update = False
+        if not op_perms.get("allowed_apis"):
+            op_perms["allowed_apis"] = ["llm"]
+            needs_update = True
+        if "can_spawn" not in op_perms or not op_perms["can_spawn"]:
+            op_perms["can_spawn"] = True
+            needs_update = True
+        if needs_update:
+            perms.setdefault("permissions", {})[_OPERATOR_AGENT_ID] = op_perms
+            _save_permissions(perms)
+        return
 
     # Create new operator
     if not default_model:
