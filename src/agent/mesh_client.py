@@ -350,6 +350,28 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def create_custom_agent(
+        self, name: str, role: str, model: str = "",
+        instructions: str = "", soul: str = "",
+    ) -> dict:
+        """Request the mesh to create a new custom agent."""
+        client = await self._get_client()
+        body: dict[str, str] = {"name": name, "role": role}
+        if model:
+            body["model"] = model
+        if instructions:
+            body["instructions"] = instructions
+        if soul:
+            body["soul"] = soul
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/create",
+            json=body,
+            timeout=120,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def get_agent_history(self, agent_id: str) -> dict:
         """Read another agent's daily logs (permission-checked on server)."""
         response = await self._get_with_retry(
