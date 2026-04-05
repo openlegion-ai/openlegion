@@ -572,3 +572,35 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    # === Operator Config Management ===
+
+    async def get_agent_config(self, agent_id: str) -> dict:
+        """Read an agent's config from agents.yaml via the mesh."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/config",
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def propose_config_change(self, agent_id: str, field: str, value: object) -> dict:
+        """Create a pending config change for review. Returns change_id and diff preview."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/propose",
+            json={"field": field, "value": value},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def confirm_config_change(self, agent_id: str, change_id: str) -> dict:
+        """Apply a pending config change by change_id."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/config",
+            json={"change_id": change_id},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+

@@ -16,8 +16,10 @@ import hmac
 import json
 import re
 import time
+import uuid as _uuid
 from collections import defaultdict
 from collections.abc import Callable, Coroutine
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
@@ -72,6 +74,44 @@ if TYPE_CHECKING:
     from src.host.runtime import RuntimeBackend
     from src.host.traces import TraceStore
     from src.host.transport import Transport
+
+
+# ── Pending Config Change Store (in-memory) ──────────────────────
+
+_pending_changes: dict[str, dict] = {}
+_MAX_PENDING = 10
+_CHANGE_TTL_SECONDS = 300
+
+
+def _cleanup_expired_changes() -> None:
+    now = datetime.utcnow()
+    expired = [k for k, v in _pending_changes.items() if v["expires_at"] < now]
+    for k in expired:
+        del _pending_changes[k]
+
+
+def _store_pending_change(agent_id: str, field: str, old_value: object, new_value: object) -> str:
+    _cleanup_expired_changes()
+    if len(_pending_changes) >= _MAX_PENDING:
+        oldest = min(_pending_changes, key=lambda k: _pending_changes[k]["expires_at"])
+        del _pending_changes[oldest]
+    change_id = str(_uuid.uuid4())
+    _pending_changes[change_id] = {
+        "agent_id": agent_id, "field": field,
+        "old_value": old_value, "new_value": new_value,
+        "expires_at": datetime.utcnow() + timedelta(seconds=_CHANGE_TTL_SECONDS),
+    }
+    return change_id
+
+
+def _get_pending_change(change_id: str) -> dict | None:
+    _cleanup_expired_changes()
+    return _pending_changes.get(change_id)
+
+
+def _consume_pending_change(change_id: str) -> dict | None:
+    _cleanup_expired_changes()
+    return _pending_changes.pop(change_id, None)
 
 
 def create_mesh_app(
@@ -1594,6 +1634,145 @@ def create_mesh_app(
             "failure_rate": 0.0,
             "avg_task_duration_s": 0,
         }
+
+    # === Operator Config Endpoints ===
+
+    _VALID_CONFIG_FIELDS = {"instructions", "soul", "model", "role", "heartbeat", "thinking", "budget", "permissions"}
+    _CONFIG_FIELD_MAP = {
+        "instructions": "initial_instructions", "soul": "initial_soul",
+        "heartbeat": "initial_heartbeat", "model": "model", "role": "role",
+        "thinking": "thinking", "budget": "budget",
+    }
+
+    @app.get("/mesh/agents/{agent_id}/config")
+    async def get_agent_config(agent_id: str, request: Request) -> dict:
+        """Read agent config from agents.yaml."""
+        _require_any_auth(request)
+        from src.cli.config import _load_config
+        agent_cfg = _load_config()
+        agents = agent_cfg.get("agents", {})
+        if agent_id not in agents:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        return {"agent_id": agent_id, "config": agents[agent_id]}
+
+    @app.post("/mesh/agents/{agent_id}/propose")
+    async def propose_agent_config_change(agent_id: str, request: Request) -> dict:
+        """Create a pending config change for review."""
+        _require_any_auth(request)
+        data = await request.json()
+
+        field = data.get("field", "")
+        new_value = data.get("value")
+
+        if not field:
+            raise HTTPException(400, "field is required")
+        if field not in _VALID_CONFIG_FIELDS:
+            raise HTTPException(400, f"Invalid field: {field}. Must be one of: {_VALID_CONFIG_FIELDS}")
+
+        # Get current value
+        from src.cli.config import _load_config
+        agent_cfg = _load_config()
+        agents = agent_cfg.get("agents", {})
+        if agent_id not in agents:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+
+        if field == "permissions":
+            from src.cli.config import _load_permissions
+            perms = _load_permissions()
+            old_value = perms.get("permissions", {}).get(agent_id, {})
+        else:
+            yaml_key = _CONFIG_FIELD_MAP.get(field, field)
+            old_value = agents[agent_id].get(yaml_key, "")
+
+        change_id = _store_pending_change(agent_id, field, old_value, new_value)
+
+        # Generate preview diff
+        old_str = json.dumps(old_value, indent=2) if not isinstance(old_value, str) else old_value
+        new_str = json.dumps(new_value, indent=2) if not isinstance(new_value, str) else new_value
+
+        preview = f"--- {field} (current)\n+++ {field} (proposed)\n"
+        if old_str != new_str:
+            old_lines = old_str.splitlines()
+            new_lines = new_str.splitlines()
+            for line in old_lines:
+                if line not in new_lines:
+                    preview += f"- {line}\n"
+            for line in new_lines:
+                if line not in old_lines:
+                    preview += f"+ {line}\n"
+
+        return {
+            "change_id": change_id,
+            "preview_diff": preview,
+            "expires_at": _pending_changes[change_id]["expires_at"].isoformat(),
+        }
+
+    @app.post("/mesh/agents/{agent_id}/config")
+    async def update_agent_config(agent_id: str, request: Request) -> dict:
+        """Apply a pending config change. Used by confirm_edit tool."""
+        _require_any_auth(request)
+        data = await request.json()
+        change_id = data.get("change_id", "")
+
+        change = _consume_pending_change(change_id)
+        if not change:
+            raise HTTPException(404, "Change not found or expired")
+        if change["agent_id"] != agent_id:
+            raise HTTPException(400, "Agent ID mismatch")
+
+        from src.cli.config import AGENTS_FILE, _load_config
+        import yaml
+
+        # Read current config
+        agent_cfg = _load_config()
+        agents = agent_cfg.get("agents", {})
+        if agent_id not in agents:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+
+        field = change["field"]
+        old_value = change["old_value"]
+        new_value = change["new_value"]
+
+        # Apply change
+        if field == "permissions":
+            from src.cli.config import _load_permissions, _save_permissions
+            perms = _load_permissions()
+            if agent_id in perms.get("permissions", {}):
+                perms["permissions"][agent_id].update(new_value)
+                _save_permissions(perms)
+        else:
+            yaml_key = _CONFIG_FIELD_MAP.get(field, field)
+            agents[agent_id][yaml_key] = new_value
+            with open(AGENTS_FILE, "w") as f:
+                yaml.dump(agent_cfg, f, default_flow_style=False, sort_keys=False)
+
+        # Hot-reload: push to running agent's workspace
+        if transport and agent_id in router.agent_registry:
+            workspace_map = {
+                "instructions": "INSTRUCTIONS.md",
+                "soul": "SOUL.md",
+                "heartbeat": "HEARTBEAT.md",
+            }
+            ws_file = workspace_map.get(field)
+            if ws_file and isinstance(new_value, str):
+                try:
+                    await transport.request(
+                        agent_id, "PUT", f"/workspace/{ws_file}",
+                        json={"content": f"# {field.title()}\n\n{new_value}"},
+                        timeout=10,
+                    )
+                except Exception:
+                    pass  # Agent might not be running
+
+        # Log to audit trail
+        blackboard.log_audit(
+            action="edit_agent", target=agent_id, field=field,
+            before_value=json.dumps(old_value) if not isinstance(old_value, str) else old_value,
+            after_value=json.dumps(new_value) if not isinstance(new_value, str) else new_value,
+            change_id=change_id,
+        )
+
+        return {"success": True, "agent_id": agent_id, "field": field}
 
     # === Browser Service Proxy ===
 

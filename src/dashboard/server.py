@@ -2461,6 +2461,23 @@ def create_dashboard_router(
         )
         return {"events": events, "total": len(events)}
 
+    @api_router.get("/api/operator-audit")
+    async def api_operator_audit(request: Request) -> dict:
+        """Get operator audit log (config changes, agent edits)."""
+        page = int(request.query_params.get("page", "1"))
+        per_page = int(request.query_params.get("per_page", "20"))
+        agent_id = request.query_params.get("agent_id", "")
+        action = request.query_params.get("action", "")
+        since = request.query_params.get("since", "")
+
+        if blackboard is None:
+            return {"entries": [], "total": 0, "page": page, "per_page": per_page}
+
+        return blackboard.get_audit_log(
+            page=page, per_page=per_page,
+            agent_id=agent_id, action=action, since=since,
+        )
+
     # ── Queue status ─────────────────────────────────────────
 
     @api_router.get("/api/queues")
