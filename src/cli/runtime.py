@@ -278,10 +278,9 @@ class RuntimeContext:
                 logger.warning("Failed to start browser service: %s", e)
 
     def _start_agents(self) -> None:
+        from src.cli.config import _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS, _ensure_operator_agent
         from src.host.runtime import DockerBackend, SandboxBackend
         from src.host.transport import HttpTransport
-
-        from src.cli.config import _ensure_operator_agent, _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
 
         # Auto-create operator if it doesn't exist
         default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
