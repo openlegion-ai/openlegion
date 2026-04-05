@@ -34,6 +34,8 @@ from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.stealth")
 
+_PROXY_NOT_SET = object()
+
 # ── Proxy ──────────────────────────────────────────────────────────────────────
 
 
@@ -73,7 +75,7 @@ def get_proxy_config() -> dict | None:
 # ── Launch options ─────────────────────────────────────────────────────────────
 
 
-def build_launch_options(agent_id: str, profile_dir: str) -> dict:
+def build_launch_options(agent_id: str, profile_dir: str, proxy=_PROXY_NOT_SET) -> dict:
     """Build Camoufox AsyncNewBrowser kwargs for an agent.
 
     Environment variables (all optional):
@@ -84,7 +86,8 @@ def build_launch_options(agent_id: str, profile_dir: str) -> dict:
                            Useful when Camoufox's bundled Firefox is too old for
                            sites that enforce minimum browser versions (e.g. Shopify).
     """
-    proxy = get_proxy_config()
+    if proxy is _PROXY_NOT_SET:
+        proxy = get_proxy_config()  # legacy fallback for callers that don't pass proxy
 
     # ── OS fingerprint ────────────────────────────────────────────────────────
     # Default to Windows: it has ≈70 % desktop market share and produces the

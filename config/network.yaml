@@ -1,0 +1,2 @@
+# Network configuration — managed via dashboard or manual edit
+no_proxy: ""

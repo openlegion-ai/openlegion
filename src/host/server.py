@@ -94,6 +94,7 @@ def create_mesh_app(
     dispatch_loop: asyncio.AbstractEventLoop | None = None,
     wallet_service_ref: list | None = None,
     api_key_manager: ApiKeyManager | None = None,
+    cfg: dict | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
@@ -1461,6 +1462,97 @@ def create_mesh_app(
     import httpx as _httpx
     _browser_proxy_client = _httpx.AsyncClient(timeout=60)
 
+    _last_browser_boot_id: str | None = None
+
+    async def _push_browser_proxy(agent_id: str) -> None:
+        """Push proxy config for an agent to the browser service."""
+        if not container_manager:
+            return
+        svc_url = getattr(container_manager, "browser_service_url", None)
+        svc_token = getattr(container_manager, "browser_auth_token", "")
+        if not svc_url:
+            return
+
+        from src.cli.config import _load_config
+        from src.cli.proxy import parse_proxy_url, resolve_agent_proxy
+        _fresh_cfg = _load_config()
+        agents_cfg = _fresh_cfg.get("agents", {})
+        network_cfg = _fresh_cfg.get("network", {})
+        proxy_url = resolve_agent_proxy(agent_id, agents_cfg, network_cfg)
+
+        if proxy_url:
+            parsed = parse_proxy_url(proxy_url)
+            if parsed:
+                body = {
+                    "url": parsed["url"],
+                    "username": parsed["username"],
+                    "password": parsed["password"],
+                }
+            else:
+                body = {}  # explicit no-proxy (invalid URL fell through)
+        else:
+            body = {}  # explicit no-proxy (direct mode or no system proxy)
+
+        headers: dict = {"X-Mesh-Internal": "1"}
+        if svc_token:
+            headers["Authorization"] = f"Bearer {svc_token}"
+        try:
+            await _browser_proxy_client.put(
+                f"{svc_url}/browser/{agent_id}/proxy",
+                json=body,
+                headers=headers,
+            )
+        except Exception as e:
+            logger.warning("Failed to push proxy config for %s: %s", agent_id, e)
+
+    async def _check_browser_boot_id_changed() -> bool:
+        """Check if browser service restarted by comparing boot_id."""
+        nonlocal _last_browser_boot_id
+        if not container_manager:
+            return False
+        svc_url = getattr(container_manager, "browser_service_url", None)
+        svc_token = getattr(container_manager, "browser_auth_token", "")
+        if not svc_url:
+            return False
+        try:
+            headers: dict = {}
+            if svc_token:
+                headers["Authorization"] = f"Bearer {svc_token}"
+            resp = await _browser_proxy_client.get(
+                f"{svc_url}/browser/status", headers=headers,
+            )
+            data = resp.json()
+            boot_id = data.get("boot_id")
+            if _last_browser_boot_id is None:
+                _last_browser_boot_id = boot_id
+                return False
+            if boot_id != _last_browser_boot_id:
+                _last_browser_boot_id = boot_id
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def _deferred_push_browser_proxies() -> None:
+        """Push proxy config for all agents after a delay (non-blocking background task)."""
+        await asyncio.sleep(5)  # Wait for agents to register
+        if not container_manager:
+            return
+        svc_url = getattr(container_manager, "browser_service_url", None)
+        if not svc_url:
+            return
+        agents = list(router.agent_registry.keys())
+        if not agents:
+            return
+        for agent_id in agents:
+            await _push_browser_proxy(agent_id)
+        logger.info("Pushed browser proxy config for %d agents", len(agents))
+
+    @app.on_event("startup")
+    async def _schedule_initial_proxy_push() -> None:
+        """Schedule initial browser proxy push as a background task (non-blocking)."""
+        asyncio.create_task(_deferred_push_browser_proxies())
+
     _ALLOWED_BROWSER_ACTIONS = frozenset({
         "navigate", "snapshot", "click", "type", "hover",
         "screenshot", "reset", "focus", "status", "solve_captcha", "scroll",
@@ -1501,6 +1593,17 @@ def create_mesh_app(
                     _resolve_and_pin(nav_url)
                 except ValueError as e:
                     raise HTTPException(400, str(e))
+
+        # Check for browser service restart — re-push proxy config for ALL agents
+        try:
+            restarted = await _check_browser_boot_id_changed()
+            if restarted:
+                all_agents = list(router.agent_registry.keys())
+                logger.info("Browser service restarted, re-pushing proxy for %d agents", len(all_agents))
+                for _aid in all_agents:
+                    await _push_browser_proxy(_aid)
+        except Exception:
+            pass  # Non-blocking — don't fail the browser command
 
         # Proxy to browser service
         browser_service_url = None

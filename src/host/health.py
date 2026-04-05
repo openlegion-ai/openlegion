@@ -16,6 +16,8 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from src.cli.config import _load_config
+from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.shared.utils import setup_logging
 
 if TYPE_CHECKING:
@@ -214,17 +216,31 @@ class HealthMonitor:
 
         try:
             loop = asyncio.get_running_loop()
-            url = await loop.run_in_executor(
-                None,
-                lambda: self.runtime.start_agent(
-                    agent_id=agent_id,
-                    role=info.get("role", ""),
-                    skills_dir=info.get("skills_dir", ""),
-                    model=info.get("model", ""),
-                    mcp_servers=info.get("mcp_servers"),
-                    thinking=info.get("thinking", ""),
-                ),
+            # Load fresh config for proxy resolution
+            fresh_cfg = _load_config()
+            _agents_cfg = fresh_cfg.get("agents", {})
+            _network_cfg = fresh_cfg.get("network", {})
+            _proxy_url = resolve_agent_proxy(agent_id, _agents_cfg, _network_cfg)
+            _proxy_env = build_proxy_env_vars(
+                _proxy_url, _network_cfg.get("no_proxy", ""),
             )
+            self.runtime.extra_env.update(_proxy_env)
+            try:
+                url = await loop.run_in_executor(
+                    None,
+                    lambda: self.runtime.start_agent(
+                        agent_id=agent_id,
+                        role=info.get("role", ""),
+                        skills_dir=info.get("skills_dir", ""),
+                        model=info.get("model", ""),
+                        mcp_servers=info.get("mcp_servers"),
+                        thinking=info.get("thinking", ""),
+                    ),
+                )
+            finally:
+                self.runtime.extra_env.pop("HTTP_PROXY", None)
+                self.runtime.extra_env.pop("HTTPS_PROXY", None)
+                self.runtime.extra_env.pop("NO_PROXY", None)
 
             self.router.register_agent(agent_id, url)
             health.consecutive_failures = 0

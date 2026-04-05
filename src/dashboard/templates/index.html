@@ -1683,6 +1683,22 @@
                               </div>
                             </div>
                           </template>
+                        <!-- Proxy -->
+                        <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
+                          <div class="text-xs text-gray-500 mb-1 flex items-center gap-1">Proxy
+                            <span class="setting-hint setting-hint-sm" tabindex="0">?<span class="setting-hint-text">How this agent connects to the internet. "System proxy" inherits the fleet-wide proxy. "Custom" uses a per-agent proxy URL. "No proxy" connects directly.</span></span>
+                          </div>
+                          <div class="flex items-center gap-3">
+                            <span class="text-sm font-mono"
+                              :class="{
+                                'text-gray-400': (agentConfigs[selectedAgent]?.proxy?.mode || 'inherit') === 'inherit',
+                                'text-indigo-400': (agentConfigs[selectedAgent]?.proxy?.mode) === 'custom',
+                                'text-amber-400': (agentConfigs[selectedAgent]?.proxy?.mode) === 'direct',
+                              }"
+                              x-text="proxyModeLabel(agentConfigs[selectedAgent]?.proxy?.mode || 'inherit')"></span>
+                            <span x-show="agentConfigs[selectedAgent]?.proxy?.url" class="text-xs text-gray-500 font-mono" x-text="agentConfigs[selectedAgent]?.proxy?.url"></span>
+                            <span x-show="agentConfigs[selectedAgent]?.proxy?.has_credential" class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/30 text-emerald-400 border border-emerald-800/50">authenticated</span>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -1936,6 +1952,50 @@
                           </button>
                           <button @click="cancelConfigEdit()" :disabled="configSaving"
                             class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors disabled:opacity-50">Cancel</button>
+                        </div>
+                      </div>
+                    </div>
+                    <!-- ── Proxy sub-section (always visible, separate from main config save) ── -->
+                    <div x-show="agentConfigs[selectedAgent]" class="mt-4 pt-4 border-t border-gray-800">
+                      <div class="flex items-center gap-2 mb-3">
+                        <svg class="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                        <span class="text-xs font-medium text-gray-400">Proxy</span>
+                        <span class="setting-hint setting-hint-sm" tabindex="0">?<span class="setting-hint-text">Configure how this agent routes HTTP and browser traffic. Changes require an agent restart to take effect.</span></span>
+                      </div>
+                      <div class="space-y-3">
+                        <div>
+                          <label class="text-xs text-gray-500 mb-1 block">Mode</label>
+                          <select x-model="agentProxyForm.mode" class="dash-select w-full">
+                            <option value="inherit">Use system proxy</option>
+                            <option value="custom">Custom proxy</option>
+                            <option value="direct">No proxy (direct)</option>
+                          </select>
+                        </div>
+                        <template x-if="agentProxyForm.mode === 'custom'">
+                          <div class="space-y-3">
+                            <div>
+                              <label class="text-xs text-gray-500 mb-1 block">Proxy URL</label>
+                              <input type="text" x-model="agentProxyForm.url" class="dash-input w-full" placeholder="socks5://proxy:1080 or http://proxy:8080">
+                            </div>
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
+                              <div>
+                                <label class="text-xs text-gray-500 mb-1 block">Username <span class="text-gray-600">(optional)</span></label>
+                                <input type="text" x-model="agentProxyForm.username" class="dash-input w-full" autocomplete="off">
+                              </div>
+                              <div>
+                                <label class="text-xs text-gray-500 mb-1 block">Password <span class="text-gray-600">(optional)</span></label>
+                                <input type="password" x-model="agentProxyForm.password" class="dash-input w-full" autocomplete="off">
+                              </div>
+                            </div>
+                          </div>
+                        </template>
+                        <div class="flex items-center gap-2">
+                          <button @click="saveAgentProxy(selectedAgent)"
+                            :disabled="agentProxySaving || (agentProxyForm.mode === 'custom' && !agentProxyForm.url)"
+                            class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
+                            <span x-text="agentProxySaving ? 'Saving...' : 'Save Proxy'"></span>
+                          </button>
+                          <span x-show="agentProxySaved" x-transition class="text-xs text-emerald-400">Saved — restart required</span>
                         </div>
                       </div>
                     </div>
@@ -3249,6 +3309,159 @@
           </div>
 
         </div><!-- /wallet sub-tab -->
+
+        <!-- ═══ NETWORK / PROXY SUB-TAB ═══ -->
+        <div x-show="systemTab === 'network'" class="space-y-4">
+
+          <!-- Loading -->
+          <div x-show="networkProxy.loading" class="py-8 text-center text-gray-600 text-sm">
+            <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+            Loading proxy configuration...
+          </div>
+
+          <!-- ── System Proxy card ── -->
+          <div x-show="!networkProxy.loading" class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex items-center gap-2 mb-4">
+              <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <h3 class="text-sm font-medium text-gray-200">System Proxy</h3>
+              <span class="text-[10px] text-amber-500/70 ml-auto">restart required after changes</span>
+            </div>
+
+            <!-- Managed proxy (read-only) -->
+            <div x-show="networkProxy.system_proxy.managed" class="space-y-3">
+              <div class="flex items-center gap-2">
+                <span class="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/50">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                  Managed by OpenLegion
+                </span>
+              </div>
+              <div class="bg-gray-800/50 rounded p-3">
+                <div class="text-xs text-gray-500 mb-1">Proxy URL</div>
+                <div class="text-sm text-gray-300 font-mono" x-text="networkProxy.system_proxy.url || '(hidden)'"></div>
+              </div>
+              <p class="text-[10px] text-gray-600">This proxy is provisioned and managed by OpenLegion. Configuration changes are not available.</p>
+            </div>
+
+            <!-- Self-hosted proxy (editable form) -->
+            <div x-show="!networkProxy.system_proxy.managed && networkProxy.system_proxy.configured" class="space-y-3">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-emerald-900/30 text-emerald-400 border border-emerald-800/50">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                  Configured
+                </span>
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 mb-1 block">Proxy URL</label>
+                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="socks5://proxy.example.com:1080">
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
+                <div>
+                  <label class="text-xs text-gray-400 mb-1 block">Username <span class="text-gray-600">(optional)</span></label>
+                  <input type="text" x-model="networkProxy.form.username" class="dash-input w-full" placeholder="Leave blank to keep existing" autocomplete="off">
+                </div>
+                <div>
+                  <label class="text-xs text-gray-400 mb-1 block">Password <span class="text-gray-600">(optional)</span></label>
+                  <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" placeholder="Leave blank to keep existing" autocomplete="off">
+                </div>
+              </div>
+              <div class="flex items-center gap-2 pt-1">
+                <button @click="saveSystemProxy()" :disabled="networkProxy.saving"
+                  class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
+                  <span x-text="networkProxy.saving ? 'Saving...' : 'Save'"></span>
+                </button>
+                <button @click="removeSystemProxy()" :disabled="networkProxy.removingSystemProxy"
+                  class="text-xs px-3 py-1.5 rounded bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-800/30 disabled:opacity-50 transition-colors">
+                  <span x-text="networkProxy.removingSystemProxy ? 'Removing...' : 'Remove Proxy'"></span>
+                </button>
+                <span x-show="networkProxy.saved" x-transition class="text-xs text-emerald-400 ml-2">Saved</span>
+              </div>
+            </div>
+
+            <!-- No proxy configured -->
+            <div x-show="!networkProxy.system_proxy.managed && !networkProxy.system_proxy.configured" class="space-y-3">
+              <div class="bg-gray-800/30 rounded-lg p-4 border border-dashed border-gray-700">
+                <p class="text-xs text-gray-400 leading-relaxed">No proxy configured. Agents use the server's IP address directly. For browser automation against sites with anti-bot protection, add a residential proxy.</p>
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 mb-1 block">Proxy URL</label>
+                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="socks5://proxy.example.com:1080 or http://proxy:8080">
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
+                <div>
+                  <label class="text-xs text-gray-400 mb-1 block">Username <span class="text-gray-600">(optional)</span></label>
+                  <input type="text" x-model="networkProxy.form.username" class="dash-input w-full" autocomplete="off">
+                </div>
+                <div>
+                  <label class="text-xs text-gray-400 mb-1 block">Password <span class="text-gray-600">(optional)</span></label>
+                  <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" autocomplete="off">
+                </div>
+              </div>
+              <button @click="saveSystemProxy()" :disabled="networkProxy.saving || !networkProxy.form.url"
+                class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
+                <span x-text="networkProxy.saving ? 'Saving...' : 'Add Proxy'"></span>
+              </button>
+            </div>
+          </div>
+
+          <!-- ── NO_PROXY ── -->
+          <div x-show="!networkProxy.loading" class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex items-center gap-2 mb-3">
+              <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg>
+              <h3 class="text-sm font-medium text-gray-200">Proxy Bypass (NO_PROXY)</h3>
+              <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Comma-separated list of domains or IPs that should bypass the proxy and connect directly. Applied to all agents regardless of their proxy mode.</span></span>
+            </div>
+            <div class="space-y-2">
+              <input type="text" x-model="networkProxy.no_proxy" class="dash-input w-full"
+                placeholder="localhost,127.0.0.1,.internal.example.com">
+              <div class="flex items-center gap-2">
+                <button @click="saveNoProxy()" :disabled="networkProxy.saving"
+                  class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
+                  <span x-text="networkProxy.saving ? 'Saving...' : 'Save'"></span>
+                </button>
+                <span class="text-[10px] text-gray-600">Example: localhost, 127.0.0.1, .example.com</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Agent Proxy Summary ── -->
+          <div x-show="!networkProxy.loading && networkProxy.agents.length > 0" class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex items-center gap-2 mb-3">
+              <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+              <h3 class="text-sm font-medium text-gray-200">Per-Agent Proxy</h3>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-xs">
+                <thead>
+                  <tr class="text-gray-500 border-b border-gray-800">
+                    <th class="text-left py-2 pr-4 font-medium">Agent</th>
+                    <th class="text-left py-2 pr-4 font-medium">Mode</th>
+                    <th class="text-left py-2 font-medium">Proxy URL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="ap in networkProxy.agents" :key="ap.agent_id">
+                    <tr class="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors">
+                      <td class="py-2 pr-4">
+                        <button @click="switchTab('fleet'); drillDown(ap.agent_id)" class="text-indigo-400 hover:text-indigo-300 transition-colors font-mono" x-text="ap.agent_id"></button>
+                      </td>
+                      <td class="py-2 pr-4">
+                        <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium"
+                          :class="{
+                            'bg-gray-700 text-gray-300': ap.mode === 'inherit',
+                            'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50': ap.mode === 'custom',
+                            'bg-amber-900/30 text-amber-400 border border-amber-800/50': ap.mode === 'direct',
+                          }"
+                          x-text="proxyModeLabel(ap.mode)"></span>
+                      </td>
+                      <td class="py-2 font-mono text-gray-400" x-text="ap.proxy_url || '-'"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div><!-- /network sub-tab -->
 
         <!-- ═══ STORAGE SUB-TAB ═══ -->
         <div x-show="systemTab === 'storage'" x-init="if (systemTab === 'storage') { fetchUploads(); fetchStorage(); fetchDatabaseDetails(); }">

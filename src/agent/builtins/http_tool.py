@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
 import socket
 from urllib.parse import urlparse, urlunparse
 
@@ -37,10 +38,14 @@ async def _get_client() -> httpx.AsyncClient:
         return _client
     async with _client_lock:
         if _client is None or _client.is_closed:
-            _client = httpx.AsyncClient(
-                follow_redirects=False,
-                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-            )
+            proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+            kwargs = {
+                "follow_redirects": False,
+                "limits": httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            }
+            if proxy_url:
+                kwargs["proxy"] = proxy_url
+            _client = httpx.AsyncClient(**kwargs)
         return _client
 
 
@@ -86,6 +91,43 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         if teredo_client in _CGNAT_NETWORK:
             return True
     return False
+
+
+def _preflight_check_target(url: str) -> bool:
+    """Pre-flight SSRF check for proxied requests.
+
+    Resolves the target hostname and validates all IPs against the blocklist.
+    Used when a proxy is configured (DNS pinning is skipped, but we still
+    block requests to private/internal addresses).
+    Returns True if target is safe, False if blocked.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    hostname = parsed.hostname
+    if not hostname:
+        return False
+
+    # Check if hostname is an IP literal
+    try:
+        ip = ipaddress.ip_address(hostname)
+        return not _is_blocked_ip(ip)
+    except ValueError:
+        pass  # Not an IP literal, resolve DNS
+
+    try:
+        results = socket.getaddrinfo(hostname, parsed.port or 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except (socket.gaierror, OSError):
+        return False  # Fail-closed
+
+    if not results:
+        return False
+
+    for _family, _, _, _, sockaddr in results:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if _is_blocked_ip(ip):
+            return False
+    return True
 
 
 def _resolve_and_pin(url: str) -> tuple[str, str, str]:
@@ -358,14 +400,80 @@ async def http_request(
             all_secrets.extend(body_secrets)
 
         client = await _get_client()
-        response = await _request_with_pinned_dns(
-            client,
-            method=method.upper(),
-            url=resolved_url,
-            headers=resolved_headers,
-            content=resolved_body if resolved_body else None,
-            timeout=timeout,
-        )
+        _is_proxied = bool(os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY"))
+
+        if _is_proxied:
+            # Pre-flight SSRF check on target
+            loop = asyncio.get_running_loop()
+            is_safe = await loop.run_in_executor(None, _preflight_check_target, resolved_url)
+            if not is_safe:
+                error_msg = "SSRF protection: requests to private/internal addresses are blocked"
+                if all_secrets:
+                    error_msg = _redact(error_msg, all_secrets)
+                return {"error": error_msg, "status_code": 0}
+
+            # Send through proxy (httpx handles proxy routing)
+            response = await client.request(
+                method=method.upper(),
+                url=resolved_url,
+                headers=resolved_headers,
+                content=resolved_body if resolved_body else None,
+                timeout=timeout,
+            )
+
+            # Manual redirect following for proxied path
+            original_parsed = urlparse(resolved_url)
+            original_origin = (original_parsed.scheme, original_parsed.hostname, original_parsed.port)
+
+            for _ in range(_MAX_REDIRECTS):
+                if response.status_code not in (301, 302, 303, 307, 308):
+                    break
+                location = response.headers.get("location")
+                if not location:
+                    break
+                redirect_url = str(httpx.URL(resolved_url).join(location))
+
+                # SSRF check on redirect target
+                is_safe = await loop.run_in_executor(None, _preflight_check_target, redirect_url)
+                if not is_safe:
+                    error_msg = "SSRF protection: redirect to private/internal address blocked"
+                    if all_secrets:
+                        error_msg = _redact(error_msg, all_secrets)
+                    return {"error": error_msg, "status_code": 0}
+
+                # For 303, always GET; for 301/302, GET; for 307/308, preserve method
+                if response.status_code in (301, 302, 303):
+                    method = "GET"
+                    resolved_body = None
+
+                # Strip Authorization on cross-origin redirects
+                redirect_parsed = urlparse(redirect_url)
+                redirect_origin = (redirect_parsed.scheme, redirect_parsed.hostname, redirect_parsed.port)
+                if redirect_origin != original_origin:
+                    resolved_headers = {k: v for k, v in resolved_headers.items() if k.lower() != "authorization"}
+
+                resolved_url = redirect_url
+                response = await client.request(
+                    method=method.upper(),
+                    url=resolved_url,
+                    headers=resolved_headers,
+                    content=resolved_body if resolved_body else None,
+                    timeout=timeout,
+                )
+            else:
+                # Exhausted redirect budget — check if final response is still a redirect
+                if response.status_code in (301, 302, 303, 307, 308):
+                    return {"error": f"SSRF protection: exceeded {_MAX_REDIRECTS} redirects", "status_code": 0}
+        else:
+            # Existing DNS pinning path (unchanged)
+            response = await _request_with_pinned_dns(
+                client,
+                method=method.upper(),
+                url=resolved_url,
+                headers=resolved_headers,
+                content=resolved_body if resolved_body else None,
+                timeout=timeout,
+            )
 
         resp_body = response.text[:_MAX_BODY]
         truncated = len(response.text) > _MAX_BODY

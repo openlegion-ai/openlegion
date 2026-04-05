@@ -963,6 +963,43 @@ class TestHttpTool:
                 _resolve_and_pin("http://nonexistent.invalid/path")
 
 
+class TestHttpToolProxyAware:
+    """Test that HTTP tool correctly handles proxy configuration."""
+
+    def test_preflight_blocks_private_ips(self):
+        """Even with proxy, requests to private IPs should be blocked."""
+        from src.agent.builtins.http_tool import _preflight_check_target
+
+        # Private targets blocked
+        assert _preflight_check_target("http://169.254.169.254/metadata") is False
+        assert _preflight_check_target("http://10.0.0.1:8080/internal") is False
+        assert _preflight_check_target("http://127.0.0.1:9000/admin") is False
+        assert _preflight_check_target("http://192.168.1.1/router") is False
+
+    def test_preflight_allows_public_ips(self):
+        from src.agent.builtins.http_tool import _preflight_check_target
+
+        # Public targets allowed (use well-known public IPs)
+        assert _preflight_check_target("http://93.184.216.34:80/") is True  # example.com
+
+    def test_preflight_blocks_bad_schemes(self):
+        from src.agent.builtins.http_tool import _preflight_check_target
+
+        assert _preflight_check_target("ftp://example.com:21") is False
+        assert _preflight_check_target("") is False
+
+    def test_is_blocked_ip_unchanged(self):
+        """Verify _is_blocked_ip still works correctly."""
+        import ipaddress
+
+        from src.agent.builtins.http_tool import _is_blocked_ip
+
+        assert _is_blocked_ip(ipaddress.ip_address("169.254.169.254")) is True
+        assert _is_blocked_ip(ipaddress.ip_address("10.0.0.1")) is True
+        assert _is_blocked_ip(ipaddress.ip_address("127.0.0.1")) is True
+        assert _is_blocked_ip(ipaddress.ip_address("93.184.216.34")) is False
+
+
 # ── browser_tool (thin HTTP client via mesh) ─────────────────
 
 
