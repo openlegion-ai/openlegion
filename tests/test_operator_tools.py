@@ -1,5 +1,6 @@
 """Tests for operator tools: propose_edit, confirm_edit, observations, history, create, projects."""
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 

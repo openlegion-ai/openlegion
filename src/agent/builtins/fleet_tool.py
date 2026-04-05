@@ -6,6 +6,10 @@ import os
 
 from src.agent.skills import skill
 
+def _is_operator() -> bool:
+    """Defence-in-depth: only the operator agent has ALLOWED_TOOLS set."""
+    return os.environ.get("ALLOWED_TOOLS", "") != ""
+
 
 def _is_operator() -> bool:
     """Defence-in-depth: only the operator agent has ALLOWED_TOOLS set."""

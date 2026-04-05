@@ -47,6 +47,7 @@ def _last_message_is_user_origin(messages: list[dict]) -> bool:
     return False
 
 
+
 # Status codes that indicate transient server-side errors worth retrying
 _RETRYABLE_STATUS_CODES = {429, 502, 503}
 _MAX_RETRIES = 3
