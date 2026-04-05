@@ -734,6 +734,28 @@ def create_dashboard_router(
                 cfg_result["wallet_addresses"] = None
         else:
             cfg_result["wallet_addresses"] = None
+        # Proxy configuration
+        proxy_cfg = agent_cfg.get("proxy", {})
+        proxy_mode = proxy_cfg.get("mode", "inherit")
+        proxy_info: dict = {"mode": proxy_mode}
+        if proxy_mode == "custom":
+            cred = proxy_cfg.get("credential", "")
+            raw = os.environ.get(f"OPENLEGION_CRED_{cred}", "")
+            if raw:
+                from urllib.parse import urlparse, urlunparse
+                try:
+                    p = urlparse(raw)
+                    masked = f"{p.scheme}://{p.hostname}:{p.port}" if p.port else raw
+                    if p.username:
+                        masked = f"{p.scheme}://{p.username[:2]}***@{p.hostname}:{p.port}"
+                except Exception:
+                    masked = "***"
+                proxy_info["url"] = masked
+            else:
+                proxy_info["url"] = ""
+            proxy_info["has_credential"] = bool(raw)
+        cfg_result["proxy"] = proxy_info
+
         vnc_url = _browser_vnc_url_for_request(request)
         if vnc_url:
             cfg_result["vnc_url"] = vnc_url
@@ -890,6 +912,64 @@ def create_dashboard_router(
         from src.cli.config import _update_agent_field
         _update_agent_field(agent_id, "budget", {"daily_usd": daily_usd, "monthly_usd": monthly_usd})
         return {"updated": True, "agent": agent_id, "daily_usd": daily_usd, "monthly_usd": monthly_usd}
+
+    @api_router.put("/api/agents/{agent_id}/proxy")
+    async def api_put_agent_proxy(agent_id: str, request: Request) -> dict:
+        """Set per-agent proxy config. Works for stopped agents."""
+        import re
+        from urllib.parse import quote, urlparse, urlunparse
+
+        from src.cli.config import _load_config, _update_agent_field
+        from src.host.credentials import _persist_to_env, _remove_from_env
+
+        cfg = _load_config()
+        agents_cfg = cfg.get("agents", {})
+        if agent_id not in agents_cfg:
+            raise HTTPException(404, "Agent not found in config")
+
+        body = await request.json()
+        mode = body.get("mode", "inherit")
+        if mode not in ("inherit", "custom", "direct"):
+            raise HTTPException(400, f"Invalid proxy mode: {mode}")
+
+        proxy_yaml: dict = {"mode": mode}
+        safe_id = re.sub(r"[^A-Za-z0-9_]", "_", agent_id)
+
+        if mode == "custom":
+            url = body.get("url", "")
+            username = body.get("username", "")
+            password = body.get("password", "")
+            # Assemble full URL with credentials
+            if username:
+                parsed = urlparse(url)
+                user_part = quote(username, safe="")
+                if password:
+                    user_part += ":" + quote(password, safe="")
+                netloc = f"{user_part}@{parsed.hostname}:{parsed.port}"
+                full_url = urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+            else:
+                full_url = url
+            # Validate
+            parsed = urlparse(full_url)
+            if parsed.scheme not in ("http", "https", "socks5") or not parsed.hostname or not parsed.port:
+                raise HTTPException(400, "Invalid proxy URL")
+
+            cred_name = f"agent_{safe_id}_proxy"
+            env_key = f"OPENLEGION_CRED_{cred_name}"
+            _persist_to_env(env_key, full_url)
+            os.environ[env_key] = full_url
+            proxy_yaml["credential"] = cred_name
+        elif mode in ("inherit", "direct"):
+            # Clean up any existing custom credential
+            old_proxy = agents_cfg.get(agent_id, {}).get("proxy", {})
+            old_cred = old_proxy.get("credential", "")
+            if old_cred:
+                env_key = f"OPENLEGION_CRED_{old_cred}"
+                _remove_from_env(env_key)
+                os.environ.pop(env_key, None)
+
+        _update_agent_field(agent_id, "proxy", proxy_yaml)
+        return {"updated": ["proxy"], "restart_required": True}
 
     @api_router.get("/api/agents/{agent_id}/permissions")
     async def api_agent_permissions(agent_id: str) -> dict:
