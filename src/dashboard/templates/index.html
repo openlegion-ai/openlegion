@@ -521,7 +521,7 @@
                 </div>
                 <div style="display:flex; gap:4px; margin-top:6px;">
                   <button class="context-agent-btn" @click="openChat(agent.id)">Chat</button>
-                  <button class="context-agent-btn" @click="drillDown(agent.id)">View</button>
+                  <button class="context-agent-btn" @click="activeTab = 'fleet'; drillDown(agent.id)">View</button>
                 </div>
               </div>
             </template>

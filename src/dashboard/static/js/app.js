@@ -697,11 +697,13 @@ function dashboard() {
     },
 
     get filteredAgents() {
+      // Hide the operator system agent from the fleet view — it's managed via the Chat tab
       if (this.activeProject) {
-        return this.agents.filter(a => a.project === this.activeProject);
+        return this.agents.filter(a => a.id !== 'operator' && a.project === this.activeProject);
       }
       // When projects exist, show only standalone (unassigned) agents
-      return this.projects.length > 0 ? this.unassignedAgents : this.agents;
+      const base = this.projects.length > 0 ? this.unassignedAgents : this.agents;
+      return base.filter(a => a.id !== 'operator');
     },
 
     get filteredFleetCost() {
@@ -5042,6 +5044,7 @@ function dashboard() {
 
     drillDown(agentId) {
       this._detailReturnProject = this.activeProject;
+      this.activeTab = 'fleet';
       this.selectedAgent = agentId;
       this.detailAgent = agentId;
       this.showBrowserViewer = false;
