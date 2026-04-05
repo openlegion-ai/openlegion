@@ -185,6 +185,7 @@ class AgentLoop:
         mesh_client: MeshClient,
         workspace: WorkspaceManager | None = None,
         context_manager: ContextManager | None = None,
+        allowed_tools: frozenset[str] | None = None,
     ):
         # Override class defaults from env vars (set by dashboard system settings)
         def _clamp_env(name: str, default: int, lo: int, hi: int) -> int:
@@ -231,11 +232,33 @@ class AgentLoop:
         self._loop_detector = ToolLoopDetector(
             exempt_tools=skills.get_loop_exempt_tools(),
         )
-        # Standalone agents have no project blackboard — hide those tools
-        self._excluded_tools: frozenset[str] | None = (
-            _BLACKBOARD_TOOLS if mesh_client.is_standalone else None
-        )
+        # When an explicit allowlist is provided (e.g. operator agent),
+        # only those tools are exposed and exclude is ignored.
+        if allowed_tools:
+            self._allowed_tools: frozenset[str] | None = allowed_tools
+            self._excluded_tools: frozenset[str] | None = None
+        else:
+            self._allowed_tools = None
+            # Standalone agents have no project blackboard — hide those tools
+            self._excluded_tools: frozenset[str] | None = (
+                _BLACKBOARD_TOOLS if mesh_client.is_standalone else None
+            )
         self._skills_reloaded: bool = False
+
+    @property
+    def _skill_filter_kw(self) -> dict:
+        """Build kwargs dict for SkillRegistry filter methods.
+
+        Returns ``{"exclude": ..., "allowed": ...}`` only including keys whose
+        values are not None, so callers that don't yet accept ``allowed`` (e.g.
+        mocks in older tests) keep working.
+        """
+        kw: dict = {}
+        if self._excluded_tools is not None:
+            kw["exclude"] = self._excluded_tools
+        if self._allowed_tools is not None:
+            kw["allowed"] = self._allowed_tools
+        return kw
 
     async def _fetch_fleet_roster(self) -> list[dict]:
         """Fetch and cache the fleet roster from the mesh (TTL: 10 min)."""
@@ -514,7 +537,7 @@ class AgentLoop:
                     if warning:
                         effective_system = system_prompt + f"\n\n## {warning}"
 
-                available_tools = self.skills.get_tool_definitions(exclude=self._excluded_tools) or None
+                available_tools = self.skills.get_tool_definitions(**self._skill_filter_kw) or None
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat,
                     system=effective_system,
@@ -1144,7 +1167,7 @@ class AgentLoop:
                 iter_tools = (
                     None if _remaining == 1
                     else self.skills.get_tool_definitions(
-                        exclude=self._excluded_tools,
+                        **self._skill_filter_kw,
                     ) or None
                 )
 
@@ -1859,7 +1882,7 @@ class AgentLoop:
                     self.llm.chat,
                     system=system,
                     messages=self._chat_messages,
-                    tools=self.skills.get_tool_definitions(exclude=self._excluded_tools) or None,
+                    tools=self.skills.get_tool_definitions(**self._skill_filter_kw) or None,
                 )
                 total_tokens += llm_response.tokens_used
 
@@ -2111,7 +2134,10 @@ class AgentLoop:
 
         has_browser = (
             "browser_navigate" in self.skills.skills
-            and (not self._excluded_tools or "browser_navigate" not in self._excluded_tools)
+            and (
+                (self._allowed_tools is not None and "browser_navigate" in self._allowed_tools)
+                or (self._allowed_tools is None and (not self._excluded_tools or "browser_navigate" not in self._excluded_tools))
+            )
         )
 
         is_standalone = self.mesh_client.is_standalone
@@ -2197,7 +2223,7 @@ class AgentLoop:
             role=self.role,
             state=self.state,
             current_task=self.current_task,
-            capabilities=self.skills.list_skills(exclude=self._excluded_tools),
+            capabilities=self.skills.list_skills(**self._skill_filter_kw),
             uptime_seconds=time.time() - self._start_time,
             tasks_completed=self.tasks_completed,
             tasks_failed=self.tasks_failed,
@@ -2274,7 +2300,7 @@ class AgentLoop:
                 llm_response = None
                 used_streaming = False
                 any_text_streamed = False
-                tools = self.skills.get_tool_definitions(exclude=self._excluded_tools) or None
+                tools = self.skills.get_tool_definitions(**self._skill_filter_kw) or None
                 try:
                     async for event in self.llm.chat_stream(
                         system=system, messages=self._chat_messages, tools=tools,

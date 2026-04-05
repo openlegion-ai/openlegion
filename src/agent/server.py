@@ -127,12 +127,13 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         dashboard accurately reflects what the agent can actually use.
         """
         exc = loop._excluded_tools
+        alw = loop._allowed_tools if isinstance(loop._allowed_tools, frozenset) else None
         return {
             "agent_id": loop.agent_id,
             "role": loop.role,
-            "skills": loop.skills.list_skills(exclude=exc),
-            "tool_definitions": loop.skills.get_tool_definitions(exclude=exc),
-            "tool_sources": loop.skills.get_tool_sources(exclude=exc),
+            "skills": loop.skills.list_skills(exclude=exc, allowed=alw),
+            "tool_definitions": loop.skills.get_tool_definitions(exclude=exc, allowed=alw),
+            "tool_sources": loop.skills.get_tool_sources(exclude=exc, allowed=alw),
         }
 
     @app.post("/invoke")
@@ -153,8 +154,11 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             raise HTTPException(400, "tool name is required")
         if not isinstance(params, dict):
             raise HTTPException(400, "params must be a JSON object")
+        allowed = loop._allowed_tools if isinstance(loop._allowed_tools, frozenset) else None
         excluded = loop._excluded_tools or frozenset()
-        if name in excluded:
+        if allowed is not None and name not in allowed:
+            raise HTTPException(403, f"Tool '{name}' is not available to this agent")
+        elif allowed is None and name in excluded:
             raise HTTPException(403, f"Tool '{name}' is not available to this agent")
 
         try:
