@@ -173,7 +173,7 @@ class TestOperatorConstants:
         assert len(_OPERATOR_INSTRUCTIONS) > 100
         assert len(_OPERATOR_SOUL) > 50
         assert len(_OPERATOR_HEARTBEAT) > 100
-        assert "FIRST RUN" in _OPERATOR_INSTRUCTIONS
+        assert "Building Teams" in _OPERATOR_INSTRUCTIONS
 
     def test_allowed_tools_populated(self):
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS, _OPERATOR_HEARTBEAT_TOOLS
@@ -188,8 +188,8 @@ class TestOperatorConstants:
 
     def test_soul_has_key_traits(self):
         from src.cli.config import _OPERATOR_SOUL
-        assert "fleet architect" in _OPERATOR_SOUL
-        assert "security-conscious" in _OPERATOR_SOUL
+        assert "proactive" in _OPERATOR_SOUL
+        assert "action" in _OPERATOR_SOUL
         assert "confirmation" in _OPERATOR_SOUL
 
     def test_heartbeat_has_steps(self):
@@ -198,28 +198,25 @@ class TestOperatorConstants:
         assert "save_observations" in _OPERATOR_HEARTBEAT
         assert "notify_user" in _OPERATOR_HEARTBEAT
 
-    def test_instructions_has_decision_tree(self):
+    def test_instructions_has_core_sections(self):
         from src.cli.config import _OPERATOR_INSTRUCTIONS
-        assert "BUILD REQUEST" in _OPERATOR_INSTRUCTIONS
-        assert "EDIT REQUEST" in _OPERATOR_INSTRUCTIONS
-        assert "WORK REQUEST" in _OPERATOR_INSTRUCTIONS
-        assert "STATUS REQUEST" in _OPERATOR_INSTRUCTIONS
-        assert "PROJECT REQUEST" in _OPERATOR_INSTRUCTIONS
+        assert "Building Teams" in _OPERATOR_INSTRUCTIONS
+        assert "Editing Agents" in _OPERATOR_INSTRUCTIONS
+        assert "Routing Work" in _OPERATOR_INSTRUCTIONS
+        assert "Plan Limits" in _OPERATOR_INSTRUCTIONS
+        assert "Projects" in _OPERATOR_INSTRUCTIONS
 
     def test_instructions_has_propose_edit(self):
         from src.cli.config import _OPERATOR_INSTRUCTIONS
         assert "propose_edit" in _OPERATOR_INSTRUCTIONS
         assert "confirm_edit" in _OPERATOR_INSTRUCTIONS
-        assert "SHOW" in _OPERATOR_INSTRUCTIONS
-        assert "PROPOSE" in _OPERATOR_INSTRUCTIONS
-        assert "CONFIRM" in _OPERATOR_INSTRUCTIONS
-        assert "APPLY" in _OPERATOR_INSTRUCTIONS
+        assert "get_agent_profile" in _OPERATOR_INSTRUCTIONS
 
     def test_instructions_has_plan_tiers(self):
         from src.cli.config import _OPERATOR_INSTRUCTIONS
-        assert "Basic Plan" in _OPERATOR_INSTRUCTIONS
-        assert "Growth Plan" in _OPERATOR_INSTRUCTIONS
-        assert "Pro Plan" in _OPERATOR_INSTRUCTIONS
+        assert "Basic" in _OPERATOR_INSTRUCTIONS
+        assert "Growth" in _OPERATOR_INSTRUCTIONS
+        assert "Pro" in _OPERATOR_INSTRUCTIONS
         assert "Self-hosted" in _OPERATOR_INSTRUCTIONS
 
 
