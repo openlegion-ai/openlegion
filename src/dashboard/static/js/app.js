@@ -285,7 +285,7 @@ function dashboard() {
       { id: 'wallet', label: 'Wallet' },
       { id: 'network', label: 'Network' },
       { id: 'storage', label: 'Storage' },
-      { id: 'audit', label: 'Audit' },
+      { id: 'operator', label: 'Operator' },
       { id: 'settings', label: 'Settings' },
     ],
 
@@ -519,7 +519,7 @@ function dashboard() {
         // Backward compat for old URLs
         const _tabAliases = { schedules: 'automation', connections: 'integrations', uploads: 'storage' };
         const resolved = _tabAliases[sub] || sub;
-        if (resolved && ['activity', 'costs', 'automation', 'integrations', 'apikeys', 'wallet', 'network', 'storage', 'audit', 'settings'].includes(resolved)) {
+        if (resolved && ['activity', 'costs', 'automation', 'integrations', 'apikeys', 'wallet', 'network', 'storage', 'operator', 'settings'].includes(resolved)) {
           route.systemTab = resolved;
           if (resolved === 'activity') {
             const view = clean.split('/')[2];
@@ -587,7 +587,7 @@ function dashboard() {
               if (route.systemTab === 'storage') {
                 this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails();
               }
-              if (route.systemTab === 'audit') {
+              if (route.systemTab === 'operator') {
                 this.fetchAuditLog();
               }
               if (route.systemTab === 'activity') {
@@ -1246,13 +1246,8 @@ function dashboard() {
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'network') { this.loadNetworkProxy(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
-      if (tabId === 'audit') {
-        // Redirect to operator's activity page where audit log now lives
-        this.drillDown('operator');
-        this.identityTab = 'activity';
-        this.fetchAgentActivity('operator');
+      if (tabId === 'operator') {
         this.fetchAuditLog();
-        return;
       }
       if (tabId === 'activity') {
         if (this.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
@@ -1828,7 +1823,6 @@ function dashboard() {
       }
       if (tab.id === 'activity') {
         await this.fetchAgentActivity(agentId);
-        if (agentId === 'operator') this.fetchAuditLog();
       }
       if (tab.id === 'logs') {
         await this.fetchIdentityLogs(agentId);
@@ -2549,6 +2543,10 @@ function dashboard() {
         can_spawn: cfg.can_spawn ?? false,
         can_manage_cron: cfg.can_manage_cron ?? false,
         can_use_wallet: cfg.can_use_wallet ?? false,
+        proxy_mode: cfg.proxy?.mode || 'inherit',
+        proxy_url: '',
+        proxy_username: '',
+        proxy_password: '',
         _walletChains: Object.fromEntries(
           (cfg.wallet_available_chains || []).map(ch => {
             const allowed = cfg.wallet_allowed_chains || [];
@@ -2640,7 +2638,10 @@ function dashboard() {
         permBody.wallet_allowed_chains = newChains;
       }
       const permsChanged = Object.keys(permBody).length > 0;
-      if (Object.keys(body).length === 0 && !permsChanged) {
+      const oldProxyMode = cfg.proxy?.mode || 'inherit';
+      const proxyChanged = this.editForm.proxy_mode !== oldProxyMode ||
+        (this.editForm.proxy_mode === 'custom' && this.editForm.proxy_url);
+      if (Object.keys(body).length === 0 && !permsChanged && !proxyChanged) {
         this.cancelConfigEdit();
         return;
       }
@@ -2672,6 +2673,25 @@ function dashboard() {
           } else {
             const err = await permResp.json();
             this.showToast(`Error updating permissions: ${err.detail || 'Update failed'}`);
+          }
+        }
+        if (proxyChanged) {
+          const proxyBody = { mode: this.editForm.proxy_mode };
+          if (this.editForm.proxy_mode === 'custom') {
+            proxyBody.url = this.editForm.proxy_url;
+            if (this.editForm.proxy_username) proxyBody.username = this.editForm.proxy_username;
+            if (this.editForm.proxy_password) proxyBody.password = this.editForm.proxy_password;
+          }
+          const proxyResp = await fetch(`${window.__config.apiBase}/agents/${agentId}/proxy`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(proxyBody),
+          });
+          if (proxyResp.ok) {
+            allUpdated.push('proxy');
+            if (!configResult) configResult = { restart_required: true };
+          } else {
+            const err = await proxyResp.json().catch(() => ({}));
+            this.showToast(`Error updating proxy: ${err.detail || 'Update failed'}`);
           }
         }
         if (configResult && configResult.restart_required) {
@@ -4363,7 +4383,7 @@ function dashboard() {
         { label: 'Budget Settings', desc: 'Default daily and monthly budgets', keywords: ['budget', 'cost', 'daily', 'monthly', 'limit', 'spend'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
         { label: 'Agent Limits', desc: 'Max iterations, tool rounds, timeouts', keywords: ['iterations', 'rounds', 'timeout', 'limit', 'agent', 'execution'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
         { label: 'Health Settings', desc: 'Poll interval, failure thresholds, restart limits', keywords: ['health', 'poll', 'restart', 'failure', 'recovery', 'monitor'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
-        { label: 'Audit Log', desc: 'Operator modification history', keywords: ['audit', 'history', 'changes', 'operator', 'log'], action: () => { this.drillDown('operator'); this.identityTab = 'activity'; this.fetchAgentActivity('operator'); this.fetchAuditLog(); } },
+        { label: 'Operator Settings', desc: 'Operator model, status, and audit log', keywords: ['audit', 'history', 'changes', 'operator', 'log', 'settings', 'model'], action: () => { this.switchSystemTab('operator'); this.switchTab('system'); } },
       ];
       for (const act of sysActions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
