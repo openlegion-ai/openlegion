@@ -251,17 +251,36 @@
 
       <!-- Operator Chat Tab -->
       <div x-show="activeTab === 'chat'" x-cloak class="h-full flex flex-col" style="min-height: calc(100vh - 8rem);">
-        <div class="flex-1 flex min-h-0 chat-two-panel">
-          <!-- Chat main panel -->
-          <div class="chat-main-panel">
-            <div class="flex-1 flex flex-col max-w-4xl mx-auto w-full h-full">
-              <!-- Header -->
-              <div class="flex items-center justify-between px-4 py-3 shrink-0 border-b border-gray-800/60">
+          <div class="flex-1 flex flex-col max-w-4xl mx-auto w-full h-full">
+            <!-- Header -->
+            <div class="flex items-center justify-between px-4 py-3 shrink-0 border-b border-gray-800/60">
+              <div class="flex items-center gap-2.5">
+                <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
                 <div>
-                  <h2 class="text-sm font-semibold text-white">Chat</h2>
-                  <p class="text-[10px] text-gray-600 mt-0.5">Your operator helps you build and manage your agent workforce</p>
+                  <h2 class="text-sm font-semibold text-white">Operator</h2>
+                  <p class="text-[10px] text-gray-600 mt-0.5">Builds and manages your agent workforce</p>
                 </div>
               </div>
+              <div class="flex items-center gap-1">
+                <!-- Reset conversation -->
+                <button @click="resetAgent('operator')"
+                  title="Reset conversation — memories preserved"
+                  class="text-gray-600 hover:text-red-400 transition-colors p-1.5 rounded"
+                  aria-label="Reset conversation">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                    <path d="M3 3v5h5"/>
+                  </svg>
+                </button>
+                <!-- Settings -->
+                <button @click="switchTab('system'); switchSystemTab('operator')"
+                  class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors flex items-center gap-1.5"
+                  title="Operator settings">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                  Settings
+                </button>
+              </div>
+            </div>
 
               <!-- Operator not ready -->
               <div x-show="!operatorReady" class="flex-1 flex items-center justify-center">
@@ -296,6 +315,8 @@
                       <div class="flex justify-end">
                         <div class="max-w-[80%] px-3 py-2 rounded-2xl rounded-br-md bg-indigo-600 text-white text-xs">
                           <div class="whitespace-pre-wrap break-words" x-text="msg.content"></div>
+                          <div x-show="formatRelativeTime(msg.ts)" class="text-[11px] mt-0.5 opacity-40 text-indigo-200"
+                            x-text="formatRelativeTime(msg.ts)"></div>
                         </div>
                       </div>
                     </template>
@@ -338,6 +359,10 @@
                     <!-- Agent/error/notification response -->
                     <template x-if="msg.role === 'agent' || msg.role === 'error' || msg.role === 'notification'">
                       <div class="flex justify-start gap-2.5">
+                        <!-- Operator avatar -->
+                        <div class="shrink-0 mt-1">
+                          <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
+                        </div>
                         <div class="max-w-[80%] min-w-0">
                           <div class="px-3 py-2 rounded-2xl rounded-bl-md text-xs"
                             :class="{
@@ -423,25 +448,36 @@
 
                 <!-- First-run: no agents yet -->
                 <div x-show="!(chatHistories['operator'] || []).length && !chatLoadingAgents['operator'] && agents.filter(a => a.id !== 'operator').length === 0"
-                  class="empty-state h-full justify-center">
-                  <div class="text-2xl mb-2">&#128640;</div>
-                  <div class="empty-state-title">Welcome to OpenLegion</div>
-                  <div class="empty-state-desc mb-4">
-                    I'm your operator &mdash; I'll help you build your agent workforce.
-                    <br>Tell me what you need help with:
-                  </div>
-                  <!-- Dynamic quick-start buttons from templates -->
-                  <div x-data="{ templates: [] }" x-init="fetch(`${window.__config.apiBase}/fleet/templates`).then(r => r.ok ? r.json() : {templates:[]}).then(d => templates = (d.templates || []).slice(0, 4)).catch(() => {})"
-                    class="flex flex-wrap gap-2 justify-center max-w-md">
-                    <template x-for="tpl in templates" :key="tpl.name">
-                      <button @click="let inp = document.getElementById('operator-chat-input'); if (inp) { let scope = Alpine.$data(inp.closest('[x-data]')); if (scope && 'opInput' in scope) { scope.opInput = (maxAgents > 0 && maxAgents <= 1) ? ('I need a ' + (tpl.description || tpl.name).toLowerCase() + ' agent') : ('I need a ' + (tpl.description || tpl.name).toLowerCase() + ' team'); inp.focus(); } }"
-                        class="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:border-indigo-500/50 hover:bg-indigo-600/10 transition-colors">
-                        <span x-text="tpl.description || tpl.name"></span>
-                      </button>
-                    </template>
-                    <button @click="let inp = document.getElementById('operator-chat-input'); if (inp) { inp.focus(); }"
-                      class="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:border-indigo-500/50 hover:bg-indigo-600/10 transition-colors">
-                      Something else...
+                  class="flex-1 flex flex-col items-center justify-center px-4">
+                  <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-10 h-10 rounded-full mb-3 opacity-80">
+                  <div class="text-sm font-semibold text-white mb-1">What are you building?</div>
+                  <div class="text-[11px] text-gray-500 mb-5">Tell me about your business and I'll set up the right team.</div>
+                  <!-- Curated intent-based options — uniform size -->
+                  <div class="flex flex-col gap-1.5 w-full max-w-sm">
+                    <button @click="let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) s.opMsg = 'I need a content team — writing, editing, and research'; el.focus(); }"
+                      class="flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-lg bg-gray-800/50 border border-gray-700/50 hover:border-indigo-500/40 hover:bg-indigo-600/5 transition-all group">
+                      <svg class="w-4 h-4 text-gray-500 group-hover:text-indigo-400 shrink-0 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25"/></svg>
+                      <div class="min-w-0"><div class="text-xs text-gray-200 group-hover:text-white">Content &amp; Marketing</div></div>
+                    </button>
+                    <button @click="let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) s.opMsg = 'I need a research team to gather intelligence and produce reports'; el.focus(); }"
+                      class="flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-lg bg-gray-800/50 border border-gray-700/50 hover:border-indigo-500/40 hover:bg-indigo-600/5 transition-all group">
+                      <svg class="w-4 h-4 text-gray-500 group-hover:text-indigo-400 shrink-0 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/></svg>
+                      <div class="min-w-0"><div class="text-xs text-gray-200 group-hover:text-white">Research &amp; Analysis</div></div>
+                    </button>
+                    <button @click="let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) s.opMsg = 'I need a sales team for prospecting and outreach'; el.focus(); }"
+                      class="flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-lg bg-gray-800/50 border border-gray-700/50 hover:border-indigo-500/40 hover:bg-indigo-600/5 transition-all group">
+                      <svg class="w-4 h-4 text-gray-500 group-hover:text-indigo-400 shrink-0 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z"/></svg>
+                      <div class="min-w-0"><div class="text-xs text-gray-200 group-hover:text-white">Sales &amp; Outreach</div></div>
+                    </button>
+                    <button @click="let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) s.opMsg = 'I need a development team — planning, coding, and code review'; el.focus(); }"
+                      class="flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-lg bg-gray-800/50 border border-gray-700/50 hover:border-indigo-500/40 hover:bg-indigo-600/5 transition-all group">
+                      <svg class="w-4 h-4 text-gray-500 group-hover:text-indigo-400 shrink-0 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5"/></svg>
+                      <div class="min-w-0"><div class="text-xs text-gray-200 group-hover:text-white">Software Development</div></div>
+                    </button>
+                    <button @click="$nextTick(() => { let el = document.getElementById('operator-chat-input'); if (el) el.focus(); })"
+                      class="flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-lg bg-transparent border border-gray-800/40 hover:border-gray-700/60 hover:bg-gray-800/20 transition-all group">
+                      <svg class="w-4 h-4 text-gray-600 group-hover:text-gray-400 shrink-0 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z"/></svg>
+                      <div class="min-w-0"><div class="text-xs text-gray-500 group-hover:text-gray-300">Something else&hellip;</div></div>
                     </button>
                   </div>
                 </div>
@@ -455,158 +491,63 @@
                 </div>
               </div>
 
-              <!-- Input area -->
-              <div x-show="operatorReady" class="px-4 py-3 border-t border-gray-800/80 shrink-0" x-data="{ opInput: '' }">
-                <div class="chat-input-wrap">
-                  <textarea x-model="opInput" id="operator-chat-input" rows="1"
-                    :disabled="chatStreamingAgents['operator']"
-                    @keydown.enter="if (!$event.shiftKey && opInput.trim()) { $event.preventDefault(); sendChatTo('operator', opInput); opInput = ''; $el.style.height = 'auto'; }"
-                    @input="$el.style.height = 'auto'; $el.style.height = Math.min($el.scrollHeight, 120) + 'px'"
-                    class="chat-slide-textarea"
-                    placeholder="Message your operator..."></textarea>
-                  <button @click="if (opInput.trim()) { sendChatTo('operator', opInput); opInput = ''; }"
-                    :disabled="!opInput.trim()"
-                    class="chat-input-send"
-                    :class="opInput.trim() ? 'bg-indigo-600 hover:bg-indigo-500' : 'bg-gray-700 opacity-40'"
-                    aria-label="Send">
-                    <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 10a.75.75 0 0 1 .75-.75h10.638L10.23 5.29a.75.75 0 1 1 1.04-1.08l5.5 5.25a.75.75 0 0 1 0 1.08l-5.5 5.25a.75.75 0 1 1-1.04-1.08l4.158-3.96H3.75A.75.75 0 0 1 3 10Z" clip-rule="evenodd"/></svg>
-                  </button>
-                </div>
+            <!-- Input area -->
+            <div x-show="operatorReady" class="px-3 py-3 border-t border-gray-800/80 shrink-0"
+              x-data="{ opMsg: '', opPendingFile: '', opSpeechActive: false, _opRecognition: null }">
+              <!-- Steer mode indicator -->
+              <div x-show="isAgentBusy('operator')" x-cloak class="flex items-center gap-2 mb-2 px-1">
+                <span class="steer-badge">
+                  <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>
+                  Steering
+                </span>
+                <span class="text-[11px] text-gray-600">Operator is working &mdash; your message will redirect it</span>
               </div>
-            </div>
-          </div><!-- /chat-main-panel -->
-
-          <!-- Context panel -->
-          <div class="context-panel master-context-panel">
-            <!-- Fleet Digest -->
-            <div x-show="fleetDigest" class="context-stats" style="margin-top:0;">
-              <div style="font-size:0.6875rem; font-weight:600; color:#e5e7eb; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;">
-                <span>Fleet Digest</span>
-                <span style="font-size:0.5625rem; color:#6b7280; font-weight:400;" x-text="fleetDigest && fleetDigest.timestamp ? 'Updated ' + formatRelativeTime(new Date(fleetDigest.timestamp).getTime()) : ''"></span>
+              <!-- Pending file indicator -->
+              <div x-show="opPendingFile" x-cloak class="flex items-center gap-1.5 mb-2 px-1 py-1 rounded-md bg-gray-800/50 border border-gray-700/50 text-[11px] text-indigo-300">
+                <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/></svg>
+                <span class="truncate flex-1" x-text="opPendingFile"></span>
+                <button @click="opPendingFile = ''" class="shrink-0 text-indigo-500 hover:text-indigo-300 transition-colors" aria-label="Remove">
+                  <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
               </div>
-              <div x-show="fleetDigest" class="text-[10px] space-y-1">
-                <div class="flex items-center gap-1.5" x-show="fleetDigest?.fleet_summary">
-                  <span style="color:#22c55e;">&#10003;</span>
-                  <span style="color:#d1d5db;" x-text="fleetDigest?.fleet_summary"></span>
-                </div>
-                <template x-for="alert in (fleetDigest?.agents_attention || [])" :key="alert.agent_id">
-                  <div class="flex items-center gap-1.5">
-                    <span :style="alert.severity === 'critical' ? 'color:#ef4444' : 'color:#f59e0b'">&#9888;</span>
-                    <span style="color:#d1d5db;">
-                      <span class="font-medium" x-text="'@' + alert.agent_id"></span>:
-                      <span x-text="alert.issue"></span>
-                    </span>
-                  </div>
-                </template>
-                <div class="flex items-center gap-1.5" x-show="fleetDigest?.cost_trend">
-                  <span style="color:#9ca3af;">$</span>
-                  <span style="color:#d1d5db;" x-text="fleetDigest?.cost_trend"></span>
-                </div>
+              <!-- Input row -->
+              <div class="chat-input-wrap">
+                <!-- Attach file button -->
+                <button @click="let fi = document.createElement('input'); fi.type = 'file'; fi.onchange = e => { if (e.target.files[0]) { let f = e.target.files[0]; opPendingFile = 'Uploading ' + f.name + '…'; fetch(window.__config.apiBase + '/uploads/' + encodeURIComponent(f.name), { method: 'POST', body: f, headers: { 'Content-Type': f.type || 'application/octet-stream' } }).then(r => { if (r.ok) opPendingFile = f.name; else { opPendingFile = ''; alert('Upload failed'); } }).catch(() => { opPendingFile = ''; }); } }; fi.click();"
+                  title="Attach file" aria-label="Attach file"
+                  class="chat-input-btn">
+                  <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+                </button>
+                <!-- Speech-to-text button -->
+                <button x-show="'SpeechRecognition' in window || 'webkitSpeechRecognition' in window"
+                  @click="if (opSpeechActive) { _opRecognition && _opRecognition.stop(); opSpeechActive = false; } else { const SR = window.SpeechRecognition || window.webkitSpeechRecognition; _opRecognition = new SR(); _opRecognition.continuous = true; _opRecognition.interimResults = true; _opRecognition.onresult = e => { let t = ''; for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript; opMsg = t; }; _opRecognition.onend = () => { opSpeechActive = false; }; _opRecognition.start(); opSpeechActive = true; }"
+                  :title="opSpeechActive ? 'Stop recording' : 'Voice input'"
+                  class="chat-input-btn"
+                  :style="opSpeechActive ? 'color: #818cf8' : ''"
+                  aria-label="Voice input">
+                  <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 1a3 3 0 0 1 3 3v8a3 3 0 0 1-6 0V4a3 3 0 0 1 3-3z"/>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                    <line x1="12" y1="19" x2="12" y2="23"/>
+                    <line x1="8" y1="23" x2="16" y2="23"/>
+                  </svg>
+                </button>
+                <textarea x-model="opMsg" id="operator-chat-input" rows="1"
+                  :disabled="chatLoadingAgents['operator'] === true"
+                  @keydown.enter="if (!$event.shiftKey && (opMsg.trim() || (opPendingFile && !opPendingFile.startsWith('Uploading')))) { $event.preventDefault(); let msg = opMsg.trim(); if (opPendingFile) msg = (msg ? msg + '\n\n' : '') + '\ud83d\udcce ' + opPendingFile + ' (at /data/uploads/' + opPendingFile + ')'; if (isAgentBusy('operator')) steerAgent('operator', msg); else sendChatTo('operator', msg); opMsg = ''; opPendingFile = ''; $el.style.height = 'auto'; }"
+                  @input="$el.style.height = 'auto'; $el.style.height = Math.min($el.scrollHeight, 120) + 'px'"
+                  class="chat-slide-textarea"
+                  :placeholder="opSpeechActive ? 'Listening\u2026' : (isAgentBusy('operator') ? 'Steer operator\u2026' : 'Message your operator...')"></textarea>
+                <button @click="if (opMsg.trim() || (opPendingFile && !opPendingFile.startsWith('Uploading'))) { let msg = opMsg.trim(); if (opPendingFile) msg = (msg ? msg + '\n\n' : '') + '\ud83d\udcce ' + opPendingFile + ' (at /data/uploads/' + opPendingFile + ')'; if (isAgentBusy('operator')) steerAgent('operator', msg); else sendChatTo('operator', msg); opMsg = ''; opPendingFile = ''; }"
+                  :disabled="!(opMsg.trim() || (opPendingFile && !opPendingFile.startsWith('Uploading')))"
+                  class="chat-input-send"
+                  :class="(opMsg.trim() || (opPendingFile && !opPendingFile.startsWith('Uploading'))) ? (isAgentBusy('operator') ? 'bg-amber-600 hover:bg-amber-500' : 'bg-indigo-600 hover:bg-indigo-500') : 'bg-gray-700 opacity-40'"
+                  aria-label="Send">
+                  <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 10a.75.75 0 0 1 .75-.75h10.638L10.23 5.29a.75.75 0 1 1 1.04-1.08l5.5 5.25a.75.75 0 0 1 0 1.08l-5.5 5.25a.75.75 0 1 1-1.04-1.08l4.158-3.96H3.75A.75.75 0 0 1 3 10Z" clip-rule="evenodd"/></svg>
+                </button>
               </div>
-            </div>
-
-            <!-- No digest yet -->
-            <div x-show="!fleetDigest" class="text-[10px] text-gray-600 py-3 text-center">
-              Fleet digest will appear after the operator's first health check.
-            </div>
-
-            <!-- Header -->
-            <div class="context-panel-header">
-              <span style="font-weight:600; font-size:0.8125rem; color:#e5e7eb;">Fleet</span>
-              <span style="font-size:0.6875rem; color:#9ca3af;" x-text="agents.length + ' agent' + (agents.length !== 1 ? 's' : '')"></span>
-            </div>
-
-            <!-- Operator card (pinned, distinct) -->
-            <template x-for="agent in agents.filter(a => a.id === 'operator')" :key="agent.id">
-              <div class="context-agent-card" style="border-color: rgba(99, 102, 241, 0.3); background: rgba(99, 102, 241, 0.05);">
-                <div style="display:flex; align-items:center; gap:8px;">
-                  <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(agent.id)">
-                    <img :src="agentAvatarUrl(agent.id)" :alt="agent.id">
-                  </div>
-                  <div style="flex:1; min-width:0;">
-                    <div style="font-size:0.75rem; font-weight:600; color:#e5e7eb; display:flex; align-items:center; gap:4px;">
-                      <span x-text="agent.id"></span>
-                      <span style="font-size:0.5rem; background:rgba(99,102,241,0.2); color:#818cf8; padding:1px 4px; border-radius:3px;">System</span>
-                    </div>
-                    <div style="font-size:0.625rem; color:#9ca3af;" x-text="agent.role || ''"></div>
-                  </div>
-                  <div style="display:flex; align-items:center; gap:2px;">
-                    <div style="width:6px; height:6px; border-radius:50%;"
-                         :style="agent.health_status === 'healthy' ? 'background:#22c55e' : 'background:#6b7280'"></div>
-                  </div>
-                </div>
-                <!-- Model name -->
-                <div x-show="agent.model" style="font-size:0.5625rem; color:#6b7280; margin-top:4px; padding-left:32px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" x-text="agent.model"></div>
-                <!-- Settings button -->
-                <div style="display:flex; gap:4px; margin-top:6px;">
-                  <button class="context-agent-btn" @click="switchTab('system'); switchSystemTab('operator')"
-                    style="flex:1; display:flex; align-items:center; justify-content:center; gap:3px;">
-                    <svg style="width:10px; height:10px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-                    Settings
-                  </button>
-                </div>
-              </div>
-            </template>
-
-            <!-- Worker agent cards -->
-            <template x-for="agent in agents.filter(a => a.id !== 'operator')" :key="agent.id">
-              <div class="context-agent-card">
-                <div style="display:flex; align-items:center; gap:8px;">
-                  <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(agent.id)">
-                    <img :src="agentAvatarUrl(agent.id)" :alt="agent.id">
-                  </div>
-                  <div style="flex:1; min-width:0;">
-                    <div style="font-size:0.75rem; font-weight:600; color:#e5e7eb; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" x-text="agent.id"></div>
-                    <div style="font-size:0.625rem; color:#9ca3af; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" x-text="agent.role || ''"></div>
-                  </div>
-                  <div style="display:flex; align-items:center; gap:2px;">
-                    <div style="width:6px; height:6px; border-radius:50%;"
-                         :style="agent.status === 'busy' ? 'background:#f59e0b' : (agent.health_status === 'healthy' ? 'background:#22c55e' : (agent.health_status === 'failed' ? 'background:#ef4444' : 'background:#6b7280'))"></div>
-                    <span style="font-size:0.5625rem; color:#9ca3af;" x-text="agent.status === 'busy' ? 'Busy' : (agent.health_status === 'healthy' ? 'Online' : (agent.health_status || 'Offline'))"></span>
-                  </div>
-                </div>
-                <div style="display:flex; gap:4px; margin-top:6px;">
-                  <button class="context-agent-btn" @click="openChat(agent.id)">Chat</button>
-                  <button class="context-agent-btn" @click="activeTab = 'fleet'; drillDown(agent.id)">View</button>
-                </div>
-              </div>
-            </template>
-
-            <!-- Empty -->
-            <div x-show="agents.filter(a => a.id !== 'operator').length === 0" class="text-center py-6">
-              <div style="font-size:0.75rem; color:#6b7280;">No agents yet</div>
-              <div style="font-size:0.625rem; color:#4b5563; margin-top:4px;">Chat with your operator to create agents</div>
-            </div>
-
-            <!-- Fleet stats -->
-            <div class="context-stats">
-              <div class="context-stat-row">
-                <span>Healthy</span>
-                <span style="color:#22c55e;" x-text="agents.filter(a => a.health_status === 'healthy').length + ' / ' + agents.length"></span>
-              </div>
-              <div class="context-stat-row">
-                <span>Busy</span>
-                <span x-text="agents.filter(a => a.status === 'busy').length"></span>
-              </div>
-              <div class="context-stat-row">
-                <span>Cost today</span>
-                <span x-text="formatCost(fleetTotalCost)"></span>
-              </div>
-            </div>
-
-            <!-- Activity -->
-            <div x-show="agents.some(a => a.status === 'busy')" style="margin-top:auto;">
-              <div style="font-size:0.6875rem; font-weight:600; color:#9ca3af; margin-bottom:6px; padding-top:8px; border-top:1px solid rgba(42,42,58,0.6);">Activity</div>
-              <template x-for="agent in agents.filter(a => a.status === 'busy')" :key="'activity-' + agent.id">
-                <div style="display:flex; align-items:center; gap:6px; padding:4px 0; font-size:0.625rem;">
-                  <svg class="animate-spin shrink-0" style="width:10px; height:10px; color:#818cf8;" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                  <span style="color:#e5e7eb; font-weight:500;" x-text="agent.id"></span>
-                  <span style="color:#6b7280;">is working&hellip;</span>
-                </div>
-              </template>
             </div>
           </div>
-        </div><!-- /chat-two-panel -->
       </div>
 
       <!-- Fleet Overview (merged: Fleet + Agents + Queues) -->
@@ -2048,25 +1989,9 @@
                               </div>
                             </div>
                           </template>
-                        <!-- Proxy -->
-                        <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
-                          <div class="text-xs text-gray-500 mb-1 flex items-center gap-1">Proxy
-                            <span class="setting-hint setting-hint-sm" tabindex="0">?<span class="setting-hint-text">How this agent connects to the internet. "System proxy" inherits the fleet-wide proxy. "Custom" uses a per-agent proxy URL. "No proxy" connects directly.</span></span>
-                          </div>
-                          <div class="flex items-center gap-3">
-                            <span class="text-sm font-mono"
-                              :class="{
-                                'text-gray-400': (agentConfigs[selectedAgent]?.proxy?.mode || 'inherit') === 'inherit',
-                                'text-indigo-400': (agentConfigs[selectedAgent]?.proxy?.mode) === 'custom',
-                                'text-amber-400': (agentConfigs[selectedAgent]?.proxy?.mode) === 'direct',
-                              }"
-                              x-text="proxyModeLabel(agentConfigs[selectedAgent]?.proxy?.mode || 'inherit')"></span>
-                            <span x-show="agentConfigs[selectedAgent]?.proxy?.url" class="text-xs text-gray-500 font-mono" x-text="agentConfigs[selectedAgent]?.proxy?.url"></span>
-                            <span x-show="agentConfigs[selectedAgent]?.proxy?.has_credential" class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/30 text-emerald-400 border border-emerald-800/50">authenticated</span>
-                          </div>
-                        </div>
-                        <!-- Proxy -->
-                        <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
+                         </div>
+                         <!-- Proxy -->
+                         <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
                           <div class="text-xs text-gray-500 mb-1 flex items-center gap-1">Proxy
                             <span class="setting-hint setting-hint-sm" tabindex="0">?<span class="setting-hint-text">How this agent connects to the internet. "System proxy" inherits the fleet-wide proxy. "Custom" uses a per-agent proxy URL. "No proxy" connects directly.</span></span>
                           </div>
@@ -2370,50 +2295,6 @@
                           </button>
                           <button @click="cancelConfigEdit()" :disabled="configSaving"
                             class="text-xs px-3 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors disabled:opacity-50">Cancel</button>
-                        </div>
-                      </div>
-                    </div>
-                    <!-- ── Proxy sub-section (always visible, separate from main config save) ── -->
-                    <div x-show="agentConfigs[selectedAgent]" class="mt-4 pt-4 border-t border-gray-800">
-                      <div class="flex items-center gap-2 mb-3">
-                        <svg class="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                        <span class="text-xs font-medium text-gray-400">Proxy</span>
-                        <span class="setting-hint setting-hint-sm" tabindex="0">?<span class="setting-hint-text">Configure how this agent routes HTTP and browser traffic. Changes require an agent restart to take effect.</span></span>
-                      </div>
-                      <div class="space-y-3">
-                        <div>
-                          <label class="text-xs text-gray-500 mb-1 block">Mode</label>
-                          <select x-model="agentProxyForm.mode" class="dash-select w-full">
-                            <option value="inherit">Use system proxy</option>
-                            <option value="custom">Custom proxy</option>
-                            <option value="direct">No proxy (direct)</option>
-                          </select>
-                        </div>
-                        <template x-if="agentProxyForm.mode === 'custom'">
-                          <div class="space-y-3">
-                            <div>
-                              <label class="text-xs text-gray-500 mb-1 block">Proxy URL</label>
-                              <input type="text" x-model="agentProxyForm.url" class="dash-input w-full" placeholder="socks5://proxy:1080 or http://proxy:8080">
-                            </div>
-                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
-                              <div>
-                                <label class="text-xs text-gray-500 mb-1 block">Username <span class="text-gray-600">(optional)</span></label>
-                                <input type="text" x-model="agentProxyForm.username" class="dash-input w-full" autocomplete="off">
-                              </div>
-                              <div>
-                                <label class="text-xs text-gray-500 mb-1 block">Password <span class="text-gray-600">(optional)</span></label>
-                                <input type="password" x-model="agentProxyForm.password" class="dash-input w-full" autocomplete="off">
-                              </div>
-                            </div>
-                          </div>
-                        </template>
-                        <div class="flex items-center gap-2">
-                          <button @click="saveAgentProxy(selectedAgent)"
-                            :disabled="agentProxySaving || (agentProxyForm.mode === 'custom' && !agentProxyForm.url)"
-                            class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
-                            <span x-text="agentProxySaving ? 'Saving...' : 'Save Proxy'"></span>
-                          </button>
-                          <span x-show="agentProxySaved" x-transition class="text-xs text-emerald-400">Saved — restart required</span>
                         </div>
                       </div>
                     </div>
@@ -4285,7 +4166,7 @@
         <!-- ═══ OPERATOR SUB-TAB ═══ -->
         <div x-show="systemTab === 'operator'" x-cloak class="space-y-4"
           x-data="{ opAgent: null, opModelEditing: false, opModelValue: '' }"
-          x-init="$watch('systemTab', v => { if (v === 'operator') { opAgent = agents.find(a => a.id === 'operator') || null; } })">
+          x-init="opAgent = agents.find(a => a.id === 'operator') || null; fetchAuditLog(); $watch('systemTab', v => { if (v === 'operator') { opAgent = agents.find(a => a.id === 'operator') || null; fetchAuditLog(); } }); $watch('agents', () => { if (systemTab === 'operator') opAgent = agents.find(a => a.id === 'operator') || null; })">
 
           <!-- Status card -->
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
@@ -4332,12 +4213,25 @@
               </div>
             </div>
 
-            <!-- Chat shortcut -->
-            <div class="pt-2 border-t border-gray-800/60">
+            <!-- Resources -->
+            <div class="flex items-center justify-between py-2 border-t border-gray-800/60">
+              <div>
+                <div class="text-xs text-gray-400">Resources</div>
+                <div class="text-sm text-gray-300 mt-0.5">128 MB · 0.05 CPU</div>
+              </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="flex items-center gap-2 pt-2 border-t border-gray-800/60">
               <button @click="switchTab('chat')"
                 class="text-xs px-3 py-1.5 rounded bg-indigo-600/10 border border-indigo-600/30 text-indigo-400 hover:bg-indigo-600/20 transition-colors flex items-center gap-1.5">
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                Chat with operator
+                Chat
+              </button>
+              <button @click="restartAgent('operator')"
+                class="text-xs px-3 py-1.5 rounded bg-gray-800 border border-gray-700 text-gray-400 hover:text-white hover:bg-gray-700 transition-colors flex items-center gap-1.5">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                Restart
               </button>
             </div>
           </div>

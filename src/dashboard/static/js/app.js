@@ -381,9 +381,6 @@ function dashboard() {
       saved: false,
       removingSystemProxy: false,
     },
-    agentProxyForm: { mode: 'inherit', url: '', username: '', password: '' },
-    agentProxySaving: false,
-    agentProxySaved: false,
 
     // Workflow cancel tracking
     _cancellingWorkflows: {},
@@ -662,7 +659,7 @@ function dashboard() {
       return this.settingsData?.plan_limits?.max_projects ?? 0;
     },
     get runningAgents() {
-      return this.agents.filter(a => a.running !== false);
+      return this.agents.filter(a => a.running !== false && a.id !== 'operator');
     },
     get atAgentLimit() {
       if (this.maxAgents === 0) return false;
@@ -2536,7 +2533,6 @@ function dashboard() {
         if (resp.ok) {
           const cfg = await resp.json();
           this.agentConfigs[agentId] = cfg;
-          if (this.selectedAgent === agentId) this.initAgentProxyForm(agentId);
           return cfg;
         }
       } catch (e) { console.warn('fetchAgentConfig failed:', e); }
@@ -3456,52 +3452,6 @@ function dashboard() {
         this.showToast(`Error: ${e.message || String(e)}`);
       }
       this.networkProxy.saving = false;
-    },
-
-    initAgentProxyForm(agentId) {
-      const cfg = this.agentConfigs[agentId];
-      if (cfg?.proxy) {
-        this.agentProxyForm = {
-          mode: cfg.proxy.mode || 'inherit',
-          url: cfg.proxy.url || '',
-          username: '',
-          password: '',
-        };
-      } else {
-        this.agentProxyForm = { mode: 'inherit', url: '', username: '', password: '' };
-      }
-      this.agentProxySaved = false;
-    },
-
-    async saveAgentProxy(agentId) {
-      this.agentProxySaving = true;
-      try {
-        const body = { mode: this.agentProxyForm.mode };
-        if (this.agentProxyForm.mode === 'custom') {
-          body.url = this.agentProxyForm.url;
-          if (this.agentProxyForm.username) body.username = this.agentProxyForm.username;
-          if (this.agentProxyForm.password) body.password = this.agentProxyForm.password;
-        }
-        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/proxy`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        if (resp.ok) {
-          this.agentProxySaved = true;
-          this.showToast('Agent proxy updated — restart required');
-          setTimeout(() => this.agentProxySaved = false, 3000);
-          // Refresh agent config to pick up new proxy state
-          await this.fetchAgentConfig(agentId);
-          this.initAgentProxyForm(agentId);
-        } else {
-          const err = await resp.json().catch(() => ({}));
-          this.showToast(`Error: ${err.detail || 'Save failed'}`);
-        }
-      } catch (e) {
-        this.showToast(`Error: ${e.message || String(e)}`);
-      }
-      this.agentProxySaving = false;
     },
 
     proxyModeLabel(mode) {
