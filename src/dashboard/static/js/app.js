@@ -5546,8 +5546,11 @@ function dashboard() {
     },
 
     agentAvatarUrl(agentId) {
-      const num = this.agentAvatarNum(agentId);
       const v = window.__config.assetVersion || '';
+      if (agentId === 'operator') {
+        return `/dashboard/static/avatars/operator.png` + (v ? `?v=${v}` : '');
+      }
+      const num = this.agentAvatarNum(agentId);
       return `/dashboard/static/avatars/${num}.svg` + (v ? `?v=${v}` : '');
     },
 
