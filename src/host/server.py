@@ -1349,6 +1349,16 @@ def create_mesh_app(
                 "message": "All agents already exist",
             }
 
+        # Assign random unique avatars to newly created agents
+        import random
+
+        from src.cli.config import _update_agent_field
+        used_avatars: set[int] = set()
+        for agent_name in created_names:
+            avatar = random.choice([i for i in range(1, 51) if i not in used_avatars])
+            used_avatars.add(avatar)
+            _update_agent_field(agent_name, "avatar", avatar)
+
         # Load config to get per-agent settings
         cfg = _load_config()
         agents_cfg = cfg.get("agents", {})
@@ -1476,15 +1486,19 @@ def create_mesh_app(
             model = config.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
 
         # Create agent config
+        import random
+
         from src.cli.config import (
             PROJECT_ROOT,
             _add_agent_permissions,
             _add_agent_to_config,
+            _update_agent_field,
         )
         _add_agent_to_config(
             name=name, role=role or name, model=model,
             initial_instructions=instructions, initial_soul=soul,
         )
+        _update_agent_field(name, "avatar", random.randint(1, 50))
         _add_agent_permissions(name)
         skills_dir = PROJECT_ROOT / "skills" / name
         skills_dir.mkdir(parents=True, exist_ok=True)

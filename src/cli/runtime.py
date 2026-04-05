@@ -689,13 +689,15 @@ class RuntimeContext:
         """Ensure every agent in config has a heartbeat cron job."""
         if not self.cron_scheduler:
             return
+        from src.cli.config import _OPERATOR_AGENT_ID
         from src.host.cron import CronScheduler
         agents_cfg = self.cfg.get("agents", {})
         schedule = self.cfg.get("mesh", {}).get(
             "heartbeat_schedule", CronScheduler.DEFAULT_HEARTBEAT_SCHEDULE,
         )
         for agent_id in agents_cfg:
-            self.cron_scheduler.ensure_heartbeat(agent_id, schedule)
+            agent_schedule = "every 1h" if agent_id == _OPERATOR_AGENT_ID else schedule
+            self.cron_scheduler.ensure_heartbeat(agent_id, agent_schedule)
 
     def _start_background(self) -> None:
         self._reconcile_heartbeats()
