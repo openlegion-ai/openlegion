@@ -285,8 +285,15 @@ function dashboard() {
       { id: 'wallet', label: 'Wallet' },
       { id: 'network', label: 'Network' },
       { id: 'storage', label: 'Storage' },
+      { id: 'audit', label: 'Audit' },
       { id: 'settings', label: 'Settings' },
     ],
+
+    // Audit sub-tab
+    auditLog: [],
+    auditTotal: 0,
+    auditPage: 1,
+    auditLoading: false,
 
     // Unified Project Hub (replaces separate PROJECT.md + Comms + Broadcast panels)
     projectHubExpanded: false,
@@ -512,7 +519,7 @@ function dashboard() {
         // Backward compat for old URLs
         const _tabAliases = { schedules: 'automation', connections: 'integrations', uploads: 'storage' };
         const resolved = _tabAliases[sub] || sub;
-        if (resolved && ['activity', 'costs', 'automation', 'integrations', 'apikeys', 'wallet', 'network', 'storage', 'settings'].includes(resolved)) {
+        if (resolved && ['activity', 'costs', 'automation', 'integrations', 'apikeys', 'wallet', 'network', 'storage', 'audit', 'settings'].includes(resolved)) {
           route.systemTab = resolved;
           if (resolved === 'activity') {
             const view = clean.split('/')[2];
@@ -579,6 +586,9 @@ function dashboard() {
               }
               if (route.systemTab === 'storage') {
                 this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails();
+              }
+              if (route.systemTab === 'audit') {
+                this.fetchAuditLog();
               }
               if (route.systemTab === 'activity') {
                 this.activityView = route.activityView;
@@ -1234,9 +1244,28 @@ function dashboard() {
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'network') { this.loadNetworkProxy(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
+      if (tabId === 'audit') { this.fetchAuditLog(); }
       if (tabId === 'activity') {
         if (this.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
         else if (this.activityView === 'logs') { this.fetchSystemLogs(); }
+      }
+    },
+
+    // ── Audit log ────────────────────────────────────────
+
+    async fetchAuditLog() {
+      this.auditLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/audit?limit=${20}&event_type=operator`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.auditLog = data.events || [];
+          this.auditTotal = data.total || 0;
+        }
+      } catch (e) {
+        console.error('Failed to fetch audit log:', e);
+      } finally {
+        this.auditLoading = false;
       }
     },
 
@@ -4324,6 +4353,7 @@ function dashboard() {
         { label: 'Budget Settings', desc: 'Default daily and monthly budgets', keywords: ['budget', 'cost', 'daily', 'monthly', 'limit', 'spend'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
         { label: 'Agent Limits', desc: 'Max iterations, tool rounds, timeouts', keywords: ['iterations', 'rounds', 'timeout', 'limit', 'agent', 'execution'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
         { label: 'Health Settings', desc: 'Poll interval, failure thresholds, restart limits', keywords: ['health', 'poll', 'restart', 'failure', 'recovery', 'monitor'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
+        { label: 'Audit Log', desc: 'Operator modification history', keywords: ['audit', 'history', 'changes', 'operator', 'log'], action: () => { this.switchSystemTab('audit'); this.switchTab('system'); } },
       ];
       for (const act of sysActions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
