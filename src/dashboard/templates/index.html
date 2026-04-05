@@ -1598,6 +1598,7 @@
                     <!-- Restart Agent -->
                     <button @click="_menuOpen = false; restartAgent(selectedAgent)"
                       :disabled="_restartingAgents[selectedAgent] === true"
+                      x-show="selectedAgent !== 'operator'"
                       class="w-full flex items-start gap-3 px-3.5 py-2.5 text-left hover:bg-gray-800/70 transition-colors group disabled:opacity-40 disabled:cursor-default">
                       <svg class="w-3.5 h-3.5 mt-0.5 shrink-0 text-gray-500 group-hover:text-gray-300 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
                       <div>
@@ -1608,6 +1609,7 @@
                     <div class="border-t border-gray-800/70 my-1"></div>
                     <!-- Delete Agent -->
                     <button @click="_menuOpen = false; removeAgent(selectedAgent)"
+                      x-show="selectedAgent !== 'operator'"
                       class="w-full flex items-start gap-3 px-3.5 py-2.5 text-left hover:bg-red-900/20 transition-colors group">
                       <svg class="w-3.5 h-3.5 mt-0.5 shrink-0 text-red-500/60 group-hover:text-red-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
                       <div>
@@ -1659,6 +1661,8 @@
               <!-- Left column: Identity panel -->
               <div class="md:col-span-3">
                 <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                  <div x-show="selectedAgent === 'operator'" class="text-xs text-indigo-400 bg-indigo-900/20 border border-indigo-800/30 rounded-lg px-3 py-2 mb-3">System agent — use the <button @click="switchTab('system'); switchSystemTab('operator')" class="underline hover:text-indigo-300">Operator settings</button> page to configure.</div>
+                  <div x-show="selectedAgent !== 'operator'">
                   <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Settings</div>
                   <!-- Tab bar (4 tabs, no access badges) -->
                   <div class="flex flex-wrap gap-0.5 bg-gray-800/50 rounded-lg p-0.5 mb-3">
@@ -2436,6 +2440,7 @@
                   </div>
                   <!-- END FILES TAB -->
 
+                  </div><!-- /x-show selectedAgent !== operator -->
                 </div>
               </div>
               <!-- Right column: Spend & Budget (combined) -->
@@ -3516,7 +3521,7 @@
                     </tr>
                   </thead>
                   <tbody class="divide-y divide-gray-800/50">
-                    <template x-for="agent in walletData.agents" :key="agent.agent_id">
+                    <template x-for="agent in (walletData.agents || []).filter(a => a.agent_id !== 'operator')" :key="agent.agent_id">
                       <tr class="hover:bg-gray-800/30">
                         <td class="px-4 py-2.5">
                           <span class="text-gray-300 font-medium" x-text="agent.agent_id"></span>
@@ -3548,7 +3553,7 @@
               <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mt-4" x-show="walletData.all_agents?.length">
                 <div class="text-xs text-gray-500 uppercase tracking-wider mb-3">Agent Wallet Access</div>
                 <div class="space-y-2">
-                  <template x-for="a in walletData.all_agents || []" :key="a.agent_id">
+                  <template x-for="a in (walletData.all_agents || []).filter(a => a.agent_id !== 'operator')" :key="a.agent_id">
                     <div class="flex flex-wrap items-center justify-between gap-y-1 text-xs">
                       <div class="flex items-center gap-2 min-w-0">
                         <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="a.wallet_enabled ? 'bg-green-500' : 'bg-gray-600'"></span>
@@ -4240,7 +4245,7 @@
             <div class="flex items-center justify-between py-2 border-t border-gray-800/60">
               <div>
                 <div class="text-xs text-gray-400">Health checks</div>
-                <div class="text-sm text-gray-300 mt-0.5">Every 30 minutes</div>
+                <div class="text-sm text-gray-300 mt-0.5" x-text="opAgent?.heartbeat_schedule || 'Every hour'"></div>
               </div>
             </div>
 
