@@ -659,7 +659,7 @@ function dashboard() {
       return this.settingsData?.plan_limits?.max_projects ?? 0;
     },
     get runningAgents() {
-      return this.agents.filter(a => a.running !== false);
+      return this.agents.filter(a => a.running !== false && a.id !== 'operator');
     },
     get atAgentLimit() {
       if (this.maxAgents === 0) return false;

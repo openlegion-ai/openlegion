@@ -22,7 +22,7 @@ def _generate_id(prefix: str, length: int = 12) -> str:
 SILENT_REPLY_TOKEN = "__SILENT__"
 """Sentinel returned by agents to suppress empty responses."""
 
-RESERVED_AGENT_IDS = frozenset({"mesh"})
+RESERVED_AGENT_IDS = frozenset({"mesh", "operator"})
 """Internal component names that must not be used as agent IDs."""
 
 AGENT_ID_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
