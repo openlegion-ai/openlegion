@@ -223,6 +223,7 @@ class HealthMonitor:
                     model=info.get("model", ""),
                     mcp_servers=info.get("mcp_servers"),
                     thinking=info.get("thinking", ""),
+                    env_overrides={},
                 ),
             )
 

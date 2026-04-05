@@ -387,6 +387,21 @@ def create_dashboard_router(
         from src.cli.config import _load_skill_templates
         return _load_skill_templates()
 
+    @api_router.get("/api/fleet/templates")
+    async def api_fleet_templates(request: Request) -> dict:
+        """Return available fleet templates."""
+        from src.cli.config import _load_templates
+        templates = _load_templates()
+        result = []
+        for name, tpl in templates.items():
+            result.append({
+                "name": name,
+                "description": tpl.get("description", ""),
+                "agent_count": len(tpl.get("agents", {})),
+                "agents": list(tpl.get("agents", {}).keys()),
+            })
+        return {"templates": result}
+
     @api_router.post("/api/agents")
     async def api_add_agent(request: Request) -> dict:
         """Add a new agent: create config, start container, register."""
@@ -406,8 +421,10 @@ def create_dashboard_router(
         if name in agent_registry:
             raise HTTPException(status_code=409, detail=f"Agent '{name}' already exists")
         # Limit based on running agents (resource usage), not config definitions.
-        # A stopped agent frees a slot.
-        if _max_agents > 0 and len(agent_registry) >= _max_agents:
+        # A stopped agent frees a slot. Operator is excluded from the count.
+        from src.cli.config import _OPERATOR_AGENT_ID
+        non_operator_count = sum(1 for a in agent_registry if a != _OPERATOR_AGENT_ID)
+        if _max_agents > 0 and non_operator_count >= _max_agents:
             raise HTTPException(
                 status_code=403,
                 detail=f"Agent limit reached ({_max_agents}). Upgrade your plan for more agents.",
@@ -482,8 +499,8 @@ def create_dashboard_router(
             if template:
                 role = acfg.get("role", role)
             skills_dir = os.path.abspath(acfg.get("skills_dir", ""))
-            # Pass workspace seed values via extra_env so the agent
-            # container writes template content into SOUL.md etc.
+            # Build per-agent env overrides (no shared extra_env mutation)
+            agent_env: dict[str, str] = {}
             for env_key, cfg_key in (
                 ("INITIAL_INSTRUCTIONS", "initial_instructions"),
                 ("INITIAL_SOUL", "initial_soul"),
@@ -491,19 +508,15 @@ def create_dashboard_router(
             ):
                 val = acfg.get(cfg_key, "")
                 if val:
-                    runtime.extra_env[env_key] = val
-            try:
-                url = runtime.start_agent(
-                    agent_id=name,
-                    role=role,
-                    skills_dir=skills_dir,
-                    model=acfg.get("model", model),
-                    thinking=acfg.get("thinking", ""),
-                )
-            finally:
-                runtime.extra_env.pop("INITIAL_INSTRUCTIONS", None)
-                runtime.extra_env.pop("INITIAL_SOUL", None)
-                runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
+                    agent_env[env_key] = val
+            url = runtime.start_agent(
+                agent_id=name,
+                role=role,
+                skills_dir=skills_dir,
+                model=acfg.get("model", model),
+                thinking=acfg.get("thinking", ""),
+                env_overrides=agent_env,
+            )
             if router is not None:
                 router.register_agent(name, url, role=role)
             else:
@@ -840,6 +853,7 @@ def create_dashboard_router(
                 model=agent_cfg.get("model", default_model),
                 mcp_servers=agent_cfg.get("mcp_servers") or None,
                 thinking=agent_cfg.get("thinking", ""),
+                env_overrides={},
             )
             if router is not None:
                 router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
@@ -2251,6 +2265,21 @@ def create_dashboard_router(
             since=since, until=until, limit=limit,
         )
         return {"events": events, "total": len(events)}
+
+    @api_router.get("/api/operator-audit")
+    async def api_operator_audit(request: Request) -> dict:
+        """Operator audit log backed by blackboard."""
+        page = int(request.query_params.get("page", "1"))
+        per_page = int(request.query_params.get("per_page", "20"))
+        agent_id = request.query_params.get("agent_id", "")
+        action_filter = request.query_params.get("action", "")
+        since = request.query_params.get("since", "")
+        if blackboard is None:
+            return {"entries": [], "total": 0, "page": page, "per_page": per_page}
+        return blackboard.get_audit_log(
+            page=page, per_page=per_page, agent_id=agent_id,
+            action=action_filter, since=since,
+        )
 
     # ── Queue status ─────────────────────────────────────────
 

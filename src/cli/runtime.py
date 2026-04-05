@@ -280,8 +280,21 @@ class RuntimeContext:
         from src.host.runtime import DockerBackend, SandboxBackend
         from src.host.transport import HttpTransport
 
-        agents_cfg = self.cfg.get("agents", {})
+        from src.cli.config import _ensure_operator_agent, _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
+
+        # Auto-create operator if it doesn't exist
         default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        _ensure_operator_agent(default_model=default_model)
+        # Reload config after possible operator creation
+        self.cfg = _load_config()
+        agents_cfg = self.cfg.get("agents", {})
+
+        # Reorder agents so operator starts first
+        if _OPERATOR_AGENT_ID in agents_cfg:
+            ordered = {_OPERATOR_AGENT_ID: agents_cfg[_OPERATOR_AGENT_ID]}
+            ordered.update({k: v for k, v in agents_cfg.items() if k != _OPERATOR_AGENT_ID})
+            agents_cfg = ordered
+
         embedding_model = self.cfg.get("llm", {}).get(
             "embedding_model", _default_embedding_model(default_model),
         )
@@ -290,13 +303,18 @@ class RuntimeContext:
 
         # Respect plan limits on startup — only start up to max_agents.
         # Prevents OOM on downsized servers after a plan downgrade.
+        # Operator is excluded from the count — it's always allowed.
         max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
-        if max_agents > 0 and len(agents_cfg) > max_agents:
+        non_operator = {k: v for k, v in agents_cfg.items() if k != _OPERATOR_AGENT_ID}
+        if max_agents > 0 and len(non_operator) > max_agents:
             logger.warning(
                 "Agent limit is %d but %d agents configured — only starting first %d",
-                max_agents, len(agents_cfg), max_agents,
+                max_agents, len(non_operator), max_agents,
             )
-            agents_cfg = dict(list(agents_cfg.items())[:max_agents])
+            trimmed = dict(list(non_operator.items())[:max_agents])
+            if _OPERATOR_AGENT_ID in agents_cfg:
+                trimmed[_OPERATOR_AGENT_ID] = agents_cfg[_OPERATOR_AGENT_ID]
+            agents_cfg = trimmed
 
         self.runtime.extra_env["EMBEDDING_MODEL"] = embedding_model
 
@@ -334,26 +352,26 @@ class RuntimeContext:
             agent_mcp_servers = agent_cfg.get("mcp_servers") or None
             agent_thinking = agent_cfg.get("thinking", "")
 
-            # Seed workspace files from template on first boot
+            # Build per-agent env overrides (no shared extra_env mutation)
+            agent_env: dict[str, str] = {}
             initial_instructions = agent_cfg.get("initial_instructions", "")
             if initial_instructions:
-                self.runtime.extra_env["INITIAL_INSTRUCTIONS"] = initial_instructions
+                agent_env["INITIAL_INSTRUCTIONS"] = initial_instructions
             initial_soul = agent_cfg.get("initial_soul", "")
             if initial_soul:
-                self.runtime.extra_env["INITIAL_SOUL"] = initial_soul
+                agent_env["INITIAL_SOUL"] = initial_soul
             initial_heartbeat = agent_cfg.get("initial_heartbeat", "")
             if initial_heartbeat:
-                self.runtime.extra_env["INITIAL_HEARTBEAT"] = initial_heartbeat
+                agent_env["INITIAL_HEARTBEAT"] = initial_heartbeat
+            if agent_id == _OPERATOR_AGENT_ID:
+                agent_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
 
-            # Set project-specific env vars for this agent
+            # Project env vars
             project_name = agent_projects.get(agent_id)
             if project_name:
                 project_md = PROJECTS_DIR / project_name / "project.md"
-                self.runtime.extra_env["PROJECT_MD_PATH"] = str(project_md)
-                self.runtime.extra_env["PROJECT_NAME"] = project_name
-            else:
-                self.runtime.extra_env.pop("PROJECT_MD_PATH", None)
-                self.runtime.extra_env.pop("PROJECT_NAME", None)
+                agent_env["PROJECT_MD_PATH"] = str(project_md)
+                agent_env["PROJECT_NAME"] = project_name
 
             try:
                 url = self.runtime.start_agent(
@@ -363,6 +381,7 @@ class RuntimeContext:
                     model=agent_model,
                     mcp_servers=agent_mcp_servers,
                     thinking=agent_thinking,
+                    env_overrides=agent_env,
                 )
             except (subprocess.TimeoutExpired, RuntimeError) as exc:
                 if isinstance(self.runtime, SandboxBackend):
@@ -389,16 +408,10 @@ class RuntimeContext:
                         model=agent_model,
                         mcp_servers=agent_mcp_servers,
                         thinking=agent_thinking,
+                        env_overrides=agent_env,
                     )
                 else:
                     raise
-            finally:
-                # Clean up per-agent env vars so they don't leak to the next agent
-                self.runtime.extra_env.pop("INITIAL_INSTRUCTIONS", None)
-                self.runtime.extra_env.pop("INITIAL_SOUL", None)
-                self.runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
-                self.runtime.extra_env.pop("PROJECT_MD_PATH", None)
-                self.runtime.extra_env.pop("PROJECT_NAME", None)
             self.router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
             if isinstance(self.transport, HttpTransport):
                 self.transport.register(agent_id, url)

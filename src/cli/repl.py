@@ -458,8 +458,8 @@ class REPLSession:
         skills_dir = os.path.abspath(agent_cfg_data.get("skills_dir", ""))
         add_mcp_servers = agent_cfg_data.get("mcp_servers") or None
         add_thinking = agent_cfg_data.get("thinking", "")
-        # Pass workspace seed values so the container writes template
-        # content into SOUL.md, INSTRUCTIONS.md, HEARTBEAT.md on first boot
+        # Build per-agent env overrides (no shared extra_env mutation)
+        agent_env: dict[str, str] = {}
         for env_key, cfg_key in (
             ("INITIAL_INSTRUCTIONS", "initial_instructions"),
             ("INITIAL_SOUL", "initial_soul"),
@@ -467,20 +467,16 @@ class REPLSession:
         ):
             val = agent_cfg_data.get(cfg_key, "")
             if val:
-                self.ctx.runtime.extra_env[env_key] = val
-        try:
-            url = self.ctx.runtime.start_agent(
-                agent_id=new_name,
-                role=new_desc,
-                skills_dir=skills_dir,
-                model=agent_cfg_data.get("model", model),
-                mcp_servers=add_mcp_servers,
-                thinking=add_thinking,
-            )
-        finally:
-            self.ctx.runtime.extra_env.pop("INITIAL_INSTRUCTIONS", None)
-            self.ctx.runtime.extra_env.pop("INITIAL_SOUL", None)
-            self.ctx.runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
+                agent_env[env_key] = val
+        url = self.ctx.runtime.start_agent(
+            agent_id=new_name,
+            role=new_desc,
+            skills_dir=skills_dir,
+            model=agent_cfg_data.get("model", model),
+            mcp_servers=add_mcp_servers,
+            thinking=add_thinking,
+            env_overrides=agent_env,
+        )
         self.ctx.router.register_agent(new_name, url, role=new_desc)
         if isinstance(self.ctx.transport, HttpTransport):
             self.ctx.transport.register(new_name, url)
@@ -1413,6 +1409,7 @@ class REPLSession:
             model=agent_model,
             mcp_servers=agent_mcp_servers,
             thinking=agent_thinking,
+            env_overrides={},
         )
 
         # Update router and transport
