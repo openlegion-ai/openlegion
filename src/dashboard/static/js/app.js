@@ -45,8 +45,9 @@ const _IDENTITY_FILE_MAP = {
 function dashboard() {
   return {
     // Navigation
-    activeTab: 'fleet',
+    activeTab: 'chat',
     tabs: [
+      { id: 'chat', label: 'Chat' },
       { id: 'fleet', label: 'Agents' },
       { id: 'system', label: 'System' },
     ],
@@ -54,6 +55,13 @@ function dashboard() {
     loading: true,
     lastRefresh: 0,
     toastQueue: [],
+
+    // Operator readiness
+    operatorReady: false,
+
+    // Fleet Digest (parsed from operator's OBSERVATIONS.md)
+    fleetDigest: null,
+    _fleetDigestTimer: null,
 
     // Fleet
     agents: [],
@@ -277,8 +285,15 @@ function dashboard() {
       { id: 'wallet', label: 'Wallet' },
       { id: 'network', label: 'Network' },
       { id: 'storage', label: 'Storage' },
+      { id: 'operator', label: 'Operator' },
       { id: 'settings', label: 'Settings' },
     ],
+
+    // Audit sub-tab
+    auditLog: [],
+    auditTotal: 0,
+    auditPage: 1,
+    auditLoading: false,
 
     // Unified Project Hub (replaces separate PROJECT.md + Comms + Broadcast panels)
     projectHubExpanded: false,
@@ -448,6 +463,7 @@ function dashboard() {
           ? `/agents/${this.detailAgent}`
           : `/agents/${this.detailAgent}/${tab}`;
       }
+      if (this.activeTab === 'chat') return '/chat';
       if (this.activeTab === 'system') {
         if (this.systemTab === 'activity') {
           if (this.activityView === 'events') return '/system/activity/events';
@@ -456,6 +472,7 @@ function dashboard() {
         }
         return '/system/' + (this.systemTab || 'activity');
       }
+      if (this.activeTab === 'fleet') return '/agents';
       return '/';
     },
 
@@ -464,6 +481,7 @@ function dashboard() {
         const tabLabel = (_IDENTITY_TABS.find(t => t.id === this.identityTab) || _IDENTITY_TABS[0]).label;
         return `${this.detailAgent} \u00b7 ${tabLabel} \u2014 OpenLegion`;
       }
+      if (this.activeTab === 'chat') return 'Chat \u2014 OpenLegion';
       if (this.activeTab === 'system') {
         if (this.systemTab === 'activity') {
           if (this.activityView === 'events') return 'Live Feed \u2014 OpenLegion';
@@ -478,8 +496,11 @@ function dashboard() {
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
+      const route = { tab: 'chat', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
       if (!clean) return route;
+
+      if (clean === 'chat') { route.tab = 'chat'; return route; }
+      if (clean === 'agents' || clean.startsWith('agents/')) { route.tab = 'fleet'; }
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
       if (agentMatch) {
@@ -498,7 +519,7 @@ function dashboard() {
         // Backward compat for old URLs
         const _tabAliases = { schedules: 'automation', connections: 'integrations', uploads: 'storage' };
         const resolved = _tabAliases[sub] || sub;
-        if (resolved && ['activity', 'costs', 'automation', 'integrations', 'apikeys', 'wallet', 'network', 'storage', 'settings'].includes(resolved)) {
+        if (resolved && ['activity', 'costs', 'automation', 'integrations', 'apikeys', 'wallet', 'network', 'storage', 'operator', 'settings'].includes(resolved)) {
           route.systemTab = resolved;
           if (resolved === 'activity') {
             const view = clean.split('/')[2];
@@ -565,6 +586,9 @@ function dashboard() {
               }
               if (route.systemTab === 'storage') {
                 this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails();
+              }
+              if (route.systemTab === 'operator') {
+                this.fetchAuditLog();
               }
               if (route.systemTab === 'activity') {
                 this.activityView = route.activityView;
@@ -673,11 +697,13 @@ function dashboard() {
     },
 
     get filteredAgents() {
+      // Hide the operator system agent from the fleet view — it's managed via the Chat tab
       if (this.activeProject) {
-        return this.agents.filter(a => a.project === this.activeProject);
+        return this.agents.filter(a => a.id !== 'operator' && a.project === this.activeProject);
       }
       // When projects exist, show only standalone (unassigned) agents
-      return this.projects.length > 0 ? this.unassignedAgents : this.agents;
+      const base = this.projects.length > 0 ? this.unassignedAgents : this.agents;
+      return base.filter(a => a.id !== 'operator');
     },
 
     get filteredFleetCost() {
@@ -923,7 +949,7 @@ function dashboard() {
 
       // Deep link restoration: parse initial URL and apply route
       const initRoute = this._parsePath(window.location.pathname);
-      const isDeepLink = initRoute.agentId || initRoute.tab !== 'fleet' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
+      const isDeepLink = initRoute.agentId || initRoute.tab !== 'chat' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
       if (isDeepLink) {
         this.$nextTick(() => {
           this._applyRoute(initRoute);
@@ -932,6 +958,21 @@ function dashboard() {
         });
       } else {
         document.title = this._buildTitle();
+      }
+
+      // Ensure operator chat is initialized when landing on the chat tab
+      if (this.activeTab === 'chat' || initRoute.tab === 'chat') {
+        if (!this.openChats.includes('operator')) {
+          this.openChats.push('operator');
+        }
+        this.activeChatId = 'operator';
+        this._loadChatHistory('operator');
+        this._startFleetDigestRefresh();
+        this.$nextTick(() => {
+          this._scrollChat('operator', true);
+          const el = document.getElementById('operator-chat-input');
+          if (el) el.focus();
+        });
       }
 
       // Popstate listener for browser back/forward
@@ -1092,8 +1133,51 @@ function dashboard() {
       Object.values(this._chatRecoveryPolls).forEach(clearInterval);
       this._chatRecoveryPolls = {};
       this.stopHeartbeatTimer();
+      this._stopFleetDigestRefresh();
       if (this._cmdPaletteHandler) document.removeEventListener('keydown', this._cmdPaletteHandler);
       if (this._popstateHandler) window.removeEventListener('popstate', this._popstateHandler);
+    },
+
+    // ── Fleet Digest ─────────────────────────────────────
+
+    async fetchFleetDigest() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/operator/workspace/OBSERVATIONS.md`);
+        if (!resp.ok) { this.fleetDigest = null; return; }
+        const text = await resp.text();
+        // Parse JSON block from markdown format
+        const match = text.match(/```json\n([\s\S]*?)\n```/);
+        if (match) {
+          this.fleetDigest = JSON.parse(match[1]);
+        } else {
+          this.fleetDigest = null;
+        }
+      } catch (e) {
+        this.fleetDigest = null;
+      }
+    },
+
+    _startFleetDigestRefresh() {
+      this.fetchFleetDigest();
+      if (!this._fleetDigestTimer) {
+        this._fleetDigestTimer = setInterval(() => {
+          if (this.activeTab === 'chat') this.fetchFleetDigest();
+        }, 300000); // 5 minutes
+      }
+    },
+
+    _stopFleetDigestRefresh() {
+      if (this._fleetDigestTimer) {
+        clearInterval(this._fleetDigestTimer);
+        this._fleetDigestTimer = null;
+      }
+    },
+
+    // ── Operator readiness ───────────────────────────────
+
+    checkOperatorReady() {
+      const op = this.agents.find(a => a.id === 'operator');
+      this.operatorReady = op && op.health_status === 'healthy';
     },
 
     // ── Tab switching ─────────────────────────────────────
@@ -1103,6 +1187,19 @@ function dashboard() {
       this.detailAgent = null;
       // Clear tab-specific auto-refresh intervals
       this._stopActivityRefresh();
+      if (tab === 'chat') {
+        if (!this.openChats.includes('operator')) {
+          this.openChats.push('operator');
+        }
+        this.activeChatId = 'operator';
+        this._loadChatHistory('operator');
+        this._startFleetDigestRefresh();
+        this.$nextTick(() => {
+          this._scrollChat('operator', true);
+          const el = document.getElementById('operator-chat-input');
+          if (el) el.focus();
+        });
+      }
       if (tab === 'fleet') {
         this.fetchAgents();
         this.fetchQueues();
@@ -1149,9 +1246,30 @@ function dashboard() {
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'network') { this.loadNetworkProxy(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
+      if (tabId === 'operator') {
+        this.fetchAuditLog();
+      }
       if (tabId === 'activity') {
         if (this.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
         else if (this.activityView === 'logs') { this.fetchSystemLogs(); }
+      }
+    },
+
+    // ── Audit log ────────────────────────────────────────
+
+    async fetchAuditLog() {
+      this.auditLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/operator-audit?per_page=20&page=${this.auditPage}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.auditLog = data.entries || [];
+          this.auditTotal = data.total || 0;
+        }
+      } catch (e) {
+        console.error('Failed to fetch audit log:', e);
+      } finally {
+        this.auditLoading = false;
       }
     },
 
@@ -1590,6 +1708,8 @@ function dashboard() {
           }
           // Fetch coordination status from blackboard
           this._fetchCoordination();
+          // Update operator readiness for the Chat tab
+          this.checkOperatorReady();
         }
       } catch (e) {
         console.warn('fetchAgents failed:', e);
@@ -2423,6 +2543,10 @@ function dashboard() {
         can_spawn: cfg.can_spawn ?? false,
         can_manage_cron: cfg.can_manage_cron ?? false,
         can_use_wallet: cfg.can_use_wallet ?? false,
+        proxy_mode: cfg.proxy?.mode || 'inherit',
+        proxy_url: '',
+        proxy_username: '',
+        proxy_password: '',
         _walletChains: Object.fromEntries(
           (cfg.wallet_available_chains || []).map(ch => {
             const allowed = cfg.wallet_allowed_chains || [];
@@ -2514,7 +2638,10 @@ function dashboard() {
         permBody.wallet_allowed_chains = newChains;
       }
       const permsChanged = Object.keys(permBody).length > 0;
-      if (Object.keys(body).length === 0 && !permsChanged) {
+      const oldProxyMode = cfg.proxy?.mode || 'inherit';
+      const proxyChanged = this.editForm.proxy_mode !== oldProxyMode ||
+        (this.editForm.proxy_mode === 'custom' && this.editForm.proxy_url);
+      if (Object.keys(body).length === 0 && !permsChanged && !proxyChanged) {
         this.cancelConfigEdit();
         return;
       }
@@ -2546,6 +2673,26 @@ function dashboard() {
           } else {
             const err = await permResp.json();
             this.showToast(`Error updating permissions: ${err.detail || 'Update failed'}`);
+          }
+        }
+        if (proxyChanged) {
+          const proxyBody = { mode: this.editForm.proxy_mode };
+          if (this.editForm.proxy_mode === 'custom') {
+            proxyBody.url = this.editForm.proxy_url;
+            if (this.editForm.proxy_username) proxyBody.username = this.editForm.proxy_username;
+            if (this.editForm.proxy_password) proxyBody.password = this.editForm.proxy_password;
+          }
+          const proxyResp = await fetch(`${window.__config.apiBase}/agents/${agentId}/proxy`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(proxyBody),
+          });
+          if (proxyResp.ok) {
+            allUpdated.push('proxy');
+            if (!configResult) configResult = {};
+            configResult.restart_required = true;
+          } else {
+            const err = await proxyResp.json().catch(() => ({}));
+            this.showToast(`Error updating proxy: ${err.detail || 'Update failed'}`);
           }
         }
         if (configResult && configResult.restart_required) {
@@ -4237,6 +4384,7 @@ function dashboard() {
         { label: 'Budget Settings', desc: 'Default daily and monthly budgets', keywords: ['budget', 'cost', 'daily', 'monthly', 'limit', 'spend'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
         { label: 'Agent Limits', desc: 'Max iterations, tool rounds, timeouts', keywords: ['iterations', 'rounds', 'timeout', 'limit', 'agent', 'execution'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
         { label: 'Health Settings', desc: 'Poll interval, failure thresholds, restart limits', keywords: ['health', 'poll', 'restart', 'failure', 'recovery', 'monitor'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
+        { label: 'Operator Settings', desc: 'Operator model, status, and audit log', keywords: ['audit', 'history', 'changes', 'operator', 'log', 'settings', 'model'], action: () => { this.switchSystemTab('operator'); this.switchTab('system'); } },
       ];
       for (const act of sysActions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {
@@ -4925,6 +5073,7 @@ function dashboard() {
 
     drillDown(agentId) {
       this._detailReturnProject = this.activeProject;
+      this.activeTab = 'fleet';
       this.selectedAgent = agentId;
       this.detailAgent = agentId;
       this.showBrowserViewer = false;

@@ -60,8 +60,14 @@ class RuntimeBackend(abc.ABC):
         model: str = "",
         mcp_servers: list[dict] | None = None,
         thinking: str = "",
+        env_overrides: dict[str, str] | None = None,
     ) -> str:
-        """Start an agent. Returns a URL or identifier for reaching it."""
+        """Start an agent. Returns a URL or identifier for reaching it.
+
+        ``env_overrides`` are per-agent environment variables that are merged
+        on top of the shared ``extra_env`` dict for this call only, without
+        mutating ``extra_env``.
+        """
 
     @abc.abstractmethod
     def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
@@ -88,6 +94,7 @@ class RuntimeBackend(abc.ABC):
         ttl: int = 3600,
         mcp_servers: list[dict] | None = None,
         thinking: str = "",
+        env_overrides: dict[str, str] | None = None,
     ) -> str:
         """Spawn an ephemeral agent with a TTL for auto-cleanup."""
         url = self.start_agent(
@@ -95,6 +102,7 @@ class RuntimeBackend(abc.ABC):
             system_prompt=system_prompt, model=model,
             mcp_servers=mcp_servers,
             thinking=thinking,
+            env_overrides=env_overrides,
         )
         self.agents[agent_id]["ephemeral"] = True
         self.agents[agent_id]["ttl"] = ttl
@@ -217,6 +225,7 @@ class DockerBackend(RuntimeBackend):
         model: str = "",
         mcp_servers: list[dict] | None = None,
         thinking: str = "",
+        env_overrides: dict[str, str] | None = None,
     ) -> str:
         import docker as _docker
 
@@ -246,6 +255,8 @@ class DockerBackend(RuntimeBackend):
         if thinking:
             environment["THINKING"] = thinking
         environment.update(self.extra_env)
+        if env_overrides:
+            environment.update(env_overrides)
         if self.use_host_network:
             environment["AGENT_PORT"] = str(port)
 
@@ -259,7 +270,10 @@ class DockerBackend(RuntimeBackend):
                 "bind": "/app/skills", "mode": "ro",
             }
         # Mount project-specific PROJECT.md (standalone agents get none)
-        project_md_path = self.extra_env.get("PROJECT_MD_PATH", "")
+        # Check env_overrides first (per-agent), then fall back to extra_env (system-wide)
+        project_md_path = (env_overrides or {}).get(
+            "PROJECT_MD_PATH", self.extra_env.get("PROJECT_MD_PATH", ""),
+        )
         if project_md_path and Path(project_md_path).exists():
             host_path = project_md_path
             if platform.system() == "Windows":
@@ -282,13 +296,16 @@ class DockerBackend(RuntimeBackend):
         # Slim agent containers (no browser). 384MB / 0.15 CPU.
         # Agents are mostly I/O-bound (waiting on LLM APIs).
         # Browser ops are handled by the shared browser service container.
+        # Operator gets reduced limits (128MB / 0.05 CPU) — it only does
+        # LLM chat and mesh API calls, no browser/shell/file processing.
+        is_operator = bool(env_overrides and env_overrides.get("ALLOWED_TOOLS"))
         run_kwargs: dict[str, Any] = {
             "detach": True,
             "name": f"openlegion_{safe_name}",
             "environment": environment,
             "volumes": volumes,
-            "mem_limit": "384m",
-            "cpu_quota": 15000,
+            "mem_limit": "128m" if is_operator else "384m",
+            "cpu_quota": 5000 if is_operator else 15000,
             "security_opt": ["no-new-privileges"],
             "cap_drop": ["ALL"],
             "read_only": True,
@@ -636,6 +653,7 @@ class SandboxBackend(RuntimeBackend):
         model: str = "",
         mcp_servers: list[dict] | None = None,
         thinking: str = "",
+        env_overrides: dict[str, str] | None = None,
     ) -> Path:
         """Create the per-agent host directory that will sync into the sandbox."""
         ws = self._workspace_root / agent_id
@@ -643,7 +661,10 @@ class SandboxBackend(RuntimeBackend):
         (ws / "data" / "workspace").mkdir(parents=True, exist_ok=True)
 
         # Copy project-specific PROJECT.md (standalone agents get none)
-        project_md_path = self.extra_env.get("PROJECT_MD_PATH", "")
+        # Check env_overrides first (per-agent), then fall back to extra_env (system-wide)
+        project_md_path = (env_overrides or {}).get(
+            "PROJECT_MD_PATH", self.extra_env.get("PROJECT_MD_PATH", ""),
+        )
         if project_md_path and Path(project_md_path).exists():
             shutil.copy2(project_md_path, ws / "PROJECT.md")
         elif project_md_path:
@@ -691,6 +712,8 @@ class SandboxBackend(RuntimeBackend):
         if thinking:
             env_cfg["THINKING"] = thinking
         env_cfg.update(self.extra_env)
+        if env_overrides:
+            env_cfg.update(env_overrides)
 
         def _sanitize_env_value(v: str) -> str:
             """Sanitize a value for Docker --env-file format.
@@ -717,11 +740,13 @@ class SandboxBackend(RuntimeBackend):
         model: str = "",
         mcp_servers: list[dict] | None = None,
         thinking: str = "",
+        env_overrides: dict[str, str] | None = None,
     ) -> str:
         sandbox_name = f"openlegion_{_docker_safe_name(agent_id)}"
         ws = self._prepare_workspace(
             agent_id, role, skills_dir, system_prompt, model,
             mcp_servers=mcp_servers, thinking=thinking,
+            env_overrides=env_overrides,
         )
 
         # Create sandbox with the shell agent type and workspace

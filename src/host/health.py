@@ -215,6 +215,12 @@ class HealthMonitor:
             logger.warning(f"Error stopping agent '{agent_id}' during restart: {e}")
 
         try:
+            # Preserve operator's ALLOWED_TOOLS on restart
+            from src.cli.config import _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
+            restart_env: dict[str, str] = {}
+            if agent_id == _OPERATOR_AGENT_ID:
+                restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
+
             loop = asyncio.get_running_loop()
             # Load fresh config for proxy resolution
             fresh_cfg = _load_config()
@@ -235,6 +241,7 @@ class HealthMonitor:
                         model=info.get("model", ""),
                         mcp_servers=info.get("mcp_servers"),
                         thinking=info.get("thinking", ""),
+                        env_overrides=restart_env,
                     ),
                 )
             finally:

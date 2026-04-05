@@ -301,6 +301,8 @@ def _period_to_since(period: str) -> str:
     now = datetime.now(timezone.utc)
     if period == "today":
         return now.strftime("%Y-%m-%d 00:00:00")
+    if period == "yesterday":
+        return (now - timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
     if period == "month":
         return now.strftime("%Y-%m-01 00:00:00")
     if period == "week":

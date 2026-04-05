@@ -34,6 +34,13 @@ async def introspect_tool(section: str = "all", *, mesh_client=None) -> dict:
     if not mesh_client:
         return {"error": "No mesh connection available"}
     try:
-        return await mesh_client.introspect(section)
+        result = await mesh_client.introspect(section)
+        # Merge fleet-wide metrics when available (operator heartbeat data)
+        try:
+            metrics = await mesh_client.get_system_metrics()
+            result["metrics"] = metrics
+        except Exception:
+            pass  # Metrics endpoint may not exist on older hosts
+        return result
     except Exception as e:
         return {"error": f"Introspect failed: {e}"}
