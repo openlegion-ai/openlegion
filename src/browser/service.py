@@ -440,13 +440,19 @@ class BrowserManager:
 
         proxy_config = self.get_proxy_config(agent_id)
         if proxy_config is not None:
-            proxy_arg = {"server": proxy_config["url"]}
-            if proxy_config.get("username"):
-                proxy_arg["username"] = proxy_config["username"]
-            if proxy_config.get("password"):
-                proxy_arg["password"] = proxy_config["password"]
-            options = build_launch_options(agent_id, profile_dir, proxy=proxy_arg)
+            if proxy_config.get("url"):
+                # Per-agent proxy configured — use it
+                proxy_arg: dict = {"server": proxy_config["url"]}
+                if proxy_config.get("username"):
+                    proxy_arg["username"] = proxy_config["username"]
+                if proxy_config.get("password"):
+                    proxy_arg["password"] = proxy_config["password"]
+                options = build_launch_options(agent_id, profile_dir, proxy=proxy_arg)
+            else:
+                # Explicitly no proxy (direct mode or inherit with no system proxy)
+                options = build_launch_options(agent_id, profile_dir, proxy=None)
         else:
+            # No per-agent config pushed yet — legacy env var fallback
             options = build_launch_options(agent_id, profile_dir)
         logger.info("Starting Camoufox for '%s' (profile=%s)", agent_id, profile_dir)
 

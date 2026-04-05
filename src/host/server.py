@@ -1480,7 +1480,6 @@ def create_mesh_app(
         network_cfg = _fresh_cfg.get("network", {})
         proxy_url = resolve_agent_proxy(agent_id, agents_cfg, network_cfg)
 
-        body = None
         if proxy_url:
             parsed = parse_proxy_url(proxy_url)
             if parsed:
@@ -1489,6 +1488,10 @@ def create_mesh_app(
                     "username": parsed["username"],
                     "password": parsed["password"],
                 }
+            else:
+                body = {}  # explicit no-proxy (invalid URL fell through)
+        else:
+            body = {}  # explicit no-proxy (direct mode or no system proxy)
 
         headers: dict = {"X-Mesh-Internal": "1"}
         if svc_token:
@@ -1591,12 +1594,14 @@ def create_mesh_app(
                 except ValueError as e:
                     raise HTTPException(400, str(e))
 
-        # Check for browser service restart — lazy re-push proxy config
+        # Check for browser service restart — re-push proxy config for ALL agents
         try:
             restarted = await _check_browser_boot_id_changed()
             if restarted:
-                logger.info("Browser service restarted, re-pushing proxy for %s", req_agent_id)
-                await _push_browser_proxy(req_agent_id)
+                all_agents = list(router.agent_registry.keys())
+                logger.info("Browser service restarted, re-pushing proxy for %d agents", len(all_agents))
+                for _aid in all_agents:
+                    await _push_browser_proxy(_aid)
         except Exception:
             pass  # Non-blocking — don't fail the browser command
 

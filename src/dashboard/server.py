@@ -191,11 +191,14 @@ def create_dashboard_router(
             from src.cli.proxy import parse_proxy_url, resolve_agent_proxy
             _cfg = _load_config()
             proxy_url = resolve_agent_proxy(agent_id, _cfg.get("agents", {}), _cfg.get("network", {}))
-            body = None
             if proxy_url:
                 parsed = parse_proxy_url(proxy_url)
                 if parsed:
                     body = {"url": parsed["url"], "username": parsed["username"], "password": parsed["password"]}
+                else:
+                    body = {}  # explicit no-proxy
+            else:
+                body = {}  # explicit no-proxy (direct mode or no system proxy)
             import httpx as _httpx
             async with _httpx.AsyncClient(timeout=10) as client:
                 headers = {}

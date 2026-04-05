@@ -5152,3 +5152,19 @@ class TestBrowserManagerProxyConfig:
         manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy4")
         assert manager.boot_id
         assert manager.boot_id == manager.boot_id
+
+    def test_empty_dict_means_explicit_no_proxy(self):
+        """Empty dict stored via set_proxy_config means 'explicitly no proxy' (direct mode)."""
+        manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy5")
+        manager.set_proxy_config("agent-1", {})
+        config = manager.get_proxy_config("agent-1")
+        assert config is not None  # not None — that would trigger legacy fallback
+        assert config == {}  # empty dict = explicit no-proxy
+        assert not config.get("url")  # no URL = _start_browser passes proxy=None
+
+    def test_none_clears_config_for_legacy_fallback(self):
+        """None clears the stored config, triggering legacy env var fallback."""
+        manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy6")
+        manager.set_proxy_config("agent-1", {"url": "http://host:8080"})
+        manager.set_proxy_config("agent-1", None)
+        assert manager.get_proxy_config("agent-1") is None  # cleared = legacy fallback
