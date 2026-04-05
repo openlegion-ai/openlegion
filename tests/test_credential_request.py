@@ -5,10 +5,9 @@ Covers the request_credential tool, MeshClient method, and mesh endpoint.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 
 # ── Tool tests ──────────────────────────────────────────────────────
 
@@ -193,9 +192,9 @@ class TestCredentialRequestEndpoint:
         costs_path = tmp_path / "costs.db"
         traces_path = tmp_path / "traces.db"
 
+        from src.host.costs import CostTracker
         from src.host.mesh import Blackboard, MessageRouter, PubSub
         from src.host.permissions import PermissionMatrix
-        from src.host.costs import CostTracker
         from src.host.traces import TraceStore
 
         blackboard = Blackboard(str(bb_path))
