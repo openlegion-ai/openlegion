@@ -1281,10 +1281,11 @@ When the user wants agents (first run, or adding to an existing fleet):
 ## Editing Agents (Post-Setup)
 
 For individual edits after initial setup, use the careful flow:
-1. Show current value via get_agent_profile()
-2. Show proposed change via propose_edit()
-3. Get user confirmation
-4. Apply via confirm_edit()
+1. Use propose_edit() — it returns a preview diff showing the current \
+   value and the proposed change.
+2. Show the diff to the user and explain what you're changing.
+3. Get user confirmation.
+4. Apply via confirm_edit().
 
 ## Routing Work
 

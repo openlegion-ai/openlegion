@@ -1070,24 +1070,31 @@ def create_mesh_app(
         if section in ("fleet", "all"):
             # Scope fleet list by project: project agents see only peers,
             # standalone agents see only themselves.
-            from src.cli.config import _load_projects
-            _projects = _load_projects()
-            _agent_project_members: set[str] | None = None
-            for _pdata in _projects.values():
-                if agent_id in _pdata.get("members", []):
-                    _agent_project_members = set(_pdata["members"])
-                    break
-
-            if _agent_project_members is not None:
+            # Exception: operator sees all agents (it manages the entire fleet).
+            if agent_id == "operator":
                 result["fleet"] = [
                     {"id": aid, "role": router.agent_roles.get(aid, "")}
                     for aid in router.agent_registry
-                    if aid in _agent_project_members
                 ]
             else:
-                result["fleet"] = [
-                    {"id": agent_id, "role": router.agent_roles.get(agent_id, "")}
-                ]
+                from src.cli.config import _load_projects
+                _projects = _load_projects()
+                _agent_project_members: set[str] | None = None
+                for _pdata in _projects.values():
+                    if agent_id in _pdata.get("members", []):
+                        _agent_project_members = set(_pdata["members"])
+                        break
+
+                if _agent_project_members is not None:
+                    result["fleet"] = [
+                        {"id": aid, "role": router.agent_roles.get(aid, "")}
+                        for aid in router.agent_registry
+                        if aid in _agent_project_members
+                    ]
+                else:
+                    result["fleet"] = [
+                        {"id": agent_id, "role": router.agent_roles.get(agent_id, "")}
+                    ]
 
         if section in ("cron", "all") and cron_scheduler:
             result["cron"] = [
@@ -1832,14 +1839,15 @@ def create_mesh_app(
         """
         _require_any_auth(request)
 
-        # -- Agent counts --
+        # -- Agent counts (exclude operator — it's a system agent, not a user slot) --
         agents = dict(router.agent_registry)
-        total = len(agents)
+        total = sum(1 for aid in agents if aid != "operator")
 
-        # -- Health breakdown --
+        # -- Health breakdown (exclude operator) --
         health_list = health_monitor.get_status() if health_monitor else []
-        healthy = sum(1 for s in health_list if s.get("status") == "healthy")
-        failed = sum(1 for s in health_list if s.get("status") == "failed")
+        health_list_user = [s for s in health_list if s.get("agent") != "operator"]
+        healthy = sum(1 for s in health_list_user if s.get("status") == "healthy")
+        failed = sum(1 for s in health_list_user if s.get("status") == "failed")
 
         # -- Busy count from lane manager --
         lane_status = lane_manager.get_status() if lane_manager else {}
@@ -1861,9 +1869,9 @@ def create_mesh_app(
         # -- Per-agent failure rates (placeholder — needs task tracking) --
         failure_rates: dict[str, float] = {}
 
-        # -- Agents needing attention --
+        # -- Agents needing attention (exclude operator) --
         agents_attention: list[dict] = []
-        for status_entry in health_list:
+        for status_entry in health_list_user:
             agent_status = status_entry.get("status", "unknown")
             if agent_status in ("failed", "unhealthy"):
                 agents_attention.append({
@@ -1994,8 +2002,14 @@ def create_mesh_app(
 
         from src.cli.config import _create_project, _load_config, _load_projects
 
-        _max_projects = int(_os.environ.get("OPENLEGION_MAX_PROJECTS", "0"))
-        if _max_projects > 0:
+        _max_projects_env = _os.environ.get("OPENLEGION_MAX_PROJECTS")
+        if _max_projects_env is not None:
+            _max_projects = int(_max_projects_env)
+            if _max_projects == 0:
+                raise HTTPException(
+                    403,
+                    "Projects are not available on your plan. Upgrade for project support.",
+                )
             current_count = len(_load_projects())
             if current_count >= _max_projects:
                 raise HTTPException(
