@@ -45,8 +45,9 @@ const _IDENTITY_FILE_MAP = {
 function dashboard() {
   return {
     // Navigation
-    activeTab: 'fleet',
+    activeTab: 'chat',
     tabs: [
+      { id: 'chat', label: 'Chat' },
       { id: 'fleet', label: 'Agents' },
       { id: 'system', label: 'System' },
     ],
@@ -54,6 +55,13 @@ function dashboard() {
     loading: true,
     lastRefresh: 0,
     toastQueue: [],
+
+    // Operator readiness
+    operatorReady: false,
+
+    // Fleet Digest (parsed from operator's OBSERVATIONS.md)
+    fleetDigest: null,
+    _fleetDigestTimer: null,
 
     // Fleet
     agents: [],
@@ -275,9 +283,17 @@ function dashboard() {
       { id: 'integrations', label: 'Integrations' },
       { id: 'apikeys', label: 'API Keys' },
       { id: 'wallet', label: 'Wallet' },
+      { id: 'network', label: 'Network' },
       { id: 'storage', label: 'Storage' },
+      { id: 'audit', label: 'Audit' },
       { id: 'settings', label: 'Settings' },
     ],
+
+    // Audit sub-tab
+    auditLog: [],
+    auditTotal: 0,
+    auditPage: 1,
+    auditLoading: false,
 
     // Unified Project Hub (replaces separate PROJECT.md + Comms + Broadcast panels)
     projectHubExpanded: false,
@@ -353,6 +369,21 @@ function dashboard() {
     walletRpcEditing: null,  // chain_id being edited
     walletRpcValue: '',  // input value for editing
     walletRpcSaving: false,
+
+    // Network / Proxy
+    networkProxy: {
+      system_proxy: { configured: false, managed: false, url: '' },
+      no_proxy: '',
+      agents: [],
+      form: { url: '', username: '', password: '' },
+      loading: false,
+      saving: false,
+      saved: false,
+      removingSystemProxy: false,
+    },
+    agentProxyForm: { mode: 'inherit', url: '', username: '', password: '' },
+    agentProxySaving: false,
+    agentProxySaved: false,
 
     // Workflow cancel tracking
     _cancellingWorkflows: {},
@@ -432,6 +463,7 @@ function dashboard() {
           ? `/agents/${this.detailAgent}`
           : `/agents/${this.detailAgent}/${tab}`;
       }
+      if (this.activeTab === 'chat') return '/chat';
       if (this.activeTab === 'system') {
         if (this.systemTab === 'activity') {
           if (this.activityView === 'events') return '/system/activity/events';
@@ -440,6 +472,7 @@ function dashboard() {
         }
         return '/system/' + (this.systemTab || 'activity');
       }
+      if (this.activeTab === 'fleet') return '/agents';
       return '/';
     },
 
@@ -448,6 +481,7 @@ function dashboard() {
         const tabLabel = (_IDENTITY_TABS.find(t => t.id === this.identityTab) || _IDENTITY_TABS[0]).label;
         return `${this.detailAgent} \u00b7 ${tabLabel} \u2014 OpenLegion`;
       }
+      if (this.activeTab === 'chat') return 'Chat \u2014 OpenLegion';
       if (this.activeTab === 'system') {
         if (this.systemTab === 'activity') {
           if (this.activityView === 'events') return 'Live Feed \u2014 OpenLegion';
@@ -462,8 +496,11 @@ function dashboard() {
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
+      const route = { tab: 'chat', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
       if (!clean) return route;
+
+      if (clean === 'chat') { route.tab = 'chat'; return route; }
+      if (clean === 'agents' || clean.startsWith('agents/')) { route.tab = 'fleet'; }
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
       if (agentMatch) {
@@ -482,7 +519,7 @@ function dashboard() {
         // Backward compat for old URLs
         const _tabAliases = { schedules: 'automation', connections: 'integrations', uploads: 'storage' };
         const resolved = _tabAliases[sub] || sub;
-        if (resolved && ['activity', 'costs', 'automation', 'integrations', 'apikeys', 'wallet', 'storage', 'settings'].includes(resolved)) {
+        if (resolved && ['activity', 'costs', 'automation', 'integrations', 'apikeys', 'wallet', 'network', 'storage', 'audit', 'settings'].includes(resolved)) {
           route.systemTab = resolved;
           if (resolved === 'activity') {
             const view = clean.split('/')[2];
@@ -544,8 +581,14 @@ function dashboard() {
                 this.fetchBrowserSettings();
                 this.fetchSystemSettings();
               }
+              if (route.systemTab === 'network') {
+                this.loadNetworkProxy();
+              }
               if (route.systemTab === 'storage') {
                 this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails();
+              }
+              if (route.systemTab === 'audit') {
+                this.fetchAuditLog();
               }
               if (route.systemTab === 'activity') {
                 this.activityView = route.activityView;
@@ -904,7 +947,7 @@ function dashboard() {
 
       // Deep link restoration: parse initial URL and apply route
       const initRoute = this._parsePath(window.location.pathname);
-      const isDeepLink = initRoute.agentId || initRoute.tab !== 'fleet' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
+      const isDeepLink = initRoute.agentId || initRoute.tab !== 'chat' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
       if (isDeepLink) {
         this.$nextTick(() => {
           this._applyRoute(initRoute);
@@ -913,6 +956,21 @@ function dashboard() {
         });
       } else {
         document.title = this._buildTitle();
+      }
+
+      // Ensure operator chat is initialized when landing on the chat tab
+      if (this.activeTab === 'chat' || initRoute.tab === 'chat') {
+        if (!this.openChats.includes('operator')) {
+          this.openChats.push('operator');
+        }
+        this.activeChatId = 'operator';
+        this._loadChatHistory('operator');
+        this._startFleetDigestRefresh();
+        this.$nextTick(() => {
+          this._scrollChat('operator', true);
+          const el = document.getElementById('operator-chat-input');
+          if (el) el.focus();
+        });
       }
 
       // Popstate listener for browser back/forward
@@ -1073,8 +1131,51 @@ function dashboard() {
       Object.values(this._chatRecoveryPolls).forEach(clearInterval);
       this._chatRecoveryPolls = {};
       this.stopHeartbeatTimer();
+      this._stopFleetDigestRefresh();
       if (this._cmdPaletteHandler) document.removeEventListener('keydown', this._cmdPaletteHandler);
       if (this._popstateHandler) window.removeEventListener('popstate', this._popstateHandler);
+    },
+
+    // ── Fleet Digest ─────────────────────────────────────
+
+    async fetchFleetDigest() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/operator/workspace/OBSERVATIONS.md`);
+        if (!resp.ok) { this.fleetDigest = null; return; }
+        const text = await resp.text();
+        // Parse JSON block from markdown format
+        const match = text.match(/```json\n([\s\S]*?)\n```/);
+        if (match) {
+          this.fleetDigest = JSON.parse(match[1]);
+        } else {
+          this.fleetDigest = null;
+        }
+      } catch (e) {
+        this.fleetDigest = null;
+      }
+    },
+
+    _startFleetDigestRefresh() {
+      this.fetchFleetDigest();
+      if (!this._fleetDigestTimer) {
+        this._fleetDigestTimer = setInterval(() => {
+          if (this.activeTab === 'chat') this.fetchFleetDigest();
+        }, 300000); // 5 minutes
+      }
+    },
+
+    _stopFleetDigestRefresh() {
+      if (this._fleetDigestTimer) {
+        clearInterval(this._fleetDigestTimer);
+        this._fleetDigestTimer = null;
+      }
+    },
+
+    // ── Operator readiness ───────────────────────────────
+
+    checkOperatorReady() {
+      const op = this.agents.find(a => a.id === 'operator');
+      this.operatorReady = op && op.health_status === 'healthy';
     },
 
     // ── Tab switching ─────────────────────────────────────
@@ -1084,6 +1185,19 @@ function dashboard() {
       this.detailAgent = null;
       // Clear tab-specific auto-refresh intervals
       this._stopActivityRefresh();
+      if (tab === 'chat') {
+        if (!this.openChats.includes('operator')) {
+          this.openChats.push('operator');
+        }
+        this.activeChatId = 'operator';
+        this._loadChatHistory('operator');
+        this._startFleetDigestRefresh();
+        this.$nextTick(() => {
+          this._scrollChat('operator', true);
+          const el = document.getElementById('operator-chat-input');
+          if (el) el.focus();
+        });
+      }
       if (tab === 'fleet') {
         this.fetchAgents();
         this.fetchQueues();
@@ -1101,6 +1215,9 @@ function dashboard() {
           this.fetchWebhooks();
           this.fetchChannels();
           this.fetchApiKeys();
+        }
+        if (this.systemTab === 'network') {
+          this.loadNetworkProxy();
         }
         if (this.systemTab === 'settings') {
           this.fetchBrowserSettings();
@@ -1125,10 +1242,30 @@ function dashboard() {
       if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); }
       if (tabId === 'apikeys') { this.fetchSettings(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
+      if (tabId === 'network') { this.loadNetworkProxy(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
+      if (tabId === 'audit') { this.fetchAuditLog(); }
       if (tabId === 'activity') {
         if (this.activityView === 'traces') { this.fetchTraces(); this._startActivityRefresh(); }
         else if (this.activityView === 'logs') { this.fetchSystemLogs(); }
+      }
+    },
+
+    // ── Audit log ────────────────────────────────────────
+
+    async fetchAuditLog() {
+      this.auditLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/audit?limit=${20}&event_type=operator`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.auditLog = data.events || [];
+          this.auditTotal = data.total || 0;
+        }
+      } catch (e) {
+        console.error('Failed to fetch audit log:', e);
+      } finally {
+        this.auditLoading = false;
       }
     },
 
@@ -1567,6 +1704,8 @@ function dashboard() {
           }
           // Fetch coordination status from blackboard
           this._fetchCoordination();
+          // Update operator readiness for the Chat tab
+          this.checkOperatorReady();
         }
       } catch (e) {
         console.warn('fetchAgents failed:', e);
@@ -2369,6 +2508,7 @@ function dashboard() {
         if (resp.ok) {
           const cfg = await resp.json();
           this.agentConfigs[agentId] = cfg;
+          if (this.selectedAgent === agentId) this.initAgentProxyForm(agentId);
           return cfg;
         }
       } catch (e) { console.warn('fetchAgentConfig failed:', e); }
@@ -3165,6 +3305,155 @@ function dashboard() {
       if (d <= 4.0) return 'Moderate';
       if (d <= 7.0) return 'Heavy';
       return 'Maximum';
+    },
+
+    // ── Network / Proxy ────────────────────────────────
+
+    async loadNetworkProxy() {
+      this.networkProxy.loading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/network/proxy`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.networkProxy.system_proxy = data.system_proxy || { configured: false, managed: false, url: '' };
+          this.networkProxy.no_proxy = data.no_proxy || '';
+          this.networkProxy.agents = data.agents || [];
+          // Populate form with existing system proxy URL (sans credentials)
+          if (data.system_proxy?.configured && !data.system_proxy?.managed) {
+            this.networkProxy.form.url = data.system_proxy.url || '';
+            this.networkProxy.form.username = '';
+            this.networkProxy.form.password = '';
+          }
+        }
+      } catch (e) { console.warn('loadNetworkProxy failed:', e); }
+      this.networkProxy.loading = false;
+    },
+
+    async saveSystemProxy() {
+      this.networkProxy.saving = true;
+      try {
+        const body = { no_proxy: this.networkProxy.no_proxy };
+        if (!this.networkProxy.system_proxy.managed) {
+          body.system_proxy = this.networkProxy.form.url ? {
+            url: this.networkProxy.form.url,
+            username: this.networkProxy.form.username || undefined,
+            password: this.networkProxy.form.password || undefined,
+          } : null;
+        }
+        const resp = await fetch(`${window.__config.apiBase}/network/proxy`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+          this.networkProxy.saved = true;
+          setTimeout(() => this.networkProxy.saved = false, 2000);
+          this.showToast('Proxy settings saved');
+          await this.loadNetworkProxy();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Save failed'}`);
+        }
+      } catch (e) {
+        this.showToast(`Error: ${e.message || String(e)}`);
+      }
+      this.networkProxy.saving = false;
+    },
+
+    async removeSystemProxy() {
+      this.networkProxy.removingSystemProxy = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/network/proxy`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ system_proxy: null, no_proxy: this.networkProxy.no_proxy }),
+        });
+        if (resp.ok) {
+          this.networkProxy.form = { url: '', username: '', password: '' };
+          this.showToast('System proxy removed');
+          await this.loadNetworkProxy();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Remove failed'}`);
+        }
+      } catch (e) {
+        this.showToast(`Error: ${e.message || String(e)}`);
+      }
+      this.networkProxy.removingSystemProxy = false;
+    },
+
+    async saveNoProxy() {
+      this.networkProxy.saving = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/network/proxy`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ no_proxy: this.networkProxy.no_proxy }),
+        });
+        if (resp.ok) {
+          this.showToast('NO_PROXY updated');
+          await this.loadNetworkProxy();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Save failed'}`);
+        }
+      } catch (e) {
+        this.showToast(`Error: ${e.message || String(e)}`);
+      }
+      this.networkProxy.saving = false;
+    },
+
+    initAgentProxyForm(agentId) {
+      const cfg = this.agentConfigs[agentId];
+      if (cfg?.proxy) {
+        this.agentProxyForm = {
+          mode: cfg.proxy.mode || 'inherit',
+          url: cfg.proxy.url || '',
+          username: '',
+          password: '',
+        };
+      } else {
+        this.agentProxyForm = { mode: 'inherit', url: '', username: '', password: '' };
+      }
+      this.agentProxySaved = false;
+    },
+
+    async saveAgentProxy(agentId) {
+      this.agentProxySaving = true;
+      try {
+        const body = { mode: this.agentProxyForm.mode };
+        if (this.agentProxyForm.mode === 'custom') {
+          body.url = this.agentProxyForm.url;
+          if (this.agentProxyForm.username) body.username = this.agentProxyForm.username;
+          if (this.agentProxyForm.password) body.password = this.agentProxyForm.password;
+        }
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/proxy`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+          this.agentProxySaved = true;
+          this.showToast('Agent proxy updated — restart required');
+          setTimeout(() => this.agentProxySaved = false, 3000);
+          // Refresh agent config to pick up new proxy state
+          await this.fetchAgentConfig(agentId);
+          this.initAgentProxyForm(agentId);
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Save failed'}`);
+        }
+      } catch (e) {
+        this.showToast(`Error: ${e.message || String(e)}`);
+      }
+      this.agentProxySaving = false;
+    },
+
+    proxyModeLabel(mode) {
+      if (mode === 'inherit') return 'System proxy';
+      if (mode === 'custom') return 'Custom proxy';
+      if (mode === 'direct') return 'No proxy';
+      return mode || '-';
     },
 
     // ── System settings ─────────────────────────────────
@@ -3997,7 +4286,7 @@ function dashboard() {
       // Match tabs with keywords
       const tabKeywords = {
         fleet: ['agents', 'fleet', 'cards', 'project'],
-        system: ['system', 'costs', 'cron', 'schedules', 'automation', 'credentials', 'api keys', 'connections', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows', 'storage', 'uploads', 'disk'],
+        system: ['system', 'costs', 'cron', 'schedules', 'automation', 'credentials', 'api keys', 'connections', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows', 'storage', 'uploads', 'disk', 'network', 'proxy', 'socks'],
       };
       for (const [tabId, keywords] of Object.entries(tabKeywords)) {
         const tab = this.tabs.find(t => t.id === tabId);
@@ -4064,6 +4353,7 @@ function dashboard() {
         { label: 'Budget Settings', desc: 'Default daily and monthly budgets', keywords: ['budget', 'cost', 'daily', 'monthly', 'limit', 'spend'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
         { label: 'Agent Limits', desc: 'Max iterations, tool rounds, timeouts', keywords: ['iterations', 'rounds', 'timeout', 'limit', 'agent', 'execution'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
         { label: 'Health Settings', desc: 'Poll interval, failure thresholds, restart limits', keywords: ['health', 'poll', 'restart', 'failure', 'recovery', 'monitor'], action: () => { this.systemTab = 'settings'; this.switchTab('system'); this.fetchSystemSettings(); } },
+        { label: 'Audit Log', desc: 'Operator modification history', keywords: ['audit', 'history', 'changes', 'operator', 'log'], action: () => { this.switchSystemTab('audit'); this.switchTab('system'); } },
       ];
       for (const act of sysActions) {
         if (act.keywords.some(kw => kw.includes(q)) || act.label.toLowerCase().includes(q)) {

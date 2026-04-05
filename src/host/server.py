@@ -16,8 +16,10 @@ import hmac
 import json
 import re
 import time
+import uuid as _uuid
 from collections import defaultdict
 from collections.abc import Callable, Coroutine
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
@@ -74,6 +76,44 @@ if TYPE_CHECKING:
     from src.host.transport import Transport
 
 
+# ── Pending Config Change Store (in-memory) ──────────────────────
+
+_pending_changes: dict[str, dict] = {}
+_MAX_PENDING = 10
+_CHANGE_TTL_SECONDS = 300
+
+
+def _cleanup_expired_changes() -> None:
+    now = datetime.utcnow()
+    expired = [k for k, v in _pending_changes.items() if v["expires_at"] < now]
+    for k in expired:
+        del _pending_changes[k]
+
+
+def _store_pending_change(agent_id: str, field: str, old_value: object, new_value: object) -> str:
+    _cleanup_expired_changes()
+    if len(_pending_changes) >= _MAX_PENDING:
+        oldest = min(_pending_changes, key=lambda k: _pending_changes[k]["expires_at"])
+        del _pending_changes[oldest]
+    change_id = str(_uuid.uuid4())
+    _pending_changes[change_id] = {
+        "agent_id": agent_id, "field": field,
+        "old_value": old_value, "new_value": new_value,
+        "expires_at": datetime.utcnow() + timedelta(seconds=_CHANGE_TTL_SECONDS),
+    }
+    return change_id
+
+
+def _get_pending_change(change_id: str) -> dict | None:
+    _cleanup_expired_changes()
+    return _pending_changes.get(change_id)
+
+
+def _consume_pending_change(change_id: str) -> dict | None:
+    _cleanup_expired_changes()
+    return _pending_changes.pop(change_id, None)
+
+
 def create_mesh_app(
     blackboard: Blackboard,
     pubsub: PubSub,
@@ -94,6 +134,7 @@ def create_mesh_app(
     dispatch_loop: asyncio.AbstractEventLoop | None = None,
     wallet_service_ref: list | None = None,
     api_key_manager: ApiKeyManager | None = None,
+    cfg: dict | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     app = FastAPI(title="OpenLegion Mesh")
@@ -1189,6 +1230,275 @@ def create_mesh_app(
         except Exception as e:
             raise HTTPException(500, f"Failed to spawn agent: {e}") from e
 
+
+    # === Fleet Templates ===
+
+    @app.get("/mesh/fleet/templates")
+    async def list_fleet_templates(request: Request) -> dict:
+        """List available fleet templates."""
+        _require_any_auth(request)
+        from src.cli.config import _load_templates
+
+        templates = _load_templates()
+        result = []
+        for name, tpl in templates.items():
+            result.append({
+                "name": name,
+                "description": tpl.get("description", ""),
+                "agent_count": len(tpl.get("agents", {})),
+                "agents": list(tpl.get("agents", {}).keys()),
+            })
+        return {"templates": result}
+
+    @app.post("/mesh/fleet/apply")
+    async def apply_fleet_template(data: dict, request: Request) -> dict:
+        """Create a team of agents from a fleet template.
+
+        Body: {template: str, model?: str}
+        """
+        if container_manager is None:
+            raise HTTPException(503, "Container manager not available")
+
+        # Auth + permission check
+        spawned_by = _resolve_agent_id(data.get("spawned_by", "unknown"), request)
+        if _auth_tokens:
+            # In authenticated mode, require spawn permission
+            if not permissions.can_spawn(spawned_by):
+                raise HTTPException(403, f"Agent {spawned_by} is not allowed to spawn agents")
+
+        template_name = data.get("template", "").strip()
+        if not template_name:
+            raise HTTPException(400, "template is required")
+
+        from src.cli.config import _load_templates, _apply_template, _load_config
+
+        templates = _load_templates()
+        tpl = templates.get(template_name)
+        if tpl is None:
+            raise HTTPException(404, f"Template not found: {template_name}")
+
+        tpl_agents = tpl.get("agents", {})
+        if not tpl_agents:
+            raise HTTPException(400, f"Template '{template_name}' has no agents")
+
+        # Check plan limits (exclude operator from count)
+        import os as _os
+        max_agents = int(_os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
+        if max_agents > 0:
+            current_count = sum(
+                1 for aid in router.agent_registry
+                if aid != "operator"
+            )
+            if current_count + len(tpl_agents) > max_agents:
+                raise HTTPException(
+                    403,
+                    f"Would exceed agent limit ({current_count} + {len(tpl_agents)} > {max_agents}). "
+                    "Upgrade your plan for more agents.",
+                )
+
+        # Optional model override
+        model_override = data.get("model", "")
+
+        # Apply template to create config entries
+        created_names = _apply_template(template_name, tpl)
+        if not created_names:
+            return {
+                "template": template_name,
+                "created": [],
+                "skipped": list(tpl_agents.keys()),
+                "message": "All agents already exist",
+            }
+
+        # Load config to get per-agent settings
+        cfg = _load_config()
+        agents_cfg = cfg.get("agents", {})
+        default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        hb_schedule = cfg.get("mesh", {}).get("heartbeat_schedule")
+
+        created_agents = []
+        failed_agents = []
+
+        for agent_name in created_names:
+            acfg = agents_cfg.get(agent_name, {})
+            agent_model = model_override or acfg.get("model", default_model)
+            skills_dir = str(
+                (container_manager.project_root / "skills" / agent_name).resolve()
+            ) if container_manager.project_root else ""
+
+            # Build per-agent env_overrides (NOT shared extra_env)
+            env_overrides: dict[str, str] = {}
+            for env_key, cfg_key in (
+                ("INITIAL_INSTRUCTIONS", "initial_instructions"),
+                ("INITIAL_SOUL", "initial_soul"),
+                ("INITIAL_HEARTBEAT", "initial_heartbeat"),
+            ):
+                val = acfg.get(cfg_key, "")
+                if val:
+                    env_overrides[env_key] = val
+
+            try:
+                # Start container with env_overrides
+                old_extra = dict(container_manager.extra_env)
+                container_manager.extra_env.update(env_overrides)
+                try:
+                    url = container_manager.start_agent(
+                        agent_id=agent_name,
+                        role=acfg.get("role", agent_name),
+                        skills_dir=skills_dir,
+                        model=agent_model,
+                        thinking=acfg.get("thinking", ""),
+                    )
+                finally:
+                    # Restore extra_env — remove only the keys we added
+                    for k in env_overrides:
+                        container_manager.extra_env.pop(k, None)
+
+                # Register with router, transport, health, cron
+                router.register_agent(agent_name, url, role=acfg.get("role", ""))
+                if transport is not None:
+                    from src.host.transport import HttpTransport
+                    if isinstance(transport, HttpTransport):
+                        transport.register(agent_name, url)
+                if health_monitor is not None:
+                    health_monitor.register(agent_name)
+                if cron_scheduler is not None:
+                    cron_scheduler.ensure_heartbeat(agent_name, hb_schedule)
+
+                # Wait for readiness
+                ready = await container_manager.wait_for_agent(agent_name, timeout=60)
+
+                if event_bus is not None:
+                    event_bus.emit("agent_state", agent=agent_name, data={
+                        "state": "added", "role": acfg.get("role", ""), "ready": ready,
+                    })
+
+                created_agents.append({
+                    "agent_id": agent_name,
+                    "role": acfg.get("role", agent_name),
+                    "ready": ready,
+                })
+            except Exception as e:
+                logger.error("Failed to start agent '%s' from template: %s", agent_name, e)
+                failed_agents.append({"agent_id": agent_name, "error": str(e)})
+
+        return {
+            "template": template_name,
+            "created": created_agents,
+            "failed": failed_agents,
+            "skipped": [n for n in tpl_agents if n not in created_names],
+        }
+
+    # === Create Custom Agent ===
+
+    @app.post("/mesh/agents/create")
+    async def create_custom_agent(data: dict, request: Request) -> dict:
+        """Create a new custom agent. Used by the operator."""
+        if container_manager is None:
+            raise HTTPException(503, "Container manager not available")
+
+        # Auth + spawn permission
+        agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        await _check_rate_limit("spawn", agent_id)
+        if not permissions.can_spawn(agent_id):
+            raise HTTPException(403, f"Agent {agent_id} is not allowed to create agents")
+
+        # Validate inputs
+        name = data.get("name", "")
+        role = data.get("role", "")
+        model = data.get("model", "")
+        instructions = data.get("instructions", "")
+        soul = data.get("soul", "")
+
+        if not name or not isinstance(name, str):
+            raise HTTPException(400, "name is required")
+
+        # Validate agent name format
+        from src.cli.config import _validate_agent_name
+        try:
+            name = _validate_agent_name(name)
+        except Exception as e:
+            raise HTTPException(400, f"Invalid agent name: {e}") from e
+
+        # Check if agent already exists
+        from src.cli.config import AGENTS_FILE, _load_config
+        config = _load_config()
+        if name in config.get("agents", {}):
+            raise HTTPException(409, f"Agent '{name}' already exists")
+
+        # Check plan limits (exclude operator)
+        import os
+        max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
+        if max_agents > 0:
+            current = len([a for a in config.get("agents", {}) if a != "operator"])
+            if current >= max_agents:
+                raise HTTPException(
+                    409,
+                    f"Plan limit reached ({current}/{max_agents} agents). "
+                    "Remove an agent or upgrade your plan.",
+                )
+
+        # Default model
+        if not model:
+            model = config.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+
+        # Create agent config
+        from src.cli.config import (
+            PROJECT_ROOT,
+            _add_agent_permissions,
+            _add_agent_to_config,
+        )
+        _add_agent_to_config(
+            name=name, role=role or name, model=model,
+            initial_instructions=instructions, initial_soul=soul,
+        )
+        _add_agent_permissions(name)
+        skills_dir = PROJECT_ROOT / "skills" / name
+        skills_dir.mkdir(parents=True, exist_ok=True)
+
+        # Start container using env_overrides pattern
+        agent_env: dict[str, str] = {}
+        if instructions:
+            agent_env["INITIAL_INSTRUCTIONS"] = instructions
+        if soul:
+            agent_env["INITIAL_SOUL"] = soul
+
+        try:
+            url = container_manager.start_agent(
+                agent_id=name, role=role or name,
+                skills_dir=str(skills_dir), model=model,
+                env_overrides=agent_env,
+            )
+            router.register_agent(name, url, role=role or name)
+            if transport is not None:
+                from src.host.transport import HttpTransport
+                if isinstance(transport, HttpTransport):
+                    transport.register(name, url)
+            if health_monitor is not None:
+                health_monitor.register(name)
+            if cron_scheduler is not None:
+                hb_schedule = config.get("mesh", {}).get("heartbeat_schedule")
+                cron_scheduler.ensure_heartbeat(name, hb_schedule)
+
+            ready = await container_manager.wait_for_agent(name, timeout=60)
+
+            if event_bus is not None:
+                event_bus.emit("agent_state", agent=name,
+                    data={"state": "added", "role": role, "ready": ready})
+
+            # Audit log via trace store
+            if trace_store:
+                from src.shared.trace import new_trace_id as _new_trace_id
+                trace_store.record(
+                    trace_id=_new_trace_id(), source="mesh.create_agent",
+                    agent=name, event_type="create_agent",
+                    detail=f"role={role}, model={model}, created_by={data.get('created_by', 'operator')}",
+                )
+
+            return {"agent_id": name, "role": role or name, "ready": ready}
+        except Exception as e:
+            raise HTTPException(500, f"Failed to start agent: {e}") from e
+
+
     # === Agent History Access ===
 
     @app.get("/mesh/agents/{agent_id}/history")
@@ -1456,10 +1766,378 @@ def create_mesh_app(
             result["budget"] = cost_tracker.check_budget(agent_id)
         return result
 
+    # === Pre-computed Metrics (for operator heartbeat) ===
+
+    @app.get("/mesh/system/metrics")
+    async def system_metrics(request: Request) -> dict:
+        """Fleet-wide aggregate metrics for operator heartbeat.
+
+        Pre-computes ratios and flags so the operator LLM doesn't need
+        to do arithmetic.  Read-only — no mutations.
+        """
+        _require_any_auth(request)
+
+        # -- Agent counts --
+        agents = dict(router.agent_registry)
+        total = len(agents)
+
+        # -- Health breakdown --
+        health_list = health_monitor.get_status() if health_monitor else []
+        health_by_agent = {s["agent"]: s for s in health_list}
+        healthy = sum(1 for s in health_list if s.get("status") == "healthy")
+        failed = sum(1 for s in health_list if s.get("status") == "failed")
+
+        # -- Busy count from lane manager --
+        lane_status = lane_manager.get_status() if lane_manager else {}
+        busy = sum(1 for ls in lane_status.values() if ls.get("busy", False))
+
+        # -- Cost data --
+        cost_today = 0.0
+        cost_yesterday = 0.0
+        if cost_tracker:
+            today_spend = cost_tracker.get_spend(None, "today")
+            cost_today = today_spend.get("total_cost", 0.0)
+            # "yesterday" returns spend since yesterday midnight (includes today).
+            # Subtract today's spend to get yesterday-only spend.
+            since_yesterday = cost_tracker.get_spend(None, "yesterday")
+            cost_yesterday = max(since_yesterday.get("total_cost", 0.0) - cost_today, 0.0)
+
+        cost_ratio = round(cost_today / cost_yesterday, 2) if cost_yesterday > 0 else 0
+
+        # -- Per-agent failure rates (placeholder — needs task tracking) --
+        failure_rates: dict[str, float] = {}
+
+        # -- Agents needing attention --
+        agents_attention: list[dict] = []
+        for status_entry in health_list:
+            agent_status = status_entry.get("status", "unknown")
+            if agent_status in ("failed", "unhealthy"):
+                agents_attention.append({
+                    "agent_id": status_entry["agent"],
+                    "issue": agent_status,
+                    "failures": status_entry.get("failures", 0),
+                    "restarts": status_entry.get("restarts", 0),
+                })
+
+        # -- Plan limits from env vars --
+        import os
+        max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
+        max_projects = int(os.environ.get("OPENLEGION_MAX_PROJECTS", "0"))
+
+        return {
+            "total_agents": total,
+            "healthy": healthy,
+            "failed": failed,
+            "busy": busy,
+            "total_cost_today_usd": round(cost_today, 4),
+            "cost_vs_yesterday_ratio": cost_ratio,
+            "failure_rate_by_agent": failure_rates,
+            "agents_needing_attention": agents_attention,
+            "plan_limits": {
+                "max_agents": max_agents,
+                "current_agents": total,
+                "max_projects": max_projects,
+                "current_projects": 0,
+            },
+        }
+
+    @app.get("/mesh/agents/{agent_id}/metrics")
+    async def agent_metrics(agent_id: str, request: Request) -> dict:
+        """Per-agent pre-computed metrics for operator heartbeat.
+
+        Returns health, cost, and queue data for a single agent.
+        Read-only — no mutations.
+        """
+        _require_any_auth(request)
+        _validate_agent_id(agent_id)
+
+        if agent_id not in router.agent_registry:
+            raise HTTPException(404, f"Agent not found: {agent_id}")
+
+        # -- Health --
+        health_status = "unknown"
+        failures = 0
+        restarts = 0
+        if health_monitor:
+            statuses = health_monitor.get_status()
+            match = next((s for s in statuses if s["agent"] == agent_id), None)
+            if match:
+                health_status = match.get("status", "unknown")
+                failures = match.get("failures", 0)
+                restarts = match.get("restarts", 0)
+
+        # -- Cost --
+        cost_today = 0.0
+        cost_yesterday = 0.0
+        if cost_tracker:
+            today_spend = cost_tracker.get_spend(agent_id, "today")
+            cost_today = today_spend.get("total_cost", 0.0)
+            since_yesterday = cost_tracker.get_spend(agent_id, "yesterday")
+            cost_yesterday = max(since_yesterday.get("total_cost", 0.0) - cost_today, 0.0)
+
+        cost_ratio = round(cost_today / cost_yesterday, 2) if cost_yesterday > 0 else 0
+
+        # -- Queue / busy --
+        queued = 0
+        is_busy = False
+        if lane_manager:
+            ls = lane_manager.get_status().get(agent_id, {})
+            queued = ls.get("queued", 0)
+            is_busy = ls.get("busy", False)
+
+        # -- Budget --
+        budget = cost_tracker.check_budget(agent_id) if cost_tracker else {}
+
+        return {
+            "agent_id": agent_id,
+            "health_status": health_status,
+            "consecutive_failures": failures,
+            "restart_count": restarts,
+            "cost_today_usd": round(cost_today, 4),
+            "cost_vs_yesterday_ratio": cost_ratio,
+            "budget": budget,
+            "queued_tasks": queued,
+            "busy": is_busy,
+            "tasks_completed_24h": 0,
+            "tasks_failed_24h": 0,
+            "failure_rate": 0.0,
+            "avg_task_duration_s": 0,
+        }
+
+    # === Operator Config Endpoints ===
+
+    _VALID_CONFIG_FIELDS = {"instructions", "soul", "model", "role", "heartbeat", "thinking", "budget", "permissions"}
+    _CONFIG_FIELD_MAP = {
+        "instructions": "initial_instructions", "soul": "initial_soul",
+        "heartbeat": "initial_heartbeat", "model": "model", "role": "role",
+        "thinking": "thinking", "budget": "budget",
+    }
+
+    @app.get("/mesh/agents/{agent_id}/config")
+    async def get_agent_config(agent_id: str, request: Request) -> dict:
+        """Read agent config from agents.yaml."""
+        _require_any_auth(request)
+        from src.cli.config import _load_config
+        agent_cfg = _load_config()
+        agents = agent_cfg.get("agents", {})
+        if agent_id not in agents:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        return {"agent_id": agent_id, "config": agents[agent_id]}
+
+    @app.post("/mesh/agents/{agent_id}/propose")
+    async def propose_agent_config_change(agent_id: str, request: Request) -> dict:
+        """Create a pending config change for review."""
+        _require_any_auth(request)
+        data = await request.json()
+
+        field = data.get("field", "")
+        new_value = data.get("value")
+
+        if not field:
+            raise HTTPException(400, "field is required")
+        if field not in _VALID_CONFIG_FIELDS:
+            raise HTTPException(400, f"Invalid field: {field}. Must be one of: {_VALID_CONFIG_FIELDS}")
+
+        # Get current value
+        from src.cli.config import _load_config
+        agent_cfg = _load_config()
+        agents = agent_cfg.get("agents", {})
+        if agent_id not in agents:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+
+        if field == "permissions":
+            from src.cli.config import _load_permissions
+            perms = _load_permissions()
+            old_value = perms.get("permissions", {}).get(agent_id, {})
+        else:
+            yaml_key = _CONFIG_FIELD_MAP.get(field, field)
+            old_value = agents[agent_id].get(yaml_key, "")
+
+        change_id = _store_pending_change(agent_id, field, old_value, new_value)
+
+        # Generate preview diff
+        old_str = json.dumps(old_value, indent=2) if not isinstance(old_value, str) else old_value
+        new_str = json.dumps(new_value, indent=2) if not isinstance(new_value, str) else new_value
+
+        preview = f"--- {field} (current)\n+++ {field} (proposed)\n"
+        if old_str != new_str:
+            old_lines = old_str.splitlines()
+            new_lines = new_str.splitlines()
+            for line in old_lines:
+                if line not in new_lines:
+                    preview += f"- {line}\n"
+            for line in new_lines:
+                if line not in old_lines:
+                    preview += f"+ {line}\n"
+
+        return {
+            "change_id": change_id,
+            "preview_diff": preview,
+            "expires_at": _pending_changes[change_id]["expires_at"].isoformat(),
+        }
+
+    @app.post("/mesh/agents/{agent_id}/config")
+    async def update_agent_config(agent_id: str, request: Request) -> dict:
+        """Apply a pending config change. Used by confirm_edit tool."""
+        _require_any_auth(request)
+        data = await request.json()
+        change_id = data.get("change_id", "")
+
+        change = _consume_pending_change(change_id)
+        if not change:
+            raise HTTPException(404, "Change not found or expired")
+        if change["agent_id"] != agent_id:
+            raise HTTPException(400, "Agent ID mismatch")
+
+        from src.cli.config import AGENTS_FILE, _load_config
+        import yaml
+
+        # Read current config
+        agent_cfg = _load_config()
+        agents = agent_cfg.get("agents", {})
+        if agent_id not in agents:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+
+        field = change["field"]
+        old_value = change["old_value"]
+        new_value = change["new_value"]
+
+        # Apply change
+        if field == "permissions":
+            from src.cli.config import _load_permissions, _save_permissions
+            perms = _load_permissions()
+            if agent_id in perms.get("permissions", {}):
+                perms["permissions"][agent_id].update(new_value)
+                _save_permissions(perms)
+        else:
+            yaml_key = _CONFIG_FIELD_MAP.get(field, field)
+            agents[agent_id][yaml_key] = new_value
+            with open(AGENTS_FILE, "w") as f:
+                yaml.dump(agent_cfg, f, default_flow_style=False, sort_keys=False)
+
+        # Hot-reload: push to running agent's workspace
+        if transport and agent_id in router.agent_registry:
+            workspace_map = {
+                "instructions": "INSTRUCTIONS.md",
+                "soul": "SOUL.md",
+                "heartbeat": "HEARTBEAT.md",
+            }
+            ws_file = workspace_map.get(field)
+            if ws_file and isinstance(new_value, str):
+                try:
+                    await transport.request(
+                        agent_id, "PUT", f"/workspace/{ws_file}",
+                        json={"content": f"# {field.title()}\n\n{new_value}"},
+                        timeout=10,
+                    )
+                except Exception:
+                    pass  # Agent might not be running
+
+        # Log to audit trail
+        blackboard.log_audit(
+            action="edit_agent", target=agent_id, field=field,
+            before_value=json.dumps(old_value) if not isinstance(old_value, str) else old_value,
+            after_value=json.dumps(new_value) if not isinstance(new_value, str) else new_value,
+            change_id=change_id,
+        )
+
+        return {"success": True, "agent_id": agent_id, "field": field}
+
     # === Browser Service Proxy ===
 
     import httpx as _httpx
     _browser_proxy_client = _httpx.AsyncClient(timeout=60)
+
+    _last_browser_boot_id: str | None = None
+
+    async def _push_browser_proxy(agent_id: str) -> None:
+        """Push proxy config for an agent to the browser service."""
+        if not container_manager:
+            return
+        svc_url = getattr(container_manager, "browser_service_url", None)
+        svc_token = getattr(container_manager, "browser_auth_token", "")
+        if not svc_url:
+            return
+
+        from src.cli.config import _load_config
+        from src.cli.proxy import parse_proxy_url, resolve_agent_proxy
+        _fresh_cfg = _load_config()
+        agents_cfg = _fresh_cfg.get("agents", {})
+        network_cfg = _fresh_cfg.get("network", {})
+        proxy_url = resolve_agent_proxy(agent_id, agents_cfg, network_cfg)
+
+        if proxy_url:
+            parsed = parse_proxy_url(proxy_url)
+            if parsed:
+                body = {
+                    "url": parsed["url"],
+                    "username": parsed["username"],
+                    "password": parsed["password"],
+                }
+            else:
+                body = {}  # explicit no-proxy (invalid URL fell through)
+        else:
+            body = {}  # explicit no-proxy (direct mode or no system proxy)
+
+        headers: dict = {"X-Mesh-Internal": "1"}
+        if svc_token:
+            headers["Authorization"] = f"Bearer {svc_token}"
+        try:
+            await _browser_proxy_client.put(
+                f"{svc_url}/browser/{agent_id}/proxy",
+                json=body,
+                headers=headers,
+            )
+        except Exception as e:
+            logger.warning("Failed to push proxy config for %s: %s", agent_id, e)
+
+    async def _check_browser_boot_id_changed() -> bool:
+        """Check if browser service restarted by comparing boot_id."""
+        nonlocal _last_browser_boot_id
+        if not container_manager:
+            return False
+        svc_url = getattr(container_manager, "browser_service_url", None)
+        svc_token = getattr(container_manager, "browser_auth_token", "")
+        if not svc_url:
+            return False
+        try:
+            headers: dict = {}
+            if svc_token:
+                headers["Authorization"] = f"Bearer {svc_token}"
+            resp = await _browser_proxy_client.get(
+                f"{svc_url}/browser/status", headers=headers,
+            )
+            data = resp.json()
+            boot_id = data.get("boot_id")
+            if _last_browser_boot_id is None:
+                _last_browser_boot_id = boot_id
+                return False
+            if boot_id != _last_browser_boot_id:
+                _last_browser_boot_id = boot_id
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def _deferred_push_browser_proxies() -> None:
+        """Push proxy config for all agents after a delay (non-blocking background task)."""
+        await asyncio.sleep(5)  # Wait for agents to register
+        if not container_manager:
+            return
+        svc_url = getattr(container_manager, "browser_service_url", None)
+        if not svc_url:
+            return
+        agents = list(router.agent_registry.keys())
+        if not agents:
+            return
+        for agent_id in agents:
+            await _push_browser_proxy(agent_id)
+        logger.info("Pushed browser proxy config for %d agents", len(agents))
+
+    @app.on_event("startup")
+    async def _schedule_initial_proxy_push() -> None:
+        """Schedule initial browser proxy push as a background task (non-blocking)."""
+        asyncio.create_task(_deferred_push_browser_proxies())
 
     _ALLOWED_BROWSER_ACTIONS = frozenset({
         "navigate", "snapshot", "click", "type", "hover",
@@ -1501,6 +2179,17 @@ def create_mesh_app(
                     _resolve_and_pin(nav_url)
                 except ValueError as e:
                     raise HTTPException(400, str(e))
+
+        # Check for browser service restart — re-push proxy config for ALL agents
+        try:
+            restarted = await _check_browser_boot_id_changed()
+            if restarted:
+                all_agents = list(router.agent_registry.keys())
+                logger.info("Browser service restarted, re-pushing proxy for %d agents", len(all_agents))
+                for _aid in all_agents:
+                    await _push_browser_proxy(_aid)
+        except Exception:
+            pass  # Non-blocking — don't fail the browser command
 
         # Proxy to browser service
         browser_service_url = None

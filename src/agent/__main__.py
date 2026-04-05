@@ -104,6 +104,11 @@ def main() -> None:
         on_memory_update=_notify_memory_update,
     )
 
+    allowed_tools_env = os.environ.get("ALLOWED_TOOLS", "")
+    allowed_tools: frozenset[str] | None = None
+    if allowed_tools_env:
+        allowed_tools = frozenset(t.strip() for t in allowed_tools_env.split(",") if t.strip())
+
     loop = AgentLoop(
         agent_id=agent_id,
         role=role,
@@ -113,6 +118,7 @@ def main() -> None:
         mesh_client=mesh_client,
         workspace=workspace,
         context_manager=context_mgr,
+        allowed_tools=allowed_tools,
     )
 
     from src.agent.builtins.subagent_tool import register_parent_llm

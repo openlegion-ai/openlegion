@@ -86,8 +86,8 @@ class SkillRegistry:
     # Class-level defaults so attribute access is safe even when __init__
     # is bypassed (e.g. via __new__ in tests).
     _mcp_client: MCPClient | None = None
-    _tool_defs_cache: dict[frozenset[str] | None, list[dict]] | None = None
-    _descriptions_cache: dict[frozenset[str] | None, str] | None = None
+    _tool_defs_cache: dict[tuple, list[dict]] | None = None
+    _descriptions_cache: dict[tuple, str] | None = None
 
     def __init__(self, skills_dir: str, mcp_client: MCPClient | None = None):
         self.skills_dir = skills_dir
@@ -95,8 +95,8 @@ class SkillRegistry:
         self.skills: dict[str, dict] = {}
         self._builtin_functions: frozenset = frozenset()
         # Memoization caches — cleared on reload()
-        self._tool_defs_cache: dict[frozenset[str] | None, list[dict]] = {}
-        self._descriptions_cache: dict[frozenset[str] | None, str] = {}
+        self._tool_defs_cache: dict[tuple, list[dict]] = {}
+        self._descriptions_cache: dict[tuple, str] = {}
         with _skill_staging_lock:
             self._discover_builtins()
             self._builtin_functions = frozenset(
@@ -173,6 +173,7 @@ class SkillRegistry:
         mesh_client: Any = None,
         workspace_manager: Any = None,
         memory_store: Any = None,
+        _messages: list[dict] | None = None,
     ) -> Any:
         """Execute a skill by name with given arguments."""
         if self._mcp_client and self._mcp_client.has_tool(name):
@@ -241,6 +242,8 @@ class SkillRegistry:
             call_args["workspace_manager"] = workspace_manager
         if "memory_store" in sig_params:
             call_args["memory_store"] = memory_store
+        if "_messages" in sig_params:
+            call_args["_messages"] = _messages
 
         # Filter out LLM-hallucinated parameters that the function doesn't
         # accept.  Without this, an LLM sending e.g. {"raw": ""} to a
@@ -277,7 +280,7 @@ class SkillRegistry:
                 req_parts = []
                 opt_parts = []
                 for k, v in param_schemas.items():
-                    if k in {"mesh_client", "workspace_manager", "memory_store"}:
+                    if k in {"mesh_client", "workspace_manager", "memory_store", "_messages"}:
                         continue
                     ptype = v.get("type", "any")
                     desc = v.get("description", "")
@@ -299,7 +302,11 @@ class SkillRegistry:
             return await func(**call_args)
         return await asyncio.get_running_loop().run_in_executor(None, lambda: func(**call_args))
 
-    def get_tool_sources(self, exclude: frozenset[str] | None = None) -> dict[str, str]:
+    def get_tool_sources(
+        self,
+        exclude: frozenset[str] | None = None,
+        allowed: frozenset[str] | None = None,
+    ) -> dict[str, str]:
         """Return a mapping of skill name → source tag.
 
         Tags: ``"builtin"`` (core platform tools), ``"mcp"`` (MCP server tools),
@@ -311,7 +318,10 @@ class SkillRegistry:
         """
         result = {}
         for name, info in self.skills.items():
-            if exclude and name in exclude:
+            if allowed is not None:
+                if name not in allowed:
+                    continue
+            elif exclude and name in exclude:
                 continue
             func = info.get("function")
             if func == "mcp":
@@ -336,25 +346,38 @@ class SkillRegistry:
             if info.get("_loop_exempt", False)
         )
 
-    def list_skills(self, exclude: frozenset[str] | None = None) -> list[str]:
+    def list_skills(
+        self,
+        exclude: frozenset[str] | None = None,
+        allowed: frozenset[str] | None = None,
+    ) -> list[str]:
         """Return list of available skill names."""
+        if allowed is not None:
+            return [n for n in self.skills if n in allowed]
         if exclude:
             return [n for n in self.skills if n not in exclude]
         return list(self.skills.keys())
 
-    def get_descriptions(self, exclude: frozenset[str] | None = None) -> str:
+    def get_descriptions(
+        self,
+        exclude: frozenset[str] | None = None,
+        allowed: frozenset[str] | None = None,
+    ) -> str:
         """Return human-readable descriptions of all skills (memoized)."""
         if self._descriptions_cache is None:
             self._descriptions_cache = {}
         cache = self._descriptions_cache
-        cache_key = exclude
+        cache_key = (exclude, allowed)
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
 
         lines = []
         for name, info in self.skills.items():
-            if exclude and name in exclude:
+            if allowed is not None:
+                if name not in allowed:
+                    continue
+            elif exclude and name in exclude:
                 continue
             raw_params = info["parameters"]
             # MCP tools have full JSON Schema; extract from "properties"
@@ -369,19 +392,26 @@ class SkillRegistry:
         self._descriptions_cache[cache_key] = result
         return result
 
-    def get_tool_definitions(self, exclude: frozenset[str] | None = None) -> list[dict]:
+    def get_tool_definitions(
+        self,
+        exclude: frozenset[str] | None = None,
+        allowed: frozenset[str] | None = None,
+    ) -> list[dict]:
         """Return OpenAI-compatible tool definitions for LLM function calling (memoized)."""
         if self._tool_defs_cache is None:
             self._tool_defs_cache = {}
         cache = self._tool_defs_cache
-        cache_key = exclude
+        cache_key = (exclude, allowed)
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
 
         tools = []
         for name, info in self.skills.items():
-            if exclude and name in exclude:
+            if allowed is not None:
+                if name not in allowed:
+                    continue
+            elif exclude and name in exclude:
                 continue
             params = info["parameters"]
 

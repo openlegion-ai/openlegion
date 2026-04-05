@@ -462,7 +462,7 @@ class TestDashboardAgentCRUD:
     @patch("src.cli.config._create_agent_from_template")
     @patch("src.cli.config._load_config")
     def test_post_agent_template_passes_initial_env(self, mock_load, mock_create_tpl):
-        """Verify that initial_soul/instructions/heartbeat reach runtime.extra_env."""
+        """Verify that initial_soul/instructions/heartbeat are passed via env_overrides."""
         mock_load.return_value = {
             "llm": {"default_model": "openai/gpt-4o-mini"},
             "agents": {
@@ -481,11 +481,11 @@ class TestDashboardAgentCRUD:
         runtime.extra_env = {}
         self.components["permissions"].reload = MagicMock()
 
-        # Capture extra_env at the moment start_agent is called
-        captured_env: dict = {}
+        # Capture env_overrides kwarg passed to start_agent
+        captured_overrides: dict = {}
 
         def _capture(*a, **kw):
-            captured_env.update(runtime.extra_env)
+            captured_overrides.update(kw.get("env_overrides", {}) or {})
             return "http://localhost:8403"
 
         runtime.start_agent.side_effect = _capture
@@ -495,10 +495,10 @@ class TestDashboardAgentCRUD:
             json={"name": "my_pm", "template": "devteam/pm"},
         )
         assert resp.status_code == 200
-        assert captured_env["INITIAL_INSTRUCTIONS"] == "You are a PM."
-        assert captured_env["INITIAL_SOUL"] == "Precise and outcome-focused."
-        assert captured_env["INITIAL_HEARTBEAT"] == "Check tasks board."
-        # Cleaned up after start
+        assert captured_overrides["INITIAL_INSTRUCTIONS"] == "You are a PM."
+        assert captured_overrides["INITIAL_SOUL"] == "Precise and outcome-focused."
+        assert captured_overrides["INITIAL_HEARTBEAT"] == "Check tasks board."
+        # extra_env is never mutated with per-agent vars
         assert "INITIAL_INSTRUCTIONS" not in runtime.extra_env
         assert "INITIAL_SOUL" not in runtime.extra_env
         assert "INITIAL_HEARTBEAT" not in runtime.extra_env
