@@ -1256,10 +1256,10 @@ function dashboard() {
     async fetchAuditLog() {
       this.auditLoading = true;
       try {
-        const resp = await fetch(`${window.__config.apiBase}/audit?limit=${20}&event_type=operator`);
+        const resp = await fetch(`${window.__config.apiBase}/operator-audit?per_page=20&page=${this.auditPage}`);
         if (resp.ok) {
           const data = await resp.json();
-          this.auditLog = data.events || [];
+          this.auditLog = data.entries || [];
           this.auditTotal = data.total || 0;
         }
       } catch (e) {

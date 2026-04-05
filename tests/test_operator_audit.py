@@ -285,10 +285,10 @@ async def test_mesh_client_confirm_config_change():
 
     mock_http = AsyncMock(return_value=mock_response)
     with patch.object(client, "_get_client", return_value=AsyncMock(post=mock_http)):
-        result = await client.confirm_config_change("alpha", "abc-123")
+        result = await client.confirm_config_change("abc-123")
         assert result["success"] is True
         mock_http.assert_called_once()
         call_args = mock_http.call_args
-        assert "/mesh/agents/alpha/config" in call_args[0][0]
+        assert "/mesh/config/confirm" in call_args[0][0]
         assert call_args[1]["json"]["change_id"] == "abc-123"
     await client.close()

@@ -1401,6 +1401,12 @@ class REPLSession:
         agent_mcp_servers = agent_cfg.get("mcp_servers") or None
         agent_thinking = agent_cfg.get("thinking", "")
 
+        # Preserve operator's ALLOWED_TOOLS on restart
+        from src.cli.config import _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
+        restart_env: dict[str, str] = {}
+        if name == _OPERATOR_AGENT_ID:
+            restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
+
         # Start new container
         url = self.ctx.runtime.start_agent(
             agent_id=name,
@@ -1409,7 +1415,7 @@ class REPLSession:
             model=agent_model,
             mcp_servers=agent_mcp_servers,
             thinking=agent_thinking,
-            env_overrides={},
+            env_overrides=restart_env,
         )
 
         # Update router and transport

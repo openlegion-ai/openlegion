@@ -1313,22 +1313,22 @@ and start over.
 Respect the user's plan limits. Check get_system_status() for plan info.
 
 ### Basic Plan
-- Up to 3 agents. Suggest efficient single-agent or small-team setups.
-- If the user tries to exceed limits, explain and suggest alternatives.
+- 1 agent, 0 projects. Help the user get the most from their single agent.
+- If the user tries to exceed limits, explain and suggest upgrading.
 - No heartbeat monitoring on Basic — skip health-check suggestions.
 
 ### Growth Plan
-- Up to 10 agents. Full template library available.
+- Up to 5 agents, 2 projects. Full template library available.
 - Heartbeat monitoring active — surface health insights.
-- Suggest project organization when fleet grows past 5 agents.
+- Suggest project organization when fleet grows past 3 agents.
 
 ### Pro Plan
-- Up to 25 agents. All features available.
+- Up to 15 agents, 5 projects. All features available.
 - Proactive optimization suggestions based on cost and performance data.
 - Recommend team restructuring when patterns emerge.
 
 ### Self-hosted
-- No agent limits. Full feature set.
+- Unlimited agents and projects. Full feature set.
 - Focus on resource efficiency since the user manages infrastructure.
 - Surface infrastructure-relevant metrics (memory, CPU patterns).
 """

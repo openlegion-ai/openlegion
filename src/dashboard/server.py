@@ -846,6 +846,11 @@ def create_dashboard_router(
             skills_dir = agent_cfg.get("skills_dir", "")
             if skills_dir:
                 skills_dir = str(Path(skills_dir).resolve())
+            # Preserve operator's ALLOWED_TOOLS on restart
+            from src.cli.config import _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
+            restart_env: dict[str, str] = {}
+            if agent_id == _OPERATOR_AGENT_ID:
+                restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
             url = runtime.start_agent(
                 agent_id=agent_id,
                 role=agent_cfg.get("role", "assistant"),
@@ -853,7 +858,7 @@ def create_dashboard_router(
                 model=agent_cfg.get("model", default_model),
                 mcp_servers=agent_cfg.get("mcp_servers") or None,
                 thinking=agent_cfg.get("thinking", ""),
-                env_overrides={},
+                env_overrides=restart_env,
             )
             if router is not None:
                 router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
@@ -2737,15 +2742,21 @@ def create_dashboard_router(
                 skills_dir = agent_cfg.get("skills_dir", "")
                 if skills_dir:
                     skills_dir = str(Path(skills_dir).resolve())
+                # Preserve operator's ALLOWED_TOOLS on restart
+                from src.cli.config import _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
+                _restart_env: dict[str, str] = {}
+                if agent_id == _OPERATOR_AGENT_ID:
+                    _restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
                 url = await loop.run_in_executor(
                     None,
-                    lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir: runtime.start_agent(
+                    lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir, re=_restart_env: runtime.start_agent(
                         agent_id=aid,
                         role=acfg.get("role", "assistant"),
                         skills_dir=sd,
                         model=acfg.get("model", default_model),
                         mcp_servers=acfg.get("mcp_servers") or None,
                         thinking=acfg.get("thinking", ""),
+                        env_overrides=re,
                     ),
                 )
                 if router is not None:

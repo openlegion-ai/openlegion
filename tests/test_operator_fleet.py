@@ -7,6 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _set_operator_env(monkeypatch):
+    """Fleet tools require ALLOWED_TOOLS to be set (defence-in-depth guard)."""
+    monkeypatch.setenv("ALLOWED_TOOLS", "list_templates,apply_template")
+
+
 # ── _last_message_is_user_origin helper ────────────────────────
 
 

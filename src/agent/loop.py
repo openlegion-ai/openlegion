@@ -33,19 +33,6 @@ if TYPE_CHECKING:
 logger = setup_logging("agent.loop")
 
 
-def _last_message_is_user_origin(messages: list[dict]) -> bool:
-    """Check if the most recent user message has genuine user origin.
-
-    Returns True when the last message with role='user' was sent by
-    a real user (``_origin`` is ``"user"`` or absent — legacy compat).
-    Returns False for system-injected messages (heartbeats, steers, etc.).
-    """
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            origin = msg.get("_origin", "user")
-            return origin == "user"
-    return False
-
 # Status codes that indicate transient server-side errors worth retrying
 _RETRYABLE_STATUS_CODES = {429, 502, 503}
 _MAX_RETRIES = 3
@@ -1061,6 +1048,8 @@ class AgentLoop:
         # Restrict operator to heartbeat-only tools during unsupervised execution.
         # Non-operator agents have _allowed_tools=None, so the swap is skipped.
         saved_allowed = getattr(self, '_allowed_tools', None)
+        # Cap operator heartbeat iterations (spec: 5, not default 10)
+        max_iters = 5 if saved_allowed is not None else HEARTBEAT_MAX_ITERATIONS
         if saved_allowed is not None:
             self._allowed_tools = _HEARTBEAT_TOOLS
         try:
@@ -1124,7 +1113,7 @@ class AgentLoop:
                     f"- Follow HEARTBEAT.md strictly. Do not infer tasks from prior sessions.\n"
                     f"{inbox_line}"
                     f"- If nothing in HEARTBEAT.md, {nothing_clause} needs attention, reply HEARTBEAT_OK immediately.\n"
-                    f"- You have max {HEARTBEAT_MAX_ITERATIONS} iterations.\n"
+                    f"- You have max {max_iters} iterations.\n"
                     f"- Use notify_user to report results to the user.\n"
                 )
 
@@ -1171,7 +1160,7 @@ class AgentLoop:
                 # Stateless message list — fresh each heartbeat
                 messages: list[dict] = [{"role": "user", "content": message, "_origin": "system:heartbeat"}]
 
-                for _iteration in range(HEARTBEAT_MAX_ITERATIONS):
+                for _iteration in range(max_iters):
                     if self._cancel_requested:
                         self._cancel_requested = False
                         self.state = "idle"
@@ -1198,7 +1187,7 @@ class AgentLoop:
                     # When approaching the iteration limit, nudge the agent to
                     # wrap up so it finishes with a proper summary instead of
                     # being cut off with "Max iterations reached".
-                    _remaining = HEARTBEAT_MAX_ITERATIONS - _iteration
+                    _remaining = max_iters - _iteration
                     if _remaining == 2:
                         messages.append({
                             "role": "user",
@@ -1386,15 +1375,15 @@ class AgentLoop:
                 if self.workspace:
                     self.workspace.append_activity(
                         trigger="heartbeat",
-                        summary=f"Max iterations ({HEARTBEAT_MAX_ITERATIONS}) reached",
+                        summary=f"Max iterations ({max_iters}) reached",
                         tools_used=tools_used,
                         duration_ms=duration_ms,
                         tokens_used=total_tokens,
                         outcome="max_iterations",
                     )
                 return {
-                    "response": f"Max iterations ({HEARTBEAT_MAX_ITERATIONS}) reached",
-                    "summary": f"Max iterations ({HEARTBEAT_MAX_ITERATIONS}) reached",
+                    "response": f"Max iterations ({max_iters}) reached",
+                    "summary": f"Max iterations ({max_iters}) reached",
                     "tools_used": tools_used,
                     "duration_ms": duration_ms,
                     "tokens_used": total_tokens,

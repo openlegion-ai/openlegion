@@ -1337,21 +1337,15 @@ def create_mesh_app(
                     env_overrides[env_key] = val
 
             try:
-                # Start container with env_overrides
-                old_extra = dict(container_manager.extra_env)
-                container_manager.extra_env.update(env_overrides)
-                try:
-                    url = container_manager.start_agent(
-                        agent_id=agent_name,
-                        role=acfg.get("role", agent_name),
-                        skills_dir=skills_dir,
-                        model=agent_model,
-                        thinking=acfg.get("thinking", ""),
-                    )
-                finally:
-                    # Restore extra_env — remove only the keys we added
-                    for k in env_overrides:
-                        container_manager.extra_env.pop(k, None)
+                # Start container with per-agent env_overrides (not shared extra_env)
+                url = container_manager.start_agent(
+                    agent_id=agent_name,
+                    role=acfg.get("role", agent_name),
+                    skills_dir=skills_dir,
+                    model=agent_model,
+                    thinking=acfg.get("thinking", ""),
+                    env_overrides=env_overrides,
+                )
 
                 # Register with router, transport, health, cron
                 router.register_agent(agent_name, url, role=acfg.get("role", ""))
@@ -1904,6 +1898,116 @@ def create_mesh_app(
             "avg_task_duration_s": 0,
         }
 
+    # === Mesh Project Proxy Endpoints ===
+    # These proxy the dashboard's /api/projects/* endpoints through the mesh
+    # so operator agents can manage projects using their mesh auth token.
+
+    @app.get("/mesh/projects")
+    async def mesh_list_projects(request: Request) -> dict:
+        """List all projects (mesh-authed proxy)."""
+        _require_any_auth(request)
+        from src.cli.config import _load_projects
+        projects = _load_projects()
+        result = []
+        for pname, pdata in sorted(projects.items(), key=lambda x: x[1].get("created_at") or ""):
+            result.append({
+                "name": pname,
+                "description": pdata.get("description", ""),
+                "members": pdata.get("members", []),
+                "created_at": pdata.get("created_at", ""),
+            })
+        return {"projects": result}
+
+    @app.post("/mesh/projects")
+    async def mesh_create_project(request: Request) -> dict:
+        """Create a new project (mesh-authed proxy)."""
+        _require_any_auth(request)
+        from src.cli.config import _create_project, _load_config, _load_projects
+        import os as _os
+
+        _max_projects = int(_os.environ.get("OPENLEGION_MAX_PROJECTS", "0"))
+        if _max_projects > 0:
+            current_count = len(_load_projects())
+            if current_count >= _max_projects:
+                raise HTTPException(
+                    403,
+                    f"Project limit reached ({_max_projects}). Upgrade your plan for more projects.",
+                )
+
+        body = await request.json()
+        name = body.get("name", "").strip()
+        description = sanitize_for_prompt(body.get("description", "")).strip()
+        members = body.get("members", [])
+        if not name:
+            raise HTTPException(400, "name is required")
+        if not isinstance(members, list):
+            raise HTTPException(400, "members must be a list")
+        cfg = _load_config()
+        known_agents = set(cfg.get("agents", {}).keys())
+        unknown = [m for m in members if m not in known_agents]
+        if unknown:
+            raise HTTPException(400, f"Unknown agents: {', '.join(unknown)}")
+        try:
+            _create_project(name, description=description, members=members)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"created": True, "name": name}
+
+    @app.post("/mesh/projects/{name}/members")
+    async def mesh_add_project_member(name: str, request: Request) -> dict:
+        """Add an agent to a project (mesh-authed proxy)."""
+        _require_any_auth(request)
+        from src.cli.config import _add_agent_to_project
+        body = await request.json()
+        agent = body.get("agent", "").strip()
+        if not agent:
+            raise HTTPException(400, "agent is required")
+        try:
+            _add_agent_to_project(name, agent)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"added": True, "project": name, "agent": agent}
+
+    @app.delete("/mesh/projects/{name}/members/{agent}")
+    async def mesh_remove_project_member(name: str, agent: str, request: Request) -> dict:
+        """Remove an agent from a project (mesh-authed proxy)."""
+        _require_any_auth(request)
+        from src.cli.config import _remove_agent_from_project
+        try:
+            _remove_agent_from_project(name, agent)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"removed": True, "project": name, "agent": agent}
+
+    @app.delete("/mesh/projects/{name}")
+    async def mesh_delete_project(name: str, request: Request) -> dict:
+        """Delete a project (mesh-authed proxy)."""
+        _require_any_auth(request)
+        from src.cli.config import _delete_project
+        try:
+            _delete_project(name)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        return {"deleted": True, "name": name}
+
+    @app.put("/mesh/projects/{name}/context")
+    async def mesh_update_project_context(name: str, request: Request) -> dict:
+        """Update a project's description/context (mesh-authed proxy)."""
+        _require_any_auth(request)
+        from src.cli.config import _load_projects, _delete_project, _create_project
+        body = await request.json()
+        context = sanitize_for_prompt(body.get("context", "")).strip()
+
+        projects = _load_projects()
+        if name not in projects:
+            raise HTTPException(404, f"Project '{name}' not found")
+        current = projects[name]
+        members = current.get("members", [])
+
+        _delete_project(name)
+        _create_project(name, description=context, members=members)
+        return {"updated": True, "project": name}
+
     # === Operator Config Endpoints ===
 
     _VALID_CONFIG_FIELDS = {"instructions", "soul", "model", "role", "heartbeat", "thinking", "budget", "permissions"}
@@ -1993,6 +2097,79 @@ def create_mesh_app(
         import yaml
 
         # Read current config
+        agent_cfg = _load_config()
+        agents = agent_cfg.get("agents", {})
+        if agent_id not in agents:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+
+        field = change["field"]
+        old_value = change["old_value"]
+        new_value = change["new_value"]
+
+        # Apply change
+        if field == "permissions":
+            from src.cli.config import _load_permissions, _save_permissions
+            perms = _load_permissions()
+            if agent_id in perms.get("permissions", {}):
+                perms["permissions"][agent_id].update(new_value)
+                _save_permissions(perms)
+        else:
+            yaml_key = _CONFIG_FIELD_MAP.get(field, field)
+            agents[agent_id][yaml_key] = new_value
+            with open(AGENTS_FILE, "w") as f:
+                yaml.dump(agent_cfg, f, default_flow_style=False, sort_keys=False)
+
+        # Hot-reload: push to running agent's workspace
+        if transport and agent_id in router.agent_registry:
+            workspace_map = {
+                "instructions": "INSTRUCTIONS.md",
+                "soul": "SOUL.md",
+                "heartbeat": "HEARTBEAT.md",
+            }
+            ws_file = workspace_map.get(field)
+            if ws_file and isinstance(new_value, str):
+                try:
+                    await transport.request(
+                        agent_id, "PUT", f"/workspace/{ws_file}",
+                        json={"content": f"# {field.title()}\n\n{new_value}"},
+                        timeout=10,
+                    )
+                except Exception:
+                    pass  # Agent might not be running
+
+        # Log to audit trail
+        blackboard.log_audit(
+            action="edit_agent", target=agent_id, field=field,
+            before_value=json.dumps(old_value) if not isinstance(old_value, str) else old_value,
+            after_value=json.dumps(new_value) if not isinstance(new_value, str) else new_value,
+            change_id=change_id,
+        )
+
+        return {"success": True, "agent_id": agent_id, "field": field}
+
+    @app.post("/mesh/config/confirm")
+    async def confirm_config_change(request: Request) -> dict:
+        """Apply a pending config change by change_id only.
+
+        Unlike POST /mesh/agents/{agent_id}/config, this endpoint resolves
+        the agent_id from the pending change itself so callers don't need
+        to know the target agent_id up front.  Used by the operator's
+        ``confirm_edit`` tool.
+        """
+        _require_any_auth(request)
+        data = await request.json()
+        change_id = data.get("change_id", "")
+
+        change = _consume_pending_change(change_id)
+        if not change:
+            raise HTTPException(404, "Change not found or expired")
+
+        # Resolve agent_id from the change itself
+        agent_id = change["agent_id"]
+
+        from src.cli.config import AGENTS_FILE, _load_config
+        import yaml
+
         agent_cfg = _load_config()
         agents = agent_cfg.get("agents", {})
         if agent_id not in agents:

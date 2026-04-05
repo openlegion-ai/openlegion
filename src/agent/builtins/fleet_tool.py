@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import os
+
 from src.agent.skills import skill
+
+def _is_operator() -> bool:
+    """Defence-in-depth: only the operator agent has ALLOWED_TOOLS set."""
+    return os.environ.get("ALLOWED_TOOLS", "") != ""
 
 
 @skill(
@@ -15,6 +21,8 @@ from src.agent.skills import skill
 )
 async def list_templates(*, mesh_client=None, **_kw) -> dict:
     """List available fleet templates."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     try:
@@ -46,6 +54,8 @@ async def apply_template(
     template: str, model: str = "", *, mesh_client=None, _messages=None, **_kw,
 ) -> dict:
     """Apply a fleet template to create a team of agents."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     # Provenance check -- require user confirmation

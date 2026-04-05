@@ -1,9 +1,16 @@
 """Tests for operator tools: propose_edit, confirm_edit, observations, history, create, projects."""
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _set_operator_env(monkeypatch):
+    """Operator tools require ALLOWED_TOOLS to be set (defence-in-depth guard)."""
+    monkeypatch.setenv("ALLOWED_TOOLS", "propose_edit,confirm_edit")
 
 
 @pytest.mark.asyncio

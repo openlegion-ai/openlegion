@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 
 
@@ -9,6 +10,15 @@ from src.agent.skills import skill
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.builtins.operator_tools")
+
+def _is_operator() -> bool:
+    """Defence-in-depth: only the operator agent has ALLOWED_TOOLS set.
+
+    Non-operator agents should never execute these tools even if they
+    appear in the tool list via auto-discovery.  Evaluated at call time
+    so env changes (and test overrides) are respected.
+    """
+    return os.environ.get("ALLOWED_TOOLS", "") != ""
 
 # Permission ceiling: operator cannot grant permissions beyond these limits
 _OPERATOR_PERMISSION_CEILING = {
@@ -62,6 +72,8 @@ _OPERATOR_AGENT_ID = "operator"
 )
 async def propose_edit(agent_id: str, field: str, value, *, mesh_client=None, **_kw) -> dict:
     """Propose a config change for an agent. Returns preview for user review."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
 
@@ -86,14 +98,29 @@ async def propose_edit(agent_id: str, field: str, value, *, mesh_client=None, **
     # Permission ceiling validation
     if field == "permissions" and isinstance(value, dict):
         for key, max_val in _OPERATOR_PERMISSION_CEILING.items():
-            if key in value and isinstance(max_val, bool) and value[key] and not max_val:
-                return {
-                    "error": (
-                        f"Permission ceiling exceeded: '{key}' cannot be set "
-                        "to True by the operator. Use the dashboard for "
-                        "advanced permissions."
-                    ),
-                }
+            if key not in value:
+                continue
+            if isinstance(max_val, bool):
+                if value[key] and not max_val:
+                    return {
+                        "error": (
+                            f"Permission ceiling exceeded: '{key}' cannot be set "
+                            "to True by the operator. Use the dashboard for "
+                            "advanced permissions."
+                        ),
+                    }
+            elif isinstance(max_val, list):
+                requested = set(value.get(key, []))
+                allowed = set(max_val)
+                if "*" not in allowed and not requested.issubset(allowed):
+                    excess = requested - allowed
+                    return {
+                        "error": (
+                            f"Permission ceiling exceeded: '{key}' patterns "
+                            f"{excess} exceed allowed {allowed}. Use the "
+                            "dashboard for advanced permissions."
+                        ),
+                    }
 
     # Budget validation
     if field == "budget" and isinstance(value, dict):
@@ -136,6 +163,8 @@ async def propose_edit(agent_id: str, field: str, value, *, mesh_client=None, **
 )
 async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_kw) -> dict:
     """Apply a proposed config change after user confirmation."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
 
@@ -152,9 +181,7 @@ async def confirm_edit(change_id: str, *, mesh_client=None, _messages=None, **_k
         }
 
     try:
-        # The confirm endpoint uses the agent_id from the pending change.
-        # We pass a placeholder and let the server resolve from change_id.
-        result = await mesh_client.confirm_config_change("_pending", change_id)
+        result = await mesh_client.confirm_config_change(change_id)
         return result
     except Exception as e:
         error_str = str(e)
@@ -214,6 +241,8 @@ async def save_observations(
     **_kw,
 ) -> dict:
     """Save fleet observations to workspace for dashboard display."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if workspace_manager is None:
         return {"error": "No workspace_manager available"}
 
@@ -293,6 +322,8 @@ async def read_agent_history(
     **_kw,
 ) -> dict:
     """Read an agent's activity history via the mesh."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     try:
@@ -353,6 +384,8 @@ async def create_agent(
     **_kw,
 ) -> dict:
     """Create a new custom agent. Provenance-gated."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
 
@@ -386,6 +419,8 @@ async def create_agent(
 )
 async def list_projects(*, mesh_client=None, **_kw) -> dict:
     """List all projects (read-only, no provenance gate)."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     try:
@@ -406,6 +441,8 @@ async def list_projects(*, mesh_client=None, **_kw) -> dict:
 )
 async def get_project(project_name: str, *, mesh_client=None, **_kw) -> dict:
     """Get a single project's details (read-only, no provenance gate)."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     try:
@@ -452,6 +489,8 @@ async def create_project(
     **_kw,
 ) -> dict:
     """Create a new project. Provenance-gated."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
 
@@ -495,6 +534,8 @@ async def add_agents_to_project(
     **_kw,
 ) -> dict:
     """Add agents to a project. Provenance-gated."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
 
@@ -540,6 +581,8 @@ async def remove_agents_from_project(
     **_kw,
 ) -> dict:
     """Remove agents from a project. Provenance-gated."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
 
@@ -587,6 +630,8 @@ async def update_project_context(
     **_kw,
 ) -> dict:
     """Update project description/context. Provenance-gated."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
 
