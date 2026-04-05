@@ -45,8 +45,9 @@ const _IDENTITY_FILE_MAP = {
 function dashboard() {
   return {
     // Navigation
-    activeTab: 'fleet',
+    activeTab: 'chat',
     tabs: [
+      { id: 'chat', label: 'Chat' },
       { id: 'fleet', label: 'Agents' },
       { id: 'system', label: 'System' },
     ],
@@ -54,6 +55,10 @@ function dashboard() {
     loading: true,
     lastRefresh: 0,
     toastQueue: [],
+
+    // Fleet Digest (parsed from operator's OBSERVATIONS.md)
+    fleetDigest: null,
+    _fleetDigestTimer: null,
 
     // Fleet
     agents: [],
@@ -448,6 +453,7 @@ function dashboard() {
           ? `/agents/${this.detailAgent}`
           : `/agents/${this.detailAgent}/${tab}`;
       }
+      if (this.activeTab === 'chat') return '/chat';
       if (this.activeTab === 'system') {
         if (this.systemTab === 'activity') {
           if (this.activityView === 'events') return '/system/activity/events';
@@ -456,6 +462,7 @@ function dashboard() {
         }
         return '/system/' + (this.systemTab || 'activity');
       }
+      if (this.activeTab === 'fleet') return '/agents';
       return '/';
     },
 
@@ -464,6 +471,7 @@ function dashboard() {
         const tabLabel = (_IDENTITY_TABS.find(t => t.id === this.identityTab) || _IDENTITY_TABS[0]).label;
         return `${this.detailAgent} \u00b7 ${tabLabel} \u2014 OpenLegion`;
       }
+      if (this.activeTab === 'chat') return 'Chat \u2014 OpenLegion';
       if (this.activeTab === 'system') {
         if (this.systemTab === 'activity') {
           if (this.activityView === 'events') return 'Live Feed \u2014 OpenLegion';
@@ -478,8 +486,11 @@ function dashboard() {
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'fleet', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
+      const route = { tab: 'chat', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
       if (!clean) return route;
+
+      if (clean === 'chat') { route.tab = 'chat'; return route; }
+      if (clean === 'agents' || clean.startsWith('agents/')) { route.tab = 'fleet'; }
 
       const agentMatch = clean.match(/^agents\/([^/]+)(?:\/([^/]+))?$/);
       if (agentMatch) {
@@ -923,7 +934,7 @@ function dashboard() {
 
       // Deep link restoration: parse initial URL and apply route
       const initRoute = this._parsePath(window.location.pathname);
-      const isDeepLink = initRoute.agentId || initRoute.tab !== 'fleet' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
+      const isDeepLink = initRoute.agentId || initRoute.tab !== 'chat' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
       if (isDeepLink) {
         this.$nextTick(() => {
           this._applyRoute(initRoute);
@@ -932,6 +943,21 @@ function dashboard() {
         });
       } else {
         document.title = this._buildTitle();
+      }
+
+      // Ensure operator chat is initialized when landing on the chat tab
+      if (this.activeTab === 'chat' || initRoute.tab === 'chat') {
+        if (!this.openChats.includes('operator')) {
+          this.openChats.push('operator');
+        }
+        this.activeChatId = 'operator';
+        this._loadChatHistory('operator');
+        this._startFleetDigestRefresh();
+        this.$nextTick(() => {
+          this._scrollChat('operator', true);
+          const el = document.getElementById('operator-chat-input');
+          if (el) el.focus();
+        });
       }
 
       // Popstate listener for browser back/forward
@@ -1092,8 +1118,44 @@ function dashboard() {
       Object.values(this._chatRecoveryPolls).forEach(clearInterval);
       this._chatRecoveryPolls = {};
       this.stopHeartbeatTimer();
+      this._stopFleetDigestRefresh();
       if (this._cmdPaletteHandler) document.removeEventListener('keydown', this._cmdPaletteHandler);
       if (this._popstateHandler) window.removeEventListener('popstate', this._popstateHandler);
+    },
+
+    // ── Fleet Digest ─────────────────────────────────────
+
+    async fetchFleetDigest() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/operator/workspace/OBSERVATIONS.md`);
+        if (!resp.ok) { this.fleetDigest = null; return; }
+        const text = await resp.text();
+        // Parse JSON block from markdown format
+        const match = text.match(/```json\n([\s\S]*?)\n```/);
+        if (match) {
+          this.fleetDigest = JSON.parse(match[1]);
+        } else {
+          this.fleetDigest = null;
+        }
+      } catch (e) {
+        this.fleetDigest = null;
+      }
+    },
+
+    _startFleetDigestRefresh() {
+      this.fetchFleetDigest();
+      if (!this._fleetDigestTimer) {
+        this._fleetDigestTimer = setInterval(() => {
+          if (this.activeTab === 'chat') this.fetchFleetDigest();
+        }, 300000); // 5 minutes
+      }
+    },
+
+    _stopFleetDigestRefresh() {
+      if (this._fleetDigestTimer) {
+        clearInterval(this._fleetDigestTimer);
+        this._fleetDigestTimer = null;
+      }
     },
 
     // ── Tab switching ─────────────────────────────────────
@@ -1103,6 +1165,19 @@ function dashboard() {
       this.detailAgent = null;
       // Clear tab-specific auto-refresh intervals
       this._stopActivityRefresh();
+      if (tab === 'chat') {
+        if (!this.openChats.includes('operator')) {
+          this.openChats.push('operator');
+        }
+        this.activeChatId = 'operator';
+        this._loadChatHistory('operator');
+        this._startFleetDigestRefresh();
+        this.$nextTick(() => {
+          this._scrollChat('operator', true);
+          const el = document.getElementById('operator-chat-input');
+          if (el) el.focus();
+        });
+      }
       if (tab === 'fleet') {
         this.fetchAgents();
         this.fetchQueues();
