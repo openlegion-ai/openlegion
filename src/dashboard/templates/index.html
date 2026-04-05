@@ -417,12 +417,12 @@
                   <div x-data="{ templates: [] }" x-init="fetch(`${window.__config.apiBase}/fleet/templates`).then(r => r.ok ? r.json() : {templates:[]}).then(d => templates = (d.templates || []).slice(0, 4)).catch(() => {})"
                     class="flex flex-wrap gap-2 justify-center max-w-md">
                     <template x-for="tpl in templates" :key="tpl.name">
-                      <button @click="let inp = document.getElementById('operator-chat-input'); if (inp) { let scope = Alpine.$data(inp.closest('[x-data]')); if (scope && 'opInput' in scope) { scope.opInput = (maxAgents > 0 && maxAgents <= 1) ? ('I need a ' + (tpl.description || tpl.name).toLowerCase() + ' agent') : ('I need a ' + (tpl.description || tpl.name).toLowerCase() + ' team'); inp.focus(); } }"
+                      <button @click="chatInput = (maxAgents > 0 && maxAgents <= 1) ? ('I need a ' + (tpl.description || tpl.name).toLowerCase() + ' agent') : ('I need a ' + (tpl.description || tpl.name).toLowerCase() + ' team'); $nextTick(() => { let el = document.getElementById('operator-chat-input'); if (el) el.focus(); })"
                         class="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:border-indigo-500/50 hover:bg-indigo-600/10 transition-colors">
                         <span x-text="tpl.description || tpl.name"></span>
                       </button>
                     </template>
-                    <button @click="let inp = document.getElementById('operator-chat-input'); if (inp) { inp.focus(); }"
+                    <button @click="$nextTick(() => { let el = document.getElementById('operator-chat-input'); if (el) el.focus(); })"
                       class="px-3 py-1.5 rounded-lg text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:border-indigo-500/50 hover:bg-indigo-600/10 transition-colors">
                       Something else...
                     </button>
@@ -438,28 +438,53 @@
                 </div>
               </div>
 
-            <!-- Input area (matches per-agent chat: file upload, voice, paste) -->
-            <div x-show="operatorReady" class="px-4 py-3 border-t border-gray-800/80 shrink-0">
-              <!-- Pending file preview -->
-              <template x-if="pendingFile && activeChatId === 'operator'">
-                <div class="flex items-center gap-2 mb-2 px-1 py-1.5 rounded-md bg-gray-800/50 border border-gray-700/50">
-                  <svg class="w-3.5 h-3.5 text-indigo-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
-                  <span class="text-xs text-gray-300 truncate flex-1" x-text="pendingFile ? pendingFile.name : ''"></span>
-                  <button @click="pendingFile = null; pendingFileData = null; pendingFileUploading = false;" class="text-gray-500 hover:text-gray-300">
-                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-                  </button>
+            <!-- Input area — identical to per-agent messenger input -->
+            <div x-show="operatorReady" class="px-3 py-3 border-t border-gray-800/80 shrink-0"
+              @dragover.prevent="dragOver = true"
+              @dragleave.prevent="dragOver = false"
+              @drop.prevent="dragOver = false; if ($event.dataTransfer.files[0]) attachFile($event.dataTransfer.files[0])">
+              <!-- Pending file attachment -->
+              <template x-if="pendingFile">
+                <div class="chat-pending-file">
+                  <div class="flex items-center gap-1.5 min-w-0 flex-1 text-[11px] text-indigo-300">
+                    <template x-if="!pendingFileUploading">
+                      <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/></svg>
+                    </template>
+                    <span class="truncate" x-text="pendingFileUploading ? 'Uploading…' : pendingFile"></span>
+                    <button x-show="!pendingFileUploading" @click="pendingFile = null" class="ml-1 shrink-0 text-indigo-500 hover:text-indigo-300 transition-colors" aria-label="Remove attachment">
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                    </button>
+                  </div>
                 </div>
               </template>
+              <!-- Drag-over overlay -->
+              <template x-if="dragOver">
+                <div class="absolute inset-0 flex items-center justify-center rounded-lg bg-indigo-900/25 border-2 border-dashed border-indigo-500/60 pointer-events-none z-10 mx-1 my-1">
+                  <div class="flex items-center gap-1.5 text-indigo-300 text-xs font-medium select-none">
+                    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+                    Drop to attach
+                  </div>
+                </div>
+              </template>
+              <!-- Steer mode indicator -->
+              <div x-show="isAgentBusy('operator')" x-cloak class="flex items-center gap-2 mb-2 px-1">
+                <span class="steer-badge">
+                  <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7"/></svg>
+                  Steering
+                </span>
+                <span class="text-[11px] text-gray-600">Operator is working &mdash; your message will redirect it</span>
+              </div>
+              <!-- Input row -->
               <div class="chat-input-wrap">
                 <!-- Hidden file input -->
-                <input type="file" x-ref="opFileInput" class="hidden" @change="attachFile($event.target.files[0]); $event.target.value=''">
+                <input type="file" x-ref="fileInput" class="hidden" @change="attachFile($event.target.files[0]); $event.target.value=''">
                 <!-- Attach file button -->
-                <button @click="$refs.opFileInput.click()" :disabled="pendingFileUploading"
+                <button @click="$refs.fileInput.click()" :disabled="pendingFileUploading"
                   title="Attach file" aria-label="Attach file"
                   class="chat-input-btn">
                   <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
                 </button>
-                <!-- Speech-to-text button -->
+                <!-- Speech-to-text button (hidden if API unavailable) -->
                 <button x-show="'SpeechRecognition' in window || 'webkitSpeechRecognition' in window"
                   @click="toggleSpeech()"
                   :title="speechActive ? 'Stop recording' : 'Voice input'"
@@ -473,16 +498,16 @@
                   </svg>
                 </button>
                 <textarea x-model="chatInput" id="operator-chat-input" rows="1"
-                  :disabled="chatStreamingAgents['operator']"
-                  @keydown.enter="if (!$event.shiftKey && (chatInput.trim() || pendingFile)) { $event.preventDefault(); activeChatId = 'operator'; sendMsg(); }"
+                  :disabled="chatLoadingAgents['operator'] === true"
+                  @keydown.enter="if (!$event.shiftKey && (chatInput.trim() || pendingFile)) { $event.preventDefault(); sendMsg(); }"
                   @input="$el.style.height = 'auto'; $el.style.height = Math.min($el.scrollHeight, 120) + 'px'"
                   @paste="if ($event.clipboardData.files[0]) { $event.preventDefault(); attachFile($event.clipboardData.files[0]); }"
                   class="chat-slide-textarea"
-                  :placeholder="speechActive ? 'Listening…' : 'Message your operator...'"></textarea>
-                <button @click="activeChatId = 'operator'; sendMsg()"
+                  :placeholder="speechActive ? 'Listening…' : (isAgentBusy('operator') ? 'Steer operator…' : 'Message your operator...')"></textarea>
+                <button @click="sendMsg()"
                   :disabled="!(chatInput.trim() || pendingFile)"
                   class="chat-input-send"
-                  :class="(chatInput.trim() || pendingFile) ? 'bg-indigo-600 hover:bg-indigo-500' : 'bg-gray-700 opacity-40'"
+                  :class="(chatInput.trim() || pendingFile) ? (isAgentBusy('operator') ? 'bg-amber-600 hover:bg-amber-500' : 'bg-indigo-600 hover:bg-indigo-500') : 'bg-gray-700 opacity-40'"
                   aria-label="Send">
                   <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 10a.75.75 0 0 1 .75-.75h10.638L10.23 5.29a.75.75 0 1 1 1.04-1.08l5.5 5.25a.75.75 0 0 1 0 1.08l-5.5 5.25a.75.75 0 1 1-1.04-1.08l4.158-3.96H3.75A.75.75 0 0 1 3 10Z" clip-rule="evenodd"/></svg>
                 </button>
