@@ -285,6 +285,11 @@ class RuntimeContext:
         # Auto-create operator if it doesn't exist
         default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
         _ensure_operator_agent(default_model=default_model)
+        # Reload permissions so the operator's allowed_apis (e.g. "llm") are
+        # present in the in-memory PermissionMatrix — without this the operator
+        # gets 403 on /mesh/api because its permissions were written to disk
+        # after PermissionMatrix was constructed in __init__.
+        self.permissions.reload()
         # Reload config after possible operator creation
         self.cfg = _load_config()
         agents_cfg = self.cfg.get("agents", {})
