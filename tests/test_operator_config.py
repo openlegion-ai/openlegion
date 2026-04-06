@@ -82,10 +82,33 @@ class TestEnsureOperatorCreates(_TempConfigMixin):
 
 
 class TestEnsureOperatorNoop(_TempConfigMixin):
-    """Does nothing when operator already exists."""
+    """Preserves non-model fields when operator already exists."""
 
-    def test_noop_when_exists(self):
-        # Pre-create operator
+    def test_preserves_role_when_exists(self):
+        # Pre-create operator with same model as default
+        agents_cfg = {"agents": {"operator": {
+            "role": "Existing operator",
+            "model": "openai/gpt-4o-mini",
+        }}}
+        with open(self._agents_path, "w") as f:
+            yaml.dump(agents_cfg, f)
+
+        with self._mock_config():
+            from src.cli.config import _ensure_operator_agent
+            _ensure_operator_agent(default_model="openai/gpt-4o-mini")
+
+        # Should not overwrite role
+        with open(self._agents_path) as f:
+            result = yaml.safe_load(f)
+        assert result["agents"]["operator"]["role"] == "Existing operator"
+        assert result["agents"]["operator"]["model"] == "openai/gpt-4o-mini"
+
+
+class TestEnsureOperatorModelSync(_TempConfigMixin):
+    """Syncs operator model to default_model when they differ."""
+
+    def test_updates_model_when_different(self):
+        # Pre-create operator with old model
         agents_cfg = {"agents": {"operator": {
             "role": "Existing operator",
             "model": "anthropic/claude-3-haiku",
@@ -95,13 +118,54 @@ class TestEnsureOperatorNoop(_TempConfigMixin):
 
         with self._mock_config():
             from src.cli.config import _ensure_operator_agent
-            _ensure_operator_agent(default_model="openai/gpt-4o-mini")
+            _ensure_operator_agent(default_model="google/gemini-2.0-flash")
 
-        # Should not overwrite
         with open(self._agents_path) as f:
             result = yaml.safe_load(f)
+        # Model should be updated to match default_model
+        assert result["agents"]["operator"]["model"] == "google/gemini-2.0-flash"
+        # Role should be preserved
         assert result["agents"]["operator"]["role"] == "Existing operator"
-        assert result["agents"]["operator"]["model"] == "anthropic/claude-3-haiku"
+
+    def test_reads_model_from_config_when_not_passed(self):
+        # Pre-create operator with old model
+        agents_cfg = {"agents": {"operator": {
+            "role": "Existing operator",
+            "model": "anthropic/claude-3-haiku",
+        }}}
+        with open(self._agents_path, "w") as f:
+            yaml.dump(agents_cfg, f)
+
+        with patch("src.cli.config._load_config", return_value={
+            "llm": {"default_model": "google/gemini-2.0-flash"},
+            "agents": {},
+            "collaboration": True,
+        }):
+            from src.cli.config import _ensure_operator_agent
+            _ensure_operator_agent()
+
+        with open(self._agents_path) as f:
+            result = yaml.safe_load(f)
+        assert result["agents"]["operator"]["model"] == "google/gemini-2.0-flash"
+
+    def test_no_write_when_model_matches(self):
+        # Pre-create operator with matching model
+        agents_cfg = {"agents": {"operator": {
+            "role": "Existing operator",
+            "model": "openai/gpt-4o-mini",
+        }}}
+        with open(self._agents_path, "w") as f:
+            yaml.dump(agents_cfg, f)
+
+        mtime_before = self._agents_path.stat().st_mtime
+
+        with self._mock_config():
+            from src.cli.config import _ensure_operator_agent
+            _ensure_operator_agent(default_model="openai/gpt-4o-mini")
+
+        # File should not have been rewritten (mtime unchanged)
+        mtime_after = self._agents_path.stat().st_mtime
+        assert mtime_before == mtime_after
 
 
 class TestEnsureOperatorMigratesConcierge(_TempConfigMixin):
