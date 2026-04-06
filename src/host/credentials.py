@@ -706,6 +706,64 @@ class CredentialVault:
             pass
         return []
 
+    # Exclude patterns for non-chat models from gateway discovery
+    _GATEWAY_EXCLUDE_PATTERNS = ("embed", "tts", "whisper", "dall-e", "image", "audio", "moderation")
+
+    async def discover_openlegion_models(
+        self,
+    ) -> tuple[list[str], dict[str, tuple[float, float]]]:
+        """Query the openlegion credit proxy gateway for available models.
+
+        Returns ``(model_ids, pricing)`` where model_ids are in
+        ``openlegion/{creator}/{model}`` format and pricing maps
+        ``creator/model`` → ``(input_per_1k, output_per_1k)`` USD.
+
+        Returns ``([], {})`` if the gateway is not configured or unreachable.
+        """
+        api_base = self.api_bases.get("openlegion_api_base")
+        api_key = self.system_credentials.get("openlegion_api_key")
+        if not api_base:
+            return [], {}
+
+        try:
+            client = await self._get_http_client()
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            resp = await client.get(f"{api_base}/models", headers=headers, timeout=10.0)
+            if resp.status_code != 200:
+                logger.warning("OpenLegion gateway /models returned %d", resp.status_code)
+                return [], {}
+
+            body = resp.json()
+            models: list[str] = []
+            pricing: dict[str, tuple[float, float]] = {}
+
+            for entry in body.get("data", []):
+                model_id = entry.get("id", "")
+                if not model_id or not isinstance(model_id, str):
+                    continue
+                # Skip non-chat models
+                lower = model_id.lower()
+                if any(pat in lower for pat in self._GATEWAY_EXCLUDE_PATTERNS):
+                    continue
+
+                models.append(f"openlegion/{model_id}")
+
+                # Extract pricing (per-token → per-1K-token)
+                p = entry.get("pricing")
+                if p and p.get("input") is not None and p.get("output") is not None:
+                    try:
+                        inp = float(p["input"]) * 1000
+                        out = float(p["output"]) * 1000
+                        pricing[model_id] = (inp, out)
+                    except (ValueError, TypeError):
+                        pass
+
+            models.sort()
+            return models, pricing
+        except Exception:
+            logger.debug("Failed to discover openlegion models", exc_info=True)
+            return [], {}
+
     def _get_api_base_for_model(self, model: str) -> str | None:
         """Resolve a custom API base URL for a model's provider.
 
@@ -720,18 +778,34 @@ class CredentialVault:
         return None
 
     def _rewrite_model_for_litellm(self, model: str, api_base: str | None) -> str:
-        """Rewrite custom provider model strings for litellm compatibility.
+        """Rewrite model strings for litellm compatibility.
 
         LiteLLM requires a recognized provider prefix to route API calls.
-        Custom OpenAI-compatible providers (those with a custom ``api_base``
-        and an unrecognized prefix) are rewritten to ``openai/<model_name>``
-        so litellm uses its OpenAI-compatible code path.
+
+        For ``openlegion/`` models (credit proxy): the gateway expects the
+        Vercel AI Gateway model ID (e.g., ``openai/gpt-5.4``) in the
+        request body.  We prepend ``openai/`` so litellm treats it as an
+        OpenAI-compatible endpoint — litellm strips that prefix and sends
+        the remainder as the model name in the HTTP body.
+
+        For other custom providers with ``api_base``: same ``openai/``
+        prefix trick so litellm uses its OpenAI-compatible code path.
         """
         if not api_base:
             return model
+
+        # openlegion credit proxy: strip "openlegion/" and prepend "openai/"
+        # so litellm routes to the custom api_base.  litellm strips the
+        # "openai/" prefix and sends the inner model ID in the request body
+        # (e.g., "openai/gpt-5.4" or "anthropic/claude-sonnet-4-6").
+        if model.startswith("openlegion/"):
+            inner = model[len("openlegion/"):]
+            return f"openai/{inner}"
+
         provider = self._resolve_provider(model)
         if provider and provider in _LITELLM_NATIVE_PROVIDERS:
             return model
+
         # Unknown provider with custom api_base → OpenAI-compatible
         if "/" in model:
             rewritten = f"openai/{model.split('/', 1)[1]}"

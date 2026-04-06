@@ -3277,3 +3277,130 @@ async def test_embed_uses_rewritten_model_for_custom_provider(monkeypatch):
 
     assert result.success
     assert captured["model"] == "openai/Chatrhino-750B"
+
+
+class TestDiscoverOpenlegionModels:
+    """Tests for CredentialVault.discover_openlegion_models()."""
+
+    @pytest.fixture
+    def vault_with_openlegion(self):
+        """Vault with openlegion api_base and api_key configured."""
+        vault = CredentialVault()
+        vault.system_credentials["openlegion_api_key"] = "test-key"
+        vault.api_bases["openlegion_api_base"] = "https://gw.example.com/v1"
+        return vault
+
+    @pytest.mark.asyncio
+    async def test_returns_prefixed_model_ids(self, vault_with_openlegion, monkeypatch):
+        import httpx
+        from unittest.mock import AsyncMock
+        gateway_response = {
+            "data": [
+                {"id": "openai/gpt-5.4", "pricing": {"input": "0.0000025", "output": "0.000015"}},
+                {"id": "anthropic/claude-sonnet-4-6", "pricing": {"input": "0.003", "output": "0.015"}},
+            ]
+        }
+        mock_resp = httpx.Response(200, json=gateway_response)
+        client = await vault_with_openlegion._get_http_client()
+        monkeypatch.setattr(client, "get", AsyncMock(return_value=mock_resp))
+
+        models, pricing = await vault_with_openlegion.discover_openlegion_models()
+        assert "openlegion/openai/gpt-5.4" in models
+        assert "openlegion/anthropic/claude-sonnet-4-6" in models
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_without_api_base(self):
+        vault = CredentialVault()
+        models, pricing = await vault.discover_openlegion_models()
+        assert models == []
+        assert pricing == {}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_http_error(self, vault_with_openlegion, monkeypatch):
+        import httpx
+        from unittest.mock import AsyncMock
+        mock_resp = httpx.Response(500)
+        client = await vault_with_openlegion._get_http_client()
+        monkeypatch.setattr(client, "get", AsyncMock(return_value=mock_resp))
+
+        models, pricing = await vault_with_openlegion.discover_openlegion_models()
+        assert models == []
+        assert pricing == {}
+
+    @pytest.mark.asyncio
+    async def test_filters_non_chat_models(self, vault_with_openlegion, monkeypatch):
+        import httpx
+        from unittest.mock import AsyncMock
+        gateway_response = {
+            "data": [
+                {"id": "openai/gpt-5.4", "pricing": {"input": "0.0000025", "output": "0.000015"}},
+                {"id": "openai/text-embedding-3-small"},
+                {"id": "openai/dall-e-3"},
+            ]
+        }
+        mock_resp = httpx.Response(200, json=gateway_response)
+        client = await vault_with_openlegion._get_http_client()
+        monkeypatch.setattr(client, "get", AsyncMock(return_value=mock_resp))
+
+        models, pricing = await vault_with_openlegion.discover_openlegion_models()
+        assert "openlegion/openai/gpt-5.4" in models
+        assert not any("embedding" in m for m in models)
+        assert not any("dall-e" in m for m in models)
+
+    @pytest.mark.asyncio
+    async def test_returns_pricing(self, vault_with_openlegion, monkeypatch):
+        import httpx
+        from unittest.mock import AsyncMock
+        gateway_response = {
+            "data": [
+                {"id": "openai/gpt-5.4", "pricing": {"input": "0.0000025", "output": "0.000015"}},
+            ]
+        }
+        mock_resp = httpx.Response(200, json=gateway_response)
+        client = await vault_with_openlegion._get_http_client()
+        monkeypatch.setattr(client, "get", AsyncMock(return_value=mock_resp))
+
+        models, pricing = await vault_with_openlegion.discover_openlegion_models()
+        assert "openlegion/openai/gpt-5.4" in models
+        assert "openai/gpt-5.4" in pricing
+        inp, out = pricing["openai/gpt-5.4"]
+        assert abs(inp - 0.0025) < 1e-10
+        assert abs(out - 0.015) < 1e-10
+
+
+class TestRewriteModelForLitellm:
+    """Tests for _rewrite_model_for_litellm explicit openlegion handling."""
+
+    @pytest.fixture
+    def vault(self):
+        return CredentialVault()
+
+    def test_openlegion_openai_model(self, vault):
+        result = vault._rewrite_model_for_litellm(
+            "openlegion/openai/gpt-5.4", "https://gw.example.com/v1",
+        )
+        assert result == "openai/openai/gpt-5.4"
+
+    def test_openlegion_anthropic_model(self, vault):
+        result = vault._rewrite_model_for_litellm(
+            "openlegion/anthropic/claude-sonnet-4-6", "https://gw.example.com/v1",
+        )
+        assert result == "openai/anthropic/claude-sonnet-4-6"
+
+    def test_openlegion_deepseek_model(self, vault):
+        result = vault._rewrite_model_for_litellm(
+            "openlegion/deepseek/deepseek-chat", "https://gw.example.com/v1",
+        )
+        assert result == "openai/deepseek/deepseek-chat"
+
+    def test_no_rewrite_without_api_base(self, vault):
+        result = vault._rewrite_model_for_litellm(
+            "openlegion/openai/gpt-5.4", None,
+        )
+        assert result == "openlegion/openai/gpt-5.4"
+
+    def test_native_provider_unchanged(self, vault):
+        result = vault._rewrite_model_for_litellm(
+            "anthropic/claude-sonnet-4-6", "https://custom.example.com",
+        )
+        assert result == "anthropic/claude-sonnet-4-6"

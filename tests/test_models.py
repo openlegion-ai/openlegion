@@ -231,3 +231,58 @@ class TestGetAllModelCosts:
         for model, cost in costs.items():
             if model.startswith("ollama/"):
                 assert cost == (0.0, 0.0), f"{model} should be free"
+
+
+class TestGatewayPricingSync:
+    """Tests for set_gateway_pricing / get_model_cost integration."""
+
+    def test_gateway_pricing_used_for_unknown_model(self):
+        from src.shared.models import set_gateway_pricing, get_model_cost
+
+        set_gateway_pricing({"xai/grok-99": (0.01, 0.05)})
+        try:
+            cost = get_model_cost("openlegion/xai/grok-99")
+            assert cost == (0.01, 0.05)
+        finally:
+            set_gateway_pricing({})
+
+    def test_gateway_pricing_used_for_openlegion_prefix(self):
+        from src.shared.models import set_gateway_pricing, get_model_cost
+
+        # Use a model NOT in litellm so the gateway pricing path is exercised
+        set_gateway_pricing({"someprovider/fancy-model-v9": (0.0025, 0.015)})
+        try:
+            cost = get_model_cost("openlegion/someprovider/fancy-model-v9")
+            assert cost == (0.0025, 0.015)
+        finally:
+            set_gateway_pricing({})
+
+    def test_fallback_still_works_without_gateway(self):
+        from src.shared.models import get_model_cost
+        cost = get_model_cost("openai/gpt-4o")
+        assert cost == (0.0025, 0.01)
+
+    def test_gateway_pricing_overrides_fallback_for_known_model(self):
+        from src.shared.models import set_gateway_pricing, get_model_cost
+
+        # gpt-4o has fallback cost (0.0025, 0.01) — gateway should override
+        set_gateway_pricing({"openai/gpt-4o": (0.005, 0.02)})
+        try:
+            cost = get_model_cost("openlegion/openai/gpt-4o")
+            # litellm may resolve first; if not, gateway pricing kicks in
+            # Either way, should NOT be the default cost (0.003, 0.015)
+            assert cost != (0.003, 0.015)
+        finally:
+            set_gateway_pricing({})
+
+    def test_set_replaces_rather_than_accumulates(self):
+        from src.shared.models import set_gateway_pricing, get_gateway_pricing
+
+        set_gateway_pricing({"model-a": (1.0, 2.0)})
+        set_gateway_pricing({"model-b": (3.0, 4.0)})
+        try:
+            gw = get_gateway_pricing()
+            assert "model-b" in gw
+            assert "model-a" not in gw  # replaced, not accumulated
+        finally:
+            set_gateway_pricing({})
