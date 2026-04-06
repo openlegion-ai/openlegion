@@ -237,7 +237,7 @@ class TestGatewayPricingSync:
     """Tests for set_gateway_pricing / get_model_cost integration."""
 
     def test_gateway_pricing_used_for_unknown_model(self):
-        from src.shared.models import set_gateway_pricing, get_model_cost
+        from src.shared.models import get_model_cost, set_gateway_pricing
 
         set_gateway_pricing({"xai/grok-99": (0.01, 0.05)})
         try:
@@ -247,7 +247,7 @@ class TestGatewayPricingSync:
             set_gateway_pricing({})
 
     def test_gateway_pricing_used_for_openlegion_prefix(self):
-        from src.shared.models import set_gateway_pricing, get_model_cost
+        from src.shared.models import get_model_cost, set_gateway_pricing
 
         # Use a model NOT in litellm so the gateway pricing path is exercised
         set_gateway_pricing({"someprovider/fancy-model-v9": (0.0025, 0.015)})
@@ -263,7 +263,7 @@ class TestGatewayPricingSync:
         assert cost == (0.0025, 0.01)
 
     def test_gateway_pricing_overrides_fallback_for_known_model(self):
-        from src.shared.models import set_gateway_pricing, get_model_cost
+        from src.shared.models import get_model_cost, set_gateway_pricing
 
         # gpt-4o has fallback cost (0.0025, 0.01) — gateway should override
         set_gateway_pricing({"openai/gpt-4o": (0.005, 0.02)})
@@ -276,7 +276,7 @@ class TestGatewayPricingSync:
             set_gateway_pricing({})
 
     def test_set_replaces_rather_than_accumulates(self):
-        from src.shared.models import set_gateway_pricing, get_gateway_pricing
+        from src.shared.models import get_gateway_pricing, set_gateway_pricing
 
         set_gateway_pricing({"model-a": (1.0, 2.0)})
         set_gateway_pricing({"model-b": (3.0, 4.0)})

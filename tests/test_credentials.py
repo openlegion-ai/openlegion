@@ -3292,8 +3292,9 @@ class TestDiscoverOpenlegionModels:
 
     @pytest.mark.asyncio
     async def test_returns_prefixed_model_ids(self, vault_with_openlegion, monkeypatch):
-        import httpx
         from unittest.mock import AsyncMock
+
+        import httpx
         gateway_response = {
             "data": [
                 {"id": "openai/gpt-5.4", "pricing": {"input": "0.0000025", "output": "0.000015"}},
@@ -3317,8 +3318,9 @@ class TestDiscoverOpenlegionModels:
 
     @pytest.mark.asyncio
     async def test_returns_empty_on_http_error(self, vault_with_openlegion, monkeypatch):
-        import httpx
         from unittest.mock import AsyncMock
+
+        import httpx
         mock_resp = httpx.Response(500)
         client = await vault_with_openlegion._get_http_client()
         monkeypatch.setattr(client, "get", AsyncMock(return_value=mock_resp))
@@ -3329,8 +3331,9 @@ class TestDiscoverOpenlegionModels:
 
     @pytest.mark.asyncio
     async def test_filters_non_chat_models(self, vault_with_openlegion, monkeypatch):
-        import httpx
         from unittest.mock import AsyncMock
+
+        import httpx
         gateway_response = {
             "data": [
                 {"id": "openai/gpt-5.4", "pricing": {"input": "0.0000025", "output": "0.000015"}},
@@ -3349,8 +3352,9 @@ class TestDiscoverOpenlegionModels:
 
     @pytest.mark.asyncio
     async def test_returns_pricing(self, vault_with_openlegion, monkeypatch):
-        import httpx
         from unittest.mock import AsyncMock
+
+        import httpx
         gateway_response = {
             "data": [
                 {"id": "openai/gpt-5.4", "pricing": {"input": "0.0000025", "output": "0.000015"}},
