@@ -2704,7 +2704,31 @@ def create_dashboard_router(
             except Exception:
                 pass  # Keep whatever's already there (if any)
 
+            # Discover models available through the OpenLegion credit proxy.
+            # Similar to Ollama discovery — merges gateway catalog into dropdown.
+            try:
+                ol_models, ol_pricing = await credential_vault.discover_openlegion_models()
+                if ol_models:
+                    from src.shared.models import set_gateway_pricing
+                    set_gateway_pricing(ol_pricing)
+                    featured = available_provider_models.get("openlegion", [])
+                    featured_set = set(featured)
+                    merged = featured + [m for m in ol_models if m not in featured_set]
+                    available_provider_models["openlegion"] = merged
+                    has_llm = True
+            except Exception:
+                pass
+
         all_costs = get_all_model_costs()
+
+        # Include gateway pricing for openlegion models.  Gateway pricing
+        # overwrites litellm/fallback costs so the dashboard displays the
+        # same prices that the credit proxy actually charges.
+        if "openlegion" in available_provider_models:
+            from src.shared.models import get_gateway_pricing
+            for gw_model, cost in get_gateway_pricing().items():
+                all_costs[f"openlegion/{gw_model}"] = cost
+
         return {
             "credentials": {"names": cred_names, "count": len(cred_names)},
             "agent_credentials": agent_cred_names,

@@ -47,6 +47,10 @@ KEYLESS_PROVIDERS = frozenset({"ollama"})
 # ── Fallback data (used when litellm is unavailable) ─────────
 
 _FALLBACK_COSTS: dict[str, tuple[float, float]] = {
+    "openai/gpt-5.4": (0.0025, 0.015),
+    "openai/gpt-5.4-pro": (0.03, 0.18),
+    "openai/gpt-5.4-mini": (0.0004, 0.0016),
+    "openai/gpt-5.4-nano": (0.0001, 0.0004),
     "openai/gpt-4o": (0.0025, 0.01),
     "openai/gpt-4o-mini": (0.00015, 0.0006),
     "openai/gpt-4.1": (0.002, 0.008),
@@ -69,7 +73,31 @@ _FALLBACK_COSTS: dict[str, tuple[float, float]] = {
 
 _DEFAULT_COST = (0.003, 0.015)
 
+# Gateway pricing cache: populated by dashboard when openlegion gateway
+# is reachable.  Maps "creator/model" → (input_per_1k, output_per_1k).
+_gateway_pricing: dict[str, tuple[float, float]] = {}
+
+
+def set_gateway_pricing(pricing: dict[str, tuple[float, float]]) -> None:
+    """Replace the gateway pricing cache (called from dashboard on discovery).
+
+    Full replacement ensures models removed from the gateway don't persist
+    with stale pricing indefinitely.
+    """
+    _gateway_pricing.clear()
+    _gateway_pricing.update(pricing)
+
+
+def get_gateway_pricing() -> dict[str, tuple[float, float]]:
+    """Return a snapshot of the gateway pricing cache (read-only copy)."""
+    return dict(_gateway_pricing)
+
+
 _FALLBACK_CONTEXT: dict[str, int] = {
+    "openai/gpt-5.4": 1_050_000,
+    "openai/gpt-5.4-pro": 1_050_000,
+    "openai/gpt-5.4-mini": 1_050_000,
+    "openai/gpt-5.4-nano": 1_050_000,
     "openai/gpt-4o": 128_000,
     "openai/gpt-4o-mini": 128_000,
     "openai/gpt-4.1": 1_047_576,
@@ -90,9 +118,13 @@ _DEFAULT_CONTEXT_WINDOW = 128_000
 # These always appear first for each provider.
 _FEATURED_MODELS: dict[str, list[str]] = {
     "openai": [
+        "openai/gpt-5.4",
+        "openai/gpt-5.4-pro",
+        "openai/gpt-5.4-mini",
+        "openai/gpt-5.4-nano",
+        "openai/gpt-5.3-codex",
         "openai/gpt-5.2",
         "openai/gpt-5.2-pro",
-        "openai/gpt-5.1-codex",
         "openai/gpt-5",
         "openai/gpt-5-mini",
         "openai/o3",
@@ -143,6 +175,8 @@ _FEATURED_MODELS: dict[str, list[str]] = {
         "zai/glm-5",
     ],
     "openrouter": [
+        "openrouter/openai/gpt-5.4",
+        "openrouter/openai/gpt-5.4-mini",
         "openrouter/anthropic/claude-sonnet-4-6",
         "openrouter/anthropic/claude-haiku-4-5-20251001",
         "openrouter/openai/gpt-4.1",
@@ -156,6 +190,8 @@ _FEATURED_MODELS: dict[str, list[str]] = {
         "openrouter/mistralai/mistral-large",
     ],
     "openlegion": [
+        "openlegion/openai/gpt-5.4",
+        "openlegion/openai/gpt-5.4-mini",
         "openlegion/anthropic/claude-sonnet-4-6",
         "openlegion/anthropic/claude-haiku-4-5-20251001",
         "openlegion/openai/gpt-4.1",
@@ -279,6 +315,11 @@ def get_model_cost(model: str) -> tuple[float, float]:
 
     # Strip openlegion/ for fallback lookup (fallback keys use provider/model format)
     lookup = model[len("openlegion/"):] if model.startswith("openlegion/") else model
+
+    # Check gateway pricing (synced from Vercel AI Gateway via dashboard)
+    if lookup in _gateway_pricing:
+        return _gateway_pricing[lookup]
+
     return _FALLBACK_COSTS.get(lookup, _DEFAULT_COST)
 
 
