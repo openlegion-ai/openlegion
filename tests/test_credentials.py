@@ -1283,6 +1283,12 @@ class TestGetAuthForModel:
     def test_providers_with_credentials(self, monkeypatch):
         monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-openai")
+        # Clear other provider keys so the test is deterministic
+        for p in ("gemini", "deepseek", "moonshot", "minimax", "xai", "groq", "zai"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{p.upper()}_API_KEY", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
         v = CredentialVault()
         providers = v.get_providers_with_credentials()
         assert "anthropic" in providers
