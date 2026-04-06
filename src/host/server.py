@@ -1120,6 +1120,9 @@ def create_mesh_app(
                     {"id": aid, "role": router.agent_roles.get(aid, "")}
                     for aid in router.agent_registry
                 ]
+                # Include project mapping so the operator can write to
+                # the correct project-scoped blackboard paths in hand_off.
+                result["agent_projects"] = dict(_agent_projects)
             else:
                 from src.cli.config import _load_projects
                 _projects = _load_projects()

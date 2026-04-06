@@ -73,20 +73,52 @@ async def hand_off(
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     if mesh_client.is_standalone:
-        return {"error": _STANDALONE_ERROR}
+        # Standalone agents can't use the blackboard *unless* they are
+        # handing off to an agent in a project — in that case we write
+        # to the target's project-scoped path directly.  The Operator is
+        # the primary consumer of this path.
+        pass  # validated below after target project lookup
 
     # Validate target agent ID format (defense-in-depth if list_agents fails)
     if not re.fullmatch(AGENT_ID_RE_PATTERN, to):
         return {"error": f"Invalid agent ID: '{to}'"}
 
-    # Validate target agent exists
+    # Validate target agent exists.  Standalone agents (e.g. Operator)
+    # can't list_agents the normal way — try introspect fleet first.
+    target_project: str | None = None
     try:
-        registry = await mesh_client.list_agents()
-        if to not in registry:
-            available = ", ".join(sorted(registry.keys()))
-            return {"error": f"Agent '{to}' not found. Available: {available}"}
+        if mesh_client.is_standalone:
+            # Introspect gives the Operator the full fleet + project map
+            info = await mesh_client.introspect("fleet")
+            fleet = info.get("fleet", [])
+            fleet_ids = {a["id"] for a in fleet if isinstance(a, dict)}
+            if to not in fleet_ids:
+                available = ", ".join(sorted(fleet_ids))
+                return {"error": f"Agent '{to}' not found. Available: {available}"}
+            # Discover target's project so we can scope blackboard keys
+            agent_projects = info.get("agent_projects", {})
+            target_project = agent_projects.get(to)
+        else:
+            registry = await mesh_client.list_agents()
+            if to not in registry:
+                available = ", ".join(sorted(registry.keys()))
+                return {"error": f"Agent '{to}' not found. Available: {available}"}
     except Exception as e:
         logger.debug("Fleet roster check failed, proceeding with validated ID: %s", e)
+
+    # Standalone agents MUST hand off to a project agent — otherwise
+    # there is no blackboard namespace to write to.
+    if mesh_client.is_standalone and not target_project:
+        return {
+            "error": (
+                f"Agent '{to}' is not assigned to a project. "
+                "Standalone agents can only hand off to project agents."
+            ),
+        }
+
+    # Determine key prefix: project-scoped for cross-project handoffs,
+    # or empty (mesh_client.write_blackboard adds scope) for same-project.
+    key_prefix = f"projects/{target_project}/" if mesh_client.is_standalone and target_project else ""
 
     handoff_id = generate_id("ho")
     from_agent = mesh_client.agent_id
@@ -100,8 +132,9 @@ async def hand_off(
         except json.JSONDecodeError:
             parsed_data = {"text": data}
         output_key = f"output/{from_agent}/{handoff_id}"
+        scoped_output_key = f"{key_prefix}{output_key}"
         try:
-            await mesh_client.write_blackboard(output_key, parsed_data, ttl=_HANDOFF_TTL)
+            await mesh_client.write_blackboard(scoped_output_key, parsed_data, ttl=_HANDOFF_TTL)
         except Exception as e:
             return {"error": f"Failed to write output: {e}"}
 
@@ -116,8 +149,9 @@ async def hand_off(
         task_record["output_key"] = output_key
 
     task_key = f"tasks/{to}/{handoff_id}"
+    scoped_task_key = f"{key_prefix}{task_key}"
     try:
-        await mesh_client.write_blackboard(task_key, task_record, ttl=_HANDOFF_TTL)
+        await mesh_client.write_blackboard(scoped_task_key, task_record, ttl=_HANDOFF_TTL)
     except Exception as e:
         # Clean up orphaned output if task write fails
         if output_key:

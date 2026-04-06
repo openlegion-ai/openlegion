@@ -207,6 +207,80 @@ class TestHandOff:
             assert call.kwargs.get("ttl") == _HANDOFF_TTL
 
 
+class TestHandOffStandalone:
+    """Tests for hand_off from standalone agents (Operator → project agent)."""
+
+    @pytest.mark.asyncio
+    async def test_standalone_hand_off_to_project_agent(self):
+        """Standalone agent can hand off to a project agent with correct scoping."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="operator", standalone=True)
+        mc.introspect = AsyncMock(return_value={
+            "fleet": [
+                {"id": "operator", "role": "operator"},
+                {"id": "researcher", "role": "researcher"},
+            ],
+            "agent_projects": {"researcher": "my-project"},
+        })
+
+        result = await hand_off(
+            to="researcher",
+            summary="research this topic",
+            data='{"topic": "AI agents"}',
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        # Both writes should be project-scoped
+        assert mc.write_blackboard.call_count == 2
+        calls = [c[0][0] for c in mc.write_blackboard.call_args_list]
+        assert all(k.startswith("projects/my-project/") for k in calls)
+
+    @pytest.mark.asyncio
+    async def test_standalone_hand_off_to_standalone_agent_fails(self):
+        """Standalone agent cannot hand off to another standalone agent."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="operator", standalone=True)
+        mc.introspect = AsyncMock(return_value={
+            "fleet": [
+                {"id": "operator", "role": "operator"},
+                {"id": "orphan", "role": "helper"},
+            ],
+            "agent_projects": {},  # orphan has no project
+        })
+
+        result = await hand_off(
+            to="orphan",
+            summary="do something",
+            mesh_client=mc,
+        )
+
+        assert "error" in result
+        assert "not assigned to a project" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_standalone_hand_off_target_not_found(self):
+        """Standalone agent gets clear error when target doesn't exist."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="operator", standalone=True)
+        mc.introspect = AsyncMock(return_value={
+            "fleet": [{"id": "operator", "role": "operator"}],
+            "agent_projects": {},
+        })
+
+        result = await hand_off(
+            to="nonexistent",
+            summary="do something",
+            mesh_client=mc,
+        )
+
+        assert "error" in result
+        assert "not found" in result["error"]
+
+
 class TestCheckInbox:
     @pytest.mark.asyncio
     async def test_check_inbox_with_tasks(self):
