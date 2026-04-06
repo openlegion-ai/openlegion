@@ -261,6 +261,7 @@ class CredentialVault:
         self,
         cost_tracker: object | None = None,
         failover_config: dict[str, list[str]] | None = None,
+        default_model: str = "",
     ) -> None:
         self.system_credentials: dict[str, str] = {}
         self.credentials: dict[str, str] = {}
@@ -276,6 +277,8 @@ class CredentialVault:
         self._anthropic_oauth_lock = asyncio.Lock()
         self._load_credentials()
         self._register_handlers()
+
+        self.default_model = default_model
 
         from src.host.failover import FailoverChain, ModelHealthTracker
         self._health_tracker = ModelHealthTracker()
@@ -871,6 +874,21 @@ class CredentialVault:
                 if self._is_permanent_error(e):
                     raise
                 last_error = e
+
+        # Last-resort: try default_model if different from requested and has credentials
+        if self.default_model and self.default_model != requested_model and self.default_model not in {m for m in models}:
+            api_key, auth_headers = self._get_auth_for_model(self.default_model)
+            if api_key or self._is_keyless_provider(self.default_model):
+                api_base = self._get_api_base_for_model(self.default_model)
+                try:
+                    result = await call_fn(self.default_model, api_key, api_base, auth_headers)
+                    self._health_tracker.record_success(self.default_model)
+                    logger.info(f"Default-model fallback: '{requested_model}' → '{self.default_model}' succeeded")
+                    return result, self.default_model
+                except Exception as e:
+                    if self._is_permanent_error(e):
+                        raise
+                    last_error = e
 
         if last_error is not None:
             raise last_error
@@ -2152,6 +2170,35 @@ class CredentialVault:
                     yield f"data: {json.dumps(error_data)}\n\n"
                     return
                 last_error = e
+
+        # Last-resort: try default_model
+        if response is None and self.default_model and self.default_model != requested_model and self.default_model not in set(models_to_try):
+            api_key, auth_headers = self._get_auth_for_model(self.default_model)
+            if api_key or self._is_keyless_provider(self.default_model):
+                api_base = self._get_api_base_for_model(self.default_model)
+                try:
+                    sanitized, extra = self._prepare_llm_params(
+                        request, self.default_model, api_base, auth_headers,
+                    )
+                    llm_kwargs = {
+                        "model": self._rewrite_model_for_litellm(self.default_model, api_base),
+                        "messages": sanitized,
+                        "stream": True,
+                        **extra,
+                    }
+                    if api_key:
+                        llm_kwargs["api_key"] = api_key
+                    response = await litellm.acompletion(**llm_kwargs)
+                    used_model = self.default_model
+                    logger.info(f"Stream default-model fallback: '{requested_model}' → '{self.default_model}'")
+                except Exception as e:
+                    if self._is_permanent_error(e):
+                        error_data = {'error': str(e)}
+                        if getattr(e, 'status_code', 0) == 402:
+                            error_data['credit_exhausted'] = True
+                        yield f"data: {json.dumps(error_data)}\n\n"
+                        return
+                    last_error = e
 
         if response is None:
             error_msg = str(last_error) if last_error else f"No API key for model: {requested_model}"

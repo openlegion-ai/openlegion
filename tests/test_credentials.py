@@ -3408,3 +3408,42 @@ class TestRewriteModelForLitellm:
             "anthropic/claude-sonnet-4-6", "https://custom.example.com",
         )
         assert result == "anthropic/claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_default_model_fallback_when_no_api_key(monkeypatch):
+    """When the requested model has no API key, fall back to default_model."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "gem-key")
+    v = CredentialVault(default_model="gemini/gemini-2.0-flash")
+
+    call_log = []
+
+    async def fake_call_fn(model, api_key, api_base, auth_headers):
+        call_log.append(model)
+        return {"content": "hello", "tool_calls": [], "tokens_used": 10}, model
+
+    result, used_model = await v._call_llm_with_failover(
+        "anthropic/claude-haiku-4-5", fake_call_fn,
+    )
+    assert used_model == "gemini/gemini-2.0-flash"
+    assert call_log == ["gemini/gemini-2.0-flash"]
+
+
+@pytest.mark.asyncio
+async def test_default_model_fallback_not_used_when_primary_works(monkeypatch):
+    """When the primary model has an API key, don't fall back."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "ant-key")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "gem-key")
+    v = CredentialVault(default_model="gemini/gemini-2.0-flash")
+
+    call_log = []
+
+    async def fake_call_fn(model, api_key, api_base, auth_headers):
+        call_log.append(model)
+        return {"content": "hello", "tool_calls": [], "tokens_used": 10}, model
+
+    result, used_model = await v._call_llm_with_failover(
+        "anthropic/claude-haiku-4-5", fake_call_fn,
+    )
+    assert used_model == "anthropic/claude-haiku-4-5"
+    assert call_log == ["anthropic/claude-haiku-4-5"]

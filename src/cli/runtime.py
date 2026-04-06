@@ -249,9 +249,11 @@ class RuntimeContext:
         self.permissions = PermissionMatrix()
         self.cost_tracker = CostTracker()
         failover_config = self.cfg.get("llm", {}).get("failover", {})
+        default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
         self.credential_vault = CredentialVault(
             cost_tracker=self.cost_tracker,
             failover_config=failover_config or None,
+            default_model=default_model,
         )
         self.router = MessageRouter(
             self.permissions, self.agent_urls,
