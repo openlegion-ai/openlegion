@@ -754,3 +754,175 @@ class TestCrossProjectPermissionIsolation:
         # Neither can access global keys
         assert not pm.can_read_blackboard("alpha_worker", "context/global")
         assert not pm.can_read_blackboard("beta_worker", "context/global")
+
+
+class TestMeshProjectMemberRescoping:
+    """Verify that adding/removing an agent from a project updates in-memory
+    state so blackboard watches and pub/sub subscriptions are re-scoped
+    immediately (not only after restart)."""
+
+    def _make_app(self, tmp_path, agent_projects=None):
+        import threading
+
+        from src.host.mesh import Blackboard, MessageRouter, PubSub
+        from src.host.permissions import PermissionMatrix
+        from src.host.server import create_mesh_app
+        from src.shared.types import AgentPermissions
+
+        bb = Blackboard(db_path=":memory:")
+        ps = PubSub()
+        perms = PermissionMatrix.__new__(PermissionMatrix)
+        perms.permissions = {
+            "operator": AgentPermissions(
+                agent_id="operator", can_message=["*"],
+            ),
+            "scout": AgentPermissions(
+                agent_id="scout",
+                blackboard_read=["*"],
+                blackboard_write=["*"],
+                can_subscribe=["research_requested"],
+                can_message=["*"],
+            ),
+        }
+        perms._config_path = ""
+        perms._reload_lock = threading.Lock()
+
+        registry: dict[str, str] = {}
+        router = MessageRouter(permissions=perms, agent_registry=registry)
+        router.register_agent("operator", "http://localhost:8400")
+        router.register_agent("scout", "http://localhost:8401")
+
+        # Create project on disk
+        proj_dir = tmp_path / "projects" / "alpha"
+        proj_dir.mkdir(parents=True)
+        (proj_dir / "metadata.yaml").write_text(yaml.dump({
+            "name": "alpha", "members": [],
+        }))
+
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(json.dumps({"permissions": {
+            "scout": {"blackboard_read": [], "blackboard_write": []},
+        }}))
+
+        app = create_mesh_app(
+            blackboard=bb,
+            pubsub=ps,
+            router=router,
+            permissions=perms,
+            agent_projects=agent_projects or {},
+            auth_tokens={"operator": "op-token", "scout": "scout-token"},
+        )
+        return app, bb, ps
+
+    def test_add_member_updates_agent_projects_and_watches(self, tmp_path):
+        """Adding an agent to a project re-scopes its blackboard watches."""
+        from fastapi.testclient import TestClient
+
+        app, bb, ps = self._make_app(tmp_path)
+
+        # Register scout (sets up unscoped watches)
+        client = TestClient(app)
+        client.post(
+            "/mesh/register",
+            json={"agent_id": "scout", "port": 8401},
+            headers={"Authorization": "Bearer scout-token"},
+        )
+
+        # Scout should have unscoped watch before project assignment
+        watchers = bb.get_watchers_for_key("tasks/scout/ho_123", exclude="operator")
+        assert "scout" in watchers
+
+        # Project-scoped key should NOT match yet
+        watchers = bb.get_watchers_for_key("projects/alpha/tasks/scout/ho_123", exclude="operator")
+        assert "scout" not in watchers
+
+        # Add scout to project alpha
+        with (
+            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+            patch("src.cli.config.PERMISSIONS_FILE", tmp_path / "permissions.json"),
+        ):
+            resp = client.post(
+                "/mesh/projects/alpha/members",
+                json={"agent": "scout"},
+                headers={"Authorization": "Bearer op-token"},
+            )
+        assert resp.status_code == 200
+
+        # Now project-scoped key SHOULD match
+        watchers = bb.get_watchers_for_key("projects/alpha/tasks/scout/ho_123", exclude="operator")
+        assert "scout" in watchers
+
+        # Old unscoped watch should be removed
+        watchers = bb.get_watchers_for_key("tasks/scout/ho_123", exclude="operator")
+        assert "scout" not in watchers
+
+    def test_add_member_rescopes_pubsub(self, tmp_path):
+        """Adding an agent to a project re-scopes its pub/sub subscriptions."""
+        from fastapi.testclient import TestClient
+
+        app, bb, ps = self._make_app(tmp_path)
+
+        client = TestClient(app)
+        client.post(
+            "/mesh/register",
+            json={"agent_id": "scout", "port": 8401},
+            headers={"Authorization": "Bearer scout-token"},
+        )
+
+        # Scout subscribed to unscoped topic
+        assert "scout" in ps.subscriptions.get("research_requested", [])
+
+        with (
+            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+            patch("src.cli.config.PERMISSIONS_FILE", tmp_path / "permissions.json"),
+        ):
+            client.post(
+                "/mesh/projects/alpha/members",
+                json={"agent": "scout"},
+                headers={"Authorization": "Bearer op-token"},
+            )
+
+        # Should now be subscribed to project-scoped topic
+        assert "scout" in ps.subscriptions.get("projects/alpha/research_requested", [])
+        # Old unscoped subscription should be gone
+        assert "scout" not in ps.subscriptions.get("research_requested", [])
+
+    def test_remove_member_unscopes_watches(self, tmp_path):
+        """Removing an agent from a project reverts watches to unscoped."""
+        from fastapi.testclient import TestClient
+
+        app, bb, ps = self._make_app(tmp_path, agent_projects={"scout": "alpha"})
+
+        client = TestClient(app)
+        # Register with project scope already set
+        client.post(
+            "/mesh/register",
+            json={"agent_id": "scout", "port": 8401},
+            headers={"Authorization": "Bearer scout-token"},
+        )
+
+        # Scout should have project-scoped watch
+        watchers = bb.get_watchers_for_key("projects/alpha/tasks/scout/ho_123", exclude="operator")
+        assert "scout" in watchers
+
+        # Add scout to the project on disk first so removal works
+        proj_meta = tmp_path / "projects" / "alpha" / "metadata.yaml"
+        proj_meta.write_text(yaml.dump({"name": "alpha", "members": ["scout"]}))
+
+        with (
+            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+            patch("src.cli.config.PERMISSIONS_FILE", tmp_path / "permissions.json"),
+        ):
+            resp = client.delete(
+                "/mesh/projects/alpha/members/scout",
+                headers={"Authorization": "Bearer op-token"},
+            )
+        assert resp.status_code == 200
+
+        # Should revert to unscoped watch
+        watchers = bb.get_watchers_for_key("tasks/scout/ho_123", exclude="operator")
+        assert "scout" in watchers
+
+        # Project-scoped watch should be removed
+        watchers = bb.get_watchers_for_key("projects/alpha/tasks/scout/ho_123", exclude="operator")
+        assert "scout" not in watchers

@@ -935,6 +935,50 @@ def create_mesh_app(
             })
         return {"registered": True}
 
+    # === Agent Re-scoping ===
+
+    def _rescope_agent(
+        agent_id: str,
+        old_project: str | None,
+        new_project: str | None,
+    ) -> None:
+        """Re-scope an agent's blackboard watches and pub/sub subscriptions
+        when its project assignment changes.
+
+        Removes old-scoped patterns and adds new-scoped ones so that
+        hand-off notifications and event delivery work immediately.
+        """
+        agent_perms = permissions.get_permissions(agent_id)
+
+        # -- Blackboard watches --
+        # Remove old inbox watch, add new one.
+        if agent_perms.blackboard_read:
+            old_inbox = (
+                f"projects/{old_project}/tasks/{agent_id}/*"
+                if old_project
+                else f"tasks/{agent_id}/*"
+            )
+            blackboard.remove_watch(agent_id, old_inbox)
+
+            new_inbox = (
+                f"projects/{new_project}/tasks/{agent_id}/*"
+                if new_project
+                else f"tasks/{agent_id}/*"
+            )
+            blackboard.add_watch(agent_id, new_inbox)
+
+        # -- Pub/sub subscriptions --
+        # Move all subscriptions from old scope to new scope.
+        for topic in agent_perms.can_subscribe:
+            old_scoped = (
+                f"projects/{old_project}/{topic}" if old_project else topic
+            )
+            new_scoped = (
+                f"projects/{new_project}/{topic}" if new_project else topic
+            )
+            pubsub.unsubscribe(old_scoped, agent_id)
+            pubsub.subscribe(new_scoped, agent_id)
+
     # === Agent Notifications ===
 
     _NOTIFY_MAX_LEN = 2000
@@ -2065,6 +2109,13 @@ def create_mesh_app(
             _add_agent_to_project(name, agent)
         except ValueError as e:
             raise HTTPException(400, str(e))
+
+        # Update in-memory project mapping so blackboard watches
+        # and pub/sub scoping work immediately (not just after restart).
+        old_project = _agent_projects.get(agent)
+        _agent_projects[agent] = name
+        _rescope_agent(agent, old_project, name)
+
         return {"added": True, "project": name, "agent": agent}
 
     @app.delete("/mesh/projects/{name}/members/{agent}")
@@ -2078,6 +2129,10 @@ def create_mesh_app(
             _remove_agent_from_project(name, agent)
         except ValueError as e:
             raise HTTPException(400, str(e))
+
+        _agent_projects.pop(agent, None)
+        _rescope_agent(agent, name, None)
+
         return {"removed": True, "project": name, "agent": agent}
 
     @app.delete("/mesh/projects/{name}")
