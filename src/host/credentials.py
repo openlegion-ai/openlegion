@@ -679,6 +679,34 @@ class CredentialVault:
             providers.add("anthropic")
         return providers
 
+    def _find_fallback_model(self, exclude: set[str] | None = None) -> str | None:
+        """Find a model with valid credentials, for last-resort fallback.
+
+        Prefers default_model if it has credentials, then picks the cheapest
+        featured model from any provider that has keys configured.
+        """
+        exclude = exclude or set()
+
+        # Try default_model first
+        if self.default_model and self.default_model not in exclude:
+            api_key, _ = self._get_auth_for_model(self.default_model)
+            if api_key or self._is_keyless_provider(self.default_model):
+                return self.default_model
+
+        # Scan providers with credentials
+        from src.shared.models import _FEATURED_MODELS
+        available_providers = self.get_providers_with_credentials()
+        for provider in available_providers:
+            models = _FEATURED_MODELS.get(provider, [])
+            if not models:
+                continue
+            # Pick the last featured model (typically cheapest/smallest)
+            candidate = models[-1]
+            if candidate not in exclude:
+                return candidate
+
+        return None
+
     _OLLAMA_DEFAULT_BASE = "http://localhost:11434"
 
     async def discover_ollama_models(self) -> list[str]:
@@ -875,16 +903,18 @@ class CredentialVault:
                     raise
                 last_error = e
 
-        # Last-resort: try default_model if different from requested and has credentials
-        if self.default_model and self.default_model != requested_model and self.default_model not in {m for m in models}:
-            api_key, auth_headers = self._get_auth_for_model(self.default_model)
-            if api_key or self._is_keyless_provider(self.default_model):
-                api_base = self._get_api_base_for_model(self.default_model)
+        # Last-resort: find any model with valid credentials
+        tried = set(models)
+        fallback = self._find_fallback_model(exclude=tried)
+        if fallback:
+            api_key, auth_headers = self._get_auth_for_model(fallback)
+            if api_key or self._is_keyless_provider(fallback):
+                api_base = self._get_api_base_for_model(fallback)
                 try:
-                    result = await call_fn(self.default_model, api_key, api_base, auth_headers)
-                    self._health_tracker.record_success(self.default_model)
-                    logger.info(f"Default-model fallback: '{requested_model}' → '{self.default_model}' succeeded")
-                    return result, self.default_model
+                    result = await call_fn(fallback, api_key, api_base, auth_headers)
+                    self._health_tracker.record_success(fallback)
+                    logger.info(f"Auto-fallback: '{requested_model}' → '{fallback}' succeeded")
+                    return result, fallback
                 except Exception as e:
                     if self._is_permanent_error(e):
                         raise
@@ -2171,34 +2201,36 @@ class CredentialVault:
                     return
                 last_error = e
 
-        # Last-resort: try default_model
-        if response is None and self.default_model and self.default_model != requested_model and self.default_model not in set(models_to_try):
-            api_key, auth_headers = self._get_auth_for_model(self.default_model)
-            if api_key or self._is_keyless_provider(self.default_model):
-                api_base = self._get_api_base_for_model(self.default_model)
-                try:
-                    sanitized, extra = self._prepare_llm_params(
-                        request, self.default_model, api_base, auth_headers,
-                    )
-                    llm_kwargs = {
-                        "model": self._rewrite_model_for_litellm(self.default_model, api_base),
-                        "messages": sanitized,
-                        "stream": True,
-                        **extra,
-                    }
-                    if api_key:
-                        llm_kwargs["api_key"] = api_key
-                    response = await litellm.acompletion(**llm_kwargs)
-                    used_model = self.default_model
-                    logger.info(f"Stream default-model fallback: '{requested_model}' → '{self.default_model}'")
-                except Exception as e:
-                    if self._is_permanent_error(e):
-                        error_data = {'error': str(e)}
-                        if getattr(e, 'status_code', 0) == 402:
-                            error_data['credit_exhausted'] = True
-                        yield f"data: {json.dumps(error_data)}\n\n"
-                        return
-                    last_error = e
+        # Last-resort: find any model with valid credentials
+        if response is None:
+            fallback = self._find_fallback_model(exclude=set(models_to_try))
+            if fallback:
+                api_key, auth_headers = self._get_auth_for_model(fallback)
+                if api_key or self._is_keyless_provider(fallback):
+                    api_base = self._get_api_base_for_model(fallback)
+                    try:
+                        sanitized, extra = self._prepare_llm_params(
+                            request, fallback, api_base, auth_headers,
+                        )
+                        llm_kwargs = {
+                            "model": self._rewrite_model_for_litellm(fallback, api_base),
+                            "messages": sanitized,
+                            "stream": True,
+                            **extra,
+                        }
+                        if api_key:
+                            llm_kwargs["api_key"] = api_key
+                        response = await litellm.acompletion(**llm_kwargs)
+                        used_model = fallback
+                        logger.info(f"Stream auto-fallback: '{requested_model}' → '{fallback}'")
+                    except Exception as e:
+                        if self._is_permanent_error(e):
+                            error_data = {'error': str(e)}
+                            if getattr(e, 'status_code', 0) == 402:
+                                error_data['credit_exhausted'] = True
+                            yield f"data: {json.dumps(error_data)}\n\n"
+                            return
+                        last_error = e
 
         if response is None:
             error_msg = str(last_error) if last_error else f"No API key for model: {requested_model}"

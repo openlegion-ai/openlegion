@@ -3453,3 +3453,29 @@ async def test_default_model_fallback_not_used_when_primary_works(monkeypatch):
     )
     assert used_model == "anthropic/claude-haiku-4-5"
     assert call_log == ["anthropic/claude-haiku-4-5"]
+
+
+@pytest.mark.asyncio
+async def test_auto_fallback_when_default_model_also_missing(monkeypatch):
+    """When both requested and default_model lack keys, fall back to any available provider."""
+    # Only gemini has a key
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
+    monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "gem-key")
+    v = CredentialVault(default_model="openai/gpt-4o-mini")  # no openai key!
+
+    call_log = []
+
+    async def fake_call_fn(model, api_key, api_base, auth_headers):
+        call_log.append(model)
+        return {"content": "hello", "tool_calls": [], "tokens_used": 10}, model
+
+    result, used_model = await v._call_llm_with_failover(
+        "anthropic/claude-haiku-4-5", fake_call_fn,
+    )
+    # Should have fallen back to a gemini model
+    assert "gemini" in used_model
+    assert len(call_log) == 1
+    assert "gemini" in call_log[0]
