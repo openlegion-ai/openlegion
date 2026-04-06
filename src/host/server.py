@@ -36,6 +36,7 @@ from src.shared.types import (
     BlackboardWatchRequest,
     MeshEvent,
     NotifyRequest,
+    WakeRequest,
 )
 from src.shared.utils import sanitize_for_prompt, setup_logging
 
@@ -181,6 +182,7 @@ def create_mesh_app(
         "wallet_execute": (10, 3600),
         "image_gen": (10, 60),
         "agent_profile": (30, 60),
+        "wake": (30, 3600),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
@@ -214,6 +216,23 @@ def create_mesh_app(
             asyncio.run_coroutine_threadsafe(_do_notify(), dispatch_loop)
         except Exception as e:
             logger.warning("Batch watch notification failed: %s", e)
+
+    def _schedule_followup(target_agent_id: str, msg: str) -> None:
+        """Schedule a followup-mode dispatch (guaranteed delivery, no steer rate-limit)."""
+        if lane_manager is None or dispatch_loop is None:
+            return
+        msg = sanitize_for_prompt(msg)
+
+        async def _do_wake():
+            try:
+                await lane_manager.enqueue(target_agent_id, msg, mode="followup")
+            except Exception as e:
+                logger.warning("Followup wake to %s failed: %s", target_agent_id, e)
+
+        try:
+            asyncio.run_coroutine_threadsafe(_do_wake(), dispatch_loop)
+        except Exception as e:
+            logger.warning("Failed to schedule followup wake for %s: %s", target_agent_id, e)
 
     def _cleanup_agent(agent_id: str) -> None:
         """Clean up all per-agent state when an agent is deregistered.
@@ -929,6 +948,29 @@ def create_mesh_app(
                 else f"tasks/{agent_id}/*"
             )
             blackboard.add_watch(agent_id, inbox_pattern)
+            # Drain pending tasks that arrived before this agent registered.
+            inbox_prefix = inbox_pattern.rstrip("*")
+            pending = blackboard.list_by_prefix(inbox_prefix)
+            pending_tasks = [
+                e for e in pending
+                if isinstance(e.value, dict) and e.value.get("status") != "done"
+            ]
+            if pending_tasks:
+                cap = 5
+                for entry in pending_tasks[:cap]:
+                    v = entry.value if isinstance(entry.value, dict) else {}
+                    wake_msg = (
+                        f"[Inbox] Pending task from "
+                        f"{v.get('from', 'unknown')}: "
+                        f"{v.get('summary', '(no summary)')[:200]}"
+                    )
+                    _schedule_followup(agent_id, wake_msg)
+                if len(pending_tasks) > cap:
+                    extra = len(pending_tasks) - cap
+                    _schedule_followup(
+                        agent_id,
+                        f"[Inbox] You have {extra} more pending tasks. Run check_inbox to see all.",
+                    )
         if event_bus is not None:
             event_bus.emit("agent_state", agent=agent_id, data={
                 "state": "registered", "capabilities": capabilities,
@@ -962,6 +1004,18 @@ def create_mesh_app(
             logger.warning("notify_user failed: %s", e)
             raise HTTPException(500, f"Notification failed: {e}")
         return {"sent": True}
+
+    @app.post("/mesh/agents/{agent_id}/wake")
+    async def wake_agent(agent_id: str, body: WakeRequest, request: Request) -> dict:
+        """Wake an agent via followup-mode dispatch (bypasses steer rate-limiting)."""
+        caller = _resolve_agent_id(body.agent_id, request)
+        await _check_rate_limit("wake", caller)
+        if not permissions.can_message(caller, agent_id):
+            raise HTTPException(403, f"Agent {caller} cannot message {agent_id}")
+        if agent_id not in router.agent_registry:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        _schedule_followup(agent_id, sanitize_for_prompt(body.message))
+        return {"woken": True, "agent_id": agent_id}
 
     @app.post("/mesh/credential-request")
     async def credential_request(data: dict, request: Request) -> dict:

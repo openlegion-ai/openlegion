@@ -309,6 +309,13 @@ class NotifyRequest(BaseModel):
     message: str
 
 
+class WakeRequest(BaseModel):
+    """Request to wake an agent via followup-mode dispatch."""
+
+    agent_id: str
+    message: str
+
+
 # === Dashboard Events ===
 
 

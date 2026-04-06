@@ -124,6 +124,17 @@ async def hand_off(
             logger.warning("Task write failed, orphaned output at %s", output_key)
         return {"error": f"Failed to create task: {e}"}
 
+    # Wake target agent via followup (bypasses steer rate-limiting).
+    wake_warning = None
+    try:
+        wake_msg = f"[Inbox] New task from {from_agent}: {summary[:200]}"
+        await mesh_client.wake_agent(to, wake_msg)
+    except Exception as e:
+        # Non-fatal: task is persisted in blackboard, agent will find it
+        # on next check_inbox or heartbeat.
+        logger.warning("Wake after hand_off to %s failed: %s", to, e)
+        wake_warning = f"Task created but wake notification failed: {e}"
+
     result = {
         "handed_off": True,
         "to": to,
@@ -132,6 +143,8 @@ async def hand_off(
     }
     if output_key:
         result["output_key"] = output_key
+    if wake_warning:
+        result["warning"] = wake_warning
     return result
 
 

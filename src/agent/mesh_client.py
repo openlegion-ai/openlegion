@@ -221,6 +221,18 @@ class MeshClient:
         )
         response.raise_for_status()
 
+    async def wake_agent(self, target_agent_id: str, message: str) -> dict:
+        """Wake a target agent via followup-mode dispatch (guaranteed delivery)."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{target_agent_id}/wake",
+            json={"agent_id": self.agent_id, "message": message},
+            timeout=10,
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def publish_event(self, topic: str, payload: dict | None = None) -> dict:
         """Publish an event to the mesh pub/sub."""
         scoped = self._scope_topic(topic)

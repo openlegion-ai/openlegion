@@ -15,6 +15,7 @@ def _make_mesh_client(agent_id="scout", standalone=False):
     mc.read_blackboard = AsyncMock(return_value={"value": {"status": "pending"}})
     mc.list_blackboard = AsyncMock(return_value=[])
     mc.delete_blackboard = AsyncMock(return_value={"deleted": True})
+    mc.wake_agent = AsyncMock(return_value={"woken": True})
     return mc
 
 
@@ -205,6 +206,46 @@ class TestHandOff:
         assert mc.write_blackboard.call_count == 2
         for call in mc.write_blackboard.call_args_list:
             assert call.kwargs.get("ttl") == _HANDOFF_TTL
+
+
+    @pytest.mark.asyncio
+    async def test_hand_off_calls_wake_agent(self):
+        """Successful hand_off wakes the target agent via followup dispatch."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+
+        result = await hand_off(
+            to="analyst",
+            summary="research done",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert "warning" not in result
+        mc.wake_agent.assert_called_once()
+        call_args = mc.wake_agent.call_args
+        assert call_args[0][0] == "analyst"
+        assert call_args[0][1].startswith("[Inbox]")
+
+    @pytest.mark.asyncio
+    async def test_hand_off_wake_failure_non_fatal(self):
+        """Hand-off succeeds even when wake notification fails."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.wake_agent = AsyncMock(side_effect=Exception("connection refused"))
+
+        result = await hand_off(
+            to="analyst",
+            summary="research done",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert "warning" in result
 
 
 class TestCheckInbox:
