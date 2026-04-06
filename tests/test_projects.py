@@ -17,6 +17,7 @@ from src.cli.config import (
     _remove_agent,
     _remove_agent_from_project,
     _remove_project_blackboard_permissions,
+    _validate_default_model,
     _validate_project_name,
 )
 
@@ -754,3 +755,73 @@ class TestCrossProjectPermissionIsolation:
         # Neither can access global keys
         assert not pm.can_read_blackboard("alpha_worker", "context/global")
         assert not pm.can_read_blackboard("beta_worker", "context/global")
+
+
+# ── Default model credential validation tests ─────────────────
+
+
+class TestValidateDefaultModel:
+    """Tests for _validate_default_model()."""
+
+    def test_provider_has_api_key(self, monkeypatch):
+        """Model returned unchanged when its provider has an API key."""
+        monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
+        assert _validate_default_model("openai/gpt-4o-mini") == "openai/gpt-4o-mini"
+
+    def test_provider_has_oauth(self, monkeypatch):
+        """Model returned unchanged when its provider has OAuth credentials."""
+        monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", "token-xyz")
+        assert (
+            _validate_default_model("anthropic/claude-sonnet-4-20250514")
+            == "anthropic/claude-sonnet-4-20250514"
+        )
+
+    def test_switches_to_available_provider(self, monkeypatch):
+        """Switches to best available provider when default has no key."""
+        # Clear any existing keys
+        for provider in ("OPENAI", "ANTHROPIC", "GEMINI", "XAI", "DEEPSEEK", "GROQ"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider}_API_KEY", raising=False)
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider}_OAUTH", raising=False)
+        # Only Anthropic has a key
+        monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-test")
+        result = _validate_default_model("openai/gpt-4o-mini")
+        assert result == "anthropic/claude-sonnet-4-20250514"
+
+    def test_switches_respects_preference_order(self, monkeypatch):
+        """When multiple providers have keys, picks highest preference."""
+        for provider in ("OPENAI", "ANTHROPIC", "GEMINI", "XAI", "DEEPSEEK", "GROQ"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider}_API_KEY", raising=False)
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider}_OAUTH", raising=False)
+        # Gemini and Groq both have keys — Gemini should win (higher preference)
+        monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "gemini-key")
+        monkeypatch.setenv("OPENLEGION_SYSTEM_GROQ_API_KEY", "groq-key")
+        result = _validate_default_model("openai/gpt-4o-mini")
+        assert result == "gemini/gemini-2.5-flash"
+
+    def test_no_keys_at_all(self, monkeypatch):
+        """Returns original model when no providers have credentials."""
+        for provider in ("OPENAI", "ANTHROPIC", "GEMINI", "XAI", "DEEPSEEK", "GROQ"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider}_API_KEY", raising=False)
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider}_OAUTH", raising=False)
+        assert _validate_default_model("openai/gpt-4o-mini") == "openai/gpt-4o-mini"
+
+    def test_load_config_validates_default_model(self, tmp_path, monkeypatch):
+        """Integration: _load_config switches model when provider lacks creds."""
+        for provider in ("OPENAI", "ANTHROPIC", "GEMINI", "XAI", "DEEPSEEK", "GROQ"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider}_API_KEY", raising=False)
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{provider}_OAUTH", raising=False)
+        monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-test")
+
+        # Write a mesh config that defaults to openai
+        mesh_path = tmp_path / "mesh.yaml"
+        mesh_path.write_text(
+            yaml.dump({"llm": {"default_model": "openai/gpt-4o-mini"}})
+        )
+
+        # Patch paths so _load_config doesn't read real files
+        monkeypatch.setattr("src.cli.config.AGENTS_FILE", tmp_path / "agents.yaml")
+        monkeypatch.setattr("src.cli.config.NETWORK_FILE", tmp_path / "network.yaml")
+        monkeypatch.setattr("src.cli.config.PROJECTS_DIR", tmp_path / "projects")
+
+        cfg = _load_config(mesh_path=mesh_path)
+        assert cfg["llm"]["default_model"] == "anthropic/claude-sonnet-4-20250514"

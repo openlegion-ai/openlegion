@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import re
 import secrets
 import subprocess
@@ -203,6 +204,13 @@ def _load_config(mesh_path: Path | None = None) -> dict:
         with open(NETWORK_FILE) as f:
             network_cfg = yaml.safe_load(f) or {}
     cfg["network"] = network_cfg
+
+    # Validate default model against available credentials
+    default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+    validated = _validate_default_model(default_model)
+    if validated != default_model:
+        cfg.setdefault("llm", {})["default_model"] = validated
+
     return cfg
 
 
@@ -591,6 +599,63 @@ def _ensure_pairing_code(pairing_path: Path) -> str | None:
 def _get_default_model() -> str:
     cfg = _load_config()
     return cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+
+
+# ── Default model credential validation ───────────────────────
+
+_PROVIDER_DEFAULT_MODELS: dict[str, str] = {
+    "anthropic": "anthropic/claude-sonnet-4-20250514",
+    "openai": "openai/gpt-4o-mini",
+    "gemini": "gemini/gemini-2.5-flash",
+    "xai": "xai/grok-3-mini",
+    "deepseek": "deepseek/deepseek-chat",
+    "groq": "groq/llama-3.3-70b-versatile",
+}
+
+_PROVIDER_PREFERENCE_ORDER: list[str] = [
+    "anthropic",
+    "openai",
+    "gemini",
+    "xai",
+    "deepseek",
+    "groq",
+]
+
+
+def _provider_has_credentials(provider: str) -> bool:
+    """Check if a provider has API key or OAuth credentials configured."""
+    upper = provider.upper()
+    return bool(
+        os.environ.get(f"OPENLEGION_SYSTEM_{upper}_API_KEY")
+        or os.environ.get(f"OPENLEGION_SYSTEM_{upper}_OAUTH")
+    )
+
+
+def _validate_default_model(model: str) -> str:
+    """Return *model* if its provider has credentials, else pick an alternative.
+
+    Scans environment variables to find a provider that has credentials and
+    returns the best default model for that provider.  If no providers have
+    credentials at all, returns the original model unchanged (will fail at
+    runtime, but the user needs to configure keys first).
+    """
+    provider = model.split("/", 1)[0] if "/" in model else model
+    if _provider_has_credentials(provider):
+        return model
+
+    # Find the first provider with credentials in preference order
+    for candidate in _PROVIDER_PREFERENCE_ORDER:
+        if _provider_has_credentials(candidate):
+            new_model = _PROVIDER_DEFAULT_MODELS[candidate]
+            logger.warning(
+                "Default model '%s' has no credentials, using '%s' instead",
+                model,
+                new_model,
+            )
+            return new_model
+
+    # No providers have credentials — return original, will fail at runtime
+    return model
 
 
 # ── Project management ──────────────────────────────────────
