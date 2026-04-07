@@ -37,6 +37,8 @@ class PermissionMatrix:
             return
         with open(path) as f:
             data = json.load(f)
+        # Clear before repopulating so that removed entries don't persist
+        self.permissions.clear()
         for agent_id, perms in data.get("permissions", {}).items():
             self.permissions[agent_id] = AgentPermissions(agent_id=agent_id, **perms)
 

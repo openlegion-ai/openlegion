@@ -10,6 +10,7 @@ def _make_mesh_client(agent_id="scout", standalone=False):
     mc = MagicMock()
     mc.agent_id = agent_id
     mc.is_standalone = standalone
+    mc.project_name = None if standalone else "default"
     mc.list_agents = AsyncMock(return_value={})
     mc.write_blackboard = AsyncMock(return_value={"version": 1})
     mc.read_blackboard = AsyncMock(return_value={"value": {"status": "pending"}})
@@ -97,6 +98,23 @@ class TestHandOff:
         call_kwargs = mc.write_blackboard.call_args
         assert call_kwargs.kwargs.get("project") == "research"
 
+    @pytest.mark.asyncio
+    async def test_hand_off_standalone_fails_closed_on_roster_error(self):
+        """Standalone agent fails handoff when roster lookup errors (can't resolve target project)."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(standalone=True)
+        mc.list_agents.side_effect = RuntimeError("connection refused")
+
+        result = await hand_off(
+            to="analyst",
+            summary="analyze this",
+            mesh_client=mc,
+        )
+
+        assert "error" in result
+        assert "roster" in result["error"].lower()
+        mc.write_blackboard.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_hand_off_invalid_json_data_falls_back(self):

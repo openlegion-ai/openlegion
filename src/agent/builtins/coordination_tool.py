@@ -90,6 +90,11 @@ async def hand_off(
         if isinstance(target_info, dict):
             target_project = target_info.get("project")
     except Exception as e:
+        # Standalone senders MUST resolve the target project to write to
+        # the correct namespace.  Fail closed rather than writing to the
+        # global scope where the recipient will never find the task.
+        if not mesh_client.project_name:
+            return {"error": f"Cannot hand off: fleet roster unavailable ({e})"}
         logger.debug("Fleet roster check failed, proceeding with validated ID: %s", e)
 
     # Determine which project scope to use for blackboard writes.

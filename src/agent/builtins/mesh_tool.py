@@ -53,9 +53,10 @@ async def notify_user(message: str, *, mesh_client=None, workspace_manager=None)
         last_sent = _NOTIFY_COOLDOWNS.get(notify_key, 0)
         if now - last_sent < _NOTIFY_COOLDOWN_SECONDS:
             return {"sent": False, "reason": "Similar notification sent recently. Wait before sending again."}
-        _NOTIFY_COOLDOWNS[notify_key] = now
 
         await mesh_client.notify_user(message)
+        # Record cooldown only after successful delivery
+        _NOTIFY_COOLDOWNS[notify_key] = now
         if workspace_manager:
             workspace_manager.append_chat_message("notification", message)
         return {"sent": True}
