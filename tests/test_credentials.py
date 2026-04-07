@@ -164,6 +164,23 @@ def test_vault_with_failover_config(monkeypatch):
     assert models == ["anthropic/claude-haiku-4-5-20251001", "openai/gpt-4o-mini"]
 
 
+def test_auto_failover_chains(monkeypatch):
+    """Without explicit failover config, auto-chains are built from featured models."""
+    for p in ("anthropic", "openai", "deepseek", "moonshot", "minimax", "xai", "groq", "zai"):
+        monkeypatch.delenv(f"OPENLEGION_SYSTEM_{p.upper()}_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
+    monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "gem-key")
+    v = CredentialVault()
+    # gemini/gemini-2.5-pro should failover to gemini/gemini-2.5-flash
+    models = v._failover_chain.get_models_to_try("gemini/gemini-2.5-pro")
+    assert "gemini/gemini-2.5-pro" in models
+    assert "gemini/gemini-2.5-flash" in models
+    # The flash model should be after pro
+    assert models.index("gemini/gemini-2.5-pro") < models.index("gemini/gemini-2.5-flash")
+
+
 async def test_handle_llm_failover_on_rate_limit(monkeypatch):
     """First model rate-limited, second succeeds."""
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
@@ -558,6 +575,7 @@ def test_no_api_base_configured(monkeypatch):
 
 async def test_llm_chat_passes_api_base(monkeypatch):
     """api_base is forwarded to litellm.acompletion when configured."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_BASE", "https://gateway.example.com/v1")
     v = CredentialVault()
@@ -589,6 +607,7 @@ async def test_llm_chat_passes_api_base(monkeypatch):
 
 async def test_llm_chat_no_api_base_when_not_configured(monkeypatch):
     """api_base is NOT passed to litellm when not configured."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
     v = CredentialVault()
 
@@ -619,6 +638,7 @@ async def test_llm_chat_no_api_base_when_not_configured(monkeypatch):
 
 async def test_stream_passes_api_base(monkeypatch):
     """api_base is forwarded during streaming LLM calls."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_BASE", "https://gateway.example.com/v1")
     v = CredentialVault()
@@ -922,6 +942,7 @@ async def test_stream_collects_thinking_content(monkeypatch):
 
 async def test_stream_no_thinking_content_when_absent(monkeypatch):
     """Streaming: done event omits thinking_content when no reasoning tokens."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai")
     v = CredentialVault()
 
@@ -1283,6 +1304,12 @@ class TestGetAuthForModel:
     def test_providers_with_credentials(self, monkeypatch):
         monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-openai")
+        # Clear other provider keys so the test is deterministic
+        for p in ("gemini", "deepseek", "moonshot", "minimax", "xai", "groq", "zai"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{p.upper()}_API_KEY", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+        monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
         v = CredentialVault()
         providers = v.get_providers_with_credentials()
         assert "anthropic" in providers
@@ -2194,6 +2221,7 @@ async def test_oauth_stream_skips_preflight_even_when_over_budget(monkeypatch):
 @pytest.mark.asyncio
 async def test_regular_key_still_tracks_costs(monkeypatch):
     """Non-OAuth calls must still track costs normally (regression guard)."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-regular-key")
     cost_tracker = MagicMock()
     cost_tracker.preflight_check.return_value = {
@@ -3408,3 +3436,75 @@ class TestRewriteModelForLitellm:
             "anthropic/claude-sonnet-4-6", "https://custom.example.com",
         )
         assert result == "anthropic/claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_default_model_fallback_when_no_api_key(monkeypatch):
+    """When the requested model has no API key, fall back to default_model."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
+    monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "gem-key")
+    v = CredentialVault(default_model="gemini/gemini-2.0-flash")
+
+    call_log = []
+
+    async def fake_call_fn(model, api_key, api_base, auth_headers):
+        call_log.append(model)
+        return {"content": "hello", "tool_calls": [], "tokens_used": 10}, model
+
+    result, used_model = await v._call_llm_with_failover(
+        "anthropic/claude-haiku-4-5", fake_call_fn,
+    )
+    assert used_model == "gemini/gemini-2.0-flash"
+    assert call_log == ["gemini/gemini-2.0-flash"]
+
+
+@pytest.mark.asyncio
+async def test_default_model_fallback_not_used_when_primary_works(monkeypatch):
+    """When the primary model has an API key, don't fall back."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "ant-key")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "gem-key")
+    v = CredentialVault(default_model="gemini/gemini-2.0-flash")
+
+    call_log = []
+
+    async def fake_call_fn(model, api_key, api_base, auth_headers):
+        call_log.append(model)
+        return {"content": "hello", "tool_calls": [], "tokens_used": 10}, model
+
+    result, used_model = await v._call_llm_with_failover(
+        "anthropic/claude-haiku-4-5", fake_call_fn,
+    )
+    assert used_model == "anthropic/claude-haiku-4-5"
+    assert call_log == ["anthropic/claude-haiku-4-5"]
+
+
+@pytest.mark.asyncio
+async def test_auto_fallback_when_default_model_also_missing(monkeypatch):
+    """When both requested and default_model lack keys, fall back to any available provider."""
+    # Only gemini has a key
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
+    monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "gem-key")
+    v = CredentialVault(default_model="openai/gpt-4o-mini")  # no openai key!
+
+    call_log = []
+
+    async def fake_call_fn(model, api_key, api_base, auth_headers):
+        call_log.append(model)
+        return {"content": "hello", "tool_calls": [], "tokens_used": 10}, model
+
+    result, used_model = await v._call_llm_with_failover(
+        "anthropic/claude-haiku-4-5", fake_call_fn,
+    )
+    # Should have fallen back to a gemini model
+    assert "gemini" in used_model
+    assert len(call_log) == 1
+    assert "gemini" in call_log[0]

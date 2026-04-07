@@ -249,9 +249,11 @@ class RuntimeContext:
         self.permissions = PermissionMatrix()
         self.cost_tracker = CostTracker()
         failover_config = self.cfg.get("llm", {}).get("failover", {})
+        default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
         self.credential_vault = CredentialVault(
             cost_tracker=self.cost_tracker,
             failover_config=failover_config or None,
+            default_model=default_model,
         )
         self.router = MessageRouter(
             self.permissions, self.agent_urls,
@@ -285,8 +287,9 @@ class RuntimeContext:
         # Auto-create operator if it doesn't exist
         default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
         _ensure_operator_agent(default_model=default_model)
-        # Reload config after possible operator creation
+        # Reload config and permissions after possible operator creation
         self.cfg = _load_config()
+        self.permissions.reload()
         agents_cfg = self.cfg.get("agents", {})
 
         # Reorder agents so operator starts first

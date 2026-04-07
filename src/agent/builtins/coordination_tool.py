@@ -72,21 +72,38 @@ async def hand_off(
 ) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone:
-        return {"error": _STANDALONE_ERROR}
 
     # Validate target agent ID format (defense-in-depth if list_agents fails)
     if not re.fullmatch(AGENT_ID_RE_PATTERN, to):
         return {"error": f"Invalid agent ID: '{to}'"}
 
-    # Validate target agent exists
+    # Resolve target agent's project for cross-project coordination.
+    # The operator (standalone) needs to write to the target's project-scoped
+    # blackboard so the recipient finds the task via check_inbox().
+    target_project: str | None = None
     try:
         registry = await mesh_client.list_agents()
         if to not in registry:
             available = ", ".join(sorted(registry.keys()))
             return {"error": f"Agent '{to}' not found. Available: {available}"}
+        target_info = registry.get(to, {})
+        if isinstance(target_info, dict):
+            target_project = target_info.get("project")
     except Exception as e:
+        # Standalone senders MUST resolve the target project to write to
+        # the correct namespace.  Fail closed rather than writing to the
+        # global scope where the recipient will never find the task.
+        if not mesh_client.project_name:
+            return {"error": f"Cannot hand off: fleet roster unavailable ({e})"}
         logger.debug("Fleet roster check failed, proceeding with validated ID: %s", e)
+
+    # Determine which project scope to use for blackboard writes.
+    # If sender and target are in the same project (or both standalone),
+    # use normal scoping.  Otherwise, use the target's project so the
+    # recipient can find the task.
+    write_project: str | None = None  # None = use sender's default scope
+    if target_project and target_project != mesh_client.project_name:
+        write_project = target_project
 
     handoff_id = generate_id("ho")
     from_agent = mesh_client.agent_id
@@ -101,7 +118,10 @@ async def hand_off(
             parsed_data = {"text": data}
         output_key = f"output/{from_agent}/{handoff_id}"
         try:
-            await mesh_client.write_blackboard(output_key, parsed_data, ttl=_HANDOFF_TTL)
+            await mesh_client.write_blackboard(
+                output_key, parsed_data, ttl=_HANDOFF_TTL,
+                project=write_project,
+            )
         except Exception as e:
             return {"error": f"Failed to write output: {e}"}
 
@@ -117,12 +137,24 @@ async def hand_off(
 
     task_key = f"tasks/{to}/{handoff_id}"
     try:
-        await mesh_client.write_blackboard(task_key, task_record, ttl=_HANDOFF_TTL)
+        await mesh_client.write_blackboard(
+            task_key, task_record, ttl=_HANDOFF_TTL,
+            project=write_project,
+        )
     except Exception as e:
         # Clean up orphaned output if task write fails
         if output_key:
             logger.warning("Task write failed, orphaned output at %s", output_key)
         return {"error": f"Failed to create task: {e}"}
+
+    # Wake the target agent so it processes the task immediately
+    # instead of waiting for its next heartbeat.
+    try:
+        await mesh_client.wake_agent(
+            to, f"New task from {from_agent}: {summary[:200]}",
+        )
+    except Exception as e:
+        logger.debug("Wake for %s failed (task still queued): %s", to, e)
 
     result = {
         "handed_off": True,

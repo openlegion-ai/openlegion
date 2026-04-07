@@ -34,9 +34,13 @@ class PermissionMatrix:
         path = Path(config_path)
         if not path.exists():
             logger.warning(f"Permissions file not found: {config_path}, using deny-all defaults")
+            # Clear so stale permissions don't persist (fail closed)
+            self.permissions.clear()
             return
         with open(path) as f:
             data = json.load(f)
+        # Clear before repopulating so that removed entries don't persist
+        self.permissions.clear()
         for agent_id, perms in data.get("permissions", {}).items():
             self.permissions[agent_id] = AgentPermissions(agent_id=agent_id, **perms)
 

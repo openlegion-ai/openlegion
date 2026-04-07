@@ -323,6 +323,45 @@ def create_mesh_app(
             raise HTTPException(403, f"Agent {msg.from_agent} cannot message {msg.to}")
         return await router.route(msg)
 
+    @app.post("/mesh/wake")
+    async def wake_agent(
+        request: Request, target: str = "", message: str = "",
+    ) -> dict:
+        """Wake a target agent by enqueuing a followup message via lanes.
+
+        Used by hand_off to prompt the target agent to check its inbox
+        immediately instead of waiting for the next heartbeat.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not target:
+            raise HTTPException(400, "target is required")
+        if not permissions.can_message(caller, target):
+            raise HTTPException(403, f"Agent {caller} cannot wake {target}")
+        await _check_rate_limit("blackboard_write", caller)  # reuse bb rate limit
+        if target not in router.agent_registry:
+            raise HTTPException(404, f"Agent '{target}' not registered")
+
+        if message:
+            wake_msg = sanitize_for_prompt(message)
+        else:
+            wake_msg = f"You have a new task from {caller}. Call check_inbox() to see it."
+        if lane_manager is not None and dispatch_loop is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    lane_manager.enqueue(target, wake_msg, mode="followup"),
+                    dispatch_loop,
+                )
+            except Exception as e:
+                logger.warning("Wake enqueue for %s failed: %s", target, e)
+                return {"woken": False, "error": str(e)}
+            return {"woken": True, "target": target}
+        # Fallback: send via router (message-only, no task processing)
+        await router.route(AgentMessage(
+            from_agent="mesh", to=target, type="coordination",
+            payload={"wake": True, "message": sanitize_for_prompt(wake_msg)},
+        ))
+        return {"woken": True, "target": target, "fallback": True}
+
     # === Blackboard ===
     # NOTE: list route must be defined BEFORE the {key:path} route to avoid shadowing
 
@@ -1009,7 +1048,11 @@ def create_mesh_app(
         else:
             _require_any_auth(request)
         def _agent_entry(aid: str, url: str) -> dict:
-            return {"url": url, "role": router.agent_roles.get(aid, "")}
+            entry: dict = {"url": url, "role": router.agent_roles.get(aid, "")}
+            proj = _agent_projects.get(aid)
+            if proj:
+                entry["project"] = proj
+            return entry
 
         if project:
             from src.cli.config import _load_projects
@@ -1107,6 +1150,9 @@ def create_mesh_app(
             result["health"] = next(
                 (s for s in statuses if s["agent"] == agent_id), None
             )
+
+        if section in ("project", "all"):
+            result["project"] = _agent_projects.get(agent_id)
 
         return result
 
@@ -2065,6 +2111,8 @@ def create_mesh_app(
             _add_agent_to_project(name, agent)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        # Update in-memory project mapping so scoping takes effect immediately
+        _agent_projects[agent] = name
         return {"added": True, "project": name, "agent": agent}
 
     @app.delete("/mesh/projects/{name}/members/{agent}")
@@ -2078,6 +2126,7 @@ def create_mesh_app(
             _remove_agent_from_project(name, agent)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        _agent_projects.pop(agent, None)
         return {"removed": True, "project": name, "agent": agent}
 
     @app.delete("/mesh/projects/{name}")

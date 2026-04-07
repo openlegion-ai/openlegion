@@ -372,32 +372,55 @@
                             }">
                             <!-- Tool calls -->
                             <template x-if="msg.tools && msg.tools.length > 0">
-                              <div class="mb-1.5 space-y-0.5">
-                                <template x-for="(tool, ti) in msg.tools" :key="ti">
-                                  <div x-data="{ open: false }">
-                                    <div class="flex items-center gap-1 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 select-none transition-colors"
-                                      :class="chatToolHasDetail(tool) ? 'cursor-pointer hover:bg-gray-900/80' : ''"
-                                      @click="chatToolHasDetail(tool) && (open = !open)" :title="tool.name">
-                                      <template x-if="tool.status === 'running'">
-                                        <svg class="animate-spin h-2.5 w-2.5 text-indigo-400 shrink-0" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-                                      </template>
-                                      <template x-if="tool.status === 'done'">
-                                        <span class="text-emerald-400 shrink-0">&#10003;</span>
-                                      </template>
-                                      <span class="font-mono truncate" x-text="tool.name"></span>
-                                      <svg x-show="chatToolHasDetail(tool)" class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600 transition-transform duration-200" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                              <div class="mb-1.5 space-y-0.5" x-data="{ toolsCollapsed: !msg.streaming && msg.tools.length > 2 && msg.tools.every(t => t.status === 'done') }">
+                                <!-- Collapsed summary -->
+                                <div x-show="toolsCollapsed"
+                                  class="flex items-center gap-1.5 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 cursor-pointer select-none hover:bg-gray-900/80 transition-colors"
+                                  @click="toolsCollapsed = false">
+                                  <span :class="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? '⚠' : '✓'"></span>
+                                  <span class="font-mono" x-text="(() => { const errs = msg.tools.filter(t => (t.outputPreview || '').toLowerCase().includes('error')).length; return msg.tools.length + ' tool calls' + (errs ? ' · ' + errs + ' error' + (errs > 1 ? 's' : '') : ''); })()"></span>
+                                  <svg class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                                </div>
+                                <!-- Expanded tool list -->
+                                <template x-if="!toolsCollapsed">
+                                  <div class="space-y-0.5">
+                                    <!-- Re-collapse button when expanded and many tools -->
+                                    <div x-show="msg.tools.length > 2 && msg.tools.every(t => t.status === 'done') && !msg.streaming"
+                                      class="flex items-center gap-1.5 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 cursor-pointer select-none hover:bg-gray-900/80 transition-colors mb-0.5"
+                                      @click="toolsCollapsed = true">
+                                      <span :class="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? '⚠' : '✓'"></span>
+                                      <span class="font-mono" x-text="(() => { const errs = msg.tools.filter(t => (t.outputPreview || '').toLowerCase().includes('error')).length; return msg.tools.length + ' tool calls' + (errs ? ' · ' + errs + ' error' + (errs > 1 ? 's' : '') : ''); })()"></span>
+                                      <svg class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600 rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
                                     </div>
-                                    <template x-if="open">
-                                      <div class="mt-0.5 rounded bg-gray-950/80 border border-gray-800/50 px-2 py-1.5 text-[10px] space-y-1.5">
-                                        <div x-show="tool.input || tool.inputPreview">
-                                          <div class="text-gray-600 uppercase tracking-wider text-[11px] mb-0.5">Input</div>
-                                          <pre class="text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar" x-text="chatToolDetailText(tool.input, tool.inputPreview)"></pre>
+                                    <!-- Individual tool items -->
+                                    <template x-for="(tool, ti) in msg.tools" :key="ti">
+                                      <div x-data="{ open: false }">
+                                        <div class="flex items-center gap-1 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 select-none transition-colors"
+                                          :class="chatToolHasDetail(tool) ? 'cursor-pointer hover:bg-gray-900/80' : ''"
+                                          @click="chatToolHasDetail(tool) && (open = !open)" :title="tool.name">
+                                          <template x-if="tool.status === 'running'">
+                                            <svg class="animate-spin h-2.5 w-2.5 text-indigo-400 shrink-0" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                                          </template>
+                                          <template x-if="tool.status === 'done'">
+                                            <span :class="(tool.outputPreview || '').toLowerCase().includes('error') ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="(tool.outputPreview || '').toLowerCase().includes('error') ? '⚠' : '✓'"></span>
+                                          </template>
+                                          <span class="font-mono truncate" x-text="tool.name"></span>
+                                          <span x-show="tool.status === 'done' && tool.outputPreview" class="text-gray-600 truncate max-w-[200px] ml-1" x-text="'— ' + (tool.outputPreview || '').slice(0, 60)"></span>
+                                          <svg x-show="chatToolHasDetail(tool)" class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600 transition-transform duration-200" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                                         </div>
-                                        <div x-show="tool.status === 'done' && (tool.output || tool.outputPreview)">
-                                          <div class="text-gray-600 uppercase tracking-wider text-[11px] mb-0.5">Output</div>
-                                          <pre class="text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar" x-text="chatToolDetailText(tool.output, tool.outputPreview)"></pre>
-                                        </div>
-                                        <div x-show="tool.status === 'running'" class="text-gray-600 italic">Running&hellip;</div>
+                                        <template x-if="open">
+                                          <div class="mt-0.5 rounded bg-gray-950/80 border border-gray-800/50 px-2 py-1.5 text-[10px] space-y-1.5">
+                                            <div x-show="tool.input || tool.inputPreview">
+                                              <div class="text-gray-600 uppercase tracking-wider text-[11px] mb-0.5">Input</div>
+                                              <pre class="text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar" x-text="chatToolDetailText(tool.input, tool.inputPreview)"></pre>
+                                            </div>
+                                            <div x-show="tool.status === 'done' && (tool.output || tool.outputPreview)">
+                                              <div class="text-gray-600 uppercase tracking-wider text-[11px] mb-0.5">Output</div>
+                                              <pre class="text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar" x-text="chatToolDetailText(tool.output, tool.outputPreview)"></pre>
+                                            </div>
+                                            <div x-show="tool.status === 'running'" class="text-gray-600 italic">Running&hellip;</div>
+                                          </div>
+                                        </template>
                                       </div>
                                     </template>
                                   </div>
@@ -1757,7 +1780,7 @@
                   <!-- ═══ Activity tab: Heartbeat + autonomous work timeline ═══ -->
                   <div x-show="identityTab === 'activity' && !agentActivityLoading && !identityLoading" class="space-y-2">
                     <div class="flex items-center justify-between mb-2">
-                      <span class="text-xs font-medium text-gray-300">Autonomous Activity</span>
+                      <span class="text-xs font-medium text-gray-300">Activity</span>
                       <button @click="fetchAgentActivity(selectedAgent)"
                         class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
                     </div>
@@ -5156,32 +5179,55 @@
                   'bg-amber-900/40 text-amber-200 border border-amber-700/50 rounded-bl-md': msg.role === 'notification',
                 }">
                 <template x-if="msg.tools && msg.tools.length > 0">
-                  <div class="mb-1.5 space-y-0.5">
-                    <template x-for="(tool, ti) in msg.tools" :key="ti">
-                      <div x-data="{ open: false }">
-                        <div class="flex items-center gap-1 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 select-none transition-colors"
-                          :class="chatToolHasDetail(tool) ? 'cursor-pointer hover:bg-gray-900/80' : ''"
-                          @click="chatToolHasDetail(tool) && (open = !open)" :title="tool.name">
-                          <template x-if="tool.status === 'running'">
-                            <svg class="animate-spin h-2.5 w-2.5 text-indigo-400 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-                          </template>
-                          <template x-if="tool.status === 'done'">
-                            <span class="text-emerald-400 shrink-0">&#10003;</span>
-                          </template>
-                          <span class="font-mono truncate" x-text="tool.name"></span>
-                          <svg x-show="chatToolHasDetail(tool)" class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600 transition-transform duration-200" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                  <div class="mb-1.5 space-y-0.5" x-data="{ toolsCollapsed: !msg.streaming && msg.tools.length > 2 && msg.tools.every(t => t.status === 'done') }">
+                    <!-- Collapsed summary -->
+                    <div x-show="toolsCollapsed"
+                      class="flex items-center gap-1.5 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 cursor-pointer select-none hover:bg-gray-900/80 transition-colors"
+                      @click="toolsCollapsed = false">
+                      <span :class="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? '⚠' : '✓'"></span>
+                      <span class="font-mono" x-text="(() => { const errs = msg.tools.filter(t => (t.outputPreview || '').toLowerCase().includes('error')).length; return msg.tools.length + ' tool calls' + (errs ? ' · ' + errs + ' error' + (errs > 1 ? 's' : '') : ''); })()"></span>
+                      <svg class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                    </div>
+                    <!-- Expanded tool list -->
+                    <template x-if="!toolsCollapsed">
+                      <div class="space-y-0.5">
+                        <!-- Re-collapse button when expanded and many tools -->
+                        <div x-show="msg.tools.length > 2 && msg.tools.every(t => t.status === 'done') && !msg.streaming"
+                          class="flex items-center gap-1.5 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 cursor-pointer select-none hover:bg-gray-900/80 transition-colors mb-0.5"
+                          @click="toolsCollapsed = true">
+                          <span :class="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? '⚠' : '✓'"></span>
+                          <span class="font-mono" x-text="(() => { const errs = msg.tools.filter(t => (t.outputPreview || '').toLowerCase().includes('error')).length; return msg.tools.length + ' tool calls' + (errs ? ' · ' + errs + ' error' + (errs > 1 ? 's' : '') : ''); })()"></span>
+                          <svg class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600 rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
                         </div>
-                        <template x-if="open">
-                          <div class="mt-0.5 rounded bg-gray-950/80 border border-gray-800/50 px-2 py-1.5 text-[10px] space-y-1.5">
-                            <div x-show="tool.input || tool.inputPreview">
-                              <div class="text-gray-600 uppercase tracking-wider text-[11px] mb-0.5">Input</div>
-                              <pre class="text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar" x-text="chatToolDetailText(tool.input, tool.inputPreview)"></pre>
+                        <!-- Individual tool items -->
+                        <template x-for="(tool, ti) in msg.tools" :key="ti">
+                          <div x-data="{ open: false }">
+                            <div class="flex items-center gap-1 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 select-none transition-colors"
+                              :class="chatToolHasDetail(tool) ? 'cursor-pointer hover:bg-gray-900/80' : ''"
+                              @click="chatToolHasDetail(tool) && (open = !open)" :title="tool.name">
+                              <template x-if="tool.status === 'running'">
+                                <svg class="animate-spin h-2.5 w-2.5 text-indigo-400 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                              </template>
+                              <template x-if="tool.status === 'done'">
+                                <span :class="(tool.outputPreview || '').toLowerCase().includes('error') ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="(tool.outputPreview || '').toLowerCase().includes('error') ? '⚠' : '✓'"></span>
+                              </template>
+                              <span class="font-mono truncate" x-text="tool.name"></span>
+                              <span x-show="tool.status === 'done' && tool.outputPreview" class="text-gray-600 truncate max-w-[200px] ml-1" x-text="'— ' + (tool.outputPreview || '').slice(0, 60)"></span>
+                              <svg x-show="chatToolHasDetail(tool)" class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600 transition-transform duration-200" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                             </div>
-                            <div x-show="tool.status === 'done' && (tool.output || tool.outputPreview)">
-                              <div class="text-gray-600 uppercase tracking-wider text-[11px] mb-0.5">Output</div>
-                              <pre class="text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar" x-text="chatToolDetailText(tool.output, tool.outputPreview)"></pre>
-                            </div>
-                            <div x-show="tool.status === 'running'" class="text-gray-600 italic">Running&hellip;</div>
+                            <template x-if="open">
+                              <div class="mt-0.5 rounded bg-gray-950/80 border border-gray-800/50 px-2 py-1.5 text-[10px] space-y-1.5">
+                                <div x-show="tool.input || tool.inputPreview">
+                                  <div class="text-gray-600 uppercase tracking-wider text-[11px] mb-0.5">Input</div>
+                                  <pre class="text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar" x-text="chatToolDetailText(tool.input, tool.inputPreview)"></pre>
+                                </div>
+                                <div x-show="tool.status === 'done' && (tool.output || tool.outputPreview)">
+                                  <div class="text-gray-600 uppercase tracking-wider text-[11px] mb-0.5">Output</div>
+                                  <pre class="text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar" x-text="chatToolDetailText(tool.output, tool.outputPreview)"></pre>
+                                </div>
+                                <div x-show="tool.status === 'running'" class="text-gray-600 italic">Running&hellip;</div>
+                              </div>
+                            </template>
                           </div>
                         </template>
                       </div>

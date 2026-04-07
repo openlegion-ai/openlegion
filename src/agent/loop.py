@@ -145,10 +145,23 @@ async def _llm_call_with_retry(llm_chat_fn, *, system, messages, tools, **kwargs
     Retries on: connection errors, timeouts, 429/502/503 status codes.
     Does NOT retry on: budget exceeded (RuntimeError), permanent errors.
     """
+    from src.agent.llm import LLMRetryableError
+
     last_exc: Exception = RuntimeError("LLM call failed after all retries")
     for attempt in range(_MAX_RETRIES + 1):
         try:
             return await llm_chat_fn(system=system, messages=messages, tools=tools, **kwargs)
+        except LLMRetryableError as e:
+            last_exc = e
+            if attempt < _MAX_RETRIES:
+                wait = _BACKOFF_BASE * (2 ** attempt) * 5  # longer backoff for rate limits: 5, 10, 20
+                logger.warning(
+                    f"LLM call rate-limited, retrying in {wait}s "
+                    f"(attempt {attempt + 1}/{_MAX_RETRIES})"
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
         except RuntimeError:
             # Budget exceeded or permanent LLM errors — don't retry
             raise
@@ -346,6 +359,11 @@ class AgentLoop:
             data = await self.mesh_client.introspect("all")
             self._introspect_cache = data
             self._introspect_cache_ts = now
+            # Sync project assignment from mesh host (supports runtime add/remove)
+            project = data.get("project")
+            if project != self.mesh_client.project_name:
+                logger.info("Project assignment updated: %s → %s", self.mesh_client.project_name, project)
+                self.mesh_client.project_name = project
             # Refresh SYSTEM.md on disk so bootstrap picks it up next prompt
             if self.workspace:
                 try:
@@ -696,15 +714,24 @@ class AgentLoop:
                         extra={"extra_data": {"iterations": iteration + 1, "tokens": total_tokens}},
                     )
 
-                    # Log task completion to daily log
+                    # Log task completion to daily log + activity
                     if self.workspace:
                         task_tools = self._collect_tool_names(messages)
                         input_summary = truncate(str(assignment.input_data).replace("\n", " "), 120)
                         tools_str = ", ".join(task_tools) if task_tools else "none"
-                        self.workspace.append_daily_log(
+                        summary = (
                             f"Task complete: {assignment.task_type} | "
                             f"{iteration + 1} iterations, {total_tokens} tokens, {duration_s}s | "
                             f"Tools: {tools_str} | Input: {input_summary}"
+                        )
+                        self.workspace.append_daily_log(summary)
+                        self.workspace.append_activity(
+                            trigger="task",
+                            summary=summary,
+                            tools_used=task_tools,
+                            duration_ms=int(duration_s * 1000),
+                            tokens_used=total_tokens,
+                            outcome="complete",
                         )
 
                     result = TaskResult(
@@ -724,9 +751,17 @@ class AgentLoop:
             self.tasks_failed += 1
             if self.workspace:
                 input_summary = truncate(str(assignment.input_data).replace("\n", " "), 120)
-                self.workspace.append_daily_log(
+                summary = (
                     f"Task FAILED (max iterations): {assignment.task_type} | "
                     f"{total_tokens} tokens | Input: {input_summary}"
+                )
+                self.workspace.append_daily_log(summary)
+                self.workspace.append_activity(
+                    trigger="task",
+                    summary=summary,
+                    duration_ms=int((time.time() - start) * 1000),
+                    tokens_used=total_tokens,
+                    outcome="failed",
                 )
             result = TaskResult(
                 task_id=assignment.task_id,
@@ -756,8 +791,14 @@ class AgentLoop:
             logger.error(f"Task {assignment.task_id} failed: {e}", exc_info=True)
             if self.workspace:
                 error_summary = truncate(str(e).replace("\n", " "), 200)
-                self.workspace.append_daily_log(
-                    f"Task FAILED (error): {assignment.task_type} | {error_summary}"
+                summary = f"Task FAILED (error): {assignment.task_type} | {error_summary}"
+                self.workspace.append_daily_log(summary)
+                self.workspace.append_activity(
+                    trigger="task",
+                    summary=summary,
+                    duration_ms=int((time.time() - start) * 1000),
+                    tokens_used=total_tokens,
+                    outcome="error",
                 )
             result = TaskResult(
                 task_id=assignment.task_id,
@@ -1975,6 +2016,15 @@ class AgentLoop:
                         continue
                     self._chat_messages.append({"role": "assistant", "content": content})
                     self._log_chat_turn(user_message, content)
+                    if tool_outputs and self.workspace:
+                        tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
+                        self.workspace.append_activity(
+                            trigger="chat",
+                            summary=truncate(content.replace("\n", " "), 200),
+                            tools_used=tool_names,
+                            tokens_used=total_tokens,
+                            outcome="complete",
+                        )
                     self.state = "idle"
                     return {
                         "response": content,
@@ -2047,6 +2097,15 @@ class AgentLoop:
             content = self._resolve_content(llm_response)
             self._chat_messages.append({"role": "assistant", "content": content})
             self._log_chat_turn(user_message, content)
+            if tool_outputs and self.workspace:
+                tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
+                self.workspace.append_activity(
+                    trigger="chat",
+                    summary=truncate(content.replace("\n", " "), 200),
+                    tools_used=tool_names,
+                    tokens_used=total_tokens,
+                    outcome="tool_limit_reached",
+                )
             self.state = "idle"
             return {
                 "response": content,
@@ -2420,6 +2479,15 @@ class AgentLoop:
                         yield {"type": "text_delta", "content": content}
                     self._chat_messages.append({"role": "assistant", "content": content})
                     self._log_chat_turn(user_message, content)
+                    if tool_outputs and self.workspace:
+                        tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
+                        self.workspace.append_activity(
+                            trigger="chat",
+                            summary=truncate(content.replace("\n", " "), 200),
+                            tools_used=tool_names,
+                            tokens_used=total_tokens,
+                            outcome="complete",
+                        )
                     yield {
                         "type": "done",
                         "response": content,
@@ -2505,6 +2573,15 @@ class AgentLoop:
                 yield {"type": "text_delta", "content": content}
             self._chat_messages.append({"role": "assistant", "content": content})
             self._log_chat_turn(user_message, content)
+            if tool_outputs and self.workspace:
+                tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
+                self.workspace.append_activity(
+                    trigger="chat",
+                    summary=truncate(content.replace("\n", " "), 200),
+                    tools_used=tool_names,
+                    tokens_used=total_tokens,
+                    outcome="tool_limit_reached",
+                )
             yield {
                 "type": "done",
                 "response": content,

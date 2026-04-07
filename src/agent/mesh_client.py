@@ -144,9 +144,20 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    async def write_blackboard(self, key: str, value: dict, ttl: int | None = None) -> dict:
-        """Write a value to the shared blackboard."""
-        scoped = self._scope_key(key)
+    async def write_blackboard(
+        self, key: str, value: dict, ttl: int | None = None,
+        *, project: str | None = None,
+    ) -> dict:
+        """Write a value to the shared blackboard.
+
+        If *project* is given, scope the key to that project instead of
+        this agent's own project.  Used by cross-project coordination
+        (e.g. operator handing off work to a project-scoped agent).
+        """
+        if project is not None:
+            scoped = f"projects/{project}/{key}"
+        else:
+            scoped = self._scope_key(key)
         client = await self._get_client()
         params: dict[str, str] = {"agent_id": self.agent_id}
         if ttl is not None:
@@ -221,6 +232,17 @@ class MeshClient:
         )
         response.raise_for_status()
 
+    async def wake_agent(self, target: str, message: str = "") -> dict:
+        """Wake a target agent so it processes work immediately."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/wake",
+            params={"target": target, "message": message},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def publish_event(self, topic: str, payload: dict | None = None) -> dict:
         """Publish an event to the mesh pub/sub."""
         scoped = self._scope_topic(topic)
@@ -259,12 +281,15 @@ class MeshClient:
         return response.json()
 
     async def list_agents(self) -> dict:
-        """List agents visible to this agent (project-scoped or self-only)."""
+        """List agents visible to this agent.
+
+        Project-scoped agents see only their project's members.
+        Standalone agents see all registered agents so they can
+        coordinate cross-project (e.g. operator handing off work).
+        """
         params: dict[str, str] = {}
         if self.project_name:
             params["project"] = self.project_name
-        else:
-            params["agent_id"] = self.agent_id
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/agents",
             params=params,

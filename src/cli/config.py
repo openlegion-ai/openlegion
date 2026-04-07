@@ -1377,6 +1377,18 @@ will request it again when they need it. Don't block setup on credentials.
 
 If a tool returns 403 or "not found", the agent may still be starting up. \
 Retry once after a brief pause before reporting failure to the user.
+
+**Never notify the user about transient system errors** (rate limits, \
+timeouts, temporary failures). These resolve on their own — just retry. \
+Only notify about issues the user can actually act on.
+
+**Always check tool results.** If a tool call returns successfully \
+(e.g. hand_off returns "handed_off": true), treat it as a success. Do not \
+claim failure based on prior errors if the current call succeeded.
+
+**Do not repeat the same notification.** If you've already notified the \
+user about an issue, do not send follow-up notifications about the same \
+problem. Wait for the user to respond or for the issue to resolve.
 """
 
 _OPERATOR_SOUL = """\
@@ -1459,6 +1471,16 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         return
 
     if has_operator:
+        # Keep operator model in sync with default_model
+        if not default_model:
+            cfg = _load_config(config_path)
+            default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        current_model = agents_cfg["agents"][_OPERATOR_AGENT_ID].get("model", "")
+        if current_model != default_model:
+            agents_cfg["agents"][_OPERATOR_AGENT_ID]["model"] = default_model
+            with open(AGENTS_FILE, "w") as f:
+                yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+
         # Ensure permissions are correct even for existing operator
         # (handles upgrades where operator was created before permissions were set)
         perms = _load_permissions()
@@ -1507,7 +1529,19 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
     )
     _add_agent_permissions(
         _OPERATOR_AGENT_ID,
-        permissions={"can_spawn": True, "can_use_browser": False},
+        permissions={
+            "can_spawn": True,
+            "can_use_browser": False,
+            "blackboard_read": ["*"],
+            "blackboard_write": ["*"],
+            "can_publish": ["*"],
+            "can_subscribe": ["*"],
+        },
     )
+    # Force can_message=["*"] — _add_agent_permissions sets it to []
+    # because operator is always the first agent created (no peers yet).
+    perms = _load_permissions()
+    perms["permissions"][_OPERATOR_AGENT_ID]["can_message"] = ["*"]
+    _save_permissions(perms)
     skills_dir = PROJECT_ROOT / "skills" / _OPERATOR_AGENT_ID
     skills_dir.mkdir(parents=True, exist_ok=True)
