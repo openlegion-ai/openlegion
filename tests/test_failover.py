@@ -46,14 +46,28 @@ class TestModelHealthTracker:
 
     def test_billing_cooldown_1h(self):
         tracker = ModelHealthTracker()
-        tracker.record_failure("m1", "RateLimitError", 429)
+        tracker.record_failure("m1", "PaymentRequired", 402)
         cooldown = tracker._get("m1").cooldown_until - time.time()
         assert 3595 < cooldown < 3605
 
-        tracker2 = ModelHealthTracker()
-        tracker2.record_failure("m2", "PaymentRequired", 402)
-        cooldown2 = tracker2._get("m2").cooldown_until - time.time()
-        assert 3595 < cooldown2 < 3605
+    def test_rate_limit_short_cooldown(self):
+        tracker = ModelHealthTracker()
+        # First 429: 10s cooldown
+        tracker.record_failure("m1", "RateLimitError", 429)
+        cooldown = tracker._get("m1").cooldown_until - time.time()
+        assert 5 < cooldown < 15
+        # Second 429: 30s
+        tracker.record_failure("m1", "RateLimitError", 429)
+        cooldown2 = tracker._get("m1").cooldown_until - time.time()
+        assert 25 < cooldown2 < 35
+        # Third 429: 90s
+        tracker.record_failure("m1", "RateLimitError", 429)
+        cooldown3 = tracker._get("m1").cooldown_until - time.time()
+        assert 85 < cooldown3 < 95
+        # Fourth 429: capped at 120s
+        tracker.record_failure("m1", "RateLimitError", 429)
+        cooldown4 = tracker._get("m1").cooldown_until - time.time()
+        assert 115 < cooldown4 < 125
 
     def test_auth_cooldown_1h(self):
         tracker = ModelHealthTracker()

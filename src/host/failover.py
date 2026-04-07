@@ -18,13 +18,15 @@ from src.shared.utils import setup_logging
 logger = setup_logging("host.failover")
 
 # Cooldown durations in seconds, by error category
-_BILLING_COOLDOWN = 3600  # 402, 429 — 1 hour
+_BILLING_COOLDOWN = 3600  # 402 — 1 hour (credits exhausted)
+_RATE_LIMIT_MAX_COOLDOWN = 120  # 429 — cap at 2 minutes
 _AUTH_COOLDOWN = 3600  # 401, 403 — 1 hour
 _DEFAULT_COOLDOWN = 60  # Catch-all
 _TRANSIENT_MAX_COOLDOWN = 1500  # Cap for exponential backoff
 
 # Status codes by category
-_BILLING_CODES = {402, 429}
+_BILLING_CODES = {402}
+_RATE_LIMIT_CODES = {429}
 _AUTH_CODES = {401, 403}
 _TRANSIENT_CODES = {408, 500, 502, 503, 504, 529}
 _TRANSIENT_KEYWORDS = {"connection", "timeout", "connecterror", "readtimeout"}
@@ -88,6 +90,10 @@ class ModelHealthTracker:
     ) -> float:
         if status_code in _BILLING_CODES:
             return _BILLING_COOLDOWN
+        if status_code in _RATE_LIMIT_CODES:
+            # Exponential backoff: 10, 30, 60, 120, 120, ...
+            raw = 10 * (3 ** (h.consecutive_failures - 1))
+            return min(raw, _RATE_LIMIT_MAX_COOLDOWN)
         if status_code in _AUTH_CODES:
             return _AUTH_COOLDOWN
         if status_code in _TRANSIENT_CODES or self._is_transient_keyword(error_type):
