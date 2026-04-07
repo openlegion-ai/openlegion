@@ -1517,7 +1517,19 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
     )
     _add_agent_permissions(
         _OPERATOR_AGENT_ID,
-        permissions={"can_spawn": True, "can_use_browser": False},
+        permissions={
+            "can_spawn": True,
+            "can_use_browser": False,
+            "blackboard_read": ["*"],
+            "blackboard_write": ["*"],
+            "can_publish": ["*"],
+            "can_subscribe": ["*"],
+        },
     )
+    # Force can_message=["*"] — _add_agent_permissions sets it to []
+    # because operator is always the first agent created (no peers yet).
+    perms = _load_permissions()
+    perms["permissions"][_OPERATOR_AGENT_ID]["can_message"] = ["*"]
+    _save_permissions(perms)
     skills_dir = PROJECT_ROOT / "skills" / _OPERATOR_AGENT_ID
     skills_dir.mkdir(parents=True, exist_ok=True)
