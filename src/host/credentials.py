@@ -282,8 +282,16 @@ class CredentialVault:
 
         from src.host.failover import FailoverChain, ModelHealthTracker
         self._health_tracker = ModelHealthTracker()
+        chains = failover_config or {}
+        # Auto-generate intra-provider failover chains for providers with
+        # credentials.  Each featured model fails over to the models below
+        # it in the list (cheaper/smaller variants).  Explicit user config
+        # takes priority — auto-chains are only added for models without
+        # an existing entry.
+        if not failover_config:
+            chains = self._build_auto_failover_chains()
         self._failover_chain = FailoverChain(
-            chains=failover_config or {}, health=self._health_tracker,
+            chains=chains, health=self._health_tracker,
         )
 
     async def _get_http_client(self) -> httpx.AsyncClient:
@@ -706,6 +714,24 @@ class CredentialVault:
                 return candidate
 
         return None
+
+    def _build_auto_failover_chains(self) -> dict[str, list[str]]:
+        """Auto-generate intra-provider failover chains.
+
+        For each provider with credentials, every featured model gets a
+        failover chain consisting of the models listed *after* it (cheaper
+        variants).  E.g. ``gemini/gemini-2.5-pro`` → ``[gemini/gemini-2.5-flash]``.
+        """
+        from src.shared.models import _FEATURED_MODELS
+        chains: dict[str, list[str]] = {}
+        available = self.get_providers_with_credentials()
+        for provider in available:
+            models = _FEATURED_MODELS.get(provider, [])
+            for i, model in enumerate(models):
+                fallbacks = models[i + 1:]
+                if fallbacks:
+                    chains[model] = fallbacks
+        return chains
 
     _OLLAMA_DEFAULT_BASE = "http://localhost:11434"
 

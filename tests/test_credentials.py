@@ -164,6 +164,23 @@ def test_vault_with_failover_config(monkeypatch):
     assert models == ["anthropic/claude-haiku-4-5-20251001", "openai/gpt-4o-mini"]
 
 
+def test_auto_failover_chains(monkeypatch):
+    """Without explicit failover config, auto-chains are built from featured models."""
+    for p in ("anthropic", "openai", "deepseek", "moonshot", "minimax", "xai", "groq", "zai"):
+        monkeypatch.delenv(f"OPENLEGION_SYSTEM_{p.upper()}_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OLLAMA_API_BASE", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
+    monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "gem-key")
+    v = CredentialVault()
+    # gemini/gemini-2.5-pro should failover to gemini/gemini-2.5-flash
+    models = v._failover_chain.get_models_to_try("gemini/gemini-2.5-pro")
+    assert "gemini/gemini-2.5-pro" in models
+    assert "gemini/gemini-2.5-flash" in models
+    # The flash model should be after pro
+    assert models.index("gemini/gemini-2.5-pro") < models.index("gemini/gemini-2.5-flash")
+
+
 async def test_handle_llm_failover_on_rate_limit(monkeypatch):
     """First model rate-limited, second succeeds."""
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
