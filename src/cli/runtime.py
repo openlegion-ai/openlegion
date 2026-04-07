@@ -287,8 +287,9 @@ class RuntimeContext:
         # Auto-create operator if it doesn't exist
         default_model = self.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
         _ensure_operator_agent(default_model=default_model)
-        # Reload config after possible operator creation
+        # Reload config and permissions after possible operator creation
         self.cfg = _load_config()
+        self.permissions.reload()
         agents_cfg = self.cfg.get("agents", {})
 
         # Reorder agents so operator starts first
