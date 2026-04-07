@@ -2120,10 +2120,7 @@ class AgentLoop:
         except Exception as e:
             self.state = "idle"
             logger.error(f"Chat failed: {e}", exc_info=True)
-            import traceback
-            tb = traceback.format_exception(type(e), e, e.__traceback__)
-            location = tb[-2].strip() if len(tb) >= 2 else ""
-            msg = f"Error: {e}" + (f" [{location}]" if location else "")
+            msg = f"Error: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)
             return {"response": msg, "tool_outputs": tool_outputs, "tokens_used": total_tokens}
@@ -2597,10 +2594,7 @@ class AgentLoop:
             raise
         except Exception as e:
             logger.error(f"Streaming chat failed: {e}", exc_info=True)
-            import traceback
-            tb = traceback.format_exception(type(e), e, e.__traceback__)
-            location = tb[-2].strip() if len(tb) >= 2 else ""
-            msg = f"Error: {e}" + (f" [{location}]" if location else "")
+            msg = f"Error: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)
             yield {

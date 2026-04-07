@@ -3436,6 +3436,10 @@ class TestRewriteModelForLitellm:
 @pytest.mark.asyncio
 async def test_default_model_fallback_when_no_api_key(monkeypatch):
     """When the requested model has no API key, fall back to default_model."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
     monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "gem-key")
     v = CredentialVault(default_model="gemini/gemini-2.0-flash")
 
@@ -3455,6 +3459,9 @@ async def test_default_model_fallback_when_no_api_key(monkeypatch):
 @pytest.mark.asyncio
 async def test_default_model_fallback_not_used_when_primary_works(monkeypatch):
     """When the primary model has an API key, don't fall back."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
+    monkeypatch.delenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", raising=False)
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "ant-key")
     monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "gem-key")
     v = CredentialVault(default_model="gemini/gemini-2.0-flash")

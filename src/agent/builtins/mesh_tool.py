@@ -7,6 +7,7 @@ the shared blackboard (not through direct conversations with each other).
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from src.agent.skills import skill
@@ -39,11 +40,16 @@ async def notify_user(message: str, *, mesh_client=None, workspace_manager=None)
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     try:
-        import time as _time
-
         # Deduplicate similar notifications within cooldown window
         notify_key = message[:80].lower().strip()
-        now = _time.time()
+        now = time.time()
+
+        # Purge expired cooldown entries to prevent unbounded growth
+        cutoff = now - _NOTIFY_COOLDOWN_SECONDS
+        expired = [k for k, ts in _NOTIFY_COOLDOWNS.items() if ts < cutoff]
+        for k in expired:
+            del _NOTIFY_COOLDOWNS[k]
+
         last_sent = _NOTIFY_COOLDOWNS.get(notify_key, 0)
         if now - last_sent < _NOTIFY_COOLDOWN_SECONDS:
             return {"sent": False, "reason": "Similar notification sent recently. Wait before sending again."}

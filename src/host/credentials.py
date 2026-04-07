@@ -282,13 +282,12 @@ class CredentialVault:
 
         from src.host.failover import FailoverChain, ModelHealthTracker
         self._health_tracker = ModelHealthTracker()
-        chains = failover_config or {}
-        # Auto-generate intra-provider failover chains for providers with
-        # credentials.  Each featured model fails over to the models below
-        # it in the list (cheaper/smaller variants).  Explicit user config
-        # takes priority — auto-chains are only added for models without
-        # an existing entry.
-        if not failover_config:
+        if failover_config:
+            chains = failover_config
+        else:
+            # Auto-generate intra-provider failover chains for providers with
+            # credentials.  Each featured model fails over to the models below
+            # it in the list (cheaper/smaller variants).
             chains = self._build_auto_failover_chains()
         self._failover_chain = FailoverChain(
             chains=chains, health=self._health_tracker,

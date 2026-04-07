@@ -341,15 +341,13 @@ def create_mesh_app(
         if target not in router.agent_registry:
             raise HTTPException(404, f"Agent '{target}' not registered")
 
-        wake_msg = message or f"You have a new task from {caller}. Call check_inbox() to see it."
+        wake_msg = sanitize_for_prompt(message) if message else f"You have a new task from {caller}. Call check_inbox() to see it."
         if lane_manager is not None and dispatch_loop is not None:
-            import asyncio as _aio
-            future = _aio.run_coroutine_threadsafe(
-                lane_manager.enqueue(target, wake_msg, mode="followup"),
-                dispatch_loop,
-            )
             try:
-                future.result(timeout=5)
+                asyncio.run_coroutine_threadsafe(
+                    lane_manager.enqueue(target, wake_msg, mode="followup"),
+                    dispatch_loop,
+                )
             except Exception as e:
                 logger.warning("Wake enqueue for %s failed: %s", target, e)
                 return {"woken": False, "error": str(e)}
@@ -357,7 +355,7 @@ def create_mesh_app(
         # Fallback: send via router (message-only, no task processing)
         await router.route(AgentMessage(
             from_agent="mesh", to=target, type="coordination",
-            payload={"wake": True, "message": wake_msg},
+            payload={"wake": True, "message": sanitize_for_prompt(wake_msg)},
         ))
         return {"woken": True, "target": target, "fallback": True}
 
