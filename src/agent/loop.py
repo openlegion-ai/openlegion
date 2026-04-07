@@ -709,15 +709,24 @@ class AgentLoop:
                         extra={"extra_data": {"iterations": iteration + 1, "tokens": total_tokens}},
                     )
 
-                    # Log task completion to daily log
+                    # Log task completion to daily log + activity
                     if self.workspace:
                         task_tools = self._collect_tool_names(messages)
                         input_summary = truncate(str(assignment.input_data).replace("\n", " "), 120)
                         tools_str = ", ".join(task_tools) if task_tools else "none"
-                        self.workspace.append_daily_log(
+                        summary = (
                             f"Task complete: {assignment.task_type} | "
                             f"{iteration + 1} iterations, {total_tokens} tokens, {duration_s}s | "
                             f"Tools: {tools_str} | Input: {input_summary}"
+                        )
+                        self.workspace.append_daily_log(summary)
+                        self.workspace.append_activity(
+                            trigger="task",
+                            summary=summary,
+                            tools_used=task_tools,
+                            duration_ms=int(duration_s * 1000),
+                            tokens_used=total_tokens,
+                            outcome="complete",
                         )
 
                     result = TaskResult(
@@ -737,9 +746,17 @@ class AgentLoop:
             self.tasks_failed += 1
             if self.workspace:
                 input_summary = truncate(str(assignment.input_data).replace("\n", " "), 120)
-                self.workspace.append_daily_log(
+                summary = (
                     f"Task FAILED (max iterations): {assignment.task_type} | "
                     f"{total_tokens} tokens | Input: {input_summary}"
+                )
+                self.workspace.append_daily_log(summary)
+                self.workspace.append_activity(
+                    trigger="task",
+                    summary=summary,
+                    duration_ms=int((time.time() - start) * 1000),
+                    tokens_used=total_tokens,
+                    outcome="failed",
                 )
             result = TaskResult(
                 task_id=assignment.task_id,
@@ -769,8 +786,14 @@ class AgentLoop:
             logger.error(f"Task {assignment.task_id} failed: {e}", exc_info=True)
             if self.workspace:
                 error_summary = truncate(str(e).replace("\n", " "), 200)
-                self.workspace.append_daily_log(
-                    f"Task FAILED (error): {assignment.task_type} | {error_summary}"
+                summary = f"Task FAILED (error): {assignment.task_type} | {error_summary}"
+                self.workspace.append_daily_log(summary)
+                self.workspace.append_activity(
+                    trigger="task",
+                    summary=summary,
+                    duration_ms=int((time.time() - start) * 1000),
+                    tokens_used=total_tokens,
+                    outcome="error",
                 )
             result = TaskResult(
                 task_id=assignment.task_id,
@@ -1988,6 +2011,15 @@ class AgentLoop:
                         continue
                     self._chat_messages.append({"role": "assistant", "content": content})
                     self._log_chat_turn(user_message, content)
+                    if tool_outputs and self.workspace:
+                        tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
+                        self.workspace.append_activity(
+                            trigger="chat",
+                            summary=truncate(content.replace("\n", " "), 200),
+                            tools_used=tool_names,
+                            tokens_used=total_tokens,
+                            outcome="complete",
+                        )
                     self.state = "idle"
                     return {
                         "response": content,
@@ -2060,6 +2092,15 @@ class AgentLoop:
             content = self._resolve_content(llm_response)
             self._chat_messages.append({"role": "assistant", "content": content})
             self._log_chat_turn(user_message, content)
+            if tool_outputs and self.workspace:
+                tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
+                self.workspace.append_activity(
+                    trigger="chat",
+                    summary=truncate(content.replace("\n", " "), 200),
+                    tools_used=tool_names,
+                    tokens_used=total_tokens,
+                    outcome="tool_limit_reached",
+                )
             self.state = "idle"
             return {
                 "response": content,
@@ -2433,6 +2474,15 @@ class AgentLoop:
                         yield {"type": "text_delta", "content": content}
                     self._chat_messages.append({"role": "assistant", "content": content})
                     self._log_chat_turn(user_message, content)
+                    if tool_outputs and self.workspace:
+                        tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
+                        self.workspace.append_activity(
+                            trigger="chat",
+                            summary=truncate(content.replace("\n", " "), 200),
+                            tools_used=tool_names,
+                            tokens_used=total_tokens,
+                            outcome="complete",
+                        )
                     yield {
                         "type": "done",
                         "response": content,
@@ -2518,6 +2568,15 @@ class AgentLoop:
                 yield {"type": "text_delta", "content": content}
             self._chat_messages.append({"role": "assistant", "content": content})
             self._log_chat_turn(user_message, content)
+            if tool_outputs and self.workspace:
+                tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
+                self.workspace.append_activity(
+                    trigger="chat",
+                    summary=truncate(content.replace("\n", " "), 200),
+                    tools_used=tool_names,
+                    tokens_used=total_tokens,
+                    outcome="tool_limit_reached",
+                )
             yield {
                 "type": "done",
                 "response": content,
