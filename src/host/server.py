@@ -341,7 +341,10 @@ def create_mesh_app(
         if target not in router.agent_registry:
             raise HTTPException(404, f"Agent '{target}' not registered")
 
-        wake_msg = sanitize_for_prompt(message) if message else f"You have a new task from {caller}. Call check_inbox() to see it."
+        if message:
+            wake_msg = sanitize_for_prompt(message)
+        else:
+            wake_msg = f"You have a new task from {caller}. Call check_inbox() to see it."
         if lane_manager is not None and dispatch_loop is not None:
             try:
                 asyncio.run_coroutine_threadsafe(
