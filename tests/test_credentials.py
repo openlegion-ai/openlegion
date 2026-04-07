@@ -575,6 +575,7 @@ def test_no_api_base_configured(monkeypatch):
 
 async def test_llm_chat_passes_api_base(monkeypatch):
     """api_base is forwarded to litellm.acompletion when configured."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_BASE", "https://gateway.example.com/v1")
     v = CredentialVault()
@@ -606,6 +607,7 @@ async def test_llm_chat_passes_api_base(monkeypatch):
 
 async def test_llm_chat_no_api_base_when_not_configured(monkeypatch):
     """api_base is NOT passed to litellm when not configured."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
     v = CredentialVault()
 
@@ -636,6 +638,7 @@ async def test_llm_chat_no_api_base_when_not_configured(monkeypatch):
 
 async def test_stream_passes_api_base(monkeypatch):
     """api_base is forwarded during streaming LLM calls."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_BASE", "https://gateway.example.com/v1")
     v = CredentialVault()
@@ -939,6 +942,7 @@ async def test_stream_collects_thinking_content(monkeypatch):
 
 async def test_stream_no_thinking_content_when_absent(monkeypatch):
     """Streaming: done event omits thinking_content when no reasoning tokens."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai")
     v = CredentialVault()
 
@@ -2217,6 +2221,7 @@ async def test_oauth_stream_skips_preflight_even_when_over_budget(monkeypatch):
 @pytest.mark.asyncio
 async def test_regular_key_still_tracks_costs(monkeypatch):
     """Non-OAuth calls must still track costs normally (regression guard)."""
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_OAUTH", raising=False)
     monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-regular-key")
     cost_tracker = MagicMock()
     cost_tracker.preflight_check.return_value = {
