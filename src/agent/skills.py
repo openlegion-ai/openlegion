@@ -196,6 +196,9 @@ class SkillRegistry:
             schema = param_schemas.get(key)
             if not schema:
                 continue
+            # Handle shorthand: {"key": "string"} → skip coercion
+            if not isinstance(schema, dict):
+                continue
             value = call_args[key]
             if value is None:
                 continue
@@ -432,6 +435,11 @@ class SkillRegistry:
             properties = {}
             required = []
             for param_name, param_info in params.items():
+                # Handle shorthand: {"key": "string"} → {"key": {"type": "string"}}
+                if isinstance(param_info, str):
+                    param_info = {"type": param_info}
+                elif not isinstance(param_info, dict):
+                    param_info = {"type": "string"}
                 prop: dict = {
                     "type": param_info.get("type", "string"),
                     "description": param_info.get("description", ""),
