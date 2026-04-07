@@ -377,8 +377,8 @@
                                 <div x-show="toolsCollapsed"
                                   class="flex items-center gap-1.5 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 cursor-pointer select-none hover:bg-gray-900/80 transition-colors"
                                   @click="toolsCollapsed = false">
-                                  <span class="text-emerald-400 shrink-0">&#10003;</span>
-                                  <span class="font-mono" x-text="msg.tools.length + ' tool calls'"></span>
+                                  <span :class="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? '⚠' : '✓'"></span>
+                                  <span class="font-mono" x-text="(() => { const errs = msg.tools.filter(t => (t.outputPreview || '').toLowerCase().includes('error')).length; return msg.tools.length + ' tool calls' + (errs ? ' · ' + errs + ' error' + (errs > 1 ? 's' : '') : ''); })()"></span>
                                   <svg class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
                                 </div>
                                 <!-- Expanded tool list -->
@@ -388,8 +388,8 @@
                                     <div x-show="msg.tools.length > 2 && msg.tools.every(t => t.status === 'done') && !msg.streaming"
                                       class="flex items-center gap-1.5 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 cursor-pointer select-none hover:bg-gray-900/80 transition-colors mb-0.5"
                                       @click="toolsCollapsed = true">
-                                      <span class="text-emerald-400 shrink-0">&#10003;</span>
-                                      <span class="font-mono" x-text="msg.tools.length + ' tool calls'"></span>
+                                      <span :class="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? '⚠' : '✓'"></span>
+                                      <span class="font-mono" x-text="(() => { const errs = msg.tools.filter(t => (t.outputPreview || '').toLowerCase().includes('error')).length; return msg.tools.length + ' tool calls' + (errs ? ' · ' + errs + ' error' + (errs > 1 ? 's' : '') : ''); })()"></span>
                                       <svg class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600 rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
                                     </div>
                                     <!-- Individual tool items -->
@@ -402,9 +402,10 @@
                                             <svg class="animate-spin h-2.5 w-2.5 text-indigo-400 shrink-0" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
                                           </template>
                                           <template x-if="tool.status === 'done'">
-                                            <span class="text-emerald-400 shrink-0">&#10003;</span>
+                                            <span :class="(tool.outputPreview || '').toLowerCase().includes('error') ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="(tool.outputPreview || '').toLowerCase().includes('error') ? '⚠' : '✓'"></span>
                                           </template>
                                           <span class="font-mono truncate" x-text="tool.name"></span>
+                                          <span x-show="tool.status === 'done' && tool.outputPreview" class="text-gray-600 truncate max-w-[200px] ml-1" x-text="'— ' + (tool.outputPreview || '').slice(0, 60)"></span>
                                           <svg x-show="chatToolHasDetail(tool)" class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600 transition-transform duration-200" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                                         </div>
                                         <template x-if="open">
@@ -5183,8 +5184,8 @@
                     <div x-show="toolsCollapsed"
                       class="flex items-center gap-1.5 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 cursor-pointer select-none hover:bg-gray-900/80 transition-colors"
                       @click="toolsCollapsed = false">
-                      <span class="text-emerald-400 shrink-0">&#10003;</span>
-                      <span class="font-mono" x-text="msg.tools.length + ' tool calls'"></span>
+                      <span :class="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? '⚠' : '✓'"></span>
+                      <span class="font-mono" x-text="(() => { const errs = msg.tools.filter(t => (t.outputPreview || '').toLowerCase().includes('error')).length; return msg.tools.length + ' tool calls' + (errs ? ' · ' + errs + ' error' + (errs > 1 ? 's' : '') : ''); })()"></span>
                       <svg class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
                     </div>
                     <!-- Expanded tool list -->
@@ -5194,8 +5195,8 @@
                         <div x-show="msg.tools.length > 2 && msg.tools.every(t => t.status === 'done') && !msg.streaming"
                           class="flex items-center gap-1.5 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 cursor-pointer select-none hover:bg-gray-900/80 transition-colors mb-0.5"
                           @click="toolsCollapsed = true">
-                          <span class="text-emerald-400 shrink-0">&#10003;</span>
-                          <span class="font-mono" x-text="msg.tools.length + ' tool calls'"></span>
+                          <span :class="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? '⚠' : '✓'"></span>
+                          <span class="font-mono" x-text="(() => { const errs = msg.tools.filter(t => (t.outputPreview || '').toLowerCase().includes('error')).length; return msg.tools.length + ' tool calls' + (errs ? ' · ' + errs + ' error' + (errs > 1 ? 's' : '') : ''); })()"></span>
                           <svg class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600 rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
                         </div>
                         <!-- Individual tool items -->
@@ -5208,9 +5209,10 @@
                                 <svg class="animate-spin h-2.5 w-2.5 text-indigo-400 shrink-0" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
                               </template>
                               <template x-if="tool.status === 'done'">
-                                <span class="text-emerald-400 shrink-0">&#10003;</span>
+                                <span :class="(tool.outputPreview || '').toLowerCase().includes('error') ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="(tool.outputPreview || '').toLowerCase().includes('error') ? '⚠' : '✓'"></span>
                               </template>
                               <span class="font-mono truncate" x-text="tool.name"></span>
+                              <span x-show="tool.status === 'done' && tool.outputPreview" class="text-gray-600 truncate max-w-[200px] ml-1" x-text="'— ' + (tool.outputPreview || '').slice(0, 60)"></span>
                               <svg x-show="chatToolHasDetail(tool)" class="w-2.5 h-2.5 shrink-0 ml-auto text-gray-600 transition-transform duration-200" :class="open && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
                             </div>
                             <template x-if="open">
