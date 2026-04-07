@@ -1108,6 +1108,9 @@ def create_mesh_app(
                 (s for s in statuses if s["agent"] == agent_id), None
             )
 
+        if section in ("project", "all"):
+            result["project"] = _agent_projects.get(agent_id)
+
         return result
 
     # === Project Costs ===
@@ -2065,6 +2068,8 @@ def create_mesh_app(
             _add_agent_to_project(name, agent)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        # Update in-memory project mapping so scoping takes effect immediately
+        _agent_projects[agent] = name
         return {"added": True, "project": name, "agent": agent}
 
     @app.delete("/mesh/projects/{name}/members/{agent}")
@@ -2078,6 +2083,7 @@ def create_mesh_app(
             _remove_agent_from_project(name, agent)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        _agent_projects.pop(agent, None)
         return {"removed": True, "project": name, "agent": agent}
 
     @app.delete("/mesh/projects/{name}")

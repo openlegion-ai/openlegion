@@ -359,6 +359,11 @@ class AgentLoop:
             data = await self.mesh_client.introspect("all")
             self._introspect_cache = data
             self._introspect_cache_ts = now
+            # Sync project assignment from mesh host (supports runtime add)
+            project = data.get("project")
+            if project and self.mesh_client.project_name != project:
+                logger.info("Project assignment updated: %s", project)
+                self.mesh_client.project_name = project
             # Refresh SYSTEM.md on disk so bootstrap picks it up next prompt
             if self.workspace:
                 try:
