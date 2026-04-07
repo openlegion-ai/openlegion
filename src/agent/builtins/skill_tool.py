@@ -80,6 +80,35 @@ def _validate_skill_code(code: str) -> str | None:
 
     if not has_skill_decorator:
         return "Code must contain at least one function with the @skill decorator"
+
+    # Check: sync functions that call mesh_client methods must be async
+    # (all mesh_client methods are coroutines — forgetting await silently
+    # creates an unawaited coroutine that never executes).
+    _ASYNC_PARAMS = {"mesh_client", "memory_store"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):  # only sync defs
+            continue
+        param_names = {a.arg for a in node.args.args} | {
+            a.arg for a in node.args.kwonlyargs
+        }
+        async_params_used = param_names & _ASYNC_PARAMS
+        if not async_params_used:
+            continue
+        # Sync function declares mesh_client/memory_store — must be async
+        for child in ast.walk(node):
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and isinstance(child.func.value, ast.Name)
+                and child.func.value.id in async_params_used
+            ):
+                return (
+                    f"Function '{node.name}' calls {child.func.value.id}."
+                    f"{child.func.attr}() but is not async. "
+                    f"Use 'async def {node.name}(...)' and "
+                    f"'await {child.func.value.id}.{child.func.attr}(...)'"
+                )
+
     return None
 
 
