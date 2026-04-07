@@ -393,7 +393,7 @@ class TestAutoContinueSession:
 
         async def _failing_stream(**kwargs):
             raise RuntimeError("no stream")
-            yield  # noqa: unreachable — makes this an async generator
+            yield  # noqa: F811 — unreachable; makes this an async generator
 
         loop.llm.chat_stream = _failing_stream
         loop._chat_total_rounds = loop.CHAT_MAX_TOTAL_ROUNDS
@@ -503,7 +503,7 @@ class TestToolLimitReached:
 
         async def _no_stream(**kwargs):
             raise RuntimeError("no streaming")
-            yield  # noqa: makes it an async generator
+            yield  # noqa: F811 — makes it an async generator
 
         loop.llm.chat_stream = _no_stream
         loop.skills.execute = AsyncMock(return_value={"result": "ok"})
@@ -890,7 +890,7 @@ class TestChatTaskIsolationGuard:
         # Use non-streaming fallback path for simplicity
         async def _no_stream(**kwargs):
             raise RuntimeError("no streaming")
-            yield  # noqa: unreachable — makes this an async generator
+            yield  # noqa: F811 — unreachable; makes this an async generator
 
         loop.llm.chat_stream = _no_stream
 

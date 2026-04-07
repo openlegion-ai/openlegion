@@ -161,7 +161,8 @@ class LLMClient:
         if not data.get("success"):
             error_msg = data.get("error", "")
             # Rate limits and transient errors should be retried
-            if any(kw in error_msg.lower() for kw in ("rate limit", "ratelimit", "429", "too many requests", "overloaded", "503")):
+            _retryable = ("rate limit", "ratelimit", "429", "too many requests", "overloaded", "503")
+            if any(kw in error_msg.lower() for kw in _retryable):
                 raise LLMRetryableError(f"LLM call failed: {error_msg}")
             raise RuntimeError(f"LLM call failed: {error_msg}")
 
