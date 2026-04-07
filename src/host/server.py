@@ -1009,7 +1009,11 @@ def create_mesh_app(
         else:
             _require_any_auth(request)
         def _agent_entry(aid: str, url: str) -> dict:
-            return {"url": url, "role": router.agent_roles.get(aid, "")}
+            entry: dict = {"url": url, "role": router.agent_roles.get(aid, "")}
+            proj = _agent_projects.get(aid)
+            if proj:
+                entry["project"] = proj
+            return entry
 
         if project:
             from src.cli.config import _load_projects

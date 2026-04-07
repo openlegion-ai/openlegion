@@ -2291,25 +2291,31 @@ class TestListAgentsProjectScope:
         assert "agent_id" not in call_kwargs.kwargs.get("params", {})
 
     @pytest.mark.asyncio
-    async def test_list_agents_standalone_scope(self):
-        """MeshClient.list_agents passes agent_id param when standalone."""
+    async def test_list_agents_standalone_sees_all(self):
+        """Standalone agents see all registered agents (no filtering)."""
         from src.agent.mesh_client import MeshClient
         client = MeshClient("http://mesh:8420", "solo", project_name=None)
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"solo": {"url": "...", "role": ""}}
+        mock_response.json.return_value = {
+            "solo": {"url": "...", "role": ""},
+            "other": {"url": "...", "role": "helper"},
+        }
         mock_response.raise_for_status = MagicMock()
         http_client = AsyncMock()
         http_client.get = AsyncMock(return_value=mock_response)
         http_client.is_closed = False
         client._client = http_client
 
-        await client.list_agents()
+        result = await client.list_agents()
 
         http_client.get.assert_called_once()
         call_kwargs = http_client.get.call_args
-        assert call_kwargs.kwargs.get("params", {}).get("agent_id") == "solo"
-        assert "project" not in call_kwargs.kwargs.get("params", {})
+        params = call_kwargs.kwargs.get("params", {})
+        # Standalone agents send no filters — see all agents
+        assert "agent_id" not in params
+        assert "project" not in params
+        assert "other" in result
 
 
 # ── CAPTCHA (browser_tool solve_captcha via mesh) ──────────────────
