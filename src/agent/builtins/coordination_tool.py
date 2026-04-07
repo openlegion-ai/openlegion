@@ -142,6 +142,15 @@ async def hand_off(
             logger.warning("Task write failed, orphaned output at %s", output_key)
         return {"error": f"Failed to create task: {e}"}
 
+    # Wake the target agent so it processes the task immediately
+    # instead of waiting for its next heartbeat.
+    try:
+        await mesh_client.wake_agent(
+            to, f"New task from {from_agent}: {summary[:200]}",
+        )
+    except Exception as e:
+        logger.debug("Wake for %s failed (task still queued): %s", to, e)
+
     result = {
         "handed_off": True,
         "to": to,

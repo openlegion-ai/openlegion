@@ -323,6 +323,44 @@ def create_mesh_app(
             raise HTTPException(403, f"Agent {msg.from_agent} cannot message {msg.to}")
         return await router.route(msg)
 
+    @app.post("/mesh/wake")
+    async def wake_agent(
+        request: Request, target: str = "", message: str = "",
+    ) -> dict:
+        """Wake a target agent by enqueuing a followup message via lanes.
+
+        Used by hand_off to prompt the target agent to check its inbox
+        immediately instead of waiting for the next heartbeat.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not target:
+            raise HTTPException(400, "target is required")
+        if not permissions.can_message(caller, target):
+            raise HTTPException(403, f"Agent {caller} cannot wake {target}")
+        await _check_rate_limit("blackboard_write", caller)  # reuse bb rate limit
+        if target not in router.agent_registry:
+            raise HTTPException(404, f"Agent '{target}' not registered")
+
+        wake_msg = message or f"You have a new task from {caller}. Call check_inbox() to see it."
+        if lane_manager is not None and dispatch_loop is not None:
+            import asyncio as _aio
+            future = _aio.run_coroutine_threadsafe(
+                lane_manager.enqueue(target, wake_msg, mode="followup"),
+                dispatch_loop,
+            )
+            try:
+                future.result(timeout=5)
+            except Exception as e:
+                logger.warning("Wake enqueue for %s failed: %s", target, e)
+                return {"woken": False, "error": str(e)}
+            return {"woken": True, "target": target}
+        # Fallback: send via router (message-only, no task processing)
+        await router.route(AgentMessage(
+            from_agent="mesh", to=target, type="coordination",
+            payload={"wake": True, "message": wake_msg},
+        ))
+        return {"woken": True, "target": target, "fallback": True}
+
     # === Blackboard ===
     # NOTE: list route must be defined BEFORE the {key:path} route to avoid shadowing
 

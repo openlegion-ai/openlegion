@@ -15,6 +15,7 @@ def _make_mesh_client(agent_id="scout", standalone=False):
     mc.read_blackboard = AsyncMock(return_value={"value": {"status": "pending"}})
     mc.list_blackboard = AsyncMock(return_value=[])
     mc.delete_blackboard = AsyncMock(return_value={"deleted": True})
+    mc.wake_agent = AsyncMock(return_value={"woken": True})
     return mc
 
 

@@ -232,6 +232,17 @@ class MeshClient:
         )
         response.raise_for_status()
 
+    async def wake_agent(self, target: str, message: str = "") -> dict:
+        """Wake a target agent so it processes work immediately."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/wake",
+            params={"target": target, "message": message},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def publish_event(self, topic: str, payload: dict | None = None) -> dict:
         """Publish an event to the mesh pub/sub."""
         scoped = self._scope_topic(topic)
