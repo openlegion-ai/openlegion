@@ -14,6 +14,9 @@ from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.builtins.mesh_tool")
 
+_NOTIFY_COOLDOWNS: dict[str, float] = {}
+_NOTIFY_COOLDOWN_SECONDS = 120  # 2 minutes between similar notifications
+
 
 @skill(
     name="notify_user",
@@ -36,6 +39,16 @@ async def notify_user(message: str, *, mesh_client=None, workspace_manager=None)
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     try:
+        import time as _time
+
+        # Deduplicate similar notifications within cooldown window
+        notify_key = message[:80].lower().strip()
+        now = _time.time()
+        last_sent = _NOTIFY_COOLDOWNS.get(notify_key, 0)
+        if now - last_sent < _NOTIFY_COOLDOWN_SECONDS:
+            return {"sent": False, "reason": "Similar notification sent recently. Wait before sending again."}
+        _NOTIFY_COOLDOWNS[notify_key] = now
+
         await mesh_client.notify_user(message)
         if workspace_manager:
             workspace_manager.append_chat_message("notification", message)

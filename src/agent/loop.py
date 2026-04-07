@@ -145,10 +145,23 @@ async def _llm_call_with_retry(llm_chat_fn, *, system, messages, tools, **kwargs
     Retries on: connection errors, timeouts, 429/502/503 status codes.
     Does NOT retry on: budget exceeded (RuntimeError), permanent errors.
     """
+    from src.agent.llm import LLMRetryableError
+
     last_exc: Exception = RuntimeError("LLM call failed after all retries")
     for attempt in range(_MAX_RETRIES + 1):
         try:
             return await llm_chat_fn(system=system, messages=messages, tools=tools, **kwargs)
+        except LLMRetryableError as e:
+            last_exc = e
+            if attempt < _MAX_RETRIES:
+                wait = _BACKOFF_BASE * (2 ** attempt) * 5  # longer backoff for rate limits: 5, 10, 20
+                logger.warning(
+                    f"LLM call rate-limited, retrying in {wait}s "
+                    f"(attempt {attempt + 1}/{_MAX_RETRIES})"
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
         except RuntimeError:
             # Budget exceeded or permanent LLM errors — don't retry
             raise

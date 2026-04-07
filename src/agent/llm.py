@@ -19,6 +19,12 @@ from src.shared.utils import setup_logging
 logger = setup_logging("agent.llm")
 
 
+class LLMRetryableError(RuntimeError):
+    """LLM error that should be retried (rate limits, transient failures)."""
+
+    pass
+
+
 class LLMClient:
     """LLM interface that routes all calls through the mesh API proxy."""
 
@@ -153,7 +159,11 @@ class LLMClient:
         data = response.json()
 
         if not data.get("success"):
-            raise RuntimeError(f"LLM call failed: {data.get('error')}")
+            error_msg = data.get("error", "")
+            # Rate limits and transient errors should be retried
+            if any(kw in error_msg.lower() for kw in ("rate limit", "ratelimit", "429", "too many requests", "overloaded", "503")):
+                raise LLMRetryableError(f"LLM call failed: {error_msg}")
+            raise RuntimeError(f"LLM call failed: {error_msg}")
 
         result = data["data"]
         return LLMResponse(

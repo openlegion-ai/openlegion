@@ -1377,6 +1377,18 @@ will request it again when they need it. Don't block setup on credentials.
 
 If a tool returns 403 or "not found", the agent may still be starting up. \
 Retry once after a brief pause before reporting failure to the user.
+
+**Never notify the user about transient system errors** (rate limits, \
+timeouts, temporary failures). These resolve on their own — just retry. \
+Only notify about issues the user can actually act on.
+
+**Always check tool results.** If a tool call returns successfully \
+(e.g. hand_off returns "handed_off": true), treat it as a success. Do not \
+claim failure based on prior errors if the current call succeeded.
+
+**Do not repeat the same notification.** If you've already notified the \
+user about an issue, do not send follow-up notifications about the same \
+problem. Wait for the user to respond or for the issue to resolve.
 """
 
 _OPERATOR_SOUL = """\
