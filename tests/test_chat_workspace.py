@@ -284,7 +284,9 @@ class TestChatTranscriptIntegration:
 
         transcript = loop.workspace.load_chat_transcript()
         assistant_msg = [m for m in transcript if m["role"] == "assistant"][0]
-        assert "memory_search" in assistant_msg.get("tools", [])
+        tools = assistant_msg.get("tools", [])
+        tool_names = [t["name"] if isinstance(t, dict) else t for t in tools]
+        assert "memory_search" in tool_names
 
     @pytest.mark.asyncio
     async def test_reset_archives_transcript(self):

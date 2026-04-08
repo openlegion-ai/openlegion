@@ -2015,7 +2015,7 @@ class AgentLoop:
                         await self._compact_chat_context(system)
                         continue
                     self._chat_messages.append({"role": "assistant", "content": content})
-                    self._log_chat_turn(user_message, content)
+                    self._log_chat_turn(user_message, content, tool_outputs)
                     if tool_outputs and self.workspace:
                         tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
                         self.workspace.append_activity(
@@ -2096,7 +2096,7 @@ class AgentLoop:
             total_tokens += llm_response.tokens_used
             content = self._resolve_content(llm_response)
             self._chat_messages.append({"role": "assistant", "content": content})
-            self._log_chat_turn(user_message, content)
+            self._log_chat_turn(user_message, content, tool_outputs)
             if tool_outputs and self.workspace:
                 tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
                 self.workspace.append_activity(
@@ -2125,7 +2125,10 @@ class AgentLoop:
                 self.workspace.append_chat_message("assistant", msg)
             return {"response": msg, "tool_outputs": tool_outputs, "tokens_used": total_tokens}
 
-    def _log_chat_turn(self, user_msg: str, assistant_msg: str) -> None:
+    def _log_chat_turn(
+        self, user_msg: str, assistant_msg: str,
+        tool_outputs: list[dict] | None = None,
+    ) -> None:
         """Append a rich summary of the chat turn to the daily log."""
         if not self.workspace:
             return
@@ -2165,9 +2168,29 @@ class AgentLoop:
         parts.append(f"Response: {response_summary}")
         self.workspace.append_daily_log(" | ".join(parts))
 
+        # Build rich tool data for transcript persistence (truncated previews)
+        tools: list[dict] | None = None
+        if tool_outputs:
+            tools = []
+            for t in tool_outputs:
+                name = t.get("tool") or t.get("name", "?")
+                inp = t.get("input")
+                out = t.get("output")
+                tools.append({
+                    "name": name,
+                    "status": "done",
+                    "inputPreview": truncate(
+                        json.dumps(inp, default=str), 200,
+                    ) if inp else "",
+                    "outputPreview": truncate(
+                        json.dumps(out, default=str), 200,
+                    ) if out else "",
+                })
+
         # Persist assistant response to transcript
         self.workspace.append_chat_message(
             "assistant", assistant_msg,
+            tools=tools,
             tool_names=tool_names or None,
         )
 
@@ -2401,6 +2424,7 @@ class AgentLoop:
         self.state = "working"
         total_tokens = 0
         tool_outputs: list[dict] = []
+        accumulated_text: list[str] = []  # all text_delta content across rounds
 
         try:
             user_message, system = await self._prepare_chat_turn(user_message)
@@ -2434,6 +2458,7 @@ class AgentLoop:
                         etype = event.get("type", "")
                         if etype == "text_delta":
                             any_text_streamed = True
+                            accumulated_text.append(event.get("content", ""))
                             yield event  # Forward token to caller immediately
                         elif etype == "done":
                             llm_response = event["response"]
@@ -2478,7 +2503,10 @@ class AgentLoop:
                     if not streamed and not any_text_streamed and content:
                         yield {"type": "text_delta", "content": content}
                     self._chat_messages.append({"role": "assistant", "content": content})
-                    self._log_chat_turn(user_message, content)
+                    # Use accumulated text from all rounds for the transcript
+                    # so intermediate messages are preserved after refresh.
+                    full_content = "".join(accumulated_text) if accumulated_text else content
+                    self._log_chat_turn(user_message, full_content, tool_outputs)
                     if tool_outputs and self.workspace:
                         tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
                         self.workspace.append_activity(
@@ -2570,9 +2598,11 @@ class AgentLoop:
             total_tokens += llm_response.tokens_used
             content = self._resolve_content(llm_response)
             if content:
+                accumulated_text.append(content)
                 yield {"type": "text_delta", "content": content}
             self._chat_messages.append({"role": "assistant", "content": content})
-            self._log_chat_turn(user_message, content)
+            full_content = "".join(accumulated_text) if accumulated_text else content
+            self._log_chat_turn(user_message, full_content, tool_outputs)
             if tool_outputs and self.workspace:
                 tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
                 self.workspace.append_activity(

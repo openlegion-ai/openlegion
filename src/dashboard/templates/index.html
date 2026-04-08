@@ -383,10 +383,11 @@
                                 </div>
                                 <!-- Expanded tool list -->
                                 <template x-if="!toolsCollapsed">
-                                  <div class="space-y-0.5">
+                                  <div class="space-y-0.5 max-h-[200px] overflow-y-auto custom-scrollbar" x-ref="toolScroll"
+                                    x-effect="if (msg.streaming && $refs.toolScroll) $refs.toolScroll.scrollTop = $refs.toolScroll.scrollHeight">
                                     <!-- Re-collapse button when expanded and many tools -->
                                     <div x-show="msg.tools.length > 2 && msg.tools.every(t => t.status === 'done') && !msg.streaming"
-                                      class="flex items-center gap-1.5 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 cursor-pointer select-none hover:bg-gray-900/80 transition-colors mb-0.5"
+                                      class="flex items-center gap-1.5 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 cursor-pointer select-none hover:bg-gray-900/80 transition-colors mb-0.5 sticky top-0 z-10"
                                       @click="toolsCollapsed = true">
                                       <span :class="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? '⚠' : '✓'"></span>
                                       <span class="font-mono" x-text="(() => { const errs = msg.tools.filter(t => (t.outputPreview || '').toLowerCase().includes('error')).length; return msg.tools.length + ' tool calls' + (errs ? ' · ' + errs + ' error' + (errs > 1 ? 's' : '') : ''); })()"></span>
@@ -5200,10 +5201,11 @@
                     </div>
                     <!-- Expanded tool list -->
                     <template x-if="!toolsCollapsed">
-                      <div class="space-y-0.5">
+                      <div class="space-y-0.5 max-h-[200px] overflow-y-auto custom-scrollbar" x-ref="toolScrollAgent"
+                        x-effect="if (msg.streaming && $refs.toolScrollAgent) $refs.toolScrollAgent.scrollTop = $refs.toolScrollAgent.scrollHeight">
                         <!-- Re-collapse button when expanded and many tools -->
                         <div x-show="msg.tools.length > 2 && msg.tools.every(t => t.status === 'done') && !msg.streaming"
-                          class="flex items-center gap-1.5 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 cursor-pointer select-none hover:bg-gray-900/80 transition-colors mb-0.5"
+                          class="flex items-center gap-1.5 text-[10px] py-0.5 px-1.5 rounded bg-gray-900/60 text-gray-400 cursor-pointer select-none hover:bg-gray-900/80 transition-colors mb-0.5 sticky top-0 z-10"
                           @click="toolsCollapsed = true">
                           <span :class="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? 'text-amber-400' : 'text-emerald-400'" class="shrink-0" x-text="msg.tools.some(t => (t.outputPreview || '').toLowerCase().includes('error')) ? '⚠' : '✓'"></span>
                           <span class="font-mono" x-text="(() => { const errs = msg.tools.filter(t => (t.outputPreview || '').toLowerCase().includes('error')).length; return msg.tools.length + ' tool calls' + (errs ? ' · ' + errs + ' error' + (errs > 1 ? 's' : '') : ''); })()"></span>
