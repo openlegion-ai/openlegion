@@ -423,6 +423,29 @@ def create_dashboard_router(
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @api_router.post("/api/browser/{agent_id}/reset")
+    async def api_browser_reset(agent_id: str) -> dict:
+        """Reset an agent's browser session (close and relaunch with current config)."""
+        if agent_id not in agent_registry:
+            raise HTTPException(404, "Agent not found")
+        if not runtime or not hasattr(runtime, 'browser_service_url') or not runtime.browser_service_url:
+            raise HTTPException(503, "Browser service not available")
+        try:
+            browser_auth = getattr(runtime, 'browser_auth_token', '')
+            headers = {}
+            if browser_auth:
+                headers["Authorization"] = f"Bearer {browser_auth}"
+            resp = await _dashboard_browser_client.post(
+                f"{runtime.browser_service_url}/browser/{agent_id}/reset",
+                json={},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.warning("Browser reset failed for '%s': %s", agent_id, e)
+            raise HTTPException(500, "Browser reset failed")
+
     @api_router.get("/api/agent-templates")
     async def api_agent_templates() -> list:
         """Return available skill templates for creating new agents."""
@@ -3008,43 +3031,40 @@ def create_dashboard_router(
             except Exception as e:
                 logger.warning("Browser service restart failed: %s", e)
 
-        # Restart each agent
+        # Restart all agents in parallel
         _network_cfg = cfg.get("network", {})
-        for agent_id in list(agent_registry.keys()):
+        from src.cli.config import _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
+
+        async def _restart_one(agent_id: str) -> tuple[str, str]:
             agent_cfg = agents_cfg.get(agent_id, {})
             try:
                 await loop.run_in_executor(None, runtime.stop_agent, agent_id)
                 skills_dir = agent_cfg.get("skills_dir", "")
                 if skills_dir:
                     skills_dir = str(Path(skills_dir).resolve())
-                # Preserve operator's ALLOWED_TOOLS on restart
-                from src.cli.config import _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
+                # Per-agent env overrides (proxy + operator tools).
+                # Proxy goes in env_overrides instead of runtime.extra_env
+                # so parallel restarts don't stomp each other's proxy vars.
                 _restart_env: dict[str, str] = {}
                 if agent_id == _OPERATOR_AGENT_ID:
                     _restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
-                # Resolve proxy for this agent
                 _proxy_url = resolve_agent_proxy(agent_id, agents_cfg, _network_cfg)
                 _proxy_env = build_proxy_env_vars(
                     _proxy_url, _network_cfg.get("no_proxy", ""),
                 )
-                runtime.extra_env.update(_proxy_env)
-                try:
-                    url = await loop.run_in_executor(
-                        None,
-                        lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir, re=_restart_env: runtime.start_agent(
-                            agent_id=aid,
-                            role=acfg.get("role", "assistant"),
-                            skills_dir=sd,
-                            model=acfg.get("model", default_model),
-                            mcp_servers=acfg.get("mcp_servers") or None,
-                            thinking=acfg.get("thinking", ""),
-                            env_overrides=re,
-                        ),
-                    )
-                finally:
-                    runtime.extra_env.pop("HTTP_PROXY", None)
-                    runtime.extra_env.pop("HTTPS_PROXY", None)
-                    runtime.extra_env.pop("NO_PROXY", None)
+                _restart_env.update(_proxy_env)
+                url = await loop.run_in_executor(
+                    None,
+                    lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir, re=_restart_env: runtime.start_agent(
+                        agent_id=aid,
+                        role=acfg.get("role", "assistant"),
+                        skills_dir=sd,
+                        model=acfg.get("model", default_model),
+                        mcp_servers=acfg.get("mcp_servers") or None,
+                        thinking=acfg.get("thinking", ""),
+                        env_overrides=re,
+                    ),
+                )
                 if router is not None:
                     router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
                 else:
@@ -3054,12 +3074,16 @@ def create_dashboard_router(
                     if isinstance(transport, HttpTransport):
                         transport.register(agent_id, url)
                 ready = await runtime.wait_for_agent(agent_id, timeout=60)
-                # Push proxy config to browser service
                 await _push_browser_proxy_for_agent(agent_id)
-                results[agent_id] = "ready" if ready else "started"
+                return (agent_id, "ready" if ready else "started")
             except Exception as e:
                 logger.error("Failed to restart agent '%s': %s", agent_id, e)
-                results[agent_id] = f"error: {e}"
+                return (agent_id, f"error: {e}")
+
+        agent_results = await _asyncio.gather(
+            *[_restart_one(aid) for aid in list(agent_registry.keys())]
+        )
+        results = dict(agent_results)
 
         return {"restarted": results}
 

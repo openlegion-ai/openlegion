@@ -1629,6 +1629,16 @@
                         <div class="text-[11px] text-gray-500 mt-0.5">Restarts the container process</div>
                       </div>
                     </button>
+                    <!-- Reset Browser -->
+                    <button @click="_menuOpen = false; resetBrowser(selectedAgent)"
+                      x-show="agentDetail?.vnc_url"
+                      class="w-full flex items-start gap-3 px-3.5 py-2.5 text-left hover:bg-gray-800/70 transition-colors group">
+                      <svg class="w-3.5 h-3.5 mt-0.5 shrink-0 text-gray-500 group-hover:text-gray-300 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><path d="M15 8l-3 3-3-3" opacity=".5"/></svg>
+                      <div>
+                        <div class="text-xs font-medium text-gray-200">Reset Browser</div>
+                        <div class="text-[11px] text-gray-500 mt-0.5">Relaunches browser with current proxy &amp; settings</div>
+                      </div>
+                    </button>
                     <div class="border-t border-gray-800/70 my-1"></div>
                     <!-- Delete Agent -->
                     <button @click="_menuOpen = false; removeAgent(selectedAgent)"
