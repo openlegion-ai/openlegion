@@ -28,55 +28,21 @@ consistent and realistic:
 from __future__ import annotations
 
 import os
-from urllib.parse import urlparse
 
 from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.stealth")
 
-_PROXY_NOT_SET = object()
-
-# ── Proxy ──────────────────────────────────────────────────────────────────────
-
-
-def get_proxy_config() -> dict | None:
-    """Build proxy config from environment variables.
-
-    Reads BROWSER_PROXY_URL, BROWSER_PROXY_USER, BROWSER_PROXY_PASS.
-    Returns dict suitable for Camoufox proxy parameter, or None.
-
-    NOTE: Residential proxies are the single most impactful defence
-    against IP-reputation-based blocking.  Datacenter IPs are trivially
-    flagged by Cloudflare, Akamai, and X regardless of fingerprint quality.
-    This deployment uses a static USA ISP IP which is far less suspicious
-    than a datacenter range, but a residential proxy remains the gold
-    standard for high-sensitivity targets.
-    """
-    proxy_url = os.environ.get("BROWSER_PROXY_URL", "")
-    if not proxy_url:
-        return None
-    config: dict = {"server": proxy_url}
-    proxy_user = os.environ.get("BROWSER_PROXY_USER", "")
-    proxy_pass = os.environ.get("BROWSER_PROXY_PASS", "")
-    if proxy_user:
-        config["username"] = proxy_user
-    if proxy_pass:
-        config["password"] = proxy_pass
-    parsed = urlparse(proxy_url)
-    safe_url = (
-        f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
-        if parsed.port
-        else f"{parsed.scheme}://{parsed.hostname}"
-    )
-    logger.info("Proxy configured: %s", safe_url)
-    return config
-
-
 # ── Launch options ─────────────────────────────────────────────────────────────
 
 
-def build_launch_options(agent_id: str, profile_dir: str, proxy=_PROXY_NOT_SET) -> dict:
+def build_launch_options(agent_id: str, profile_dir: str, proxy: dict | None = None) -> dict:
     """Build Camoufox AsyncNewBrowser kwargs for an agent.
+
+    Args:
+        proxy: Camoufox proxy dict (server, username, password) or None.
+               Proxy is always resolved per-agent by the mesh host and pushed
+               to the browser service — callers must pass it explicitly.
 
     Environment variables (all optional):
       BROWSER_OS     — "windows" (default) | "macos" | "linux"
@@ -86,8 +52,6 @@ def build_launch_options(agent_id: str, profile_dir: str, proxy=_PROXY_NOT_SET) 
                            Useful when Camoufox's bundled Firefox is too old for
                            sites that enforce minimum browser versions (e.g. Shopify).
     """
-    if proxy is _PROXY_NOT_SET:
-        proxy = get_proxy_config()  # legacy fallback for callers that don't pass proxy
 
     # ── OS fingerprint ────────────────────────────────────────────────────────
     # Default to Windows: it has ≈70 % desktop market share and produces the

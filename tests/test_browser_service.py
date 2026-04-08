@@ -560,9 +560,9 @@ class TestStealthConfig:
             opts = build_launch_options("agent1", "/tmp/profile")
         assert "geoip" not in opts
         # With proxy — geoip should be True
-        env = {"BROWSER_PROXY_URL": "http://proxy.example.com:8080"}
-        with patch.dict("os.environ", env):
-            opts = build_launch_options("agent1", "/tmp/profile")
+        proxy = {"server": "http://proxy.example.com:8080"}
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent1", "/tmp/profile", proxy=proxy)
         assert opts.get("geoip") is True
 
     # Resolution tests removed — _pick_resolution was dead code (VNC is always
@@ -595,29 +595,20 @@ class TestStealthConfig:
         assert "timezone" not in opts
 
     def test_build_launch_options_with_proxy(self):
-        env = {
-            "BROWSER_PROXY_URL": "http://proxy.example.com:8080",
-            "BROWSER_PROXY_USER": "user",
-            "BROWSER_PROXY_PASS": "pass",
-        }
-        with patch.dict("os.environ", env):
-            from src.browser.stealth import get_proxy_config
-            config = get_proxy_config()
-        assert config is not None
-        assert config["server"] == "http://proxy.example.com:8080"
-        assert config["username"] == "user"
+        from src.browser.stealth import build_launch_options
+        proxy = {"server": "http://proxy.example.com:8080", "username": "user", "password": "pass"}
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent-1", "/tmp/profile", proxy=proxy)
+        assert opts["proxy"] == proxy
+        assert opts["geoip"] is True
 
-    def test_proxy_url_logging_strips_credentials(self):
-        """Proxy URL with embedded credentials should not log the password."""
-        from src.browser.stealth import get_proxy_config
-        env = {"BROWSER_PROXY_URL": "http://user:s3cret@proxy.example.com:8080"}
-        with patch.dict("os.environ", env):
-            with patch("src.browser.stealth.logger") as mock_logger:
-                get_proxy_config()
-                log_msg = mock_logger.info.call_args[0][1]
-                assert "s3cret" not in log_msg
-                assert "user:" not in log_msg
-                assert "proxy.example.com" in log_msg
+    def test_proxy_env_vars_ignored_without_explicit_proxy(self):
+        """BROWSER_PROXY_* env vars are no longer read by build_launch_options."""
+        from src.browser.stealth import build_launch_options
+        env = {"BROWSER_PROXY_URL": "http://proxy.example.com:8080"}
+        with patch.dict("os.environ", env, clear=False):
+            opts = build_launch_options("agent-1", "/tmp/profile")
+        assert "proxy" not in opts
 
 
 class TestUAOverride:
@@ -5158,13 +5149,13 @@ class TestBrowserManagerProxyConfig:
         manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy5")
         manager.set_proxy_config("agent-1", {})
         config = manager.get_proxy_config("agent-1")
-        assert config is not None  # not None — that would trigger legacy fallback
+        assert config is not None  # not None — that would mean no config pushed
         assert config == {}  # empty dict = explicit no-proxy
         assert not config.get("url")  # no URL = _start_browser passes proxy=None
 
-    def test_none_clears_config_for_legacy_fallback(self):
-        """None clears the stored config, triggering legacy env var fallback."""
+    def test_none_clears_config(self):
+        """None clears the stored config (no config pushed state)."""
         manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy6")
         manager.set_proxy_config("agent-1", {"url": "http://host:8080"})
         manager.set_proxy_config("agent-1", None)
-        assert manager.get_proxy_config("agent-1") is None  # cleared = legacy fallback
+        assert manager.get_proxy_config("agent-1") is None
