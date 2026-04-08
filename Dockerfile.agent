@@ -18,7 +18,7 @@ WORKDIR /app
 COPY pyproject.toml .
 RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip \
     && pip install --no-cache-dir --root-user-action=ignore \
-    fastapi uvicorn httpx pydantic mcp pypdf \
+    fastapi uvicorn httpx socksio pydantic mcp pypdf \
     && pip install --no-cache-dir --root-user-action=ignore --pre sqlite-vec
 
 # Application code
