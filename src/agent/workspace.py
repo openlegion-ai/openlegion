@@ -492,7 +492,9 @@ class WorkspaceManager:
     _MAX_TRANSCRIPT_SIZE = 2_000_000  # 2 MB — rotate if larger
 
     def append_chat_message(
-        self, role: str, content: str, *, tool_names: list[str] | None = None,
+        self, role: str, content: str, *,
+        tool_names: list[str] | None = None,
+        tools: list[dict] | None = None,
     ) -> None:
         """Append a message to the persistent chat transcript (JSONL).
 
@@ -501,7 +503,9 @@ class WorkspaceManager:
         """
         path = self.root / self.CHAT_TRANSCRIPT
         entry: dict = {"role": role, "content": content, "ts": time.time()}
-        if tool_names:
+        if tools:
+            entry["tools"] = tools
+        elif tool_names:
             entry["tools"] = tool_names
         try:
             with path.open("a") as f:

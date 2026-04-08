@@ -1591,7 +1591,16 @@ function dashboard() {
         const hist = this.chatHistories[agent] || [];
         const last = hist[hist.length - 1];
         if (last && last._remoteStream && last.streaming) {
-          last.content = evt.data?.response || last.content;
+          const rResp = evt.data?.response || '';
+          if (rResp) {
+            if (last._sawTextDelta) {
+              // text_delta events already built up last.content — keep as-is.
+            } else {
+              last.content = last.content
+                ? last.content + '\n\n' + rResp
+                : rResp;
+            }
+          }
           last.streaming = false;
           last.phase = 'done';
           delete last._remoteStream;
@@ -4119,7 +4128,17 @@ function dashboard() {
                 this._pushChatTimelinePhase(entry, 'responding');
                 this._appendChatTimelineText(entry, finalResponse);
               }
-              entry.content = finalResponse || entry.content;
+              if (finalResponse) {
+                if (entry._sawTextDelta) {
+                  // text_delta events already streamed content into
+                  // entry.content (including the final response) — keep as-is
+                  // so intermediate messages aren't overwritten.
+                } else {
+                  entry.content = entry.content
+                    ? entry.content + '\n\n' + finalResponse
+                    : finalResponse;
+                }
+              }
               entry.streaming = false;
               entry.phase = 'done';
               entry.tool_limit_reached = data.tool_limit_reached || false;
