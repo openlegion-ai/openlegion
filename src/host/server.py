@@ -1016,24 +1016,50 @@ def create_mesh_app(
         name = data.get("name", "")
         description = data.get("description", "")
         service = data.get("service", name)
+        fields = data.get("fields", [])
 
-        if not name:
-            raise HTTPException(400, "Credential name is required")
-        if not re.match(r"^[a-zA-Z0-9_.\-]{1,128}$", name):
+        if not name and not fields:
+            raise HTTPException(400, "Credential name or fields required")
+
+        # Validate names
+        name_re = re.compile(r"^[a-zA-Z0-9_.\-]{1,128}$")
+        if name and not name_re.match(name):
             raise HTTPException(400, "Invalid credential name")
+        for f in fields:
+            fn = f.get("name", "")
+            if not fn or not name_re.match(fn):
+                raise HTTPException(400, f"Invalid field name: {fn!r}")
+
+        # Build fields list for the event
+        if fields:
+            event_fields = [
+                {"name": f["name"], "description": f.get("description", "")[:500]}
+                for f in fields[:10]  # cap at 10 fields
+            ]
+        else:
+            event_fields = [{"name": name, "description": description[:500]}]
+
+        # Filter out fields that already exist in the vault
+        if credential_vault:
+            existing = set(credential_vault.list_agent_credential_names())
+            event_fields = [f for f in event_fields if f["name"] not in existing]
+
+        if not event_fields:
+            # All credentials already exist — no card needed
+            return {"requested": False, "already_exists": True,
+                    "name": name or fields[0]["name"]}
 
         if event_bus:
             event_bus.emit(
                 "credential_request",
                 agent=agent_id,
                 data={
-                    "name": name,
-                    "description": description[:500],
-                    "service": service[:128],
+                    "service": (service or name)[:128],
+                    "fields": event_fields,
                 },
             )
 
-        return {"requested": True, "name": name}
+        return {"requested": True, "name": name or fields[0]["name"]}
 
     @app.get("/mesh/agents")
     async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:

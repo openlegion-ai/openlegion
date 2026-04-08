@@ -419,17 +419,21 @@ class MeshClient:
 
     async def request_credential_from_user(
         self, name: str, description: str, service: str = "",
+        fields: list | None = None,
     ) -> dict:
         """Emit a credential request event to the dashboard."""
         client = await self._get_client()
+        payload: dict = {
+            "agent_id": self.agent_id,
+            "name": name,
+            "description": description,
+            "service": service,
+        }
+        if fields:
+            payload["fields"] = fields
         response = await client.post(
             f"{self.mesh_url}/mesh/credential-request",
-            json={
-                "agent_id": self.agent_id,
-                "name": name,
-                "description": description,
-                "service": service,
-            },
+            json=payload,
             headers=self._trace_headers(),
         )
         response.raise_for_status()

@@ -1475,40 +1475,60 @@ function dashboard() {
       }
 
       // Surface credential requests as secure input cards in chat.
-      if (evt.type === 'credential_request' && agent && evt.data && evt.data.name) {
+      // The server sends fields as an array; we render them in a single card.
+      if (evt.type === 'credential_request' && agent && evt.data) {
         const evtTs = this._normalizeEventTs(evt);
+        const service = evt.data.service || evt.data.name || '';
+        // Build fields from event — supports both new (fields array) and legacy (single name) format
+        const evtFields = (evt.data.fields && evt.data.fields.length > 0)
+          ? evt.data.fields.map(f => ({ name: f.name, description: f.description || '', saved: false }))
+          : evt.data.name
+            ? [{ name: evt.data.name, description: evt.data.description || '', saved: false }]
+            : [];
+        if (evtFields.length === 0) return;
+
         const credCard = {
           role: 'credential_request',
-          content: evt.data.description || '',
-          name: evt.data.name,
-          service: evt.data.service || '',
-          saved: false,
+          service,
+          fields: evtFields,
           ts: evtTs,
         };
+
+        const addIfNew = (history, extraProps) => {
+          // Skip if all fields already exist in an existing card for this service
+          const existing = history.find(m =>
+            m.role === 'credential_request' && m.service === service
+          );
+          if (existing) {
+            let added = false;
+            for (const f of evtFields) {
+              if (!existing.fields.some(ef => ef.name === f.name)) {
+                existing.fields.push({ ...f });
+                added = true;
+              }
+            }
+            return added ? 'merged' : false;
+          }
+          history.push({ ...credCard, ...extraProps });
+          return 'new';
+        };
+
         // Show in the requesting agent's chat
         if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
-        const isDup = this.chatHistories[agent].some(m =>
-          m.role === 'credential_request' && m.name === evt.data.name && Math.abs((m.ts || 0) - evtTs) < 5000
-        );
-        if (!isDup) {
-          this.chatHistories[agent].push(credCard);
+        const result = addIfNew(this.chatHistories[agent], {});
+        if (result) {
           if (this.activeChatId === agent) {
             this.$nextTick(() => this._scrollChat(agent));
-          } else {
+          } else if (result === 'new') {
             this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
           }
         }
         // Also surface in operator chat so users see it from the main Chat tab
         if (agent !== 'operator') {
           if (!this.chatHistories['operator']) this.chatHistories['operator'] = [];
-          const opDup = this.chatHistories['operator'].some(m =>
-            m.role === 'credential_request' && m.name === evt.data.name && Math.abs((m.ts || 0) - evtTs) < 5000
-          );
-          if (!opDup) {
-            this.chatHistories['operator'].push({ ...credCard, _from_agent: agent });
-            if (this.activeTab === 'chat') {
-              this.$nextTick(() => this._scrollChat('operator'));
-            }
+          const opResult = addIfNew(this.chatHistories['operator'], { _from_agent: agent });
+          if (opResult === 'new' && this.activeTab === 'chat') {
+            this.$nextTick(() => this._scrollChat('operator'));
           }
         }
       }

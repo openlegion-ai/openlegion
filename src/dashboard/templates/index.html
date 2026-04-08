@@ -320,37 +320,78 @@
                         </div>
                       </div>
                     </template>
-                    <!-- Credential request card -->
+                    <!-- Credential request card (grouped by service) -->
                     <template x-if="msg.role === 'credential_request'">
                       <div class="flex justify-start gap-2.5">
                         <div class="max-w-[80%] min-w-0">
-                          <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-indigo-600/30">
+                          <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-indigo-600/30"
+                            x-data="{ credValues: {}, saving: false, saveError: '', allSaved: false }"
+                            x-init="(msg.fields || []).forEach(f => credValues[f.name] = '')">
                             <div class="flex items-center gap-2 mb-2">
                               <svg class="w-4 h-4 text-indigo-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
                                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
                                 <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                               </svg>
-                              <span class="text-xs font-medium text-indigo-300" x-text="'Credential needed: ' + (msg.service || msg.name)"></span>
+                              <span class="text-xs font-medium text-indigo-300" x-text="'Credential needed: ' + msg.service"></span>
                             </div>
-                            <p class="text-xs text-gray-300 mb-3" x-text="msg.content"></p>
-                            <div x-show="!msg.saved" x-data="{ credValue: '', saving: false, saveError: '' }">
-                              <input type="password" x-model="credValue"
-                                class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none mb-2"
-                                :placeholder="'Enter ' + (msg.service || msg.name)">
+                            <!-- Per-field inputs -->
+                            <div x-show="!allSaved">
+                              <template x-for="(field, fi) in (msg.fields || [])" :key="field.name">
+                                <div class="mb-3">
+                                  <p class="text-xs text-gray-300 mb-1.5" x-text="field.description"></p>
+                                  <input type="password" x-model="credValues[field.name]"
+                                    class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none"
+                                    :placeholder="'Enter ' + field.name">
+                                </div>
+                              </template>
                               <div x-show="saveError" class="text-[10px] text-red-400 mb-1.5" x-text="saveError"></div>
-                              <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim()}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
-                                :disabled="!credValue.trim() || saving"
+                              <button @click="
+                                const fields = msg.fields || [];
+                                const filled = fields.every(f => (credValues[f.name] || '').trim());
+                                if (!filled) return;
+                                saving = true; saveError = '';
+                                const agentId = msg._from_agent || 'operator';
+                                let remaining = fields.length; let failed = false;
+                                fields.forEach(f => {
+                                  fetch(window.__config.apiBase + '/credentials/agent', {
+                                    method: 'POST',
+                                    headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'},
+                                    body: JSON.stringify({service: f.name, key: credValues[f.name].trim(), notify_agent: agentId})
+                                  }).then(r => {
+                                    if (!r.ok) failed = true;
+                                    else f.saved = true;
+                                  }).catch(() => { failed = true; }).finally(() => {
+                                    remaining--;
+                                    if (remaining === 0) {
+                                      saving = false;
+                                      if (failed) { saveError = 'Failed to save. Please try again.'; }
+                                      else { allSaved = true; credValues = {}; }
+                                    }
+                                  });
+                                });
+                              "
+                                :disabled="!(msg.fields || []).every(f => (credValues[f.name] || '').trim()) || saving"
                                 class="w-full px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
-                                :class="credValue.trim() && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-500 cursor-not-allowed'">
+                                :class="(msg.fields || []).every(f => (credValues[f.name] || '').trim()) && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-500 cursor-not-allowed'">
                                 <span x-show="!saving">Save to Vault</span>
                                 <span x-show="saving">Saving...</span>
                               </button>
                             </div>
-                            <div x-show="msg.saved" class="flex items-center gap-1.5 text-xs text-emerald-400">
+                            <!-- All saved confirmation -->
+                            <div x-show="allSaved" class="flex items-center gap-1.5 text-xs text-emerald-400">
                               <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
                               </svg>
-                              <span>Saved securely. The agent can now use this credential.</span>
+                              <span>Saved securely. The agent can now use these credentials.</span>
+                            </div>
+                            <!-- Vault security details -->
+                            <div class="mt-2 pt-2 border-t border-gray-700/50">
+                              <div class="flex items-start gap-1.5 text-[10px] text-gray-500">
+                                <svg class="w-3 h-3 mt-px shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                  <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+                                </svg>
+                                <span>Stored in an encrypted vault. Agents access credentials via opaque handles and never see raw values.</span>
+                              </div>
                             </div>
                           </div>
                         </div>
@@ -5132,37 +5173,78 @@
                   <div class="flex-1 border-t border-dashed border-gray-800"></div>
                 </div>
               </template>
-              <!-- Credential request card -->
+              <!-- Credential request card (grouped by service) -->
               <template x-if="msg.role === 'credential_request'">
                 <div class="flex justify-start">
                   <div class="max-w-[80%] min-w-0">
-                    <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-indigo-600/30">
+                    <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-indigo-600/30"
+                      x-data="{ credValues: {}, saving: false, saveError: '', allSaved: false }"
+                      x-init="(msg.fields || []).forEach(f => credValues[f.name] = '')">
                       <div class="flex items-center gap-2 mb-2">
                         <svg class="w-4 h-4 text-indigo-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
                           <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
                           <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                         </svg>
-                        <span class="text-xs font-medium text-indigo-300" x-text="'Credential needed: ' + (msg.service || msg.name)"></span>
+                        <span class="text-xs font-medium text-indigo-300" x-text="'Credential needed: ' + msg.service"></span>
                       </div>
-                      <p class="text-xs text-gray-300 mb-3" x-text="msg.content"></p>
-                      <div x-show="!msg.saved" x-data="{ credValue: '', saving: false, saveError: '' }">
-                        <input type="password" x-model="credValue"
-                          class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none mb-2"
-                          :placeholder="'Enter ' + (msg.service || msg.name)">
+                      <!-- Per-field inputs -->
+                      <div x-show="!allSaved">
+                        <template x-for="(field, fi) in (msg.fields || [])" :key="field.name">
+                          <div class="mb-3">
+                            <p class="text-xs text-gray-300 mb-1.5" x-text="field.description"></p>
+                            <input type="password" x-model="credValues[field.name]"
+                              class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none"
+                              :placeholder="'Enter ' + field.name">
+                          </div>
+                        </template>
                         <div x-show="saveError" class="text-[10px] text-red-400 mb-1.5" x-text="saveError"></div>
-                        <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim()}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
-                          :disabled="!credValue.trim() || saving"
+                        <button @click="
+                          const fields = msg.fields || [];
+                          const filled = fields.every(f => (credValues[f.name] || '').trim());
+                          if (!filled) return;
+                          saving = true; saveError = '';
+                          const agentId = activeChatId;
+                          let remaining = fields.length; let failed = false;
+                          fields.forEach(f => {
+                            fetch(window.__config.apiBase + '/credentials/agent', {
+                              method: 'POST',
+                              headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'},
+                              body: JSON.stringify({service: f.name, key: credValues[f.name].trim(), notify_agent: agentId})
+                            }).then(r => {
+                              if (!r.ok) failed = true;
+                              else f.saved = true;
+                            }).catch(() => { failed = true; }).finally(() => {
+                              remaining--;
+                              if (remaining === 0) {
+                                saving = false;
+                                if (failed) { saveError = 'Failed to save. Please try again.'; }
+                                else { allSaved = true; credValues = {}; }
+                              }
+                            });
+                          });
+                        "
+                          :disabled="!(msg.fields || []).every(f => (credValues[f.name] || '').trim()) || saving"
                           class="w-full px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
-                          :class="credValue.trim() && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-500 cursor-not-allowed'">
+                          :class="(msg.fields || []).every(f => (credValues[f.name] || '').trim()) && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-500 cursor-not-allowed'">
                           <span x-show="!saving">Save to Vault</span>
                           <span x-show="saving">Saving...</span>
                         </button>
                       </div>
-                      <div x-show="msg.saved" class="flex items-center gap-1.5 text-xs text-emerald-400">
+                      <!-- All saved confirmation -->
+                      <div x-show="allSaved" class="flex items-center gap-1.5 text-xs text-emerald-400">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
                           <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
                         </svg>
-                        <span>Saved securely. The agent can now use this credential.</span>
+                        <span>Saved securely. The agent can now use these credentials.</span>
+                      </div>
+                      <!-- Vault security details -->
+                      <div class="mt-2 pt-2 border-t border-gray-700/50">
+                        <div class="flex items-start gap-1.5 text-[10px] text-gray-500">
+                          <svg class="w-3 h-3 mt-px shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+                          </svg>
+                          <span>Stored in an encrypted vault. Agents access credentials via opaque handles and never see raw values.</span>
+                        </div>
                       </div>
                     </div>
                   </div>

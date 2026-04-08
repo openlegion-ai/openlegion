@@ -97,7 +97,9 @@ _CRED_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]{1,128}$')
         "through a secure input in their chat. The credential is stored "
         "directly in the vault — you never see the actual value. After "
         "the user saves it, use the handle $CRED{name} in HTTP requests "
-        "or browser logins."
+        "or browser logins. For services needing multiple credentials "
+        "(e.g. username + password), use the 'fields' parameter to request "
+        "them all in a single card."
     ),
     parameters={
         "name": {
@@ -113,53 +115,108 @@ _CRED_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]{1,128}$')
             "description": "Service name (e.g. 'LinkedIn', 'Twitter', 'Stripe')",
             "default": "",
         },
+        "fields": {
+            "type": "array",
+            "description": (
+                "Request multiple credentials in one card. Each field has "
+                "'name' and 'description'. Example: "
+                "[{\"name\": \"linkedin_username\", \"description\": \"Your email\"}, "
+                "{\"name\": \"linkedin_password\", \"description\": \"Your password\"}]. "
+                "When provided, 'name' and 'description' are ignored."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["name", "description"],
+            },
+            "default": [],
+        },
     },
 )
 async def request_credential(
-    name: str, description: str, service: str = "",
+    name: str = "", description: str = "", service: str = "",
+    fields: list | None = None,
     *, mesh_client=None, **_kw,
 ) -> dict:
     """Request a credential from the user via secure chat input."""
     if not mesh_client:
         return {"error": "Vault tools require mesh connectivity"}
 
-    if not name:
-        return {"error": "name is required"}
+    # Normalize: if fields provided, use those; otherwise wrap name/description
+    if fields:
+        resolved_fields = []
+        for f in fields:
+            fn = f.get("name", "")
+            fd = f.get("description", "")
+            if not fn:
+                return {"error": "Each field must have a 'name'"}
+            if not _CRED_NAME_RE.match(fn):
+                return {
+                    "error": (
+                        f"Invalid credential name: {fn}. "
+                        "Use alphanumeric, underscore, dot, or hyphen (1-128 chars)."
+                    ),
+                }
+            resolved_fields.append({"name": fn, "description": fd})
+    else:
+        if not name:
+            return {"error": "name is required (or provide 'fields')"}
+        if not _CRED_NAME_RE.match(name):
+            return {
+                "error": (
+                    f"Invalid credential name: {name}. "
+                    "Use alphanumeric, underscore, dot, or hyphen (1-128 chars)."
+                ),
+            }
+        resolved_fields = [{"name": name, "description": description}]
 
-    if not _CRED_NAME_RE.match(name):
-        return {
-            "error": (
-                f"Invalid credential name: {name}. "
-                "Use alphanumeric, underscore, dot, or hyphen (1-128 chars)."
-            ),
-        }
-
-    # Check if credential already exists
+    # Check if credentials already exist
+    handles = {}
+    already_exist = []
     try:
         existing = await mesh_client.vault_list()
-        if name in existing:
-            return {
-                "already_exists": True,
-                "handle": f"$CRED{{{name}}}",
-                "message": f"Credential '{name}' already exists in the vault.",
-            }
-    except Exception:
-        pass  # Vault may not be available yet; proceed with the request
+        for f in resolved_fields:
+            if f["name"] in existing:
+                already_exist.append(f["name"])
+            handles[f["name"]] = f"$CRED{{{f['name']}}}"
+    except Exception as exc:
+        logger.warning("vault_list check failed, proceeding with request: %s", exc)
+        for f in resolved_fields:
+            handles[f["name"]] = f"$CRED{{{f['name']}}}"
+
+    if len(already_exist) == len(resolved_fields):
+        return {
+            "already_exists": True,
+            "handles": handles,
+            "message": "All requested credentials already exist in the vault.",
+        }
+
+    # Filter to only request credentials that don't already exist
+    fields_to_request = [f for f in resolved_fields if f["name"] not in already_exist]
 
     # Emit credential request event to the dashboard via the mesh
+    service_name = service or name or (fields_to_request[0]["name"] if fields_to_request else "")
     try:
         await mesh_client.request_credential_from_user(
-            name=name, description=description, service=service or name,
+            name=service_name,
+            description=description,
+            service=service_name,
+            fields=fields_to_request,
         )
     except Exception:
         pass  # Best effort — the tool result itself is the primary mechanism
 
     return {
         "requested": True,
-        "name": name,
-        "handle": f"$CRED{{{name}}}",
+        "handles": handles,
         "message": (
             f"Credential request sent to user. "
-            f"Once they save it, use $CRED{{{name}}} in your requests."
+            f"You will be notified automatically when the user saves the credentials. "
+            f"Do NOT poll vault_list — just continue with other work or wait. "
+            f"Once notified, use these handles: "
+            + ", ".join(f"$CRED{{{f['name']}}}" for f in resolved_fields)
         ),
     }

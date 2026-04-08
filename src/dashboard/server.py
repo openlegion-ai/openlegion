@@ -1761,6 +1761,20 @@ def create_dashboard_router(
                 detail=f"Cannot store system credential via chat card: {service}",
             )
         credential_vault.add_credential(service, key)
+
+        # Notify the requesting agent that credentials are now available
+        notify_agent = body.get("notify_agent", "").strip()
+        if notify_agent and lane_manager:
+            try:
+                await lane_manager.enqueue(
+                    notify_agent,
+                    f"The user has saved the credential '{service}' to the vault. "
+                    f"You can now use it via the handle $CRED{{{service}}}.",
+                    mode="steer",
+                )
+            except Exception:
+                pass  # best effort
+
         return {"stored": True, "service": service, "tier": "agent"}
 
     @api_router.post("/api/credentials/upload-env")
