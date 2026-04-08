@@ -199,6 +199,7 @@ function dashboard() {
     dbDetails: null,
     dbDetailsLoading: false,
     dbPurging: {},  // { dbId: true } while purging
+    purgeOpenId: null,   // db.id of the open purge dropdown, or null
 
     // Messenger-style chat panel
     openChats: [],             // Array of agent IDs with open chat panels
