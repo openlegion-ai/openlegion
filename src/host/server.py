@@ -1387,6 +1387,7 @@ def create_mesh_app(
 
         # Apply template to create config entries
         created_names = _apply_template(template_name, tpl)
+        permissions.reload()
         if not created_names:
             return {
                 "template": template_name,
@@ -1546,6 +1547,7 @@ def create_mesh_app(
         )
         _update_agent_field(name, "avatar", random.randint(1, 50))
         _add_agent_permissions(name)
+        permissions.reload()
         skills_dir = PROJECT_ROOT / "skills" / name
         skills_dir.mkdir(parents=True, exist_ok=True)
 
