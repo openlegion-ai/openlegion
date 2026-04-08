@@ -199,13 +199,16 @@ def create_dashboard_router(
                     body = {}  # explicit no-proxy
             else:
                 body = {}  # explicit no-proxy (direct mode or no system proxy)
-            import httpx as _httpx
-            async with _httpx.AsyncClient(timeout=10) as client:
-                headers = {}
-                svc_token = getattr(runtime, "browser_auth_token", "")
-                if svc_token:
-                    headers["Authorization"] = f"Bearer {svc_token}"
-                await client.put(f"{runtime.browser_service_url}/browser/{agent_id}/proxy", json=body, headers=headers)
+            headers: dict = {}
+            svc_token = getattr(runtime, "browser_auth_token", "")
+            if svc_token:
+                headers["Authorization"] = f"Bearer {svc_token}"
+            resp = await _dashboard_browser_client.put(
+                f"{runtime.browser_service_url}/browser/{agent_id}/proxy",
+                json=body, headers=headers,
+            )
+            if resp.status_code >= 400:
+                logger.warning("Browser proxy push for %s returned %d", agent_id, resp.status_code)
         except Exception as e:
             logger.warning("Failed to push browser proxy for %s: %s", agent_id, e)
 
@@ -944,28 +947,24 @@ def create_dashboard_router(
             restart_env: dict[str, str] = {}
             if agent_id == _OPERATOR_AGENT_ID:
                 restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
-            # Resolve proxy for this agent
+            # Proxy goes in env_overrides (not runtime.extra_env) so
+            # concurrent single-agent restarts don't stomp each other.
             _proxy_url = resolve_agent_proxy(
                 agent_id, cfg.get("agents", {}), cfg.get("network", {}),
             )
             _proxy_env = build_proxy_env_vars(
                 _proxy_url, cfg.get("network", {}).get("no_proxy", ""),
             )
-            runtime.extra_env.update(_proxy_env)
-            try:
-                url = runtime.start_agent(
-                    agent_id=agent_id,
-                    role=agent_cfg.get("role", "assistant"),
-                    skills_dir=skills_dir,
-                    model=agent_cfg.get("model", default_model),
-                    mcp_servers=agent_cfg.get("mcp_servers") or None,
-                    thinking=agent_cfg.get("thinking", ""),
-                    env_overrides=restart_env,
-                )
-            finally:
-                runtime.extra_env.pop("HTTP_PROXY", None)
-                runtime.extra_env.pop("HTTPS_PROXY", None)
-                runtime.extra_env.pop("NO_PROXY", None)
+            restart_env.update(_proxy_env)
+            url = runtime.start_agent(
+                agent_id=agent_id,
+                role=agent_cfg.get("role", "assistant"),
+                skills_dir=skills_dir,
+                model=agent_cfg.get("model", default_model),
+                mcp_servers=agent_cfg.get("mcp_servers") or None,
+                thinking=agent_cfg.get("thinking", ""),
+                env_overrides=restart_env,
+            )
             if router is not None:
                 router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
             else:
@@ -1129,6 +1128,10 @@ def create_dashboard_router(
                 os.environ.pop(env_key, None)
 
         _update_agent_field(agent_id, "proxy", proxy_yaml)
+
+        # Push new proxy config to browser service immediately so manual
+        # browser resets pick up the change without a full agent restart.
+        await _push_browser_proxy_for_agent(agent_id)
 
         return {"updated": ["proxy"], "restart_required": True}
 

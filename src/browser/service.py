@@ -452,9 +452,19 @@ class BrowserManager:
                 # Explicitly no proxy (direct mode or inherit with no system proxy)
                 options = build_launch_options(agent_id, profile_dir, proxy=None)
         else:
-            # No per-agent config pushed yet — legacy env var fallback
-            options = build_launch_options(agent_id, profile_dir)
-        logger.info("Starting Camoufox for '%s' (profile=%s)", agent_id, profile_dir)
+            # No per-agent config pushed yet — start without proxy.
+            # The mesh will push the correct config shortly after startup
+            # which triggers a reset, relaunching with the right proxy.
+            logger.warning("No proxy config pushed for '%s' yet, starting without proxy", agent_id)
+            options = build_launch_options(agent_id, profile_dir, proxy=None)
+
+        # Log which proxy is being used for debuggability
+        _proxy_opt = options.get("proxy")
+        if _proxy_opt:
+            _p_server = _proxy_opt.get("server", "?")
+            logger.info("Starting Camoufox for '%s' (profile=%s, proxy=%s)", agent_id, profile_dir, _p_server)
+        else:
+            logger.info("Starting Camoufox for '%s' (profile=%s, no proxy)", agent_id, profile_dir)
 
         # Snapshot existing Firefox windows so we can identify the new one
         wids_before = await self._get_firefox_wids()
