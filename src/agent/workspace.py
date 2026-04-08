@@ -495,6 +495,7 @@ class WorkspaceManager:
         self, role: str, content: str, *,
         tool_names: list[str] | None = None,
         tools: list[dict] | None = None,
+        streamed_content: str | None = None,
     ) -> None:
         """Append a message to the persistent chat transcript (JSONL).
 
@@ -507,6 +508,8 @@ class WorkspaceManager:
             entry["tools"] = tools
         elif tool_names:
             entry["tools"] = tool_names
+        if streamed_content and streamed_content != content:
+            entry["streamedContent"] = streamed_content
         try:
             with path.open("a") as f:
                 f.write(json.dumps(entry, default=str) + "\n")

@@ -2128,6 +2128,7 @@ class AgentLoop:
     def _log_chat_turn(
         self, user_msg: str, assistant_msg: str,
         tool_outputs: list[dict] | None = None,
+        streamed_content: str | None = None,
     ) -> None:
         """Append a rich summary of the chat turn to the daily log."""
         if not self.workspace:
@@ -2192,6 +2193,7 @@ class AgentLoop:
             "assistant", assistant_msg,
             tools=tools,
             tool_names=tool_names or None,
+            streamed_content=streamed_content,
         )
 
     def get_chat_messages(self) -> list[dict]:
@@ -2503,10 +2505,13 @@ class AgentLoop:
                     if not streamed and not any_text_streamed and content:
                         yield {"type": "text_delta", "content": content}
                     self._chat_messages.append({"role": "assistant", "content": content})
-                    # Use accumulated text from all rounds for the transcript
-                    # so intermediate messages are preserved after refresh.
-                    full_content = "".join(accumulated_text) if accumulated_text else content
-                    self._log_chat_turn(user_message, full_content, tool_outputs)
+                    # Pass accumulated intermediate text separately so the
+                    # transcript can store it for expand-on-click after refresh.
+                    streamed = "".join(accumulated_text) if accumulated_text else None
+                    self._log_chat_turn(
+                        user_message, content, tool_outputs,
+                        streamed_content=streamed,
+                    )
                     if tool_outputs and self.workspace:
                         tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
                         self.workspace.append_activity(
@@ -2601,8 +2606,11 @@ class AgentLoop:
                 accumulated_text.append(content)
                 yield {"type": "text_delta", "content": content}
             self._chat_messages.append({"role": "assistant", "content": content})
-            full_content = "".join(accumulated_text) if accumulated_text else content
-            self._log_chat_turn(user_message, full_content, tool_outputs)
+            streamed = "".join(accumulated_text) if accumulated_text else None
+            self._log_chat_turn(
+                user_message, content, tool_outputs,
+                streamed_content=streamed,
+            )
             if tool_outputs and self.workspace:
                 tool_names = list({t.get("tool") or t.get("name", "?") for t in tool_outputs})
                 self.workspace.append_activity(

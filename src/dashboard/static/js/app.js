@@ -1593,12 +1593,11 @@ function dashboard() {
         if (last && last._remoteStream && last.streaming) {
           const rResp = evt.data?.response || '';
           if (rResp) {
-            if (last._sawTextDelta) {
-              // text_delta events already built up last.content — keep as-is.
+            if (last._sawTextDelta && last.content && last.content !== rResp) {
+              last._streamedContent = last.content;
+              last.content = rResp;
             } else {
-              last.content = last.content
-                ? last.content + '\n\n' + rResp
-                : rResp;
+              last.content = rResp || last.content;
             }
           }
           last.streaming = false;
@@ -3680,6 +3679,7 @@ function dashboard() {
           tools: Array.isArray(m.tools) ? m.tools.map(t =>
             typeof t === 'string' ? { name: t, status: 'done', inputPreview: '', outputPreview: '' } : t
           ) : [],
+          _streamedContent: m.streamedContent || null,
         }));
         // Preserve local user messages not yet on the server (e.g., sent
         // right before tab-out, before the server could persist them).
@@ -4128,16 +4128,13 @@ function dashboard() {
                 this._pushChatTimelinePhase(entry, 'responding');
                 this._appendChatTimelineText(entry, finalResponse);
               }
-              if (finalResponse) {
-                if (entry._sawTextDelta) {
-                  // text_delta events already streamed content into
-                  // entry.content (including the final response) — keep as-is
-                  // so intermediate messages aren't overwritten.
-                } else {
-                  entry.content = entry.content
-                    ? entry.content + '\n\n' + finalResponse
-                    : finalResponse;
-                }
+              // If intermediate text was streamed before the final response,
+              // stash it so the user can expand it, and show only the final.
+              if (entry._sawTextDelta && finalResponse && entry.content && entry.content !== finalResponse) {
+                entry._streamedContent = entry.content;
+                entry.content = finalResponse;
+              } else if (finalResponse) {
+                entry.content = finalResponse || entry.content;
               }
               entry.streaming = false;
               entry.phase = 'done';

@@ -438,6 +438,19 @@
                             <template x-if="msg.role === 'notification'">
                               <div class="text-[10px] font-semibold text-amber-400/70 uppercase tracking-wide mb-0.5">Notification</div>
                             </template>
+                            <!-- Expandable streamed content (intermediate work) -->
+                            <template x-if="msg._streamedContent && !msg.streaming">
+                              <div x-data="{ showWork: false }">
+                                <div class="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer select-none hover:text-gray-400 transition-colors mb-1"
+                                  @click="showWork = !showWork">
+                                  <svg class="w-2.5 h-2.5 shrink-0 transition-transform duration-200" :class="showWork && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                                  <span x-text="showWork ? 'Hide reasoning' : 'Show reasoning'"></span>
+                                </div>
+                                <div x-show="showWork" x-transition class="mb-2 pl-2 border-l-2 border-gray-700/50">
+                                  <div class="chat-markdown break-words text-gray-400 text-[11px]" x-html="renderMarkdown(msg._streamedContent)"></div>
+                                </div>
+                              </div>
+                            </template>
                             <!-- Content -->
                             <div class="chat-markdown break-words" x-html="renderMarkdown(msg.content)"></div>
                             <span x-show="msg.streaming" class="inline-block w-1 h-3 bg-indigo-400 animate-pulse ml-0.5 align-text-bottom"></span>
@@ -5254,6 +5267,19 @@
                 </div>
                 <template x-if="msg.role === 'notification'">
                   <div class="text-[10px] font-semibold text-amber-400/70 uppercase tracking-wide mb-0.5">Notification</div>
+                </template>
+                <!-- Expandable streamed content (intermediate work) -->
+                <template x-if="msg._streamedContent && !msg.streaming && msg.role !== 'user'">
+                  <div x-data="{ showWork: false }">
+                    <div class="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer select-none hover:text-gray-400 transition-colors mb-1"
+                      @click="showWork = !showWork">
+                      <svg class="w-2.5 h-2.5 shrink-0 transition-transform duration-200" :class="showWork && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                      <span x-text="showWork ? 'Hide reasoning' : 'Show reasoning'"></span>
+                    </div>
+                    <div x-show="showWork" x-transition class="mb-2 pl-2 border-l-2 border-gray-700/50">
+                      <div class="chat-markdown break-words text-gray-400 text-[11px]" x-html="renderMarkdown(msg._streamedContent)"></div>
+                    </div>
+                  </div>
                 </template>
                 <div x-show="msg.role === 'user'" class="whitespace-pre-wrap break-words" x-text="msg.content"></div>
                 <div x-show="msg.role !== 'user'" class="chat-markdown break-words" x-html="renderMarkdown(msg.content)"></div>
