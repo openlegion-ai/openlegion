@@ -71,7 +71,8 @@ class TestResolveAgentProxy:
             result = resolve_agent_proxy("test-agent", agents_cfg, {})
         assert result == "socks5://u:p@host:1080"
 
-    def test_mode_custom_missing_credential_falls_through_to_system(self):
+    def test_mode_custom_missing_credential_returns_none(self):
+        """Custom mode with missing credential must NOT fall through to system proxy."""
         agents_cfg = {
             "test-agent": {
                 "proxy": {"mode": "custom", "credential": "agent_test-agent_proxy"}
@@ -80,8 +81,7 @@ class TestResolveAgentProxy:
         env = {"BROWSER_PROXY_URL": "http://system:8080"}
         with patch.dict(os.environ, env, clear=False):
             result = resolve_agent_proxy("test-agent", agents_cfg, {})
-        assert result is not None
-        assert "system:8080" in result
+        assert result is None
 
     def test_mode_direct_returns_none(self):
         agents_cfg = {

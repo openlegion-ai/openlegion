@@ -2377,7 +2377,7 @@ def create_mesh_app(
                     "password": parsed["password"],
                 }
             else:
-                body = {}  # explicit no-proxy (invalid URL fell through)
+                body = {}  # explicit no-proxy (URL failed validation)
         else:
             body = {}  # explicit no-proxy (direct mode or no system proxy)
 
@@ -2385,11 +2385,13 @@ def create_mesh_app(
         if svc_token:
             headers["Authorization"] = f"Bearer {svc_token}"
         try:
-            await _browser_proxy_client.put(
+            resp = await _browser_proxy_client.put(
                 f"{svc_url}/browser/{agent_id}/proxy",
                 json=body,
                 headers=headers,
             )
+            if resp.status_code >= 400:
+                logger.warning("Browser proxy push for %s returned %d", agent_id, resp.status_code)
         except Exception as e:
             logger.warning("Failed to push proxy config for %s: %s", agent_id, e)
 

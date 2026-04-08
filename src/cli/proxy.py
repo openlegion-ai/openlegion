@@ -130,16 +130,20 @@ def resolve_agent_proxy(
                 return proxy_url
             if proxy_url:
                 logger.warning(
-                    "[%s] Proxy credential '%s' has invalid URL, falling through to system proxy",
+                    "[%s] Proxy credential '%s' has invalid URL, using no proxy",
                     agent_id, cred_name,
                 )
             else:
                 logger.warning(
-                    "[%s] Proxy credential '%s' not found (env var %s), falling through to system proxy",
+                    "[%s] Proxy credential '%s' not found (env var %s), using no proxy",
                     agent_id, cred_name, env_key,
                 )
         else:
-            logger.warning("[%s] mode=custom but no credential specified, falling through", agent_id)
+            logger.warning("[%s] mode=custom but no credential specified, using no proxy", agent_id)
+        # Custom mode must never fall through to system proxy — if the
+        # credential is broken, use no proxy rather than silently
+        # switching to a different proxy the user didn't choose.
+        return None
 
     return _resolve_system_proxy()
 
