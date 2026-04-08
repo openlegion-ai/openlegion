@@ -1433,6 +1433,15 @@ def create_mesh_app(
                 if val:
                     env_overrides[env_key] = val
 
+            # Inject project env vars so the agent gets its PROJECT.md
+            _proj = _agent_projects.get(agent_name)
+            if _proj:
+                from src.cli.config import PROJECTS_DIR
+                env_overrides["PROJECT_MD_PATH"] = str(
+                    PROJECTS_DIR / _proj / "project.md"
+                )
+                env_overrides["PROJECT_NAME"] = _proj
+
             try:
                 # Start container with per-agent env_overrides (not shared extra_env)
                 url = container_manager.start_agent(
@@ -1557,6 +1566,15 @@ def create_mesh_app(
             agent_env["INITIAL_INSTRUCTIONS"] = instructions
         if soul:
             agent_env["INITIAL_SOUL"] = soul
+
+        # Inject project env vars so the agent gets its PROJECT.md
+        _proj = _agent_projects.get(name)
+        if _proj:
+            from src.cli.config import PROJECTS_DIR
+            agent_env["PROJECT_MD_PATH"] = str(
+                PROJECTS_DIR / _proj / "project.md"
+            )
+            agent_env["PROJECT_NAME"] = _proj
 
         try:
             url = container_manager.start_agent(
