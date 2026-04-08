@@ -2768,6 +2768,27 @@ function dashboard() {
       }, true);
     },
 
+    async resetBrowser(agentId) {
+      this.showConfirm('Reset Browser', `Reset the browser session for "${agentId}"? The browser will relaunch with current proxy and settings on next use.`, async () => {
+        // Close VNC viewer if open — the session is about to die
+        if (this.showBrowserViewer && this.selectedAgent === agentId) {
+          this.showBrowserViewer = false;
+          this._browserFocusDone = false;
+          this._browserToggling = false;
+        }
+        this.showToast(`Resetting browser for ${agentId}...`);
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/browser/${agentId}/reset`, { method: 'POST' });
+          if (resp.ok) {
+            this.showToast(`Browser reset for ${agentId}`);
+          } else {
+            const err = await resp.json().catch(() => ({}));
+            this.showToast(`Reset failed: ${err.detail || 'Unknown error'}`);
+          }
+        } catch (e) { this.showToast(`Error: ${e.message}`); }
+      }, true);
+    },
+
     async toggleHeartbeat(agent) {
       const jobId = agent.heartbeat_job_id;
       if (!jobId || this.cronPauseLoading[jobId]) return;

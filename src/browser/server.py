@@ -172,6 +172,13 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         if body_bytes:
             body = json.loads(body_bytes)
         manager.set_proxy_config(agent_id, body)
+        # If a browser is already running for this agent, restart it so the
+        # new proxy config takes effect on the next get_or_start() call.
+        # reset() is a no-op when no instance exists (stop() checks under lock).
+        try:
+            await manager.reset(agent_id)
+        except Exception:
+            logger.warning("Failed to reset browser for '%s' after proxy change", agent_id, exc_info=True)
         return {"success": True}
 
     @app.post("/browser/{agent_id}/focus")
