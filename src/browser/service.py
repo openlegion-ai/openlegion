@@ -469,8 +469,31 @@ class BrowserManager:
         # Snapshot existing Firefox windows so we can identify the new one
         wids_before = await self._get_firefox_wids()
 
-        # persistent_context=True → returns a BrowserContext directly
-        browser = await AsyncNewBrowser(pw, **options)
+        # persistent_context=True → returns a BrowserContext directly.
+        # geoip=True makes Camoufox connect through the proxy to resolve
+        # the egress IP for fingerprint-consistent timezone/locale.  If the
+        # proxy is slow to handshake, this can fail.  Retry once with geoip
+        # (proxy may just need time), then fall back without it as last resort.
+        try:
+            browser = await AsyncNewBrowser(pw, **options)
+        except Exception as e:
+            if not options.get("geoip"):
+                raise
+            logger.warning(
+                "Camoufox launch failed for '%s' with geoip (%s), retrying with geoip after brief wait",
+                agent_id, e,
+            )
+            await asyncio.sleep(2)
+            try:
+                browser = await AsyncNewBrowser(pw, **options)
+            except Exception as e2:
+                logger.warning(
+                    "Camoufox geoip retry failed for '%s' (%s), "
+                    "falling back without geoip — fingerprint won't match proxy location",
+                    agent_id, e2,
+                )
+                options.pop("geoip", None)
+                browser = await AsyncNewBrowser(pw, **options)
         context = browser
         pages = context.pages
         page = pages[0] if pages else await context.new_page()
@@ -586,7 +609,8 @@ class BrowserManager:
         try:
             inst = await self.get_or_start(agent_id)
         except Exception as e:
-            logger.debug("Focus get_or_start failed for '%s': %s", agent_id, e)
+            logger.warning("Focus: browser failed to start for '%s': %s", agent_id, e)
+            self._user_focused_agent = None
             return False
         async with inst.lock:
             try:

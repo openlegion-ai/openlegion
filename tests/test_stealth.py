@@ -2,7 +2,7 @@
 
 from unittest.mock import patch
 
-from src.browser.stealth import _PROXY_NOT_SET, build_launch_options
+from src.browser.stealth import build_launch_options
 
 
 class TestBuildLaunchOptionsProxy:
@@ -33,14 +33,9 @@ class TestBuildLaunchOptionsProxy:
         assert "proxy" not in opts
         assert opts.get("geoip") is not True
 
-    def test_proxy_not_passed_falls_back_to_env(self):
-        """When proxy kwarg is not passed at all, legacy env var behavior."""
+    def test_default_proxy_is_none(self):
+        """When proxy kwarg is not passed, default is None (no proxy)."""
         with patch.dict("os.environ", {"BROWSER_PROXY_URL": "http://env:8080"}, clear=False):
             opts = build_launch_options("agent-1", "/tmp/profile")
-        assert opts.get("proxy") is not None
-        assert opts["proxy"]["server"] == "http://env:8080"
-        assert opts["geoip"] is True
-
-    def test_sentinel_is_not_none(self):
-        """_PROXY_NOT_SET sentinel is distinct from None."""
-        assert _PROXY_NOT_SET is not None
+        assert "proxy" not in opts
+        assert opts.get("geoip") is not True
