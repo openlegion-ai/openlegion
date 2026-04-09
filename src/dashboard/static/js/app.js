@@ -372,7 +372,7 @@ function dashboard() {
 
     // Network / Proxy
     networkProxy: {
-      system_proxy: { configured: false, managed: false, url: '' },
+      system_proxy: { configured: false, managed: false, managed_url: '', overridden: false, url: '' },
       no_proxy: '',
       agents: [],
       form: { url: '', username: '', password: '' },
@@ -380,6 +380,9 @@ function dashboard() {
       saving: false,
       saved: false,
       removingSystemProxy: false,
+      editingAgentProxy: null,
+      agentProxyForm: { mode: 'inherit', url: '', username: '', password: '' },
+      agentProxySaving: false,
     },
 
     // Workflow cancel tracking
@@ -3411,14 +3414,16 @@ function dashboard() {
         const resp = await fetch(`${window.__config.apiBase}/network/proxy`);
         if (resp.ok) {
           const data = await resp.json();
-          this.networkProxy.system_proxy = data.system_proxy || { configured: false, managed: false, url: '' };
+          this.networkProxy.system_proxy = data.system_proxy || { configured: false, managed: false, managed_url: '', overridden: false, url: '' };
           this.networkProxy.no_proxy = data.no_proxy || '';
           this.networkProxy.agents = data.agents || [];
-          // Populate form with existing system proxy URL (sans credentials)
-          if (data.system_proxy?.configured && !data.system_proxy?.managed) {
+          // Populate form: show override URL when overridden, or self-hosted URL when configured
+          if (data.system_proxy?.overridden || (!data.system_proxy?.managed && data.system_proxy?.configured)) {
             this.networkProxy.form.url = data.system_proxy.url || '';
             this.networkProxy.form.username = '';
             this.networkProxy.form.password = '';
+          } else {
+            this.networkProxy.form = { url: '', username: '', password: '' };
           }
         }
       } catch (e) { console.warn('loadNetworkProxy failed:', e); }
@@ -3429,13 +3434,11 @@ function dashboard() {
       this.networkProxy.saving = true;
       try {
         const body = { no_proxy: this.networkProxy.no_proxy };
-        if (!this.networkProxy.system_proxy.managed) {
-          body.system_proxy = this.networkProxy.form.url ? {
-            url: this.networkProxy.form.url,
-            username: this.networkProxy.form.username || undefined,
-            password: this.networkProxy.form.password || undefined,
-          } : null;
-        }
+        body.system_proxy = this.networkProxy.form.url ? {
+          url: this.networkProxy.form.url,
+          username: this.networkProxy.form.username || undefined,
+          password: this.networkProxy.form.password || undefined,
+        } : null;
         const resp = await fetch(`${window.__config.apiBase}/network/proxy`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
@@ -3444,7 +3447,7 @@ function dashboard() {
         if (resp.ok) {
           this.networkProxy.saved = true;
           setTimeout(() => this.networkProxy.saved = false, 2000);
-          this.showToast('Proxy settings saved');
+          this.showToast('Proxy settings saved — restart agents to apply');
           await this.loadNetworkProxy();
         } else {
           const err = await resp.json().catch(() => ({}));
@@ -3456,7 +3459,7 @@ function dashboard() {
       this.networkProxy.saving = false;
     },
 
-    async removeSystemProxy() {
+    async revertSystemProxy() {
       this.networkProxy.removingSystemProxy = true;
       try {
         const resp = await fetch(`${window.__config.apiBase}/network/proxy`, {
@@ -3466,7 +3469,7 @@ function dashboard() {
         });
         if (resp.ok) {
           this.networkProxy.form = { url: '', username: '', password: '' };
-          this.showToast('System proxy removed');
+          this.showToast(this.networkProxy.system_proxy.managed ? 'Reverted to managed proxy — restart agents to apply' : 'System proxy removed — restart agents to apply');
           await this.loadNetworkProxy();
         } else {
           const err = await resp.json().catch(() => ({}));
@@ -3504,6 +3507,49 @@ function dashboard() {
       if (mode === 'custom') return 'Custom proxy';
       if (mode === 'direct') return 'No proxy';
       return mode || '-';
+    },
+
+    startAgentProxyEdit(agent) {
+      this.networkProxy.editingAgentProxy = agent.agent_id;
+      this.networkProxy.agentProxyForm = {
+        mode: agent.mode || 'inherit',
+        url: '',
+        username: '',
+        password: '',
+      };
+    },
+
+    cancelAgentProxyEdit() {
+      this.networkProxy.editingAgentProxy = null;
+      this.networkProxy.agentProxyForm = { mode: 'inherit', url: '', username: '', password: '' };
+    },
+
+    async saveAgentProxy(agentId) {
+      if (this.networkProxy.agentProxySaving) return;
+      this.networkProxy.agentProxySaving = true;
+      try {
+        const form = this.networkProxy.agentProxyForm;
+        const body = { mode: form.mode };
+        if (form.mode === 'custom') {
+          body.url = form.url;
+          if (form.username) body.username = form.username;
+          if (form.password) body.password = form.password;
+        }
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/proxy`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'dashboard' },
+          body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+          this.showToast(`Proxy updated for ${agentId} — restart to apply`);
+          this.cancelAgentProxyEdit();
+          await this.loadNetworkProxy();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
+      finally { this.networkProxy.agentProxySaving = false; }
     },
 
     // ── System settings ─────────────────────────────────
