@@ -15,6 +15,7 @@ already governed by scroll_pause timing.
 
 from __future__ import annotations
 
+import math
 import random
 
 # ── Speed ─────────────────────────────────────────────────────
@@ -168,16 +169,15 @@ def scroll_increment() -> int:
     return int(_clamped_gauss(140, 30, 80, 200))
 
 
-def scroll_ramp(pos: float) -> float:
-    """Scroll step multiplier for momentum effect (0.4–1.0).
+def scroll_ramp(progress: float) -> float:
+    """Scroll step multiplier for momentum effect (0.15–1.0).
 
-    *pos* is the scroll progress from 0.0 (start) to 1.0 (end).
+    *progress* is the scroll progress from 0.0 (start) to 1.0 (end).
     Returns a multiplier that scales scroll step size to model
     wheel inertia: smaller steps at the start and end of a scroll,
     full-size steps in the middle.  Uses a sine curve for smooth ramp.
     """
-    import math
-    return 0.4 + 0.6 * math.sin(max(0.0, min(1.0, pos)) * math.pi)
+    return max(0.15, math.sin(max(0.0, min(1.0, progress)) * math.pi))
 
 
 # ── Inter-action delay sampling ──────────────────────────────
