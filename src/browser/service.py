@@ -717,6 +717,10 @@ class BrowserManager:
                         "body": self.redactor.redact(agent_id, body_text),
                     },
                 }
+                # Auto-detect CAPTCHAs so the agent knows immediately
+                captcha = await self._check_captcha(inst)
+                if captcha:
+                    result["captcha"] = captcha
                 if snapshot_after:
                     snap = await self._snapshot_impl(inst, agent_id)
                     result["snapshot"] = snap.get("data", {})
@@ -1812,41 +1816,46 @@ class BrowserManager:
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
-    async def solve_captcha(self, agent_id: str) -> dict:
+    async def _check_captcha(self, inst: CamoufoxInstance) -> dict | None:
+        """Check for CAPTCHA elements on the current page.
+
+        Returns a dict with captcha details if found, None otherwise.
+        Called automatically after navigation so agents are always
+        aware when a CAPTCHA is blocking progress.
+        """
+        captcha_selectors = [
+            'iframe[src*="recaptcha"]',
+            'iframe[src*="hcaptcha"]',
+            'iframe[src*="challenges.cloudflare.com"]',
+            'iframe[src*="captcha"]',
+            '[class*="cf-turnstile"]',
+            '[class*="captcha"]',
+            '#captcha',
+        ]
+        try:
+            for sel in captcha_selectors:
+                if await inst.page.locator(sel).count() > 0:
+                    return {
+                        "type": sel,
+                        "message": (
+                            "CAPTCHA detected — you cannot bypass this. "
+                            "Use notify_user to ask the user for help, "
+                            "then wait before retrying."
+                        ),
+                    }
+        except Exception:
+            pass
+        return None
+
+    async def detect_captcha(self, agent_id: str) -> dict:
         """Detect CAPTCHAs on the current page."""
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
-            try:
-                captcha_selectors = [
-                    'iframe[src*="recaptcha"]',
-                    'iframe[src*="hcaptcha"]',
-                    'iframe[src*="challenges.cloudflare.com"]',
-                    'iframe[src*="captcha"]',
-                    '[class*="cf-turnstile"]',
-                    '[class*="captcha"]',
-                    '#captcha',
-                ]
-                found = None
-                for sel in captcha_selectors:
-                    count = await inst.page.locator(sel).count()
-                    if count > 0:
-                        found = sel
-                        break
-
-                if not found:
-                    return {"success": True, "data": {"captcha_found": False, "message": "No CAPTCHA detected"}}
-
-                return {
-                    "success": True,
-                    "data": {
-                        "captcha_found": True,
-                        "captcha_type": found,
-                        "message": "CAPTCHA detected. Manual solving may be required via VNC.",
-                    },
-                }
-            except Exception as e:
-                return {"success": False, "error": str(e)}
+            captcha = await self._check_captcha(inst)
+            if captcha:
+                return {"success": True, "data": {"captcha_found": True, **captcha}}
+            return {"success": True, "data": {"captcha_found": False, "message": "No CAPTCHA detected"}}
 
     async def press_key(self, agent_id: str, key: str) -> dict:
         """Press a keyboard key or combination (e.g. 'Enter', 'Escape', 'Control+a').

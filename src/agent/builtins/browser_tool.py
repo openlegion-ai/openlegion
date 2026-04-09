@@ -571,15 +571,15 @@ async def browser_switch_tab(tab_index: int = -1, *, mesh_client=None) -> dict:
 
 
 @skill(
-    name="browser_solve_captcha",
+    name="browser_detect_captcha",
     description=(
         "Detect CAPTCHAs (reCAPTCHA, hCaptcha, Cloudflare Turnstile) on the "
         "current page. If found, the CAPTCHA must be solved manually via VNC. "
-        "Use this when you suspect a CAPTCHA is blocking progress."
+        "Usually not needed — browser_navigate auto-detects CAPTCHAs."
     ),
     parameters={},
     parallel_safe=False,
 )
-async def browser_solve_captcha(*, mesh_client=None) -> dict:
+async def browser_detect_captcha(*, mesh_client=None) -> dict:
     """Detect CAPTCHAs on the current page."""
-    return await _browser_command(mesh_client, "solve_captcha")
+    return await _browser_command(mesh_client, "detect_captcha")

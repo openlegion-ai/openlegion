@@ -386,7 +386,7 @@ canonicalized parameters and results over a 15-call sliding window.
 | `browser_go_forward` | Navigate forward in browser history |
 | `browser_switch_tab` | List open tabs or switch to a specific tab |
 | `browser_reset` | Reset browser session (profile preserved) |
-| `browser_solve_captcha` | Manual CAPTCHA detection and solving |
+| `browser_detect_captcha` | CAPTCHA detection (usually not needed — `browser_navigate` auto-detects) |
 | `memory_search` | Hybrid search across workspace files and structured DB |
 | `memory_save` | Save fact to workspace and structured memory DB |
 | `web_search` | Search the web via DuckDuckGo (no API key) |
