@@ -4,6 +4,8 @@ import os
 from unittest.mock import patch
 
 from src.cli.proxy import (
+    _assemble_proxy_url,
+    build_proxy_env_vars,
     parse_proxy_url,
     resolve_agent_proxy,
     sanitize_agent_id_for_env,
@@ -32,6 +34,10 @@ class TestValidateProxyUrl:
 
     def test_garbage(self):
         assert validate_proxy_url("not-a-url") is False
+
+    def test_port_zero_rejected(self):
+        """Port 0 is not a usable proxy endpoint — reject as misconfiguration."""
+        assert validate_proxy_url("http://proxy.example.com:0") is False
 
 
 class TestParseProxyUrl:
@@ -166,3 +172,58 @@ class TestSanitizeAgentIdForEnv:
 
     def test_multiple_special_chars(self):
         assert sanitize_agent_id_for_env("my-agent.v2-beta") == "my_agent_v2_beta"
+
+
+class TestBuildProxyEnvVars:
+    def test_with_proxy_returns_env_dict(self):
+        result = build_proxy_env_vars("http://proxy:8080")
+        assert result == {
+            "HTTP_PROXY": "http://proxy:8080",
+            "HTTPS_PROXY": "http://proxy:8080",
+            "NO_PROXY": "host.docker.internal,127.0.0.1,localhost",
+        }
+
+    def test_none_proxy_returns_empty_dict(self):
+        assert build_proxy_env_vars(None) == {}
+
+    def test_empty_string_proxy_returns_empty_dict(self):
+        assert build_proxy_env_vars("") == {}
+
+    def test_custom_no_proxy_appended(self):
+        result = build_proxy_env_vars("http://proxy:8080", no_proxy_user="10.0.0.0/8,myhost")
+        assert result["NO_PROXY"] == "host.docker.internal,127.0.0.1,localhost,10.0.0.0/8,myhost"
+
+    def test_mandatory_no_proxy_always_present(self):
+        result = build_proxy_env_vars("socks5://proxy:1080")
+        assert "host.docker.internal" in result["NO_PROXY"]
+        assert "127.0.0.1" in result["NO_PROXY"]
+        assert "localhost" in result["NO_PROXY"]
+
+    def test_socks5_proxy_url_preserved(self):
+        result = build_proxy_env_vars("socks5://user:pass@proxy:1080")
+        assert result["HTTP_PROXY"] == "socks5://user:pass@proxy:1080"
+        assert result["HTTPS_PROXY"] == "socks5://user:pass@proxy:1080"
+
+
+class TestAssembleProxyUrl:
+    def test_no_credentials(self):
+        assert _assemble_proxy_url("http://proxy:8080") == "http://proxy:8080"
+
+    def test_username_only(self):
+        result = _assemble_proxy_url("http://proxy:8080", username="user")
+        assert result == "http://user@proxy:8080"
+
+    def test_username_and_password(self):
+        result = _assemble_proxy_url("http://proxy:8080", username="user", password="pass")
+        assert result == "http://user:pass@proxy:8080"
+
+    def test_special_chars_encoded(self):
+        result = _assemble_proxy_url("http://proxy:8080", username="user@domain", password="p@ss:word")
+        assert "user%40domain" in result
+        assert "p%40ss%3Aword" in result
+        # Verify it roundtrips through validation
+        assert validate_proxy_url(result) is True
+
+    def test_socks5_with_credentials(self):
+        result = _assemble_proxy_url("socks5://proxy:1080", username="u", password="p")
+        assert result == "socks5://u:p@proxy:1080"

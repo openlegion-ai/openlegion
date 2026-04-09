@@ -1471,16 +1471,6 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         return
 
     if has_operator:
-        # Keep operator model in sync with default_model
-        if not default_model:
-            cfg = _load_config(config_path)
-            default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-        current_model = agents_cfg["agents"][_OPERATOR_AGENT_ID].get("model", "")
-        if current_model != default_model:
-            agents_cfg["agents"][_OPERATOR_AGENT_ID]["model"] = default_model
-            with open(AGENTS_FILE, "w") as f:
-                yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
-
         # Ensure permissions are correct even for existing operator
         # (handles upgrades where operator was created before permissions were set)
         perms = _load_permissions()
