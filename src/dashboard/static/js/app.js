@@ -3336,6 +3336,7 @@ function dashboard() {
           this.showToast(`Schedule updated for ${jobId}`);
           this.cancelCronEdit();
           this.fetchCronJobs();
+          this.fetchAgents();  // Refresh heartbeat_schedule in agent profiles
         } else {
           const err = await resp.json();
           this.showToast(`Error: ${err.detail || 'Update failed'}`);
