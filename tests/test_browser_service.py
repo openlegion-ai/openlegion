@@ -44,10 +44,12 @@ class TestCredentialRedactor:
     def test_deep_redact_nested(self):
         from src.browser.redaction import CredentialRedactor
         r = CredentialRedactor()
-        r.track_resolved_value("a1", "mysecretvalue")
-        obj = {"key": "has mysecretvalue", "nested": [{"v": "also mysecretvalue"}]}
+        obj = {
+            "key": "has sk-abcdefghijklmnopqrstuvwxyz1234567890",
+            "nested": [{"v": "also sk-abcdefghijklmnopqrstuvwxyz1234567890"}],
+        }
         result = r.deep_redact("a1", obj)
-        assert "mysecretvalue" not in str(result)
+        assert "sk-abcdefgh" not in str(result)
         assert "[REDACTED]" in result["key"]
 
     def test_clear_agent(self):
