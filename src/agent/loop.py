@@ -286,6 +286,7 @@ class AgentLoop:
         self._is_operator: bool = allowed_tools is not None
         self._operator_playbook_state: dict[str, int] = {}  # playbook -> turns since trigger
         self._last_active_playbooks: list[str] = []
+        self._operator_playbook_scan_idx: int = 0
         # Reference to the active messages list — set during tool execution
         # so skills.execute() can inject it into provenance-gated tools.
         self._current_messages: list[dict] = []
@@ -315,18 +316,29 @@ class AgentLoop:
 
         from src.cli.operator_playbooks import PLAYBOOK_STICKY_TURNS, extract_triggered_playbooks
 
-        # Find newly triggered playbooks
-        triggered = extract_triggered_playbooks(self._chat_messages)
+        # Scan only messages added since last check.
+        # After context compaction, the message list may shrink — clamp the
+        # start index so we re-scan from the new beginning rather than
+        # skipping everything.
+        scan_start = min(self._operator_playbook_scan_idx, len(self._chat_messages))
+        new_messages = self._chat_messages[scan_start:]
+        self._operator_playbook_scan_idx = len(self._chat_messages)
 
-        # Reset counter for triggered playbooks
+        # Reset counter only for playbooks triggered in NEW messages
+        triggered = extract_triggered_playbooks(new_messages)
         for pb in triggered:
             self._operator_playbook_state[pb] = 0
 
         # Return active playbooks (within sticky window)
-        return [
+        active = [
             pb for pb, turns in sorted(self._operator_playbook_state.items(), key=lambda x: x[1])
             if turns <= PLAYBOOK_STICKY_TURNS
         ]
+
+        if active != self._last_active_playbooks:
+            logger.debug("Operator playbooks: %s", active)
+
+        return active
 
     def _age_operator_playbooks(self) -> None:
         """Increment turn counter for all active playbooks. Call once per user turn."""
@@ -2631,6 +2643,18 @@ class AgentLoop:
                                 "output": {"error": str(tool_err)},
                             }
                 self._chat_total_rounds += 1
+
+                # Rebuild system prompt if operator playbook state changed
+                if self._is_operator:
+                    new_active = self._update_operator_playbooks()
+                    old_active = self._last_active_playbooks
+                    if set(new_active) != set(old_active):
+                        self._last_active_playbooks = new_active
+                        system = self._build_chat_system_prompt(
+                            goals=self._goals_cache if self._goals_cache is not self._GOALS_NOT_FETCHED else None,
+                            fleet_roster=self._fleet_roster,
+                            introspect_data=self._introspect_cache,
+                        )
 
                 # Rebuild system prompt after skill hot-reload
                 if self._skills_reloaded:

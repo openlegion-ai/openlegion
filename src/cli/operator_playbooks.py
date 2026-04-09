@@ -212,13 +212,9 @@ PLAYBOOK_STICKY_TURNS = 5
 
 
 def extract_triggered_playbooks(messages: list[dict]) -> set[str]:
-    """Scan messages for tool calls and return set of triggered playbook keys.
-
-    Only scans recent messages (last 20) for efficiency.
-    """
+    """Scan messages for tool calls and return set of triggered playbook keys."""
     triggered: set[str] = set()
-    recent = messages[-20:] if len(messages) > 20 else messages
-    for msg in recent:
+    for msg in messages:
         if msg.get("role") == "assistant" and msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
                 name = tc.get("function", {}).get("name", "")
