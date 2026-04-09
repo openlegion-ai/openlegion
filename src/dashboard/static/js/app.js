@@ -3417,14 +3417,9 @@ function dashboard() {
           this.networkProxy.system_proxy = data.system_proxy || { configured: false, managed: false, managed_url: '', overridden: false, url: '' };
           this.networkProxy.no_proxy = data.no_proxy || '';
           this.networkProxy.agents = data.agents || [];
-          // Populate form: show override URL when overridden, or self-hosted URL when configured
-          if (data.system_proxy?.overridden || (!data.system_proxy?.managed && data.system_proxy?.configured)) {
-            this.networkProxy.form.url = data.system_proxy.url || '';
-            this.networkProxy.form.username = '';
-            this.networkProxy.form.password = '';
-          } else {
-            this.networkProxy.form = { url: '', username: '', password: '' };
-          }
+          // Never pre-fill form with masked URLs — display masked value as
+          // read-only info, keep form empty for new input only.
+          this.networkProxy.form = { url: '', username: '', password: '' };
         }
       } catch (e) { console.warn('loadNetworkProxy failed:', e); }
       this.networkProxy.loading = false;

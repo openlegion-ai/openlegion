@@ -3709,18 +3709,22 @@
               <div class="bg-gray-800/50 rounded p-3 text-[11px] text-gray-500">
                 <span class="text-gray-600">Managed proxy:</span> <span class="font-mono" x-text="networkProxy.system_proxy.managed_url"></span>
               </div>
+              <div class="bg-gray-800/50 rounded p-3">
+                <div class="text-xs text-gray-500 mb-1">Current Override</div>
+                <div class="text-sm text-gray-300 font-mono" x-text="networkProxy.system_proxy.url"></div>
+              </div>
               <div>
-                <label class="text-xs text-gray-400 mb-1 block">Override Proxy URL</label>
+                <label class="text-xs text-gray-400 mb-1 block">New Override Proxy URL</label>
                 <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="socks5://proxy.example.com:1080">
               </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
                 <div>
                   <label class="text-xs text-gray-400 mb-1 block">Username <span class="text-gray-600">(optional)</span></label>
-                  <input type="text" x-model="networkProxy.form.username" class="dash-input w-full" placeholder="Leave blank to keep existing" autocomplete="off">
+                  <input type="text" x-model="networkProxy.form.username" class="dash-input w-full" autocomplete="off">
                 </div>
                 <div>
                   <label class="text-xs text-gray-400 mb-1 block">Password <span class="text-gray-600">(optional)</span></label>
-                  <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" placeholder="Leave blank to keep existing" autocomplete="off">
+                  <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" autocomplete="off">
                 </div>
               </div>
               <div class="flex items-center gap-2 pt-1">
@@ -3744,22 +3748,26 @@
                   Configured
                 </span>
               </div>
+              <div class="bg-gray-800/50 rounded p-3">
+                <div class="text-xs text-gray-500 mb-1">Current Proxy</div>
+                <div class="text-sm text-gray-300 font-mono" x-text="networkProxy.system_proxy.url"></div>
+              </div>
               <div>
-                <label class="text-xs text-gray-400 mb-1 block">Proxy URL</label>
+                <label class="text-xs text-gray-400 mb-1 block">New Proxy URL</label>
                 <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="socks5://proxy.example.com:1080">
               </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
                 <div>
                   <label class="text-xs text-gray-400 mb-1 block">Username <span class="text-gray-600">(optional)</span></label>
-                  <input type="text" x-model="networkProxy.form.username" class="dash-input w-full" placeholder="Leave blank to keep existing" autocomplete="off">
+                  <input type="text" x-model="networkProxy.form.username" class="dash-input w-full" autocomplete="off">
                 </div>
                 <div>
                   <label class="text-xs text-gray-400 mb-1 block">Password <span class="text-gray-600">(optional)</span></label>
-                  <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" placeholder="Leave blank to keep existing" autocomplete="off">
+                  <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" autocomplete="off">
                 </div>
               </div>
               <div class="flex items-center gap-2 pt-1">
-                <button @click="saveSystemProxy()" :disabled="networkProxy.saving"
+                <button @click="saveSystemProxy()" :disabled="networkProxy.saving || !networkProxy.form.url"
                   class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
                   <span x-text="networkProxy.saving ? 'Saving...' : 'Save'"></span>
                 </button>
@@ -3839,7 +3847,7 @@
                       <!-- Display mode -->
                       <template x-if="networkProxy.editingAgentProxy !== ap.agent_id">
                         <td class="py-2 pr-4">
-                          <span class="text-gray-300 font-mono" x-text="ap.agent_id"></span>
+                          <button @click="switchTab('fleet'); drillDown(ap.agent_id)" class="text-indigo-400 hover:text-indigo-300 transition-colors font-mono" x-text="ap.agent_id"></button>
                         </td>
                       </template>
                       <template x-if="networkProxy.editingAgentProxy !== ap.agent_id">
