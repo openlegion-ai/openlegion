@@ -420,6 +420,7 @@ def create_dashboard_router(
                 f"{runtime.browser_service_url}/browser/{agent_id}/focus",
                 json={},
                 headers=headers,
+                timeout=60,  # Cold-start can take 20-30s (Camoufox + geoip)
             )
             resp.raise_for_status()
             return resp.json()
