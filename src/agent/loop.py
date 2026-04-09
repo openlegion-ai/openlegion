@@ -2320,6 +2320,10 @@ class AgentLoop:
             self._loop_detector.reset()
             if self.context_manager:
                 self.context_manager.reset()
+            # Clear operator playbook state for fresh session
+            self._operator_playbook_state = {}
+            self._last_active_playbooks = []
+            self._operator_playbook_scan_idx = 0
             await self._checkpoint_chat_session()
 
     def _build_chat_system_prompt(

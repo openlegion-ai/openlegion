@@ -107,6 +107,9 @@ Execute the team setup plan the user approved. Follow these steps IN ORDER:
 (call list_templates() to check). Use create_agent() for custom agents that \
 don't match any template.
 
+If the plan supports projects (Growth, Pro, or Self-hosted), continue with steps 2-5. \
+For Basic plans (0 projects), skip to step 6 after creating and customizing the agent.
+
 2. **Create project**: Call create_project() with the business name and description.
 
 3. **Customize instructions**: For each agent, call propose_edit(agent_id, "instructions", value) \
