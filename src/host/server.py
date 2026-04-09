@@ -2324,6 +2324,33 @@ def create_mesh_app(
                 except Exception:
                     pass  # Agent might not be running
 
+        # Heartbeat schedule sync: if the value looks like a cron schedule
+        # (5-field expression or "every Xm/h/d"), update the cron job too.
+        # This handles the common case where the operator edits heartbeat
+        # frequency — the cron scheduler schedule must match.
+        if field == "heartbeat" and cron_scheduler is not None and isinstance(new_value, str):
+            sched = new_value.strip()
+            _is_schedule = (
+                bool(re.match(r"every\s+\d+[smhd]", sched, re.IGNORECASE))
+                or (len(sched.split()) == 5 and all(
+                    re.match(r"^[\d,\-\*/]+$", p) for p in sched.split()
+                ))
+            )
+            if _is_schedule:
+                hb_job = cron_scheduler.find_heartbeat_job(agent_id)
+                if hb_job:
+                    try:
+                        await cron_scheduler.update_job(hb_job.id, schedule=sched)
+                        logger.info(
+                            "Updated heartbeat schedule for '%s': %s",
+                            agent_id, sched,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to update heartbeat schedule for '%s': %s",
+                            agent_id, e,
+                        )
+
         blackboard.log_audit(
             action="edit_agent", target=agent_id, field=field,
             before_value=json.dumps(old_value) if not isinstance(old_value, str) else old_value,
