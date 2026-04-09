@@ -35,9 +35,9 @@ class TestValidateProxyUrl:
     def test_garbage(self):
         assert validate_proxy_url("not-a-url") is False
 
-    def test_port_zero_is_valid(self):
-        """Port 0 is technically valid per RFC — should not be rejected."""
-        assert validate_proxy_url("http://proxy.example.com:0") is True
+    def test_port_zero_rejected(self):
+        """Port 0 is not a usable proxy endpoint — reject as misconfiguration."""
+        assert validate_proxy_url("http://proxy.example.com:0") is False
 
 
 class TestParseProxyUrl:
