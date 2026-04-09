@@ -2300,11 +2300,25 @@ def create_mesh_app(
             if agent_id in perms.get("permissions", {}):
                 perms["permissions"][agent_id].update(new_value)
                 _save_permissions(perms)
+            # Hot-reload the in-memory permission matrix
+            if permissions is not None:
+                permissions.reload()
         else:
             yaml_key = _CONFIG_FIELD_MAP.get(field, field)
             agents[agent_id][yaml_key] = new_value
             with open(AGENTS_FILE, "w") as f:
                 yaml.dump(agent_cfg, f, default_flow_style=False, sort_keys=False)
+
+        # Budget sync: update the in-memory cost tracker immediately
+        if field == "budget" and cost_tracker is not None and isinstance(new_value, dict):
+            _daily = new_value.get("daily_usd")
+            _monthly = new_value.get("monthly_usd")
+            if _daily is not None or _monthly is not None:
+                cost_tracker.set_budget(
+                    agent_id,
+                    daily_usd=_daily,
+                    monthly_usd=_monthly,
+                )
 
         # Hot-reload: push to running agent's workspace
         if transport and agent_id in router.agent_registry:
