@@ -331,7 +331,7 @@ class AgentLoop:
 
         # Return active playbooks (within sticky window)
         active = [
-            pb for pb, turns in sorted(self._operator_playbook_state.items(), key=lambda x: x[1])
+            pb for pb, turns in sorted(self._operator_playbook_state.items(), key=lambda x: (x[1], x[0]))
             if turns <= PLAYBOOK_STICKY_TURNS
         ]
 
