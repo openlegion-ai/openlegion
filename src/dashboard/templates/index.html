@@ -4383,7 +4383,7 @@
 
         <!-- ═══ OPERATOR SUB-TAB ═══ -->
         <div x-show="systemTab === 'operator'" x-cloak class="space-y-4"
-          x-data="{ opAgent: null, opModelEditing: false, opModelValue: '', _opModelSearch: '', _opModelDropdownOpen: false }"
+          x-data="{ opAgent: null, opModelEditing: false, opModelValue: '', _opModelSearch: '', _opModelDropdownOpen: false, opHeartbeatEditing: false, opHeartbeatSaving: false, opHeartbeatAmount: 15, opHeartbeatUnit: 'm' }"
           x-init="opAgent = agents.find(a => a.id === 'operator') || null; fetchAuditLog(); $watch('systemTab', v => { if (v === 'operator') { opAgent = agents.find(a => a.id === 'operator') || null; fetchAuditLog(); } }); $watch('agents', () => { if (systemTab === 'operator') opAgent = agents.find(a => a.id === 'operator') || null; })">
 
           <!-- Status card -->
@@ -4450,15 +4450,62 @@
                   </div>
                 </div>
               </div>
-              <button x-show="!opModelEditing" @click="opModelValue = opAgent ? opAgent.model : ''; opModelEditing = true"
+              <button x-show="!opModelEditing" @click="opModelValue = opAgent ? opAgent.model : ''; opHeartbeatEditing = false; opModelEditing = true"
                 class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors shrink-0">Change</button>
             </div>
 
             <!-- Heartbeat -->
             <div class="flex items-center justify-between py-2 border-t border-gray-800/60">
-              <div>
+              <div class="flex-1 min-w-0">
                 <div class="text-xs text-gray-400">Health checks</div>
-                <div class="text-sm text-gray-300 mt-0.5" x-text="opAgent?.heartbeat_schedule || 'Every hour'"></div>
+                <!-- Read-only view -->
+                <div class="flex items-center gap-2 mt-0.5" x-show="!opHeartbeatEditing">
+                  <span class="text-sm" :class="opAgent?.heartbeat_enabled ? 'text-gray-300' : 'text-gray-600'" x-text="opAgent?.heartbeat_schedule || 'Every hour'"></span>
+                  <span x-show="opAgent?.heartbeat_enabled === false" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500">paused</span>
+                </div>
+                <!-- Edit view -->
+                <div x-show="opHeartbeatEditing" @keydown.escape.prevent="if(!opHeartbeatSaving) opHeartbeatEditing = false" class="mt-1.5 space-y-2">
+                  <!-- Preset buttons -->
+                  <div class="flex flex-wrap gap-1.5">
+                    <template x-for="preset in ['15m', '30m', '1h', '2h', '6h']" :key="preset">
+                      <button :disabled="opHeartbeatSaving"
+                        @click="opHeartbeatSaving = true; if (await saveOpHeartbeat('every ' + preset)) opHeartbeatEditing = false; opHeartbeatSaving = false"
+                        class="text-[11px] px-2.5 py-1 rounded border transition-colors disabled:opacity-50"
+                        :class="opAgent?.heartbeat_schedule === 'every ' + preset
+                          ? 'bg-indigo-600/20 border-indigo-600/40 text-indigo-300'
+                          : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600 hover:text-white'"
+                        x-text="preset"></button>
+                    </template>
+                  </div>
+                  <!-- Custom interval -->
+                  <div class="flex items-center gap-2">
+                    <span class="text-[11px] text-gray-500">Custom:</span>
+                    <input type="number" x-model.number="opHeartbeatAmount" min="1" max="1440" :disabled="opHeartbeatSaving"
+                      class="w-16 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-gray-200 focus:border-indigo-500/60 focus:outline-none disabled:opacity-50"
+                      @keydown.enter.prevent="if(!opHeartbeatSaving && opHeartbeatAmount >= 1 && opHeartbeatAmount <= 1440) { opHeartbeatSaving = true; if(await saveOpHeartbeat('every ' + Math.round(opHeartbeatAmount) + opHeartbeatUnit)) opHeartbeatEditing = false; opHeartbeatSaving = false; }">
+                    <select x-model="opHeartbeatUnit" :disabled="opHeartbeatSaving"
+                      class="px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-gray-200 focus:border-indigo-500/60 focus:outline-none disabled:opacity-50">
+                      <option value="m">min</option>
+                      <option value="h">hr</option>
+                    </select>
+                    <button :disabled="opHeartbeatSaving"
+                      @click="if(opHeartbeatAmount >= 1 && opHeartbeatAmount <= 1440) { opHeartbeatSaving = true; if(await saveOpHeartbeat('every ' + Math.round(opHeartbeatAmount) + opHeartbeatUnit)) opHeartbeatEditing = false; opHeartbeatSaving = false; }"
+                      class="text-xs px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-50">Save</button>
+                    <button @click="opHeartbeatEditing = false" :disabled="opHeartbeatSaving"
+                      class="text-xs px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-400 transition-colors disabled:opacity-50">Cancel</button>
+                  </div>
+                </div>
+              </div>
+              <!-- Right-side buttons (read-only view) -->
+              <div class="flex items-center gap-1.5 shrink-0" x-show="!opHeartbeatEditing">
+                <button x-show="opAgent?.heartbeat_job_id" @click="toggleHeartbeat(opAgent)"
+                  :disabled="cronPauseLoading[opAgent?.heartbeat_job_id] === true"
+                  class="text-xs px-2.5 py-1 rounded transition-colors disabled:opacity-50"
+                  :class="opAgent?.heartbeat_enabled ? 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white' : 'bg-amber-900/30 hover:bg-amber-900/50 text-amber-400 hover:text-amber-300 border border-amber-800/30'"
+                  x-text="cronPauseLoading[opAgent?.heartbeat_job_id] === true ? '...' : (opAgent?.heartbeat_enabled ? 'Pause' : 'Resume')"></button>
+                <button x-show="opAgent?.heartbeat_job_id"
+                  @click="(() => { const m = (opAgent?.heartbeat_schedule || '').match(/^every\s+(\d+)([mh])$/i); if(m) { opHeartbeatAmount = parseInt(m[1]); opHeartbeatUnit = m[2].toLowerCase(); } else { opHeartbeatAmount = 15; opHeartbeatUnit = 'm'; } })(); opModelEditing = false; opHeartbeatEditing = true"
+                  class="text-xs px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Change</button>
               </div>
             </div>
 
