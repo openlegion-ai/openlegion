@@ -1126,7 +1126,7 @@ class TestBrowserTypeHttpClient:
 
         mc.browser_command.assert_awaited_once_with(
             "type", {"ref": "e5", "selector": "", "text": "hello", "clear": True,
-                     "is_credential": False, "fast": False, "snapshot_after": False},
+                     "fast": False, "snapshot_after": False},
         )
         assert result["success"] is True
 
@@ -1147,118 +1147,19 @@ class TestBrowserTypeHttpClient:
         assert "Provide either" in result["error"]
 
 
-class TestBrowserTypeCredentialHandles:
-    """$CRED{} handles are resolved agent-side before sending to browser service."""
-
-    @pytest.mark.asyncio
-    async def test_cred_handle_resolved_and_redacted(self):
-        """$CRED{name} is resolved via vault and return shows [credential]."""
-        from src.agent.builtins.browser_tool import browser_type
-
-        mc = AsyncMock()
-        mc.vault_resolve = AsyncMock(return_value="actual-secret-value")
-        mc.browser_command = AsyncMock(return_value={"success": True, "data": {"typed": "x"}})
-
-        result = await browser_type(text="$CRED{my_api_key}", ref="e5", mesh_client=mc)
-
-        # Verify actual secret was sent to browser_command with is_credential flag
-        mc.browser_command.assert_awaited_once()
-        call_params = mc.browser_command.call_args[0][1]
-        assert call_params["text"] == "actual-secret-value"
-        assert call_params["is_credential"] is True
-        # Return shows [credential] instead of actual value
-        assert result["data"]["typed"] == "[credential]"
-        assert "actual-secret-value" not in str(result)
-
-    @pytest.mark.asyncio
-    async def test_cred_handle_not_found(self):
-        """$CRED{nonexistent} returns error."""
-        from src.agent.builtins.browser_tool import browser_type
-
-        mc = AsyncMock()
-        mc.vault_resolve = AsyncMock(return_value=None)
-
-        result = await browser_type(text="$CRED{nonexistent}", ref="e1", mesh_client=mc)
-        assert "error" in result
-        assert "not found" in result["error"].lower()
-
-    @pytest.mark.asyncio
-    async def test_cred_handle_no_mesh_client(self):
-        """$CRED{} without mesh_client returns error."""
-        from src.agent.builtins.browser_tool import browser_type
-
-        result = await browser_type(text="$CRED{some_key}", ref="e1", mesh_client=None)
-        assert "error" in result
-        assert "mesh connectivity" in result["error"].lower()
-
-    @pytest.mark.asyncio
-    async def test_mixed_text_and_cred(self):
-        """Text with $CRED{} embedded resolves and returns [credential]."""
-        from src.agent.builtins.browser_tool import browser_type
-
-        mc = AsyncMock()
-        mc.vault_resolve = AsyncMock(return_value="secret123")
-        mc.browser_command = AsyncMock(return_value={"success": True, "data": {"typed": "x"}})
-
-        result = await browser_type(text="Bearer $CRED{token}", ref="e1", mesh_client=mc)
-
-        call_params = mc.browser_command.call_args[0][1]
-        assert call_params["text"] == "Bearer secret123"
-        assert result["data"]["typed"] == "[credential]"
-
-    @pytest.mark.asyncio
-    async def test_cred_handle_tracks_resolved_value(self):
-        """$CRED{} resolution adds value to _resolved_credential_values."""
-        import src.agent.builtins.browser_tool as bt
-        from src.agent.builtins.browser_tool import browser_type
-
-        bt._resolved_credential_values.clear()
-
-        mc = AsyncMock()
-        mc.agent_id = "test-agent"
-        mc.vault_resolve = AsyncMock(return_value="MySecretP@ss123")
-        mc.browser_command = AsyncMock(return_value={"success": True, "data": {}})
-
-        await browser_type(text="$CRED{password}", ref="e1", mesh_client=mc)
-
-        assert "MySecretP@ss123" in bt._resolved_credential_values.get("test-agent", set())
-        bt._resolved_credential_values.clear()
-
-    @pytest.mark.asyncio
-    async def test_cred_handle_skips_short_values(self):
-        """Resolved values shorter than 4 chars are not tracked."""
-        import src.agent.builtins.browser_tool as bt
-        from src.agent.builtins.browser_tool import browser_type
-
-        bt._resolved_credential_values.clear()
-
-        mc = AsyncMock()
-        mc.agent_id = "test-agent"
-        mc.vault_resolve = AsyncMock(return_value="abc")
-        mc.browser_command = AsyncMock(return_value={"success": True, "data": {}})
-
-        await browser_type(text="$CRED{pin}", ref="e1", mesh_client=mc)
-
-        assert "abc" not in bt._resolved_credential_values.get("test-agent", set())
-        bt._resolved_credential_values.clear()
-
-
 class TestCredentialRedaction:
-    """Tests for _deep_redact, _redact_credentials, _redact_resolved_credentials."""
+    """Tests for _deep_redact and _redact_credentials (pattern-based)."""
 
     def test_deep_redact_nested_structures(self):
-        import src.agent.builtins.browser_tool as bt
         from src.agent.builtins.browser_tool import _deep_redact
 
-        bt._resolved_credential_values = {"test-agent": {"secret-val"}}
-
-        assert _deep_redact({"a": {"b": "secret-val"}}, "test-agent") == {"a": {"b": "[REDACTED]"}}
-        assert _deep_redact([{"k": "secret-val"}], "test-agent") == [{"k": "[REDACTED]"}]
-        assert _deep_redact({"items": ["ok", "secret-val"]}, "test-agent") == {"items": ["ok", "[REDACTED]"]}
         assert _deep_redact({"count": 42, "flag": True}, "test-agent") == {"count": 42, "flag": True}
         assert _deep_redact(None, "test-agent") is None
         assert _deep_redact("", "test-agent") == ""
-        bt._resolved_credential_values.clear()
+        # Pattern-based redaction still works in nested structures
+        assert "[REDACTED]" in _deep_redact(
+            {"a": {"b": "sk-abcdefghijklmnopqrstuvwxyz"}}, "test-agent",
+        )["a"]["b"]
 
     def test_redact_credentials_api_key_patterns(self):
         from src.agent.builtins.browser_tool import _redact_credentials
@@ -1274,75 +1175,51 @@ class TestCredentialRedaction:
         assert _redact_credentials("Price: $42.00") == "Price: $42.00"
         assert _redact_credentials("") == ""
 
-    def test_redact_resolved_credentials_basic(self):
-        import src.agent.builtins.browser_tool as bt
-        from src.agent.builtins.browser_tool import _redact_resolved_credentials
-
-        bt._resolved_credential_values = {"test-agent": {"secret123", "p@ssw0rd"}}
-        assert _redact_resolved_credentials("the key is secret123", "test-agent") == "the key is [REDACTED]"
-        assert _redact_resolved_credentials("safe text here", "test-agent") == "safe text here"
-        bt._resolved_credential_values.clear()
-
-    def test_redact_resolved_credentials_noop_when_empty(self):
-        import src.agent.builtins.browser_tool as bt
-        from src.agent.builtins.browser_tool import _redact_resolved_credentials
-
-        bt._resolved_credential_values = {}
-        text = "sk-abcdefghijklmnopqrstuvwxyz"
-        assert _redact_resolved_credentials(text, "test-agent") == text
-
     def test_browser_command_redacts_response(self):
         """_browser_command applies _deep_redact to the response."""
         import asyncio
 
-        import src.agent.builtins.browser_tool as bt
         from src.agent.builtins.browser_tool import _browser_command
-
-        bt._resolved_credential_values = {"test-agent": {"leaked-secret"}}
 
         mc = AsyncMock()
         mc.agent_id = "test-agent"
-        mc.browser_command = AsyncMock(return_value={"content": "found leaked-secret here"})
+        mc.browser_command = AsyncMock(return_value={
+            "content": "key is sk-abcdefghijklmnopqrstuvwxyz"
+        })
 
         result = asyncio.get_event_loop().run_until_complete(
             _browser_command(mc, "navigate", {"url": "https://x.com"})
         )
 
-        assert "leaked-secret" not in str(result)
+        assert "sk-abcdefghijklmnopqrstuvwxyz" not in str(result)
         assert "[REDACTED]" in result["content"]
-        bt._resolved_credential_values.clear()
 
     def test_browser_command_redacts_error(self):
         """_browser_command redacts errors too."""
         import asyncio
 
-        import src.agent.builtins.browser_tool as bt
         from src.agent.builtins.browser_tool import _browser_command
-
-        bt._resolved_credential_values = {"test-agent": {"my-secret"}}
 
         mc = AsyncMock()
         mc.agent_id = "test-agent"
-        mc.browser_command = AsyncMock(side_effect=Exception("fail: my-secret exposed"))
+        mc.browser_command = AsyncMock(
+            side_effect=Exception("fail: sk-abcdefghijklmnopqrstuvwxyz exposed")
+        )
 
         result = asyncio.get_event_loop().run_until_complete(
             _browser_command(mc, "navigate", {})
         )
 
-        assert "my-secret" not in str(result)
+        assert "sk-abcdefghijklmnopqrstuvwxyz" not in str(result)
         assert "[REDACTED]" in result["error"]
-        bt._resolved_credential_values.clear()
 
 
 class TestBrowserResetHttpClient:
-    """browser_reset sends reset command and clears credential tracking."""
+    """browser_reset sends reset command through mesh."""
 
     @pytest.mark.asyncio
-    async def test_reset_clears_credential_values(self):
-        import src.agent.builtins.browser_tool as bt
+    async def test_reset_sends_command(self):
         from src.agent.builtins.browser_tool import browser_reset
-
-        bt._resolved_credential_values.setdefault("test-agent", set()).add("some-secret")
 
         mc = AsyncMock()
         mc.agent_id = "test-agent"
@@ -1352,20 +1229,14 @@ class TestBrowserResetHttpClient:
 
         mc.browser_command.assert_awaited_once_with("reset", {})
         assert result["status"] == "reset"
-        assert "test-agent" not in bt._resolved_credential_values
 
     @pytest.mark.asyncio
     async def test_reset_no_mesh_client(self):
-        import src.agent.builtins.browser_tool as bt
         from src.agent.builtins.browser_tool import browser_reset
-
-        bt._resolved_credential_values.setdefault("", set()).add("leftover")
 
         result = await browser_reset(mesh_client=None)
 
         assert "error" in result
-        # Credentials should still be cleared even if mesh call fails
-        assert "" not in bt._resolved_credential_values
 
 
 class TestBrowserNoMeshClient:

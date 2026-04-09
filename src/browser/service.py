@@ -253,7 +253,6 @@ class CamoufoxInstance:
         self.page = page
         self.last_activity = time.time()
         self.refs: dict[str, dict] = {}  # ref_id -> {"role", "name", "index", "disabled"}
-        self.credential_filled_refs: set[str] = set()
         self.dialog_active: bool = False  # True when snapshot scoped to a modal dialog
         self.dialog_detected: bool = False  # True when a modal was found (even if scoping failed)
         self.lock = asyncio.Lock()  # serialize page operations per instance
@@ -807,8 +806,6 @@ class BrowserManager:
                             attrs.append("disabled")
                         if node.get("value"):
                             val = node["value"]
-                            if ref_id in inst.credential_filled_refs:
-                                val = "****"
                             attrs.append(f"value={val}")
                         if occ > 0:
                             attrs.append(f"dup:{occ + 1}")
@@ -1530,7 +1527,7 @@ class BrowserManager:
                 return {"success": False, "error": str(e)}
 
     async def type_text(self, agent_id: str, ref: str | None = None, selector: str | None = None,
-                        text: str = "", clear: bool = True, is_credential: bool = False,
+                        text: str = "", clear: bool = True,
                         fast: bool = False, snapshot_after: bool = False) -> dict:
         """Type text into element. Credential values should be pre-resolved by agent.
 
@@ -1614,11 +1611,6 @@ class BrowserManager:
                 # Settle after typing — framework state (React, Lexical, Vue)
                 # batches DOM reconciliation asynchronously.
                 await asyncio.sleep(0.10 if fast else action_delay())
-
-                if is_credential:
-                    self.redactor.track_resolved_value(agent_id, text)
-                    if ref:
-                        inst.credential_filled_refs.add(ref)
 
                 result = {"success": True, "data": {"typed_into": ref or selector, "length": len(text)}}
                 if snapshot_after:

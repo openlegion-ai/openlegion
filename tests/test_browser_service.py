@@ -387,42 +387,6 @@ class TestBrowserManagerRefResolution:
         assert mgr._locator_from_ref(inst, "e99") is None
 
 
-class TestBrowserManagerCredentialTracking:
-    """Tests for is_credential flag in type_text."""
-
-    @pytest.mark.asyncio
-    async def test_non_credential_text_not_tracked(self):
-        """Plain text typing should NOT add to redactor."""
-        from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-
-        mock_page = AsyncMock()
-        mock_page.keyboard = AsyncMock()
-        mock_page.keyboard.press = AsyncMock()
-        mock_page.evaluate = AsyncMock(return_value=True)
-        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        mgr._instances["a1"] = inst
-
-        with patch("src.browser.service.random.random", return_value=1.0):
-            await mgr.type_text("a1", selector="input", text="hello world", is_credential=False)
-        assert "hello world" not in mgr.redactor._resolved_values.get("a1", set())
-
-    @pytest.mark.asyncio
-    async def test_credential_text_is_tracked(self):
-        """Credential text typing SHOULD add to redactor."""
-        from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-
-        mock_page = AsyncMock()
-        mock_page.keyboard = AsyncMock()
-        mock_page.keyboard.press = AsyncMock()
-        mock_page.evaluate = AsyncMock(return_value=True)
-        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        mgr._instances["a1"] = inst
-
-        with patch("src.browser.service.random.random", return_value=1.0):
-            await mgr.type_text("a1", selector="input", text="secret-password", is_credential=True)
-        assert "secret-password" in mgr.redactor._resolved_values.get("a1", set())
 
 
 class TestTypeTextClearBehavior:
@@ -1119,30 +1083,6 @@ class TestSnapshot:
         assert inst.refs == result["data"]["refs"]
 
     @pytest.mark.asyncio
-    async def test_snapshot_credential_value_masked(self):
-        from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-
-        mock_page = AsyncMock()
-        tree = {
-            "role": "WebArea",
-            "name": "",
-            "children": [
-                {"role": "textbox", "name": "Password", "value": "s3cretPass!"},
-            ],
-        }
-        mock_page.accessibility = MagicMock()
-        mock_page.accessibility.snapshot = AsyncMock(return_value=tree)
-        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.credential_filled_refs.add("e0")
-        mgr._instances["a1"] = inst
-
-        result = await mgr.snapshot("a1")
-        assert result["success"] is True
-        assert "****" in result["data"]["snapshot"]
-        assert "s3cretPass!" not in result["data"]["snapshot"]
-
-    @pytest.mark.asyncio
     async def test_snapshot_no_interactive_elements(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
@@ -1285,28 +1225,6 @@ class TestTypeTextWithRef:
         assert "Control+a" not in press_calls
         assert "a" in press_calls and "b" in press_calls
         assert mock_page.evaluate.await_count == 0
-
-    @pytest.mark.asyncio
-    async def test_type_by_ref_credential_tracks_ref(self):
-        from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-
-        mock_page = MagicMock()
-        mock_locator = AsyncMock()
-        mock_locator.click = AsyncMock()
-        mock_page.get_by_role.return_value = mock_locator
-        mock_locator.nth = MagicMock(return_value=mock_locator)
-        mock_page.keyboard = AsyncMock()
-        mock_page.keyboard.press = AsyncMock()
-        mock_page.evaluate = AsyncMock(return_value=True)
-        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "textbox", "name": "Password"}}
-        mgr._instances["a1"] = inst
-
-        with patch("src.browser.service.random.random", return_value=1.0):
-            await mgr.type_text("a1", ref="e0", text="secret123", is_credential=True)
-        assert "e0" in inst.credential_filled_refs
-        assert "secret123" in mgr.redactor._resolved_values.get("a1", set())
 
     @pytest.mark.asyncio
     async def test_type_no_ref_or_selector(self):
@@ -2556,7 +2474,6 @@ class TestSnapshotDisabledField:
         inst.page.url = "https://x.com"
         inst.page.title = AsyncMock(return_value="X")
         inst.refs = {}
-        inst.credential_filled_refs = set()
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
 
@@ -2587,7 +2504,6 @@ class TestSnapshotDisabledField:
         inst.page.url = "https://example.com"
         inst.page.title = AsyncMock(return_value="Example")
         inst.refs = {}
-        inst.credential_filled_refs = set()
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
 

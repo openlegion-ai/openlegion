@@ -141,7 +141,6 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             selector=body.get("selector"),
             text=body.get("text", ""),
             clear=body.get("clear", True),
-            is_credential=body.get("is_credential", False),
             fast=body.get("fast", False),
             snapshot_after=body.get("snapshot_after", False),
         )

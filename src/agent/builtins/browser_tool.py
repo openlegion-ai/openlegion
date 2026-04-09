@@ -2,15 +2,12 @@
 
 All browser operations are proxied through the mesh to the shared browser
 service container. Agent containers no longer bundle Chrome or VNC.
-Credential resolution ($CRED{} handles) happens agent-side before sending
-text to the browser service, so secrets never transit as plaintext names.
 """
 
 from __future__ import annotations
 
 import re
 
-from src.agent.builtins import CRED_HANDLE_RE
 from src.agent.skills import skill
 from src.shared.utils import setup_logging
 
@@ -29,10 +26,6 @@ _REDACT_PATTERNS = [
     re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9/+=])"),
 ]
 
-# Per-agent resolved credential values for exact-match redaction.
-# Keyed by agent_id so credentials never leak across trust boundaries.
-_resolved_credential_values: dict[str, set[str]] = {}
-
 
 def _redact_credentials(text: str) -> str:
     """Replace common secret patterns with [REDACTED]."""
@@ -43,26 +36,10 @@ def _redact_credentials(text: str) -> str:
     return text
 
 
-def _redact_resolved_credentials(text: str, agent_id: str = "") -> str:
-    """Replace any resolved $CRED{} values with [REDACTED].
-
-    Only redacts credentials belonging to *agent_id* so that one agent's
-    secrets cannot influence another agent's output.
-    """
-    if not text or not agent_id:
-        return text
-    agent_creds = _resolved_credential_values.get(agent_id)
-    if not agent_creds:
-        return text
-    for value in agent_creds:
-        text = text.replace(value, "[REDACTED]")
-    return text
-
-
 def _deep_redact(obj, agent_id: str = ""):
     """Recursively redact credential values from any JSON-serializable structure."""
     if isinstance(obj, str):
-        return _redact_resolved_credentials(_redact_credentials(obj), agent_id)
+        return _redact_credentials(obj)
     if isinstance(obj, dict):
         return {k: _deep_redact(v, agent_id) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -313,8 +290,6 @@ async def browser_click(
         "Type text into a form field on the current page. Clears the field first, "
         "then enters the new text. Preferred: use ref from browser_get_elements "
         "(e.g. ref='e5'). Fallback: use a CSS selector. "
-        "Use $CRED{name} handles to type secrets (e.g. text='$CRED{twitter_password}') "
-        "— the value is resolved from the vault and never exposed to you. "
         "Set fast=true for search queries, URLs, and non-sensitive fields to "
         "type quickly. Set snapshot_after=true to include updated element refs."
     ),
@@ -326,10 +301,7 @@ async def browser_click(
         },
         "text": {
             "type": "string",
-            "description": (
-                "Text to type. Use $CRED{name} for secrets, "
-                "e.g. '$CRED{twitter_password}'"
-            ),
+            "description": "Text to type into the field",
         },
         "ref": {
             "type": "string",
@@ -360,40 +332,17 @@ async def browser_type(
     text: str, selector: str = "", ref: str = "", fast: bool = False,
     snapshot_after: bool = False, *, mesh_client=None,
 ) -> dict:
-    """Type text into an element. Resolves $CRED{} handles agent-side."""
+    """Type text into an element."""
     if not text:
         return {"error": "The 'text' parameter is required"}
     if not selector and not ref:
         return {"error": "Provide either 'ref' (from browser_get_elements) or 'selector' (CSS)"}
 
-    # Resolve $CRED{name} handles agent-side (secrets never transit as names)
-    is_credential = False
-    actual_text = text
-    cred_matches = CRED_HANDLE_RE.findall(text)
-    if cred_matches:
-        if not mesh_client:
-            return {"error": "$CRED{} handles require mesh connectivity for resolution"}
-        agent_id = getattr(mesh_client, "agent_id", "unknown")
-        for cred_name in cred_matches:
-            resolved = await mesh_client.vault_resolve(cred_name)
-            if resolved is None:
-                return {"error": f"Credential not found: {cred_name}"}
-            actual_text = actual_text.replace(f"$CRED{{{cred_name}}}", resolved)
-            if len(resolved) >= 4:
-                _resolved_credential_values.setdefault(agent_id, set()).add(resolved)
-        is_credential = True
-
-    result = await _browser_command(
+    return await _browser_command(
         mesh_client, "type",
-        {"ref": ref, "selector": selector, "text": actual_text, "clear": True,
-         "is_credential": is_credential, "fast": fast,
-         "snapshot_after": snapshot_after},
+        {"ref": ref, "selector": selector, "text": text, "clear": True,
+         "fast": fast, "snapshot_after": snapshot_after},
     )
-
-    # Never return credential values to the LLM
-    if is_credential and result.get("success"):
-        result["data"] = {"typed": "[credential]", "ref": ref or selector}
-    return result
 
 
 @skill(
@@ -481,8 +430,6 @@ async def browser_scroll(
 )
 async def browser_reset(*, mesh_client=None) -> dict:
     """Force-close the browser session so the next call gets a fresh one."""
-    agent_id = getattr(mesh_client, "agent_id", "unknown") if mesh_client else ""
-    _resolved_credential_values.pop(agent_id, None)
     return await _browser_command(mesh_client, "reset")
 
 
