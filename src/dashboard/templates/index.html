@@ -2079,8 +2079,9 @@
                     </div>
                     <!-- Edit mode -->
                     <div x-show="agentConfigs[selectedAgent] && configEditing">
-                      <div class="space-y-3">
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 chat-grid">
+                      <div class="space-y-4">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-x-3 gap-y-3">
+                          <!-- ── Core ── -->
                           <div>
                             <label class="text-xs text-gray-500 mb-1 block">Model</label>
                             <div class="relative" @click.outside="editForm._modelDropdownOpen = false" @keydown.escape.stop="editForm._modelDropdownOpen = false">
@@ -2205,7 +2206,8 @@
                               <div class="dash-input w-full text-gray-500 cursor-not-allowed">Not supported for this model</div>
                             </template>
                           </div>
-                          <div class="md:col-span-2">
+                          <!-- ── Permissions ── -->
+                          <div class="md:col-span-2 pt-2 mt-1 border-t border-gray-800/60">
                             <label class="text-xs text-gray-500 mb-1.5 block">Capabilities</label>
                             <div class="flex flex-wrap gap-4">
                               <label class="flex items-center gap-2 cursor-pointer">
@@ -2319,38 +2321,52 @@
                               </div>
                             </template>
                           </div>
-                        </div>
-                        <!-- Proxy -->
-                        <div class="border border-gray-800 rounded-lg p-3">
-                          <div class="flex items-center gap-2 mb-2">
-                            <svg class="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                            <span class="text-xs font-medium text-gray-400">Proxy</span>
-                            <span class="setting-hint setting-hint-sm" tabindex="0">?<span class="setting-hint-text">Configure how this agent routes HTTP and browser traffic. Changes require an agent restart.</span></span>
-                          </div>
-                          <div class="space-y-3">
-                            <div>
-                              <label class="text-xs text-gray-500 mb-1 block">Mode</label>
-                              <select x-model="editForm.proxy_mode" class="dash-select w-full">
-                                <option value="inherit">Use system proxy</option>
-                                <option value="custom">Custom proxy</option>
-                                <option value="direct">No proxy (direct)</option>
-                              </select>
-                            </div>
+                          <!-- ── Network ── -->
+                          <div class="md:col-span-2 pt-2 mt-1 border-t border-gray-800/60">
+                            <label class="text-xs text-gray-500 mb-1 block">Proxy</label>
+                            <select x-model="editForm.proxy_mode" @change="editForm._showProxyChange = false" class="dash-select w-full md:w-1/2">
+                              <option value="inherit">Use system proxy</option>
+                              <option value="custom">Custom proxy</option>
+                              <option value="direct">No proxy (direct)</option>
+                            </select>
                             <template x-if="editForm.proxy_mode === 'custom'">
-                              <div class="space-y-3">
-                                <div>
-                                  <label class="text-xs text-gray-500 mb-1 block">Proxy URL</label>
-                                  <input type="text" x-model="editForm.proxy_url" class="dash-input w-full" placeholder="socks5://proxy:1080 or http://proxy:8080">
-                                </div>
-                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
-                                  <div>
-                                    <label class="text-xs text-gray-500 mb-1 block">Username <span class="text-gray-600">(optional)</span></label>
-                                    <input type="text" x-model="editForm.proxy_username" class="dash-input w-full" autocomplete="off">
+                              <div class="mt-3 space-y-3">
+                                <template x-if="editForm._current_proxy_host">
+                                  <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+                                    <span class="w-2 h-2 rounded-full bg-emerald-400 shrink-0"></span>
+                                    <span class="text-xs text-gray-300">
+                                      <span class="text-emerald-400 font-medium" x-text="(editForm._current_proxy_scheme || 'http').toUpperCase()"></span>
+                                      proxy at
+                                      <span class="font-mono text-gray-200" x-text="editForm._current_proxy_host"></span>
+                                      <template x-if="editForm._current_proxy_has_credential">
+                                        <span class="text-gray-500">(authenticated)</span>
+                                      </template>
+                                    </span>
+                                    <button type="button" @click="editForm._showProxyChange = !editForm._showProxyChange"
+                                      class="ml-auto text-xs text-indigo-400 hover:text-indigo-300">
+                                      <span x-text="editForm._showProxyChange ? 'Cancel change' : 'Change'"></span>
+                                    </button>
                                   </div>
+                                </template>
+                                <div x-show="!editForm._current_proxy_host || editForm._showProxyChange" x-transition class="space-y-2">
                                   <div>
-                                    <label class="text-xs text-gray-500 mb-1 block">Password <span class="text-gray-600">(optional)</span></label>
-                                    <input type="password" x-model="editForm.proxy_password" class="dash-input w-full" autocomplete="off">
+                                    <label class="block text-xs text-gray-400 mb-1">Proxy URL</label>
+                                    <input x-model="editForm.proxy_url" type="text" placeholder="http://proxy.example.com:8080"
+                                      class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"/>
                                   </div>
+                                  <div class="grid grid-cols-2 gap-2">
+                                    <div>
+                                      <label class="block text-xs text-gray-400 mb-1">Username <span class="text-gray-600">(optional)</span></label>
+                                      <input x-model="editForm.proxy_username" type="text" autocomplete="off"
+                                        class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"/>
+                                    </div>
+                                    <div>
+                                      <label class="block text-xs text-gray-400 mb-1">Password <span class="text-gray-600">(optional)</span></label>
+                                      <input x-model="editForm.proxy_password" type="password" autocomplete="off"
+                                        class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"/>
+                                    </div>
+                                  </div>
+                                  <p class="text-xs text-gray-500">Only HTTP and HTTPS proxies are supported.</p>
                                 </div>
                               </div>
                             </template>
