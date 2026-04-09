@@ -1,16 +1,14 @@
 """Tests for operator playbook detection, state tracking, and content assembly."""
 from __future__ import annotations
 
-import pytest
-
 from src.cli.operator_playbooks import (
-    PLAYBOOK_STICKY_TURNS,
     _OPERATOR_CORE,
     _PLAYBOOK_CREDENTIALS,
     _PLAYBOOK_EDIT,
     _PLAYBOOK_MONITOR,
     _PLAYBOOK_TEAM_BUILD,
     _TOOL_PLAYBOOK_MAP,
+    PLAYBOOK_STICKY_TURNS,
     extract_triggered_playbooks,
     get_playbook_content,
 )

@@ -22,7 +22,8 @@ class TestCredentialRedactor:
     def test_deep_redact_nested(self):
         from src.browser.redaction import CredentialRedactor
         r = CredentialRedactor()
-        obj = {"key": "has sk-abcdefghijklmnopqrstuvwxyz1234567890", "nested": [{"v": "also sk-abcdefghijklmnopqrstuvwxyz1234567890"}]}
+        secret = "sk-abcdefghijklmnopqrstuvwxyz1234567890"
+        obj = {"key": f"has {secret}", "nested": [{"v": f"also {secret}"}]}
         result = r.deep_redact("a1", obj)
         assert "sk-abcdefgh" not in str(result)
         assert "[REDACTED]" in result["key"]
