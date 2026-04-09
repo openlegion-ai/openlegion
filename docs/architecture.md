@@ -100,6 +100,18 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `redaction.py` | Credential redaction for browser content |
 | `timing.py` | Human-like timing jitter for browser actions |
 
+### Browser Container Resources
+
+Resources scale by plan to fit server constraints:
+
+| Plan | Server | RAM | SHM | CPU | Max Browsers |
+|------|--------|-----|-----|-----|-------------|
+| Basic | cax11 4GB 2c | 2GB | 512MB | 1.0 core | 1 |
+| Growth | cax21 8GB 4c | 4GB | 1GB | 1.5 cores | 5 |
+| Pro | cax31 16GB 8c | 8GB | 2GB | 2.0 cores | 10 |
+
+SHM (shared memory) is critical for Firefox compositor IPC — too small causes VNC rendering freezes.
+
 ### Channels (`src/channels/`)
 
 | Module | Platform |

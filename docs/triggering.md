@@ -166,6 +166,14 @@ Each agent can have a `HEARTBEAT.md` file in its workspace that defines autonomo
 - Report completion to the blackboard
 ```
 
+### Editing Heartbeat Schedules
+
+Heartbeat schedules can be changed via:
+1. **Dashboard Automations tab** — edit the cron schedule directly
+2. **Operator agent** — via propose_edit/confirm_edit with a cron expression (e.g. `0 */8 * * *`) or interval (e.g. `every 6h`)
+
+Both methods sync the schedule to the cron scheduler immediately — no restart required. The dashboard displays update in real-time.
+
 ### Enriched Heartbeat Messages
 
 When a heartbeat fires, the agent receives a single message with all the context it needs to act:

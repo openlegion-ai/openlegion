@@ -161,6 +161,25 @@ Notifications never steal keyboard focus or force-unminimize a panel the user de
 
 Closing the chat panel while a response is streaming cancels the in-flight request. The partial response is preserved in history.
 
+### Credit Exhaustion
+
+When an agent's LLM call fails due to depleted credits (HTTP 402), a styled card appears in the chat:
+- Shows "Credits Depleted" with the error details
+- "Top Up Credits" button links to the app's credits page
+- "Use Own API Key" button navigates to Settings → API Keys
+- Prevents duplicate cards via deduplication on the last 3 messages
+
+## Proxy Configuration
+
+Agent proxy settings are in the agent config panel under **Network**:
+- **System proxy** (inherit) — uses the fleet-wide proxy
+- **Custom proxy** — per-agent HTTP/HTTPS proxy URL with optional credentials
+- **No proxy** (direct) — bypasses all proxies
+
+When a custom proxy is configured, a green indicator shows the current proxy host. Click "Change" to modify. Only HTTP and HTTPS proxies are supported — SOCKS5 is not available.
+
+Proxy changes auto-restart the agent and reset the browser session. In the System → Network page, per-agent proxy edits also trigger an automatic restart.
+
 ## Broadcast
 
 Send a message to multiple agents simultaneously using the broadcast bar below the agent grid. When a project is selected, the broadcast targets only that project's members. When viewing "All Agents", it targets every agent. Standalone agents (not in any project) are included only in the "All Agents" broadcast. Each agent processes the message independently. Responses display inline with expand/collapse for long replies (200+ characters).
