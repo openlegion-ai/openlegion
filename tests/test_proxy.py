@@ -108,7 +108,8 @@ class TestResolveAgentProxy:
             result = resolve_agent_proxy("test-agent", agents_cfg, {})
         assert result == "socks5://sys:p@host:1080"
 
-    def test_browser_proxy_takes_precedence_over_system_proxy(self):
+    def test_system_proxy_takes_precedence_over_browser_proxy(self):
+        """User override (OPENLEGION_SYSTEM_PROXY) wins over managed (BROWSER_PROXY_*)."""
         agents_cfg = {"test-agent": {}}
         env = {
             "BROWSER_PROXY_URL": "http://managed:8080",
@@ -116,7 +117,7 @@ class TestResolveAgentProxy:
         }
         with patch.dict(os.environ, env, clear=False):
             result = resolve_agent_proxy("test-agent", agents_cfg, {})
-        assert "managed:8080" in result
+        assert "self-hosted:1080" in result
 
     def test_no_proxy_anywhere_returns_none(self):
         agents_cfg = {"test-agent": {}}
