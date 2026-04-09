@@ -105,9 +105,9 @@ class TestEnsureOperatorNoop(_TempConfigMixin):
 
 
 class TestEnsureOperatorModelSync(_TempConfigMixin):
-    """Syncs operator model to default_model when they differ."""
+    """Preserves existing operator model — does not overwrite on restart."""
 
-    def test_updates_model_when_different(self):
+    def test_preserves_existing_model(self):
         # Pre-create operator with old model
         agents_cfg = {"agents": {"operator": {
             "role": "Existing operator",
@@ -122,12 +122,12 @@ class TestEnsureOperatorModelSync(_TempConfigMixin):
 
         with open(self._agents_path) as f:
             result = yaml.safe_load(f)
-        # Model should be updated to match default_model
-        assert result["agents"]["operator"]["model"] == "google/gemini-2.0-flash"
+        # Model should be preserved (not overwritten by default_model)
+        assert result["agents"]["operator"]["model"] == "anthropic/claude-3-haiku"
         # Role should be preserved
         assert result["agents"]["operator"]["role"] == "Existing operator"
 
-    def test_reads_model_from_config_when_not_passed(self):
+    def test_preserves_model_when_default_not_passed(self):
         # Pre-create operator with old model
         agents_cfg = {"agents": {"operator": {
             "role": "Existing operator",
@@ -146,9 +146,11 @@ class TestEnsureOperatorModelSync(_TempConfigMixin):
 
         with open(self._agents_path) as f:
             result = yaml.safe_load(f)
-        assert result["agents"]["operator"]["model"] == "google/gemini-2.0-flash"
+        # Model should remain unchanged even when default differs
+        assert result["agents"]["operator"]["model"] == "anthropic/claude-3-haiku"
 
-    def test_no_write_when_model_matches(self):
+    def test_no_write_when_operator_exists(self):
+        """Does not rewrite agents.yaml when operator already exists."""
         # Pre-create operator with matching model
         agents_cfg = {"agents": {"operator": {
             "role": "Existing operator",
