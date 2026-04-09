@@ -92,6 +92,30 @@ def _start_kasmvnc() -> subprocess.Popen:
     return proc
 
 
+def _start_unclutter() -> subprocess.Popen | None:
+    """Hide the X11 system cursor via XFixes.
+
+    KasmVNC streams both the X11 cursor and the browser's rendered content.
+    Camoufox's ``humanize=True`` draws its own visual cursor (red dot)
+    inside the browser page.  Without hiding the X11 cursor, VNC viewers
+    see two cursors — the red dot that moves with automation and a stale
+    system cursor that only moves on xdotool calls.  Hiding the X11
+    cursor leaves only the Camoufox cursor visible.
+    """
+    try:
+        proc = subprocess.Popen(
+            ["unclutter", "--timeout", "0"],
+            env={**os.environ, "DISPLAY": _DISPLAY},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info("unclutter started — X11 cursor hidden (pid=%d)", proc.pid)
+        return proc
+    except FileNotFoundError:
+        logger.warning("unclutter not found — X11 cursor will remain visible")
+        return None
+
+
 def _start_openbox() -> subprocess.Popen:
     """Start Openbox window manager on the KasmVNC display."""
     proc = subprocess.Popen(
@@ -108,6 +132,7 @@ def _start_openbox() -> subprocess.Popen:
 def main() -> None:
     """Start all services and run the FastAPI server."""
     kasmvnc_proc = _start_kasmvnc()
+    unclutter_proc = _start_unclutter()
     openbox_proc = _start_openbox()
 
     manager = BrowserManager(
@@ -122,7 +147,10 @@ def main() -> None:
         logger.info("Browser service ready (max=%d, idle_timeout=%dm)", _MAX_BROWSERS, _IDLE_TIMEOUT)
         yield
         await manager.stop_all()
-        for proc in (openbox_proc, kasmvnc_proc):
+        procs = [openbox_proc, kasmvnc_proc]
+        if unclutter_proc:
+            procs.insert(0, unclutter_proc)
+        for proc in procs:
             try:
                 proc.terminate()
                 proc.wait(timeout=5)
