@@ -22,7 +22,7 @@ Agents run as non-root (UID 1000) with:
 - 384MB memory limit (agents are slim — no browser)
 - 0.15 CPU quota (agents are I/O-bound, waiting on LLM APIs)
 - PID limit: 256 processes (`pids_limit: 256`)
-- Browser operations handled by shared browser service container (2–8GB RAM scaled by fleet size, 1 CPU)
+- Browser operations handled by shared browser service container: 2–8GB RAM, 0.5–2.0 CPU, 512MB–2GB SHM (scaled by plan tier — see Architecture)
 - `cap_drop: ALL` (no capabilities re-added)
 - Read-only root filesystem (`read_only: True`)
 - Tmpfs at `/tmp` (100MB, noexec, nosuid)
@@ -130,6 +130,7 @@ Agent HTTP requests (`src/agent/builtins/http_tool.py`) are blocked from reachin
 - IPv4-mapped IPv6 addresses (e.g., `::ffff:127.0.0.1`) are also blocked
 - CGNAT range (100.64.0.0/10, RFC 6598) is also blocked
 - Prevents agents from using the HTTP tool to scan internal networks or access host services
+- SOCKS5 proxy URLs are rejected server-side with HTTP 400 — only HTTP/HTTPS proxies are supported
 
 ### Path Traversal Prevention
 
