@@ -3554,8 +3554,15 @@ function dashboard() {
           body: JSON.stringify(body),
         });
         if (resp.ok) {
-          this.showToast(`Proxy updated for ${agentId} — restart to apply`);
           this.cancelAgentProxyEdit();
+          try {
+            await fetch(`${window.__config.apiBase}/agents/${agentId}/restart`, {
+              method: 'POST', headers: { 'X-Requested-With': 'dashboard' },
+            });
+            this.showToast(`Proxy updated for ${agentId} — restarting`);
+          } catch (_) {
+            this.showToast(`Proxy updated for ${agentId} — restart failed, do it manually`);
+          }
           await this.loadNetworkProxy();
         } else {
           const err = await resp.json().catch(() => ({}));
