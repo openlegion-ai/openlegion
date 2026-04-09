@@ -1254,15 +1254,17 @@ class BrowserManager:
         return "+".join(mapped)
 
     def _is_x11_site(self, inst: CamoufoxInstance) -> bool:
-        """Check if current page is on a site needing X11 input bypass."""
-        try:
-            host = urlparse(inst.page.url).hostname or ""
-        except Exception:
-            return False
-        return (
-            host == "x.com" or host.endswith(".x.com")
-            or host == "twitter.com" or host.endswith(".twitter.com")
-        )
+        """Whether to use X11 input injection for this page.
+
+        X11/xdotool injects real kernel-level InputEvents that the browser
+        marks ``isTrusted=true``.  CDP-dispatched events always carry
+        ``isTrusted=false``, which bot-detection systems (DataDome,
+        Cloudflare, PerimeterX, ArkoseLabs) broadly check — not just on
+        Twitter.  Using X11 input everywhere eliminates this signal.
+
+        Falls back to CDP automatically on failure (see call sites).
+        """
+        return True
 
     async def click(
         self, agent_id: str, ref: str | None = None,
