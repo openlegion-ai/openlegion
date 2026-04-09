@@ -1396,9 +1396,9 @@ class TestBrowserNoMeshClient:
         assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_solve_captcha_no_mesh(self):
-        from src.agent.builtins.browser_tool import browser_solve_captcha
-        result = await browser_solve_captcha(mesh_client=None)
+    async def test_detect_captcha_no_mesh(self):
+        from src.agent.builtins.browser_tool import browser_detect_captcha
+        result = await browser_detect_captcha(mesh_client=None)
         assert "error" in result
 
     @pytest.mark.asyncio
@@ -2318,15 +2318,15 @@ class TestListAgentsProjectScope:
         assert "other" in result
 
 
-# ── CAPTCHA (browser_tool solve_captcha via mesh) ──────────────────
+# ── CAPTCHA (browser_tool detect_captcha via mesh) ──────────────────
 
 
-class TestBrowserSolveCaptchaHttpClient:
-    """browser_solve_captcha sends solve_captcha command through mesh_client."""
+class TestBrowserDetectCaptchaHttpClient:
+    """browser_detect_captcha sends detect_captcha command through mesh_client."""
 
     @pytest.mark.asyncio
-    async def test_solve_captcha_calls_browser_command(self):
-        from src.agent.builtins.browser_tool import browser_solve_captcha
+    async def test_detect_captcha_calls_browser_command(self):
+        from src.agent.builtins.browser_tool import browser_detect_captcha
 
         mc = AsyncMock()
         mc.browser_command = AsyncMock(return_value={
@@ -2335,27 +2335,27 @@ class TestBrowserSolveCaptchaHttpClient:
             "injected": True,
         })
 
-        result = await browser_solve_captcha(mesh_client=mc)
+        result = await browser_detect_captcha(mesh_client=mc)
 
-        mc.browser_command.assert_awaited_once_with("solve_captcha", {})
+        mc.browser_command.assert_awaited_once_with("detect_captcha", {})
         assert result["status"] == "solved"
         assert result["captcha_type"] == "turnstile"
 
     @pytest.mark.asyncio
-    async def test_solve_captcha_no_mesh_client(self):
-        from src.agent.builtins.browser_tool import browser_solve_captcha
+    async def test_detect_captcha_no_mesh_client(self):
+        from src.agent.builtins.browser_tool import browser_detect_captcha
 
-        result = await browser_solve_captcha(mesh_client=None)
+        result = await browser_detect_captcha(mesh_client=None)
         assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_solve_captcha_service_error(self):
-        from src.agent.builtins.browser_tool import browser_solve_captcha
+    async def test_detect_captcha_service_error(self):
+        from src.agent.builtins.browser_tool import browser_detect_captcha
 
         mc = AsyncMock()
         mc.browser_command = AsyncMock(side_effect=Exception("service unavailable"))
 
-        result = await browser_solve_captcha(mesh_client=mc)
+        result = await browser_detect_captcha(mesh_client=mc)
         assert "error" in result
 
 
