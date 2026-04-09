@@ -143,3 +143,38 @@ class TestPlaybookConstants:
 
     def test_sticky_turns_reasonable(self):
         assert 3 <= PLAYBOOK_STICKY_TURNS <= 10
+
+    def test_playbooks_have_key_tools(self):
+        """Each playbook references the tools it guides the operator to use."""
+        assert "propose_edit" in _PLAYBOOK_TEAM_BUILD
+        assert "confirm_edit" in _PLAYBOOK_TEAM_BUILD
+        assert "create_project" in _PLAYBOOK_TEAM_BUILD
+        assert "create_agent" in _PLAYBOOK_TEAM_BUILD
+        assert "apply_template" in _PLAYBOOK_TEAM_BUILD
+        assert "add_agents_to_project" in _PLAYBOOK_TEAM_BUILD
+        assert "update_project_context" in _PLAYBOOK_TEAM_BUILD
+        assert "vault_list" in _PLAYBOOK_TEAM_BUILD
+        assert "request_credential" in _PLAYBOOK_TEAM_BUILD
+
+        assert "propose_edit" in _PLAYBOOK_EDIT
+        assert "confirm_edit" in _PLAYBOOK_EDIT
+
+        assert "check_inbox" in _PLAYBOOK_MONITOR
+        assert "get_system_status" in _PLAYBOOK_MONITOR
+        assert "save_observations" in _PLAYBOOK_MONITOR
+
+        assert "vault_list" in _PLAYBOOK_CREDENTIALS
+        assert "request_credential" in _PLAYBOOK_CREDENTIALS
+
+    def test_core_has_key_sections(self):
+        """Core instructions contain all expected section headers."""
+        for section in [
+            "## Core Approach",
+            "## Plan Limits",
+            "## Assessment",
+            "## Routing Work",
+            "## Workflow Overview",
+            "## Proactive Improvement",
+            "## Tool Errors",
+        ]:
+            assert section in _OPERATOR_CORE, f"Missing section: {section}"
