@@ -1153,12 +1153,12 @@ class TestCredentialRedaction:
     def test_deep_redact_nested_structures(self):
         from src.agent.builtins.browser_tool import _deep_redact
 
-        assert _deep_redact({"count": 42, "flag": True}, "test-agent") == {"count": 42, "flag": True}
-        assert _deep_redact(None, "test-agent") is None
-        assert _deep_redact("", "test-agent") == ""
+        assert _deep_redact({"count": 42, "flag": True}) == {"count": 42, "flag": True}
+        assert _deep_redact(None) is None
+        assert _deep_redact("") == ""
         # Pattern-based redaction still works in nested structures
         assert "[REDACTED]" in _deep_redact(
-            {"a": {"b": "sk-abcdefghijklmnopqrstuvwxyz"}}, "test-agent",
+            {"a": {"b": "sk-abcdefghijklmnopqrstuvwxyz"}},
         )["a"]["b"]
 
     def test_redact_credentials_api_key_patterns(self):
@@ -1182,7 +1182,6 @@ class TestCredentialRedaction:
         from src.agent.builtins.browser_tool import _browser_command
 
         mc = AsyncMock()
-        mc.agent_id = "test-agent"
         mc.browser_command = AsyncMock(return_value={
             "content": "key is sk-abcdefghijklmnopqrstuvwxyz"
         })
@@ -1201,7 +1200,6 @@ class TestCredentialRedaction:
         from src.agent.builtins.browser_tool import _browser_command
 
         mc = AsyncMock()
-        mc.agent_id = "test-agent"
         mc.browser_command = AsyncMock(
             side_effect=Exception("fail: sk-abcdefghijklmnopqrstuvwxyz exposed")
         )

@@ -1529,7 +1529,7 @@ class BrowserManager:
     async def type_text(self, agent_id: str, ref: str | None = None, selector: str | None = None,
                         text: str = "", clear: bool = True,
                         fast: bool = False, snapshot_after: bool = False) -> dict:
-        """Type text into element. Credential values should be pre-resolved by agent.
+        """Type text into element.
 
         fast=True uses minimal inter-key delays (8 ms) — still fires real
         keyDown/keyUp events for framework compatibility, but skips
@@ -1546,10 +1546,9 @@ class BrowserManager:
                 # composer) don't see individual keystrokes and won't activate
                 # submit buttons or update their controlled-component state.
                 #
-                # On X11 sites (x.com/twitter.com), the entire interaction chain
-                # (focus click, select-all, typing) must use X11 input so all
-                # events carry isTrusted=true. Mixed CDP+X11 sequences create
-                # a detectable signal for ArkoseLabs.
+                # The entire interaction chain (focus click, select-all, typing)
+                # uses X11 input so all events carry isTrusted=true. Mixed
+                # CDP+X11 sequences create a detectable signal.
                 _use_x11 = bool(inst.x11_wid) and self._is_x11_site(inst)
 
                 if ref and ref in inst.refs:
