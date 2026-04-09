@@ -409,8 +409,8 @@ class DockerBackend(RuntimeBackend):
                 uploads_path: {"bind": "/app/uploads", "mode": "ro"},
             },
             "mem_limit": browser_mem,
-            "cpu_quota": 100000,
-            "shm_size": "512m",
+            "cpu_quota": 200000,
+            "shm_size": "2g",
             "security_opt": ["no-new-privileges"],
         }
 

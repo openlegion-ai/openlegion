@@ -500,8 +500,8 @@ class TestDockerBackendSlimResources:
         # Verify browser service resource limits
         run_call = mock_client.containers.run.call_args
         assert run_call.kwargs.get("mem_limit") == "2g"
-        assert run_call.kwargs.get("cpu_quota") == 100000
-        assert run_call.kwargs.get("shm_size") == "512m"
+        assert run_call.kwargs.get("cpu_quota") == 200000
+        assert run_call.kwargs.get("shm_size") == "2g"
 
         backend.stop_browser_service()
         mock_container.stop.assert_called_once()
