@@ -528,3 +528,66 @@ async def browser_switch_tab(tab_index: int = -1, *, mesh_client=None) -> dict:
 async def browser_detect_captcha(*, mesh_client=None) -> dict:
     """Detect CAPTCHAs on the current page."""
     return await _browser_command(mesh_client, "detect_captcha")
+
+
+@skill(
+    name="request_browser_login",
+    description=(
+        "Ask the user to log in to a website through a live browser view "
+        "in their chat. The agent's browser navigates to the given URL, "
+        "and the user sees an interactive VNC viewer to complete the login. "
+        "The login session (cookies, localStorage) persists in the agent's "
+        "browser profile — you never see the password. After the user "
+        "finishes, you receive a notification."
+    ),
+    parameters={
+        "url": {
+            "type": "string",
+            "description": "Login page URL (e.g. 'https://tiktok.com/login')",
+        },
+        "service": {
+            "type": "string",
+            "description": "Service name (e.g. 'TikTok', 'LinkedIn', 'Instagram')",
+        },
+        "description": {
+            "type": "string",
+            "description": "Tell the user what to do (e.g. 'Please log in to your TikTok account')",
+        },
+    },
+)
+async def request_browser_login(
+    url: str, service: str, description: str,
+    *, mesh_client=None, **_kw,
+) -> dict:
+    """Request user login via live browser view in chat."""
+    if not mesh_client:
+        return {"error": "Browser login requires mesh connectivity"}
+    if not url:
+        return {"error": "url is required"}
+    if not service:
+        return {"error": "service is required"}
+
+    # Navigate the agent's browser to the login page first
+    try:
+        await mesh_client.browser_command("navigate", {"url": url})
+    except Exception as e:
+        return {"error": f"Failed to navigate browser to {url}: {e}"}
+
+    # Emit browser login request event to the dashboard
+    try:
+        await mesh_client.request_browser_login(
+            url=url, service=service, description=description,
+        )
+    except Exception:
+        pass  # Best effort — the tool result is the primary mechanism
+
+    return {
+        "requested": True,
+        "service": service,
+        "url": url,
+        "message": (
+            f"Browser login request sent to user. The browser is showing {url}. "
+            f"Wait for the user to complete the login — you will be notified. "
+            f"Do NOT use browser tools until the user confirms."
+        ),
+    }

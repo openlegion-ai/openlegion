@@ -1065,6 +1065,38 @@ def create_mesh_app(
 
         return {"requested": True, "name": name}
 
+    @app.post("/mesh/browser-login-request")
+    async def browser_login_request(data: dict, request: Request) -> dict:
+        """Agent requests user login via browser VNC viewer in chat.
+
+        Emits a ``browser_login_request`` event so the dashboard renders
+        an interactive browser card with VNC viewer.
+        """
+        agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        await _check_rate_limit("notify", agent_id)
+
+        url = data.get("url", "")
+        service = data.get("service", "")
+        description = data.get("description", "")
+
+        if not url:
+            raise HTTPException(400, "URL is required")
+        if not service:
+            raise HTTPException(400, "Service name is required")
+
+        if event_bus:
+            event_bus.emit(
+                "browser_login_request",
+                agent=agent_id,
+                data={
+                    "url": url,
+                    "service": service[:128],
+                    "description": description[:500],
+                },
+            )
+
+        return {"requested": True, "service": service}
+
     @app.get("/mesh/agents")
     async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:
         """List registered agents, optionally scoped by project or agent_id.

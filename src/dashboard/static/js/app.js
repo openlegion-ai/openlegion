@@ -80,6 +80,7 @@ function dashboard() {
       'tool_start', 'tool_result', 'text_delta', 'llm_call',
       'blackboard_write', 'health_change', 'notification', 'workspace_updated',
       'heartbeat_complete', 'cron_change', 'credit_exhausted', 'credential_request',
+      'browser_login_request',
     ],
 
     // Agent detail
@@ -1524,6 +1525,46 @@ function dashboard() {
           );
           if (!opDup) {
             this.chatHistories['operator'].push({ ...credCard, _from_agent: agent });
+            if (this.activeTab === 'chat') {
+              this.$nextTick(() => this._scrollChat('operator'));
+            }
+          }
+        }
+      }
+
+      // Surface browser login requests as interactive VNC cards in chat.
+      if (evt.type === 'browser_login_request' && agent && evt.data && evt.data.service) {
+        const evtTs = this._normalizeEventTs(evt);
+        const loginCard = {
+          role: 'browser_login_request',
+          content: evt.data.description || '',
+          service: evt.data.service || '',
+          url: evt.data.url || '',
+          completed: false,
+          cancelled: false,
+          ts: evtTs,
+        };
+        // Show in the requesting agent's chat
+        if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
+        const isDup = this.chatHistories[agent].some(m =>
+          m.role === 'browser_login_request' && m.service === evt.data.service && Math.abs((m.ts || 0) - evtTs) < 5000
+        );
+        if (!isDup) {
+          this.chatHistories[agent].push(loginCard);
+          if (this.activeChatId === agent) {
+            this.$nextTick(() => this._scrollChat(agent));
+          } else {
+            this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
+          }
+        }
+        // Also surface in operator chat
+        if (agent !== 'operator') {
+          if (!this.chatHistories['operator']) this.chatHistories['operator'] = [];
+          const opDup = this.chatHistories['operator'].some(m =>
+            m.role === 'browser_login_request' && m.service === evt.data.service && Math.abs((m.ts || 0) - evtTs) < 5000
+          );
+          if (!opDup) {
+            this.chatHistories['operator'].push({ ...loginCard, _from_agent: agent });
             if (this.activeTab === 'chat') {
               this.$nextTick(() => this._scrollChat('operator'));
             }
@@ -4566,18 +4607,19 @@ function dashboard() {
         const data = await resp.json().catch(() => ({ success: false }));
         if (!data.success) {
           this.showToast('Browser focus failed — agent may not have a browser running', 5000);
-          this.showBrowserViewer = false;
-          this._browserFocusDone = false;
           return false;
         }
         return true;
       } catch (e) {
         console.warn('focusBrowser failed:', e);
         this.showToast('Could not connect to browser service', 5000);
-        this.showBrowserViewer = false;
-        this._browserFocusDone = false;
         return false;
       }
+    },
+
+    _getVncUrl() {
+      const a = this.agents.find(a => a.vnc_url);
+      return a ? a.vnc_url : '';
     },
 
     async toggleBrowser() {
@@ -4607,7 +4649,11 @@ function dashboard() {
         // the iframe connects to KasmVNC.
         if (agentId) {
           const ok = await this.focusBrowser(agentId);
-          if (!ok) return;
+          if (!ok) {
+            this.showBrowserViewer = false;
+            this._browserFocusDone = false;
+            return;
+          }
         }
         // Staleness guard: if the user switched agents while we were
         // awaiting, abandon — the new agent's toggle will handle it.
