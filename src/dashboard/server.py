@@ -1011,16 +1011,25 @@ def create_dashboard_router(
         system_proxy = os.environ.get("OPENLEGION_SYSTEM_PROXY", "")
         is_managed = bool(browser_proxy_url)
 
-        masked_url = ""
+        # Managed URL (always compute when managed, for display)
+        managed_masked = ""
         if browser_proxy_url:
             full = _assemble_proxy_url(
                 browser_proxy_url,
                 os.environ.get("BROWSER_PROXY_USER", ""),
                 os.environ.get("BROWSER_PROXY_PASS", ""),
             )
-            masked_url = _mask_proxy_url(full)
-        elif system_proxy:
-            masked_url = _mask_proxy_url(system_proxy)
+            managed_masked = _mask_proxy_url(full)
+
+        # Active URL follows resolution order: user override > managed
+        if system_proxy:
+            active_masked = _mask_proxy_url(system_proxy)
+        elif managed_masked:
+            active_masked = managed_masked
+        else:
+            active_masked = ""
+
+        is_overridden = is_managed and bool(system_proxy)
 
         network_cfg = cfg.get("network", {})
         no_proxy = network_cfg.get("no_proxy", "")
@@ -1039,9 +1048,11 @@ def create_dashboard_router(
 
         return {
             "system_proxy": {
-                "configured": bool(masked_url),
+                "configured": bool(active_masked),
                 "managed": is_managed,
-                "url": masked_url,
+                "managed_url": managed_masked,
+                "overridden": is_overridden,
+                "url": active_masked,
             },
             "no_proxy": no_proxy,
             "agents": agent_summary,
@@ -1049,7 +1060,7 @@ def create_dashboard_router(
 
     @api_router.put("/api/network/proxy")
     async def api_put_network_proxy(request: Request):
-        """Update system proxy (self-hosted only) and/or NO_PROXY."""
+        """Update system proxy and/or NO_PROXY."""
         body = await request.json()
         updated = []
 
@@ -1059,10 +1070,6 @@ def create_dashboard_router(
             updated.append("no_proxy")
 
         if "system_proxy" in body:
-            browser_proxy_url = os.environ.get("BROWSER_PROXY_URL", "")
-            if browser_proxy_url:
-                raise HTTPException(400, "System proxy is managed by OpenLegion and cannot be changed here")
-
             from src.cli.proxy import _assemble_proxy_url, validate_proxy_url
             from src.host.credentials import _persist_to_env, _remove_from_env
 

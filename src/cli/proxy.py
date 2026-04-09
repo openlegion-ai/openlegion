@@ -2,7 +2,7 @@
 
 Resolves proxy configuration for each agent using the resolution chain:
   1. Agent's agents.yaml proxy config (custom/direct/inherit)
-  2. System proxy: BROWSER_PROXY_* env vars (managed) or OPENLEGION_SYSTEM_PROXY (self-hosted)
+  2. System proxy: OPENLEGION_SYSTEM_PROXY (user override) or BROWSER_PROXY_* env vars (managed)
   3. No proxy
 """
 
@@ -80,7 +80,13 @@ def _assemble_proxy_url(base_url: str, username: str = "", password: str = "") -
 
 
 def _resolve_system_proxy() -> str | None:
-    """Resolve system proxy from env vars. BROWSER_PROXY_* takes precedence."""
+    """Resolve system proxy from env vars. User override takes precedence over managed."""
+    system_proxy = os.environ.get("OPENLEGION_SYSTEM_PROXY", "")
+    if system_proxy:
+        if validate_proxy_url(system_proxy):
+            return system_proxy
+        logger.warning("OPENLEGION_SYSTEM_PROXY is set but invalid")
+
     browser_url = os.environ.get("BROWSER_PROXY_URL", "")
     if browser_url:
         user = os.environ.get("BROWSER_PROXY_USER", "")
@@ -89,12 +95,6 @@ def _resolve_system_proxy() -> str | None:
         if validate_proxy_url(full):
             return full
         logger.warning("BROWSER_PROXY_URL is set but invalid: %s", browser_url)
-
-    system_proxy = os.environ.get("OPENLEGION_SYSTEM_PROXY", "")
-    if system_proxy:
-        if validate_proxy_url(system_proxy):
-            return system_proxy
-        logger.warning("OPENLEGION_SYSTEM_PROXY is set but invalid")
 
     return None
 
