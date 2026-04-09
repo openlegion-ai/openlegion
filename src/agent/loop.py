@@ -283,6 +283,9 @@ class AgentLoop:
                 _BLACKBOARD_TOOLS if mesh_client.is_standalone else None
             )
         self._skills_reloaded: bool = False
+        self._is_operator: bool = allowed_tools is not None
+        self._operator_playbook_state: dict[str, int] = {}  # playbook -> turns since trigger
+        self._last_active_playbooks: list[str] = []
         # Reference to the active messages list — set during tool execution
         # so skills.execute() can inject it into provenance-gated tools.
         self._current_messages: list[dict] = []
@@ -301,6 +304,41 @@ class AgentLoop:
         if self._allowed_tools is not None:
             kw["allowed"] = self._allowed_tools
         return kw
+
+    def _update_operator_playbooks(self) -> list[str]:
+        """Update operator playbook state based on recent tool calls.
+
+        Returns list of currently active playbook keys.
+        """
+        if not self._is_operator:
+            return []
+
+        from src.cli.operator_playbooks import PLAYBOOK_STICKY_TURNS, extract_triggered_playbooks
+
+        # Find newly triggered playbooks
+        triggered = extract_triggered_playbooks(self._chat_messages)
+
+        # Reset counter for triggered playbooks
+        for pb in triggered:
+            self._operator_playbook_state[pb] = 0
+
+        # Return active playbooks (within sticky window)
+        return [
+            pb for pb, turns in sorted(self._operator_playbook_state.items(), key=lambda x: x[1])
+            if turns <= PLAYBOOK_STICKY_TURNS
+        ]
+
+    def _age_operator_playbooks(self) -> None:
+        """Increment turn counter for all active playbooks. Call once per user turn."""
+        if not self._is_operator:
+            return
+        from src.cli.operator_playbooks import PLAYBOOK_STICKY_TURNS
+
+        expired = [pb for pb, turns in self._operator_playbook_state.items() if turns > PLAYBOOK_STICKY_TURNS]
+        for pb in expired:
+            del self._operator_playbook_state[pb]
+        for pb in self._operator_playbook_state:
+            self._operator_playbook_state[pb] += 1
 
     async def _fetch_fleet_roster(self) -> list[dict]:
         """Fetch and cache the fleet roster from the mesh (TTL: 10 min)."""
@@ -1694,6 +1732,8 @@ class AgentLoop:
                 for s in steered:
                     self.workspace.append_chat_message("user", f"[steer] {s}")
 
+        self._age_operator_playbooks()
+
         # Parallel fetch: goals, fleet roster (if multi-agent), introspect.
         # Saves 30-100ms per turn vs sequential requests.
         if self.mesh_client.is_standalone:
@@ -2067,6 +2107,18 @@ class AgentLoop:
                             })
                 self._chat_total_rounds += 1
 
+                # Rebuild system prompt if operator playbook state changed
+                if self._is_operator:
+                    new_active = self._update_operator_playbooks()
+                    old_active = self._last_active_playbooks
+                    if set(new_active) != set(old_active):
+                        self._last_active_playbooks = new_active
+                        system = self._build_chat_system_prompt(
+                            goals=self._goals_cache if self._goals_cache is not self._GOALS_NOT_FETCHED else None,
+                            fleet_roster=self._fleet_roster,
+                            introspect_data=self._introspect_cache,
+                        )
+
                 # If skills were hot-reloaded during tool execution,
                 # rebuild the system prompt so tool descriptions stay in sync.
                 if self._skills_reloaded:
@@ -2331,6 +2383,16 @@ class AgentLoop:
         tool_history = self._build_tool_history_context()
         if tool_history:
             parts.append(sanitize_for_prompt(tool_history))
+
+        # Inject operator playbooks based on tool-call patterns
+        if self._is_operator:
+            active_playbooks = self._update_operator_playbooks()
+            if active_playbooks:
+                from src.cli.operator_playbooks import get_playbook_content
+
+                playbook_text = get_playbook_content(active_playbooks)
+                if playbook_text:
+                    parts.append(playbook_text)
 
         if introspect_data:
             runtime_ctx = self._format_runtime_context(
