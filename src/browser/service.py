@@ -27,6 +27,7 @@ from src.browser.timing import (
     navigation_jitter,
     scroll_increment,
     scroll_pause,
+    scroll_ramp,
     think_pause,
     x11_settle_delay,
     x11_step_delay,
@@ -1705,7 +1706,15 @@ class BrowserManager:
                 sign = -1 if direction == "up" else 1
                 scrolled = 0
                 while scrolled < amount:
-                    step = min(scroll_increment(), amount - scrolled)
+                    remaining = amount - scrolled
+                    # Momentum ramp using actual scroll progress — smaller
+                    # steps at start/end, full in middle.  Tracks real
+                    # position rather than estimated step count so the ramp
+                    # adapts to variable-size increments.
+                    progress = scrolled / amount
+                    ramp = scroll_ramp(progress)
+                    step = max(40, int(scroll_increment() * ramp))
+                    step = min(step, remaining)
                     delta = step * sign
                     # Use mouse.wheel() to dispatch real WheelEvent
                     # (isTrusted=true). JS window.scrollBy() only fires
@@ -1714,7 +1723,8 @@ class BrowserManager:
                     await inst.page.mouse.wheel(0, delta)
                     scrolled += step
                     if scrolled < amount:
-                        await asyncio.sleep(scroll_pause())
+                        # Pause varies with momentum — shorter during fast cruise
+                        await asyncio.sleep(scroll_pause() / max(0.5, ramp))
 
                 return {
                     "success": True,

@@ -15,6 +15,7 @@ already governed by scroll_pause timing.
 
 from __future__ import annotations
 
+import math
 import random
 
 # ── Speed ─────────────────────────────────────────────────────
@@ -153,6 +154,17 @@ def scroll_increment() -> int:
     Not scaled by speed factor — scroll speed is governed by scroll_pause timing.
     """
     return int(_clamped_gauss(140, 30, 80, 200))
+
+
+def scroll_ramp(progress: float) -> float:
+    """Compute a momentum multiplier (0.0–1.0) for scroll position *progress*.
+
+    Uses a sine-based ease-in-out curve: slow at the start (0.0) and end
+    (1.0), fastest at the midpoint (0.5).  Returns ≥ 0.15 so the step
+    size never drops to an impractical crawl.
+    """
+    # sin maps [0, π] → [0, 1, 0] — natural bell shape.
+    return max(0.15, math.sin(progress * math.pi))
 
 
 # ── Inter-action delay sampling ──────────────────────────────
