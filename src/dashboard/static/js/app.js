@@ -3441,7 +3441,7 @@ function dashboard() {
         } : null;
         const resp = await fetch(`${window.__config.apiBase}/network/proxy`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'dashboard' },
           body: JSON.stringify(body),
         });
         if (resp.ok) {
@@ -3464,7 +3464,7 @@ function dashboard() {
       try {
         const resp = await fetch(`${window.__config.apiBase}/network/proxy`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'dashboard' },
           body: JSON.stringify({ system_proxy: null, no_proxy: this.networkProxy.no_proxy }),
         });
         if (resp.ok) {
@@ -3486,7 +3486,7 @@ function dashboard() {
       try {
         const resp = await fetch(`${window.__config.apiBase}/network/proxy`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'dashboard' },
           body: JSON.stringify({ no_proxy: this.networkProxy.no_proxy }),
         });
         if (resp.ok) {

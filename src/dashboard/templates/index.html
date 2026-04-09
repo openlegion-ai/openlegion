@@ -3724,7 +3724,7 @@
                 </div>
               </div>
               <div class="flex items-center gap-2 pt-1">
-                <button @click="saveSystemProxy()" :disabled="networkProxy.saving"
+                <button @click="saveSystemProxy()" :disabled="networkProxy.saving || !networkProxy.form.url"
                   class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
                   <span x-text="networkProxy.saving ? 'Saving...' : 'Save'"></span>
                 </button>
