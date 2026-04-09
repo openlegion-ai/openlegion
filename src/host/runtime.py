@@ -358,18 +358,19 @@ class DockerBackend(RuntimeBackend):
         # Each Camoufox instance uses ~200-400 MB RAM.  We size the
         # container memory and max concurrent browsers to support as
         # many agents browsing simultaneously as the VPS can handle.
+        # shm_size is for Firefox compositor IPC — too small causes VNC freezes.
         #
-        #   Plan    Server   Agents  Container  Max Browsers
-        #   Basic   cax11 4GB    1     2 GB        1
-        #   Growth  cax21 8GB    5     4 GB        5
-        #   Pro     cax31 16GB  15     8 GB       10
+        #   Plan    Server         Agents  Mem   SHM   CPU   Max Browsers
+        #   Basic   cax11  4GB 2c    1    2GB  512m  1.0c     1
+        #   Growth  cax21  8GB 4c    5    4GB    1g  1.5c     5
+        #   Pro     cax31 16GB 8c   15    8GB    2g  2.0c    10
         max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
         if max_agents <= 1:
-            max_browsers, browser_mem = 1, "2g"
+            max_browsers, browser_mem, browser_shm, browser_cpu = 1, "2g", "512m", 100000
         elif max_agents <= 5:
-            max_browsers, browser_mem = max_agents, "4g"
+            max_browsers, browser_mem, browser_shm, browser_cpu = max_agents, "4g", "1g", 150000
         else:
-            max_browsers, browser_mem = min(max_agents, 10), "8g"
+            max_browsers, browser_mem, browser_shm, browser_cpu = min(max_agents, 10), "8g", "2g", 200000
 
         # Override browser idle timeout from dashboard config
         idle_timeout_minutes = 30
@@ -409,8 +410,8 @@ class DockerBackend(RuntimeBackend):
                 uploads_path: {"bind": "/app/uploads", "mode": "ro"},
             },
             "mem_limit": browser_mem,
-            "cpu_quota": 200000,
-            "shm_size": "2g",
+            "cpu_quota": browser_cpu,
+            "shm_size": browser_shm,
             "security_opt": ["no-new-privileges"],
         }
 
