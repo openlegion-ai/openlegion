@@ -1815,7 +1815,8 @@ def create_dashboard_router(
             try:
                 await lane_manager.enqueue(
                     agent_id,
-                    f"The user just saved credential '{service}' to the vault. You can now use $CRED{{{service}}} in your requests.",
+                    f"The user just saved credential '{service}' to the vault. "
+                    f"You can now use $CRED{{{service}}} in your requests.",
                     mode="steer",
                     trace_id=new_trace_id(),
                 )
