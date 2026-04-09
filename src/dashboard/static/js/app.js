@@ -4526,8 +4526,20 @@ function dashboard() {
 
     async focusBrowser(agentId) {
       try {
-        await fetch(`${window.__config.apiBase}/browser/${agentId}/focus`, { method: 'POST' });
-      } catch (e) { console.warn('focusBrowser failed:', e); }
+        const resp = await fetch(`${window.__config.apiBase}/browser/${agentId}/focus`, { method: 'POST' });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (!data.success) {
+            this.showToast('Browser failed to start — check agent proxy settings', 5000);
+            this.showBrowserViewer = false;
+            return false;
+          }
+        }
+        return true;
+      } catch (e) {
+        console.warn('focusBrowser failed:', e);
+        return true; // network error — let VNC panel attempt connection
+      }
     },
 
     async toggleBrowser() {
@@ -4556,7 +4568,8 @@ function dashboard() {
         // Await focus so the correct agent's window is raised before
         // the iframe connects to KasmVNC.
         if (agentId) {
-          await this.focusBrowser(agentId);
+          const ok = await this.focusBrowser(agentId);
+          if (!ok) return;
         }
         // Staleness guard: if the user switched agents while we were
         // awaiting, abandon — the new agent's toggle will handle it.

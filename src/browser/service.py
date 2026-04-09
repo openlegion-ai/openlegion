@@ -447,6 +447,19 @@ class BrowserManager:
                     proxy_arg["username"] = proxy_config["username"]
                 if proxy_config.get("password"):
                     proxy_arg["password"] = proxy_config["password"]
+
+                # Firefox does not support SOCKS5 proxy authentication.
+                # Strip credentials and try IP-whitelist fallback.
+                if proxy_arg.get("server", "").startswith("socks"):
+                    if proxy_arg.get("username") or proxy_arg.get("password"):
+                        logger.warning(
+                            "SOCKS5 proxy with auth detected for '%s' — Firefox does not "
+                            "support SOCKS5 auth. Trying without credentials (IP whitelist).",
+                            agent_id,
+                        )
+                        proxy_arg.pop("username", None)
+                        proxy_arg.pop("password", None)
+
                 options = build_launch_options(agent_id, profile_dir, proxy=proxy_arg)
             else:
                 # Explicitly no proxy (direct mode or inherit with no system proxy)

@@ -171,12 +171,19 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         body = None
         if body_bytes:
             body = json.loads(body_bytes)
+        was_focused = manager._user_focused_agent == agent_id
         manager.set_proxy_config(agent_id, body)
         # If a browser is already running for this agent, restart it so the
         # new proxy config takes effect on the next get_or_start() call.
         # reset() is a no-op when no instance exists (stop() checks under lock).
         try:
             await manager.reset(agent_id)
+            # If this was the user's active browser, re-launch it immediately
+            # so they don't see a purple screen after a proxy config change.
+            # Check was_focused (captured before reset) because reset() → stop()
+            # clears _user_focused_agent.
+            if was_focused:
+                await manager.focus(agent_id)
         except Exception:
             logger.warning("Failed to reset browser for '%s' after proxy change", agent_id, exc_info=True)
         return {"success": True}
