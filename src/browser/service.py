@@ -1761,14 +1761,14 @@ class BrowserManager:
 
                 sign = -1 if direction == "up" else 1
                 scrolled = 0
-                # Estimate total steps for momentum curve calculation
-                est_steps = max(1, amount // 140)
-                step_idx = 0
                 while scrolled < amount:
                     remaining = amount - scrolled
-                    # Momentum ramp: smaller steps at start/end, full in middle
-                    progress = step_idx / max(1, est_steps) if est_steps > 2 else 0.5
-                    ramp = scroll_ramp(min(progress, 1.0))
+                    # Momentum ramp using actual scroll progress — smaller
+                    # steps at start/end, full in middle.  Tracks real
+                    # position rather than estimated step count so the ramp
+                    # adapts to variable-size increments.
+                    progress = scrolled / amount
+                    ramp = scroll_ramp(progress)
                     step = max(40, int(scroll_increment() * ramp))
                     step = min(step, remaining)
                     delta = step * sign
@@ -1778,7 +1778,6 @@ class BrowserManager:
                     # check for the presence of wheel events in the stream.
                     await inst.page.mouse.wheel(0, delta)
                     scrolled += step
-                    step_idx += 1
                     if scrolled < amount:
                         # Pause varies with momentum — shorter during fast cruise
                         await asyncio.sleep(scroll_pause() / max(0.5, ramp))
