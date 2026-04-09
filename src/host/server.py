@@ -1075,9 +1075,9 @@ def create_mesh_app(
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
         await _check_rate_limit("notify", agent_id)
 
-        url = data.get("url", "")
-        service = data.get("service", "")
-        description = data.get("description", "")
+        url = data.get("url", "").strip()
+        service = data.get("service", "").strip()
+        description = data.get("description", "").strip()
 
         if not url:
             raise HTTPException(400, "URL is required")

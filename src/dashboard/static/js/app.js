@@ -80,7 +80,7 @@ function dashboard() {
       'tool_start', 'tool_result', 'text_delta', 'llm_call',
       'blackboard_write', 'health_change', 'notification', 'workspace_updated',
       'heartbeat_complete', 'cron_change', 'credit_exhausted', 'credential_request',
-      'browser_login_request',
+      'browser_login_request', 'browser_login_completed', 'browser_login_cancelled',
     ],
 
     // Agent detail
@@ -1567,6 +1567,34 @@ function dashboard() {
             this.chatHistories['operator'].push({ ...loginCard, _from_agent: agent });
             if (this.activeTab === 'chat') {
               this.$nextTick(() => this._scrollChat('operator'));
+            }
+          }
+        }
+      }
+
+      // Sync browser login card state across all copies (agent chat + operator chat).
+      // When one card is completed/cancelled, the event marks all copies so the
+      // other card can't send a duplicate steer message.
+      if (evt.type === 'browser_login_completed' && agent && evt.data?.service) {
+        for (const chatId of [agent, 'operator']) {
+          const hist = this.chatHistories[chatId];
+          if (!hist) continue;
+          for (const m of hist) {
+            if (m.role === 'browser_login_request' && m.service === evt.data.service
+                && (chatId === agent || m._from_agent === agent)) {
+              m.completed = true;
+            }
+          }
+        }
+      }
+      if (evt.type === 'browser_login_cancelled' && agent && evt.data?.service) {
+        for (const chatId of [agent, 'operator']) {
+          const hist = this.chatHistories[chatId];
+          if (!hist) continue;
+          for (const m of hist) {
+            if (m.role === 'browser_login_request' && m.service === evt.data.service
+                && (chatId === agent || m._from_agent === agent)) {
+              m.cancelled = true;
             }
           }
         }
