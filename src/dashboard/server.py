@@ -711,6 +711,8 @@ def create_dashboard_router(
             perms = _load_permissions()
             perms.get("permissions", {}).pop(agent_id, None)
             _save_permissions(perms)
+            if permissions is not None:
+                permissions.reload()
         except Exception as e:
             logger.warning(f"Failed to clean config for {agent_id}: {e}")
 
