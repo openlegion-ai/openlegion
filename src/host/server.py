@@ -2331,7 +2331,7 @@ def create_mesh_app(
         if field == "heartbeat" and cron_scheduler is not None and isinstance(new_value, str):
             sched = new_value.strip()
             _is_schedule = (
-                bool(re.match(r"every\s+\d+[smhd]", sched, re.IGNORECASE))
+                bool(re.fullmatch(r"every\s+\d+[smhd]", sched, re.IGNORECASE))
                 or (len(sched.split()) == 5 and all(
                     re.match(r"^[\d,\-\*/]+$", p) for p in sched.split()
                 ))
