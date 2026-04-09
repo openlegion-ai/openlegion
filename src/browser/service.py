@@ -25,8 +25,10 @@ from src.browser.timing import (
     click_dwell,
     keystroke_delay,
     navigation_jitter,
+    pre_click_settle,
     scroll_increment,
     scroll_pause,
+    scroll_ramp,
     think_pause,
     x11_settle_delay,
     x11_step_delay,
@@ -1009,6 +1011,11 @@ class BrowserManager:
         Generates a natural-looking curved mouse path using cubic Bezier
         interpolation with randomized control points. Real human wrist
         movement produces slight S-curves, not straight lines.
+
+        Velocity easing (cubic ease-in-out) models Fitts' Law: slow
+        departure, fast cruise, slow precision-landing. Step count
+        scales with distance so short movements stay snappy and long
+        movements stay smooth.
         """
         wid = inst.x11_wid
         if not wid:
@@ -1048,10 +1055,20 @@ class BrowserManager:
         cp2_x = start_x + dx * 0.75 + perp_x * off2
         cp2_y = start_y + dy * 0.75 + perp_y * off2
 
-        # Walk the Bezier curve in 4-8 steps
-        steps = random.randint(4, 8)
+        # Scale step count with distance — short moves stay snappy,
+        # long moves stay smooth.  Range: 3 steps (tiny) to 14 (across screen).
+        steps = max(3, min(14, int(dist / 80) + random.randint(2, 4)))
+
         for i in range(1, steps + 1):
-            t = i / steps
+            # Raw parameter
+            raw_t = i / steps
+            # Cubic ease-in-out: slow start, fast middle, slow landing
+            # Models Fitts' Law deceleration as cursor approaches target
+            if raw_t < 0.5:
+                t = 4 * raw_t * raw_t * raw_t
+            else:
+                t = 1 - ((-2 * raw_t + 2) ** 3) / 2
+
             u = 1 - t
             wp_x = int(
                 u**3 * start_x + 3 * u**2 * t * cp1_x
@@ -1077,6 +1094,38 @@ class BrowserManager:
                 )
             await asyncio.sleep(x11_step_delay())
 
+        # Overshoot + correction for long movements — models the human
+        # tendency to slightly overshoot the target and make a tiny
+        # corrective flick back. Only on ~30% of long movements.
+        if dist > 300 and random.random() < 0.3:
+            # Direction from last control point toward target
+            end_dx = target_x - cp2_x
+            end_dy = target_y - cp2_y
+            end_dist = max(1, (end_dx**2 + end_dy**2) ** 0.5)
+            overshoot_px = random.uniform(3, 8)
+            ov_x = max(0, int(target_x + end_dx / end_dist * overshoot_px))
+            ov_y = max(0, int(target_y + end_dy / end_dist * overshoot_px))
+            # Overshoot
+            await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["xdotool", "mousemove", "--sync", "--window", wid_s,
+                     str(ov_x), str(ov_y)],
+                    capture_output=True, timeout=3,
+                ),
+            )
+            await asyncio.sleep(x11_step_delay())
+            # Correct back to exact target
+            await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["xdotool", "mousemove", "--sync", "--window", wid_s,
+                     str(target_x), str(target_y)],
+                    capture_output=True, timeout=3,
+                ),
+            )
+            await asyncio.sleep(x11_step_delay())
+
     async def _x11_click(self, inst: CamoufoxInstance, locator) -> None:
         """Click via xdotool for isTrusted=true events.
 
@@ -1098,12 +1147,15 @@ class BrowserManager:
         await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
         await asyncio.sleep(x11_settle_delay())
 
-        # 2. Get element center in viewport coords
+        # 2. Get element position — jitter within inner area, not dead center
         box = await locator.bounding_box()
         if not box:
             raise RuntimeError("Element has no bounding box — not visible")
-        target_x = int(box["x"] + box["width"] / 2)
-        target_y = int(box["y"] + box["height"] / 2)
+        # Real humans don't click dead center — offset within inner 60%
+        jitter_x = random.uniform(-0.15, 0.15) * box["width"]
+        jitter_y = random.uniform(-0.10, 0.10) * box["height"]
+        target_x = int(box["x"] + box["width"] / 2 + jitter_x)
+        target_y = int(box["y"] + box["height"] / 2 + jitter_y)
 
         wid = inst.x11_wid
         if not wid:
@@ -1115,7 +1167,7 @@ class BrowserManager:
         # 4. Click with human-like dwell time (mousedown -> hold -> mouseup)
         wid_s = str(wid)
         loop = asyncio.get_running_loop()
-        await asyncio.sleep(x11_settle_delay())
+        await asyncio.sleep(pre_click_settle())
         await loop.run_in_executor(
             None,
             lambda: subprocess.run(
@@ -1140,8 +1192,11 @@ class BrowserManager:
         box = await locator.bounding_box()
         if not box:
             raise RuntimeError("Element has no bounding box — not visible")
-        target_x = int(box["x"] + box["width"] / 2)
-        target_y = int(box["y"] + box["height"] / 2)
+        # Jitter within inner area — same as _x11_click for consistency
+        jitter_x = random.uniform(-0.15, 0.15) * box["width"]
+        jitter_y = random.uniform(-0.10, 0.10) * box["height"]
+        target_x = int(box["x"] + box["width"] / 2 + jitter_x)
+        target_y = int(box["y"] + box["height"] / 2 + jitter_y)
 
         await self._x11_move_to(inst, target_x, target_y)
 
@@ -1704,8 +1759,16 @@ class BrowserManager:
 
                 sign = -1 if direction == "up" else 1
                 scrolled = 0
+                # Estimate total steps for momentum curve calculation
+                est_steps = max(1, amount // 140)
+                step_idx = 0
                 while scrolled < amount:
-                    step = min(scroll_increment(), amount - scrolled)
+                    remaining = amount - scrolled
+                    # Momentum ramp: smaller steps at start/end, full in middle
+                    progress = step_idx / max(1, est_steps) if est_steps > 2 else 0.5
+                    ramp = scroll_ramp(min(progress, 1.0))
+                    step = max(40, int(scroll_increment() * ramp))
+                    step = min(step, remaining)
                     delta = step * sign
                     # Use mouse.wheel() to dispatch real WheelEvent
                     # (isTrusted=true). JS window.scrollBy() only fires
@@ -1713,8 +1776,10 @@ class BrowserManager:
                     # check for the presence of wheel events in the stream.
                     await inst.page.mouse.wheel(0, delta)
                     scrolled += step
+                    step_idx += 1
                     if scrolled < amount:
-                        await asyncio.sleep(scroll_pause())
+                        # Pause varies with momentum — shorter during fast cruise
+                        await asyncio.sleep(scroll_pause() / max(0.5, ramp))
 
                 return {
                     "success": True,

@@ -147,12 +147,37 @@ def click_dwell() -> float:
     return _scaled(0.085, 0.025, 0.045, 0.140)
 
 
+def pre_click_settle() -> float:
+    """Pause after reaching click target, before pressing (seconds).
+
+    Models the human hesitation between landing the cursor on a target
+    and confirming it visually before clicking.  Longer than
+    x11_settle_delay which governs motor-control timing during
+    the movement trajectory.
+
+    Base: μ=0.15, σ=0.04, range 0.08-0.28.
+    """
+    return _scaled(0.15, 0.04, 0.08, 0.28)
+
+
 def scroll_increment() -> int:
     """Per-step scroll distance (pixels). μ=140, σ=30, range 80–200.
 
     Not scaled by speed factor — scroll speed is governed by scroll_pause timing.
     """
     return int(_clamped_gauss(140, 30, 80, 200))
+
+
+def scroll_ramp(pos: float) -> float:
+    """Scroll step multiplier for momentum effect (0.4–1.0).
+
+    *pos* is the scroll progress from 0.0 (start) to 1.0 (end).
+    Returns a multiplier that scales scroll step size to model
+    wheel inertia: smaller steps at the start and end of a scroll,
+    full-size steps in the middle.  Uses a sine curve for smooth ramp.
+    """
+    import math
+    return 0.4 + 0.6 * math.sin(max(0.0, min(1.0, pos)) * math.pi)
 
 
 # ── Inter-action delay sampling ──────────────────────────────
