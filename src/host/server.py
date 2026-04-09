@@ -1089,7 +1089,7 @@ def create_mesh_app(
                 "browser_login_request",
                 agent=agent_id,
                 data={
-                    "url": url,
+                    "url": url[:2048],
                     "service": service[:128],
                     "description": description[:500],
                 },

@@ -1561,7 +1561,7 @@ function dashboard() {
         if (agent !== 'operator') {
           if (!this.chatHistories['operator']) this.chatHistories['operator'] = [];
           const opDup = this.chatHistories['operator'].some(m =>
-            m.role === 'browser_login_request' && m.service === evt.data.service && Math.abs((m.ts || 0) - evtTs) < 5000
+            m.role === 'browser_login_request' && m._from_agent === agent && m.service === evt.data.service && Math.abs((m.ts || 0) - evtTs) < 5000
           );
           if (!opDup) {
             this.chatHistories['operator'].push({ ...loginCard, _from_agent: agent });
@@ -4618,8 +4618,46 @@ function dashboard() {
     },
 
     _getVncUrl() {
-      const a = this.agents.find(a => a.vnc_url);
-      return a ? a.vnc_url : '';
+      const match = this.agents.find(ag => ag.vnc_url);
+      return match ? match.vnc_url : '';
+    },
+
+    async _completeBrowserLogin(msg, agentId) {
+      const prev = { completed: msg.completed, cancelled: msg.cancelled };
+      msg.completed = true;
+      try {
+        const resp = await fetch(window.__config.apiBase + '/browser-login/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
+        });
+        if (!resp.ok) {
+          msg.completed = prev.completed;
+          this.showToast('Failed to notify agent — please try again');
+        }
+      } catch (_) {
+        msg.completed = prev.completed;
+        this.showToast('Network error — please try again');
+      }
+    },
+
+    async _cancelBrowserLogin(msg, agentId) {
+      const prev = { completed: msg.completed, cancelled: msg.cancelled };
+      msg.cancelled = true;
+      try {
+        const resp = await fetch(window.__config.apiBase + '/browser-login/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
+        });
+        if (!resp.ok) {
+          msg.cancelled = prev.cancelled;
+          this.showToast('Failed to notify agent — please try again');
+        }
+      } catch (_) {
+        msg.cancelled = prev.cancelled;
+        this.showToast('Network error — please try again');
+      }
     },
 
     async toggleBrowser() {

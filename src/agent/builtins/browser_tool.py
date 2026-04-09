@@ -578,8 +578,18 @@ async def request_browser_login(
         await mesh_client.request_browser_login(
             url=url, service=service, description=description,
         )
-    except Exception:
-        pass  # Best effort — the tool result is the primary mechanism
+    except Exception as e:
+        logger.warning("Failed to emit browser login request for %s: %s", service, e)
+        return {
+            "requested": False,
+            "service": service,
+            "url": url,
+            "message": (
+                f"Browser navigated to {url} but failed to show the login card "
+                f"in the user's chat. Try calling notify_user to ask them to "
+                f"log in via the browser on your settings page instead."
+            ),
+        }
 
     return {
         "requested": True,

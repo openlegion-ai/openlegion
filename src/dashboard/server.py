@@ -1815,20 +1815,21 @@ def create_dashboard_router(
         """User completed browser login — notify the requesting agent."""
         body = await request.json()
         agent_id = body.get("agent_id", "").strip()
-        service = body.get("service", "").strip()
+        service = body.get("service", "").strip()[:128]
         if not agent_id or not service:
             raise HTTPException(status_code=400, detail="agent_id and service are required")
         # Notify the agent that login is complete
         if agent_id in agent_registry and lane_manager is not None:
             from src.shared.trace import new_trace_id
+            from src.shared.utils import sanitize_for_prompt
             try:
-                await lane_manager.enqueue(
-                    agent_id,
+                msg = sanitize_for_prompt(
                     f"The user has completed the browser login for {service}. "
                     f"The session (cookies, localStorage) is now saved in your browser profile. "
-                    f"You can resume using browser tools to interact with {service}.",
-                    mode="steer",
-                    trace_id=new_trace_id(),
+                    f"You can resume using browser tools to interact with {service}."
+                )
+                await lane_manager.enqueue(
+                    agent_id, msg, mode="steer", trace_id=new_trace_id(),
                 )
             except Exception:
                 pass
@@ -1841,18 +1842,19 @@ def create_dashboard_router(
         """User cancelled browser login — notify the requesting agent."""
         body = await request.json()
         agent_id = body.get("agent_id", "").strip()
-        service = body.get("service", "").strip()
+        service = body.get("service", "").strip()[:128]
         if not agent_id or not service:
             raise HTTPException(status_code=400, detail="agent_id and service are required")
         if agent_id in agent_registry and lane_manager is not None:
             from src.shared.trace import new_trace_id
+            from src.shared.utils import sanitize_for_prompt
             try:
-                await lane_manager.enqueue(
-                    agent_id,
+                msg = sanitize_for_prompt(
                     f"The user cancelled the browser login for {service}. "
-                    f"You may need to find an alternative approach or ask again later.",
-                    mode="steer",
-                    trace_id=new_trace_id(),
+                    f"You may need to find an alternative approach or ask again later."
+                )
+                await lane_manager.enqueue(
+                    agent_id, msg, mode="steer", trace_id=new_trace_id(),
                 )
             except Exception:
                 pass

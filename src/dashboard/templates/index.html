@@ -394,7 +394,7 @@
                         </div>
                         <div class="min-w-0" :class="msg._browserExpanded ? 'max-w-[95%]' : 'max-w-[80%]'">
                           <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-violet-600/30"
-                            x-data="{ browserOpen: false, focusDone: false, focusing: false }">
+                            x-data="{ browserOpen: false, focusDone: false, focusing: false, vncLoaded: false }">
                             <template x-if="!msg.completed && !msg.cancelled">
                               <div>
                                 <div class="flex items-center gap-2 mb-2">
@@ -418,18 +418,21 @@
                                 <template x-if="browserOpen">
                                   <div class="mb-3">
                                     <div class="relative rounded-lg overflow-hidden bg-gray-900 border border-gray-700" :style="msg._browserExpanded ? 'aspect-ratio: 16/9; max-width: 100%;' : 'aspect-ratio: 16/9; max-width: 480px;'">
-                                      <div x-show="!focusDone"
-                                        class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 z-10">
+                                      <!-- Loading overlay — stays visible until iframe loads -->
+                                      <div x-show="!vncLoaded"
+                                        class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 z-10 transition-opacity duration-500"
+                                        :style="vncLoaded ? 'opacity:0; pointer-events:none' : ''">
                                         <svg class="animate-spin h-6 w-6 text-violet-400 mb-2" fill="none" viewBox="0 0 24 24">
                                           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
                                           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                                         </svg>
                                         <span class="text-xs text-gray-400">Connecting to browser...</span>
                                       </div>
-                                      <iframe x-show="focusDone"
+                                      <iframe
                                         :src="focusDone ? _getVncUrl() : ''"
                                         class="w-full h-full border-0"
                                         allow="clipboard-read; clipboard-write"
+                                        @load="if (focusDone) vncLoaded = true"
                                       ></iframe>
                                     </div>
                                   </div>
@@ -437,19 +440,19 @@
                                 <!-- Action buttons -->
                                 <div class="flex gap-2">
                                   <template x-if="!browserOpen">
-                                    <button @click="if (!focusing) { focusing = true; browserOpen = true; focusDone = false; focusBrowser(msg._from_agent || '').then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
+                                    <button @click="if (!focusing && msg._from_agent) { focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
                                       class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors flex items-center justify-center gap-1.5">
                                       <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                                       Open Browser
                                     </button>
                                   </template>
                                   <template x-if="browserOpen">
-                                    <button @click="msg.completed = true; browserOpen = false; focusDone = false; fetch(window.__config.apiBase + '/browser-login/complete', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({agent_id: msg._from_agent || '', service: msg.service}) });"
+                                    <button @click="browserOpen = false; focusDone = false; vncLoaded = false; _completeBrowserLogin(msg, msg._from_agent)"
                                       class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white transition-colors">
                                       &#10003; Complete Login
                                     </button>
                                   </template>
-                                  <button @click="msg.cancelled = true; browserOpen = false; focusDone = false; fetch(window.__config.apiBase + '/browser-login/cancel', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({agent_id: msg._from_agent || '', service: msg.service}) });"
+                                  <button @click="browserOpen = false; focusDone = false; vncLoaded = false; _cancelBrowserLogin(msg, msg._from_agent)"
                                     class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
                                     :class="browserOpen ? 'bg-gray-700 hover:bg-gray-600 text-gray-300' : 'bg-gray-700/50 hover:bg-gray-600 text-gray-400'">
                                     Cancel
@@ -5533,7 +5536,7 @@
                 <div class="flex justify-start">
                   <div class="min-w-0" :class="msg._browserExpanded ? 'max-w-[95%]' : 'max-w-[80%]'">
                     <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-violet-600/30"
-                      x-data="{ browserOpen: false, focusDone: false, focusing: false }">
+                      x-data="{ browserOpen: false, focusDone: false, focusing: false, vncLoaded: false }">
                       <template x-if="!msg.completed && !msg.cancelled">
                         <div>
                           <div class="flex items-center gap-2 mb-2">
@@ -5557,18 +5560,21 @@
                           <template x-if="browserOpen">
                             <div class="mb-3">
                               <div class="relative rounded-lg overflow-hidden bg-gray-900 border border-gray-700" :style="msg._browserExpanded ? 'aspect-ratio: 16/9; max-width: 100%;' : 'aspect-ratio: 16/9; max-width: 480px;'">
-                                <div x-show="!focusDone"
-                                  class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 z-10">
+                                <!-- Loading overlay — stays visible until iframe loads -->
+                                <div x-show="!vncLoaded"
+                                  class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 z-10 transition-opacity duration-500"
+                                  :style="vncLoaded ? 'opacity:0; pointer-events:none' : ''">
                                   <svg class="animate-spin h-6 w-6 text-violet-400 mb-2" fill="none" viewBox="0 0 24 24">
                                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
                                     <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                                   </svg>
                                   <span class="text-xs text-gray-400">Connecting to browser...</span>
                                 </div>
-                                <iframe x-show="focusDone"
+                                <iframe
                                   :src="focusDone ? _getVncUrl() : ''"
                                   class="w-full h-full border-0"
                                   allow="clipboard-read; clipboard-write"
+                                  @load="if (focusDone) vncLoaded = true"
                                 ></iframe>
                               </div>
                             </div>
@@ -5576,19 +5582,19 @@
                           <!-- Action buttons -->
                           <div class="flex gap-2">
                             <template x-if="!browserOpen">
-                              <button @click="if (!focusing) { focusing = true; browserOpen = true; focusDone = false; focusBrowser(activeChatId || '').then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
+                              <button @click="if (!focusing && activeChatId) { focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(activeChatId).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
                                 class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors flex items-center justify-center gap-1.5">
                                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                                 Open Browser
                               </button>
                             </template>
                             <template x-if="browserOpen">
-                              <button @click="msg.completed = true; browserOpen = false; focusDone = false; fetch(window.__config.apiBase + '/browser-login/complete', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({agent_id: activeChatId || '', service: msg.service}) });"
+                              <button @click="browserOpen = false; focusDone = false; vncLoaded = false; _completeBrowserLogin(msg, activeChatId)"
                                 class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white transition-colors">
                                 &#10003; Complete Login
                               </button>
                             </template>
-                            <button @click="msg.cancelled = true; browserOpen = false; focusDone = false; fetch(window.__config.apiBase + '/browser-login/cancel', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({agent_id: activeChatId || '', service: msg.service}) });"
+                            <button @click="browserOpen = false; focusDone = false; vncLoaded = false; _cancelBrowserLogin(msg, activeChatId)"
                               class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
                               :class="browserOpen ? 'bg-gray-700 hover:bg-gray-600 text-gray-300' : 'bg-gray-700/50 hover:bg-gray-600 text-gray-400'">
                               Cancel
