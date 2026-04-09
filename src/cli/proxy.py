@@ -35,7 +35,7 @@ def validate_proxy_url(url: str) -> bool:
             return False
         if not parsed.hostname:
             return False
-        if not parsed.port:
+        if parsed.port is None:
             return False
         return True
     except Exception:
