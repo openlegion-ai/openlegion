@@ -2612,6 +2612,7 @@ class TestTypeTextSettleDelays:
         inst.page.click = AsyncMock()
         inst.page.keyboard = AsyncMock()
         inst.page.keyboard.press = AsyncMock()
+        inst.x11_wid = 12345
         inst.refs = {"e1": {"role": "textbox", "name": "Tweet", "index": 0, "disabled": False}}
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
@@ -2625,12 +2626,14 @@ class TestTypeTextSettleDelays:
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
             with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
-                with patch.object(BrowserManager, "_type_with_variance", new_callable=AsyncMock):
-                    with patch("src.browser.service.action_delay", return_value=0.15):
-                        with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
-                            result = await mgr.type_text(
-                                "agent1", text="hello", ref="e1", clear=False,
-                            )
+                with patch.object(BrowserManager, "_x11_click", new_callable=AsyncMock):
+                    with patch.object(BrowserManager, "_x11_type", new_callable=AsyncMock):
+                        with patch.object(BrowserManager, "_x11_key", new_callable=AsyncMock):
+                            with patch("src.browser.service.action_delay", return_value=0.15):
+                                with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
+                                    result = await mgr.type_text(
+                                        "agent1", text="hello", ref="e1", clear=False,
+                                    )
 
         assert result["success"] is True
         # Should have at least 2 settle delays (after focus, after typing)
@@ -2648,6 +2651,7 @@ class TestTypeTextSettleDelays:
         inst.page.click = AsyncMock()
         inst.page.keyboard = AsyncMock()
         inst.page.keyboard.press = AsyncMock()
+        inst.x11_wid = 12345
         inst.refs = {"e1": {"role": "textbox", "name": "Tweet", "index": 0, "disabled": False}}
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
@@ -2661,12 +2665,14 @@ class TestTypeTextSettleDelays:
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
             with patch.object(BrowserManager, "_locator_from_ref", return_value=mock_locator):
-                with patch.object(BrowserManager, "_type_with_variance", new_callable=AsyncMock):
-                    with patch("src.browser.service.action_delay", return_value=0.15):
-                        with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
-                            result = await mgr.type_text(
-                                "agent1", text="hello", ref="e1", clear=True,
-                            )
+                with patch.object(BrowserManager, "_x11_click", new_callable=AsyncMock):
+                    with patch.object(BrowserManager, "_x11_type", new_callable=AsyncMock):
+                        with patch.object(BrowserManager, "_x11_key", new_callable=AsyncMock):
+                            with patch("src.browser.service.action_delay", return_value=0.15):
+                                with patch("src.browser.service.asyncio.sleep", side_effect=capture_sleep):
+                                    result = await mgr.type_text(
+                                        "agent1", text="hello", ref="e1", clear=True,
+                                    )
 
         assert result["success"] is True
         # Should have settle delays + the 0.05 clear delay
@@ -4318,8 +4324,8 @@ class TestX11Input:
         mgr._x11_type.assert_called_once_with(inst, "Hello world")
 
     @pytest.mark.asyncio
-    async def test_type_text_non_sensitive_uses_cdp(self):
-        """type_text() with selector on a non-X site should use CDP typing."""
+    async def test_type_text_uses_x11_on_all_sites(self):
+        """type_text() with selector on any site should use X11 typing when x11_wid is set."""
         mgr = self._make_manager()
         inst = self._make_instance()
         inst.page = MagicMock()
@@ -4328,8 +4334,9 @@ class TestX11Input:
         inst.lock = asyncio.Lock()
 
         mgr.get_or_start = AsyncMock(return_value=inst)
-        mgr._human_click_selector = AsyncMock()
-        mgr._type_with_variance = AsyncMock()
+        mgr._x11_click = AsyncMock()
+        mgr._x11_type = AsyncMock()
+        mgr._x11_key = AsyncMock()
         mgr._snapshot_impl = AsyncMock(return_value={"data": {}})
 
         result = await mgr.type_text(
@@ -4338,7 +4345,7 @@ class TestX11Input:
             text="Hello",
         )
         assert result["success"]
-        mgr._type_with_variance.assert_called_once()
+        mgr._x11_type.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_x11_click_mousemove_failure_raises(self):
@@ -4410,8 +4417,8 @@ class TestX11Input:
         mgr._x11_type.assert_called_once_with(inst, "Hello X")
 
     @pytest.mark.asyncio
-    async def test_type_text_ref_on_other_site_uses_cdp(self):
-        """type_text() with a textbox ref on non-X site should use CDP typing."""
+    async def test_type_text_ref_uses_x11_on_all_sites(self):
+        """type_text() with a textbox ref on any site should use X11 typing when x11_wid is set."""
         mgr = self._make_manager()
         inst = self._make_instance()
         inst.page = MagicMock()
@@ -4423,13 +4430,14 @@ class TestX11Input:
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
         mgr._locator_from_ref = MagicMock(return_value=mock_locator)
-        mgr._human_click = AsyncMock()
-        mgr._type_with_variance = AsyncMock()
+        mgr._x11_click = AsyncMock()
+        mgr._x11_type = AsyncMock()
+        mgr._x11_key = AsyncMock()
         mgr._snapshot_impl = AsyncMock(return_value={"data": {}})
 
         result = await mgr.type_text("agent-1", ref="T1", text="Hello")
         assert result["success"]
-        mgr._type_with_variance.assert_called_once()
+        mgr._x11_type.assert_called_once()
 
     # ── _is_x11_site tests ───────────────────────────────────────────
 
@@ -4452,24 +4460,24 @@ class TestX11Input:
             inst.page.url = url
             assert mgr._is_x11_site(inst) is True, f"Expected True for {url}"
 
-    def test_is_x11_site_other_domain(self):
-        """_is_x11_site should return False for non-X/Twitter domains."""
+    def test_is_x11_site_all_domains(self):
+        """_is_x11_site should return True for all domains."""
         mgr = self._make_manager()
         inst = self._make_instance()
         inst.page = MagicMock()
         for url in ("https://google.com", "https://example.com/x.com",
                      "https://github.com"):
             inst.page.url = url
-            assert mgr._is_x11_site(inst) is False, f"Expected False for {url}"
+            assert mgr._is_x11_site(inst) is True, f"Expected True for {url}"
 
-    def test_is_x11_site_no_false_positive_suffix(self):
-        """_is_x11_site should not match notx.com or faketwitter.com."""
+    def test_is_x11_site_any_domain(self):
+        """_is_x11_site should return True for any domain."""
         mgr = self._make_manager()
         inst = self._make_instance()
         inst.page = MagicMock()
         for url in ("https://notx.com/home", "https://faketwitter.com/feed"):
             inst.page.url = url
-            assert mgr._is_x11_site(inst) is False, f"Expected False for {url}"
+            assert mgr._is_x11_site(inst) is True, f"Expected True for {url}"
 
     # ── URL-based X11 routing tests ──────────────────────────────────
 
@@ -4847,8 +4855,8 @@ class TestX11Input:
         mgr._x11_hover.assert_called_once_with(inst, mock_locator)
 
     @pytest.mark.asyncio
-    async def test_hover_uses_cdp_on_other_sites(self):
-        """hover() on non-X site should use CDP locator.hover."""
+    async def test_hover_uses_x11_on_all_sites(self):
+        """hover() on any site should use _x11_hover when x11_wid is set."""
         mgr = self._make_manager()
         inst = self._make_instance()
         inst.page = MagicMock()
@@ -4864,8 +4872,8 @@ class TestX11Input:
 
         result = await mgr.hover("agent-1", ref="e0")
         assert result["success"]
-        mock_locator.hover.assert_called_once()
-        mgr._x11_hover.assert_not_called()
+        mgr._x11_hover.assert_called_once()
+        mock_locator.hover.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_hover_x11_failure_falls_back_to_cdp(self):
@@ -4940,8 +4948,8 @@ class TestX11Input:
         mgr._x11_key.assert_called_once_with(inst, "Return")
 
     @pytest.mark.asyncio
-    async def test_press_key_uses_cdp_on_other_sites(self):
-        """press_key on non-X site should use CDP keyboard.press."""
+    async def test_press_key_uses_x11_on_all_sites(self):
+        """press_key on any site should use _x11_key when x11_wid is set."""
         mgr = self._make_manager()
         inst = self._make_instance()
         inst.page = MagicMock()
@@ -4954,8 +4962,8 @@ class TestX11Input:
 
         result = await mgr.press_key("agent-1", "Enter")
         assert result["success"]
-        inst.page.keyboard.press.assert_called_once_with("Enter")
-        mgr._x11_key.assert_not_called()
+        mgr._x11_key.assert_called_once()
+        inst.page.keyboard.press.assert_not_called()
 
     def test_playwright_key_to_xdotool(self):
         """_playwright_key_to_xdotool should map Playwright keys to xdotool names."""
