@@ -14,7 +14,7 @@ from urllib.parse import quote, unquote, urlparse, urlunparse
 
 logger = logging.getLogger("proxy")
 
-_VALID_SCHEMES = {"http", "https", "socks5"}
+_VALID_SCHEMES = {"http", "https"}
 
 _MANDATORY_NO_PROXY = "host.docker.internal,127.0.0.1,localhost"
 

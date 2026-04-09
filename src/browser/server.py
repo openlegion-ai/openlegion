@@ -171,6 +171,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         body = None
         if body_bytes:
             body = json.loads(body_bytes)
+        was_focused = manager._user_focused_agent == agent_id
         manager.set_proxy_config(agent_id, body)
         # If a browser is already running for this agent, restart it so the
         # new proxy config takes effect on the next get_or_start() call.
@@ -179,6 +180,17 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             await manager.reset(agent_id)
         except Exception:
             logger.warning("Failed to reset browser for '%s' after proxy change", agent_id, exc_info=True)
+        # Re-focus the agent if it was focused before the reset, so the VNC
+        # viewer doesn't show a purple/blank screen.
+        if was_focused:
+            try:
+                # Re-check: another request may have shifted focus during reset.
+                # stop() clears _user_focused_agent to None, so if it's still
+                # None nobody else claimed focus. If it's our agent, also safe.
+                if manager._user_focused_agent is None or manager._user_focused_agent == agent_id:
+                    await manager.focus(agent_id)
+            except Exception:
+                logger.debug("Failed to re-focus '%s' after proxy reset", agent_id)
         return {"success": True}
 
     @app.post("/browser/{agent_id}/focus")

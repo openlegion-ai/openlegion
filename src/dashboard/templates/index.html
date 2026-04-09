@@ -2071,7 +2071,15 @@
                                 'text-amber-400': (agentConfigs[selectedAgent]?.proxy?.mode) === 'direct',
                               }"
                               x-text="proxyModeLabel(agentConfigs[selectedAgent]?.proxy?.mode || 'inherit')"></span>
-                            <span x-show="agentConfigs[selectedAgent]?.proxy?.url" class="text-xs text-gray-500 font-mono" x-text="agentConfigs[selectedAgent]?.proxy?.url"></span>
+                            <template x-if="agentConfigs[selectedAgent]?.proxy?.mode === 'custom' && agentConfigs[selectedAgent]?.proxy?.host">
+                              <span class="text-xs text-gray-500 font-mono flex items-center gap-2">
+                                <span>&middot;</span>
+                                <span x-text="agentConfigs[selectedAgent]?.proxy?.host"></span>
+                              </span>
+                            </template>
+                            <template x-if="agentConfigs[selectedAgent]?.proxy?.mode === 'custom' && !agentConfigs[selectedAgent]?.proxy?.host">
+                              <span x-show="agentConfigs[selectedAgent]?.proxy?.url" class="text-xs text-gray-500 font-mono" x-text="agentConfigs[selectedAgent]?.proxy?.url"></span>
+                            </template>
                             <span x-show="agentConfigs[selectedAgent]?.proxy?.has_credential" class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-900/30 text-emerald-400 border border-emerald-800/50">authenticated</span>
                           </div>
                         </div>
@@ -2330,27 +2338,57 @@
                           <div class="space-y-3">
                             <div>
                               <label class="text-xs text-gray-500 mb-1 block">Mode</label>
-                              <select x-model="editForm.proxy_mode" class="dash-select w-full">
+                              <select x-model="editForm.proxy_mode" @change="editForm._showProxyChange = false" class="dash-select w-full">
                                 <option value="inherit">Use system proxy</option>
                                 <option value="custom">Custom proxy</option>
                                 <option value="direct">No proxy (direct)</option>
                               </select>
                             </div>
                             <template x-if="editForm.proxy_mode === 'custom'">
-                              <div class="space-y-3">
-                                <div>
-                                  <label class="text-xs text-gray-500 mb-1 block">Proxy URL</label>
-                                  <input type="text" x-model="editForm.proxy_url" class="dash-input w-full" placeholder="socks5://proxy:1080 or http://proxy:8080">
-                                </div>
-                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
-                                  <div>
-                                    <label class="text-xs text-gray-500 mb-1 block">Username <span class="text-gray-600">(optional)</span></label>
-                                    <input type="text" x-model="editForm.proxy_username" class="dash-input w-full" autocomplete="off">
+                              <div class="space-y-3 mt-3">
+                                <!-- Current proxy indicator -->
+                                <template x-if="editForm._current_proxy_host">
+                                  <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+                                    <span class="w-2 h-2 rounded-full bg-emerald-400 shrink-0"></span>
+                                    <span class="text-xs text-gray-300">
+                                      <span class="text-emerald-400 font-medium" x-text="(editForm._current_proxy_scheme || 'http').toUpperCase()"></span>
+                                      proxy at
+                                      <span class="font-mono text-gray-200" x-text="editForm._current_proxy_host"></span>
+                                      <template x-if="editForm._current_proxy_has_credential">
+                                        <span class="text-gray-500">(authenticated)</span>
+                                      </template>
+                                    </span>
+                                    <button type="button" @click="editForm._showProxyChange = !editForm._showProxyChange"
+                                      class="ml-auto text-xs text-indigo-400 hover:text-indigo-300">
+                                      <span x-text="editForm._showProxyChange ? 'Cancel change' : 'Change'"></span>
+                                    </button>
                                   </div>
+                                </template>
+
+                                <!-- New proxy form (always shown if no current proxy, toggled if there is one) -->
+                                <div x-show="!editForm._current_proxy_host || editForm._showProxyChange"
+                                     x-transition class="space-y-2">
                                   <div>
-                                    <label class="text-xs text-gray-500 mb-1 block">Password <span class="text-gray-600">(optional)</span></label>
-                                    <input type="password" x-model="editForm.proxy_password" class="dash-input w-full" autocomplete="off">
+                                    <label class="block text-xs text-gray-400 mb-1">Proxy URL</label>
+                                    <input x-model="editForm.proxy_url" type="text"
+                                      placeholder="http://proxy.example.com:8080"
+                                      class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"/>
                                   </div>
+                                  <div class="grid grid-cols-2 gap-2">
+                                    <div>
+                                      <label class="block text-xs text-gray-400 mb-1">Username <span class="text-gray-600">(optional)</span></label>
+                                      <input x-model="editForm.proxy_username" type="text"
+                                        autocomplete="off"
+                                        class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"/>
+                                    </div>
+                                    <div>
+                                      <label class="block text-xs text-gray-400 mb-1">Password <span class="text-gray-600">(optional)</span></label>
+                                      <input x-model="editForm.proxy_password" type="password"
+                                        autocomplete="off"
+                                        class="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"/>
+                                    </div>
+                                  </div>
+                                  <p class="text-xs text-gray-500">Only HTTP and HTTPS proxies are supported.</p>
                                 </div>
                               </div>
                             </template>
@@ -3710,7 +3748,7 @@
               <p class="text-[10px] text-gray-600">This proxy is provisioned by OpenLegion. You can override it with your own below.</p>
               <div>
                 <label class="text-xs text-gray-400 mb-1 block">Override Proxy URL</label>
-                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="socks5://your-proxy.example.com:1080">
+                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="http://proxy.example.com:8080">
               </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
                 <div>
@@ -3722,6 +3760,7 @@
                   <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" autocomplete="off">
                 </div>
               </div>
+              <p class="text-[10px] text-gray-500">Only HTTP and HTTPS proxies are supported.</p>
               <button @click="saveSystemProxy()" :disabled="networkProxy.saving || !networkProxy.form.url"
                 class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
                 <span x-text="networkProxy.saving ? 'Saving...' : 'Override Proxy'"></span>
@@ -3745,7 +3784,7 @@
               </div>
               <div>
                 <label class="text-xs text-gray-400 mb-1 block">New Override Proxy URL</label>
-                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="socks5://proxy.example.com:1080">
+                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="http://proxy.example.com:8080">
               </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
                 <div>
@@ -3757,6 +3796,7 @@
                   <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" autocomplete="off">
                 </div>
               </div>
+              <p class="text-[10px] text-gray-500">Only HTTP and HTTPS proxies are supported.</p>
               <div class="flex items-center gap-2 pt-1">
                 <button @click="saveSystemProxy()" :disabled="networkProxy.saving || !networkProxy.form.url"
                   class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
@@ -3784,7 +3824,7 @@
               </div>
               <div>
                 <label class="text-xs text-gray-400 mb-1 block">New Proxy URL</label>
-                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="socks5://proxy.example.com:1080">
+                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="http://proxy.example.com:8080">
               </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
                 <div>
@@ -3796,6 +3836,7 @@
                   <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" autocomplete="off">
                 </div>
               </div>
+              <p class="text-[10px] text-gray-500">Only HTTP and HTTPS proxies are supported.</p>
               <div class="flex items-center gap-2 pt-1">
                 <button @click="saveSystemProxy()" :disabled="networkProxy.saving || !networkProxy.form.url"
                   class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
@@ -3816,7 +3857,7 @@
               </div>
               <div>
                 <label class="text-xs text-gray-400 mb-1 block">Proxy URL</label>
-                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="socks5://proxy.example.com:1080 or http://proxy:8080">
+                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="http://proxy.example.com:8080">
               </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
                 <div>
@@ -3828,6 +3869,7 @@
                   <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" autocomplete="off">
                 </div>
               </div>
+              <p class="text-[10px] text-gray-500">Only HTTP and HTTPS proxies are supported.</p>
               <button @click="saveSystemProxy()" :disabled="networkProxy.saving || !networkProxy.form.url"
                 class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
                 <span x-text="networkProxy.saving ? 'Saving...' : 'Add Proxy'"></span>
@@ -3917,7 +3959,7 @@
                             <div x-show="networkProxy.agentProxyForm.mode === 'custom'" class="space-y-2">
                               <div>
                                 <label class="text-[10px] text-gray-500 mb-1 block">Proxy URL</label>
-                                <input type="text" x-model="networkProxy.agentProxyForm.url" class="dash-input w-full text-xs" placeholder="socks5://proxy.example.com:1080">
+                                <input type="text" x-model="networkProxy.agentProxyForm.url" class="dash-input w-full text-xs" placeholder="http://proxy.example.com:8080">
                               </div>
                               <div class="grid grid-cols-2 gap-2">
                                 <div>
@@ -3929,6 +3971,7 @@
                                   <input type="password" x-model="networkProxy.agentProxyForm.password" class="dash-input w-full text-xs" autocomplete="off">
                                 </div>
                               </div>
+                              <p class="text-[10px] text-gray-500">Only HTTP and HTTPS proxies are supported.</p>
                             </div>
                             <div class="flex items-center gap-2 pt-1">
                               <button @click="saveAgentProxy(ap.agent_id)"
