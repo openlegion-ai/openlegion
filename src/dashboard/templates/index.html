@@ -420,7 +420,7 @@
                                     <div class="relative rounded-lg overflow-hidden bg-gray-900 border border-gray-700" :style="msg._browserExpanded ? 'aspect-ratio: 16/9; max-width: 100%;' : 'aspect-ratio: 16/9; max-width: 480px;'">
                                       <!-- Loading overlay — fades out when iframe loads -->
                                       <div class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 z-10 transition-opacity duration-500"
-                                        :class="vncLoaded ? 'opacity-0 pointer-events-none' : 'opacity-100'"
+                                        :class="vncLoaded ? 'opacity-0 pointer-events-none' : 'opacity-100'">
                                         <svg class="animate-spin h-6 w-6 text-violet-400 mb-2" fill="none" viewBox="0 0 24 24">
                                           <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
                                           <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
@@ -5559,10 +5559,9 @@
                           <template x-if="browserOpen">
                             <div class="mb-3">
                               <div class="relative rounded-lg overflow-hidden bg-gray-900 border border-gray-700" :style="msg._browserExpanded ? 'aspect-ratio: 16/9; max-width: 100%;' : 'aspect-ratio: 16/9; max-width: 480px;'">
-                                <!-- Loading overlay — stays visible until iframe loads -->
-                                <div x-show="!vncLoaded"
-                                  class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 z-10 transition-opacity duration-500"
-                                  :style="vncLoaded ? 'opacity:0; pointer-events:none' : ''">
+                                <!-- Loading overlay — fades out when iframe loads -->
+                                <div class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 z-10 transition-opacity duration-500"
+                                  :class="vncLoaded ? 'opacity-0 pointer-events-none' : 'opacity-100'">
                                   <svg class="animate-spin h-6 w-6 text-violet-400 mb-2" fill="none" viewBox="0 0 24 24">
                                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
                                     <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
