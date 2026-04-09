@@ -581,63 +581,75 @@ def create_mesh_app(
                     if isinstance(block, dict) and block.get("type") == "text":
                         response_preview = (block.get("text") or "")[:500]
                         break
-        if req_trace_id and trace_store:
-            trace_meta = {
-                "service": api_request.service,
-                "action": api_request.action,
-            }
-            if prompt_preview:
-                trace_meta["prompt_preview"] = prompt_preview
-            if response_preview:
-                trace_meta["response_preview"] = response_preview
-            trace_status = "ok"
-            trace_error = ""
-            if result.success and result.data:
-                trace_meta["model"] = result.data.get("model", "")
-                trace_meta["tokens_used"] = result.data.get("tokens_used", 0)
-                trace_meta["input_tokens"] = result.data.get("input_tokens", 0)
-                trace_meta["output_tokens"] = result.data.get("output_tokens", 0)
-            elif not result.success:
-                trace_status = "error"
-                trace_error = result.error or "Unknown error"
-            trace_store.record(
-                trace_id=req_trace_id,
-                source="mesh.api_proxy",
-                agent=agent_id,
-                event_type="llm_call",
-                detail=f"{api_request.service}/{api_request.action}",
-                duration_ms=duration_ms,
-                status=trace_status,
-                error=trace_error,
-                meta=trace_meta,
+        try:
+            if req_trace_id and trace_store:
+                trace_meta = {
+                    "service": api_request.service,
+                    "action": api_request.action,
+                }
+                if prompt_preview:
+                    trace_meta["prompt_preview"] = prompt_preview
+                if response_preview:
+                    trace_meta["response_preview"] = response_preview
+                trace_status = "ok"
+                trace_error = ""
+                if result.success and result.data:
+                    trace_meta["model"] = result.data.get("model", "")
+                    trace_meta["tokens_used"] = result.data.get("tokens_used", 0)
+                    trace_meta["input_tokens"] = result.data.get("input_tokens", 0)
+                    trace_meta["output_tokens"] = result.data.get("output_tokens", 0)
+                elif not result.success:
+                    trace_status = "error"
+                    trace_error = result.error or "Unknown error"
+                trace_store.record(
+                    trace_id=req_trace_id,
+                    source="mesh.api_proxy",
+                    agent=agent_id,
+                    event_type="llm_call",
+                    detail=f"{api_request.service}/{api_request.action}",
+                    duration_ms=duration_ms,
+                    status=trace_status,
+                    error=trace_error,
+                    meta=trace_meta,
+                )
+        except Exception:
+            logger.error(
+                "Post-processing failed (trace) for %s/%s agent=%s",
+                api_request.service, api_request.action, agent_id, exc_info=True,
             )
-        if event_bus is not None and not result.success and result.status_code == 402:
-            event_bus.emit("credit_exhausted", agent=agent_id, data={
-                "error": result.error or "Insufficient credits",
-            })
-        if event_bus is not None and result.success and result.data:
-            model = result.data.get("model", "")
-            tokens = result.data.get("tokens_used", 0)
-            input_tok = result.data.get("input_tokens", 0)
-            output_tok = result.data.get("output_tokens", 0)
-            from src.host.costs import estimate_cost
-            fixed_cost = result.data.get("fixed_cost_usd", 0)
-            event_data = {
-                "service": api_request.service, "action": api_request.action,
-                "duration_ms": duration_ms,
-                "model": model,
-                "total_tokens": tokens,
-                "input_tokens": input_tok,
-                "output_tokens": output_tok,
-                "cost_usd": fixed_cost if fixed_cost else estimate_cost(
-                    model, input_tokens=input_tok, output_tokens=output_tok, total_tokens=tokens,
-                ),
-            }
-            if prompt_preview:
-                event_data["prompt_preview"] = prompt_preview
-            if response_preview:
-                event_data["response_preview"] = response_preview
-            event_bus.emit("llm_call", agent=agent_id, data=event_data)
+        try:
+            if event_bus is not None and not result.success and result.status_code == 402:
+                event_bus.emit("credit_exhausted", agent=agent_id, data={
+                    "error": result.error or "Insufficient credits",
+                })
+            if event_bus is not None and result.success and result.data:
+                model = result.data.get("model", "")
+                tokens = result.data.get("tokens_used", 0)
+                input_tok = result.data.get("input_tokens", 0)
+                output_tok = result.data.get("output_tokens", 0)
+                from src.host.costs import estimate_cost
+                fixed_cost = result.data.get("fixed_cost_usd", 0)
+                event_data = {
+                    "service": api_request.service, "action": api_request.action,
+                    "duration_ms": duration_ms,
+                    "model": model,
+                    "total_tokens": tokens,
+                    "input_tokens": input_tok,
+                    "output_tokens": output_tok,
+                    "cost_usd": fixed_cost if fixed_cost else estimate_cost(
+                        model, input_tokens=input_tok, output_tokens=output_tok, total_tokens=tokens,
+                    ),
+                }
+                if prompt_preview:
+                    event_data["prompt_preview"] = prompt_preview
+                if response_preview:
+                    event_data["response_preview"] = response_preview
+                event_bus.emit("llm_call", agent=agent_id, data=event_data)
+        except Exception:
+            logger.error(
+                "Post-processing failed (events) for %s/%s agent=%s",
+                api_request.service, api_request.action, agent_id, exc_info=True,
+            )
         return result
 
     @app.post("/mesh/api/stream")
@@ -653,20 +665,26 @@ def create_mesh_app(
         req_trace_id = request.headers.get("x-trace-id")
         prompt_preview = _extract_prompt_preview(api_request.params)
 
-        if req_trace_id and trace_store:
-            stream_meta: dict = {
-                "service": api_request.service,
-                "action": api_request.action,
-            }
-            if prompt_preview:
-                stream_meta["prompt_preview"] = prompt_preview
-            trace_store.record(
-                trace_id=req_trace_id,
-                source="mesh.api_proxy",
-                agent=agent_id,
-                event_type="llm_stream",
-                detail=f"{api_request.service}/{api_request.action}",
-                meta=stream_meta,
+        try:
+            if req_trace_id and trace_store:
+                stream_meta: dict = {
+                    "service": api_request.service,
+                    "action": api_request.action,
+                }
+                if prompt_preview:
+                    stream_meta["prompt_preview"] = prompt_preview
+                trace_store.record(
+                    trace_id=req_trace_id,
+                    source="mesh.api_proxy",
+                    agent=agent_id,
+                    event_type="llm_stream",
+                    detail=f"{api_request.service}/{api_request.action}",
+                    meta=stream_meta,
+                )
+        except Exception:
+            logger.error(
+                "Post-processing failed (trace) for %s/%s agent=%s",
+                api_request.service, api_request.action, agent_id, exc_info=True,
             )
 
         async def _stream_with_events():
@@ -688,43 +706,55 @@ def create_mesh_app(
             duration_ms = int((time.monotonic() - start) * 1000)
             tokens = done_data.get("tokens_used", 0)
             model = done_data.get("model", "")
-            if event_bus is not None and (tokens or model):
-                from src.host.costs import estimate_cost
-                ev: dict = {
-                    "service": api_request.service,
-                    "action": api_request.action,
-                    "duration_ms": duration_ms,
-                    "model": model,
-                    "total_tokens": tokens,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cost_usd": estimate_cost(model, total_tokens=tokens),
-                }
-                if prompt_preview:
-                    ev["prompt_preview"] = prompt_preview
-                response_preview = (done_data.get("content") or "")[:500]
-                if response_preview:
-                    ev["response_preview"] = response_preview
-                event_bus.emit("llm_call", agent=agent_id, data=ev)
-            if req_trace_id and trace_store and done_data:
-                trace_store.record(
-                    trace_id=req_trace_id,
-                    source="mesh.api_proxy",
-                    agent=agent_id,
-                    event_type="llm_call",
-                    detail=f"{api_request.service}/{api_request.action}",
-                    duration_ms=duration_ms,
-                    status="ok",
-                    meta={
+            try:
+                if event_bus is not None and (tokens or model):
+                    from src.host.costs import estimate_cost
+                    ev: dict = {
+                        "service": api_request.service,
+                        "action": api_request.action,
+                        "duration_ms": duration_ms,
                         "model": model,
-                        "tokens_used": tokens,
-                        "streaming": True,
-                    },
+                        "total_tokens": tokens,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cost_usd": estimate_cost(model, total_tokens=tokens),
+                    }
+                    if prompt_preview:
+                        ev["prompt_preview"] = prompt_preview
+                    response_preview = (done_data.get("content") or "")[:500]
+                    if response_preview:
+                        ev["response_preview"] = response_preview
+                    event_bus.emit("llm_call", agent=agent_id, data=ev)
+                if event_bus is not None and credit_error:
+                    event_bus.emit("credit_exhausted", agent=agent_id, data={
+                        "error": "Insufficient credits",
+                    })
+            except Exception:
+                logger.error(
+                    "Post-processing failed (events) for %s/%s agent=%s",
+                    api_request.service, api_request.action, agent_id, exc_info=True,
                 )
-            if event_bus is not None and credit_error:
-                event_bus.emit("credit_exhausted", agent=agent_id, data={
-                    "error": "Insufficient credits",
-                })
+            try:
+                if req_trace_id and trace_store and done_data:
+                    trace_store.record(
+                        trace_id=req_trace_id,
+                        source="mesh.api_proxy",
+                        agent=agent_id,
+                        event_type="llm_call",
+                        detail=f"{api_request.service}/{api_request.action}",
+                        duration_ms=duration_ms,
+                        status="ok",
+                        meta={
+                            "model": model,
+                            "tokens_used": tokens,
+                            "streaming": True,
+                        },
+                    )
+            except Exception:
+                logger.error(
+                    "Post-processing failed (trace) for %s/%s agent=%s",
+                    api_request.service, api_request.action, agent_id, exc_info=True,
+                )
 
         return StreamingResponse(_stream_with_events(), media_type="text/event-stream")
 

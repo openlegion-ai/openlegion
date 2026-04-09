@@ -333,6 +333,8 @@ class DashboardEvent(BaseModel):
         "chat_user_message",
         "chat_done",
         "chat_reset",
+        "credit_exhausted",
+        "credential_request",
     ]
     agent: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

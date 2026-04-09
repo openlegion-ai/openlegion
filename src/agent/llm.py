@@ -77,6 +77,8 @@ class LLMClient:
         m = model or self.default_model
         if m.startswith("openrouter/"):
             m = m[len("openrouter/"):]
+        if m.startswith("openlegion/"):
+            m = m[len("openlegion/"):]
         if m.startswith("anthropic/"):
             budget = self._THINKING_BUDGETS.get(self.thinking, 10_000)
             # Anthropic requires max_tokens > budget_tokens; ensure enough room
