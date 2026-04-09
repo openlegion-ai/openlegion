@@ -554,10 +554,11 @@ async def browser_detect_captcha(*, mesh_client=None) -> dict:
             "description": "Tell the user what to do (e.g. 'Please log in to your TikTok account')",
         },
     },
+    parallel_safe=False,
 )
 async def request_browser_login(
     url: str, service: str, description: str,
-    *, mesh_client=None, **_kw,
+    *, mesh_client=None,
 ) -> dict:
     """Request user login via live browser view in chat."""
     if not mesh_client:
