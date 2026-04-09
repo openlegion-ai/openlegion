@@ -45,7 +45,7 @@ All agents share a single **browser service container** running Camoufox (a stea
 | `browser_go_forward` | -- | Navigate forward in browser history. |
 | `browser_switch_tab` | `tab_index` | List open tabs or switch to a specific tab. Omit `tab_index` to list only. |
 | `browser_reset` | -- | Reset browser session (profile preserved) |
-| `browser_solve_captcha` | -- | Manual CAPTCHA detection and solving. Usually not needed — `browser_navigate` auto-detects CAPTCHAs. |
+| `browser_detect_captcha` | -- | CAPTCHA detection. If found, notify the user and wait. Usually not needed — `browser_navigate` auto-detects CAPTCHAs. |
 
 ### Memory
 

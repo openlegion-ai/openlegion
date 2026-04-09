@@ -48,7 +48,7 @@ Every agent automatically has access to built-in tools defined in
 - `run_command` — Shell command execution
 - `read_file`, `write_file`, `list_files` — File I/O
 - `http_request` — HTTP requests with `$CRED{name}` handles
-- `browser_navigate`, `browser_get_elements`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_hover`, `browser_scroll`, `browser_wait_for`, `browser_press_key`, `browser_go_back`, `browser_go_forward`, `browser_switch_tab`, `browser_reset`, `browser_solve_captcha` — Browser automation
+- `browser_navigate`, `browser_get_elements`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_hover`, `browser_scroll`, `browser_wait_for`, `browser_press_key`, `browser_go_back`, `browser_go_forward`, `browser_switch_tab`, `browser_reset`, `browser_detect_captcha` — Browser automation
 - `memory_search`, `memory_save` — Persistent memory
 - `web_search` — Web search via DuckDuckGo
 - `list_agents`, `spawn_fleet_agent`, `notify_user`, `publish_event`, `subscribe_event` — Fleet coordination

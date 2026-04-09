@@ -284,7 +284,7 @@ class BrowserCommand(BaseModel):
     """Browser command sent from agent through mesh to browser service."""
 
     agent_id: str
-    action: str  # navigate, snapshot, click, type, evaluate, screenshot, reset, focus, status, solve_captcha
+    action: str  # navigate, snapshot, click, type, evaluate, screenshot, reset, focus, status, detect_captcha
     params: dict[str, Any] = {}
 
 

@@ -1356,7 +1356,7 @@ class TestSolveCaptcha:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
-        result = await mgr.solve_captcha("a1")
+        result = await mgr.detect_captcha("a1")
         assert result["success"] is True
         assert result["data"]["captcha_found"] is False
 
@@ -1378,7 +1378,7 @@ class TestSolveCaptcha:
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
-        result = await mgr.solve_captcha("a1")
+        result = await mgr.detect_captcha("a1")
         assert result["success"] is True
         assert result["data"]["captcha_found"] is True
 
@@ -2243,7 +2243,7 @@ class TestAllowedBrowserActions:
         """Core browser actions must remain in the allowlist."""
         actions = self._get_allowed_actions()
         required = {"navigate", "snapshot", "click", "type", "screenshot",
-                    "reset", "focus", "scroll", "solve_captcha", "wait_for", "hover"}
+                    "reset", "focus", "scroll", "detect_captcha", "wait_for", "hover"}
         missing = required - actions
         assert not missing, f"Missing browser actions: {missing}"
 
@@ -3002,7 +3002,7 @@ class TestCaptchaDetection:
         )
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
-            result = await mgr.solve_captcha("agent1")
+            result = await mgr.detect_captcha("agent1")
 
         assert result["success"] is True
         assert result["data"]["captcha_found"] is True
@@ -3024,7 +3024,7 @@ class TestCaptchaDetection:
         inst.page.locator = MagicMock(return_value=mock_loc)
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
-            result = await mgr.solve_captcha("agent1")
+            result = await mgr.detect_captcha("agent1")
 
         assert result["success"] is True
         assert result["data"]["captcha_found"] is False

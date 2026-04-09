@@ -212,10 +212,10 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         await _apply_delay()
         return result
 
-    @app.post("/browser/{agent_id}/solve_captcha")
-    async def solve_captcha(agent_id: str, request: Request):
+    @app.post("/browser/{agent_id}/detect_captcha")
+    async def detect_captcha(agent_id: str, request: Request):
         _verify_auth(request)
-        return await manager.solve_captcha(agent_id)
+        return await manager.detect_captcha(agent_id)
 
     @app.post("/browser/{agent_id}/press_key")
     async def press_key(agent_id: str, request: Request):

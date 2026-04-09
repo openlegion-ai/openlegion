@@ -1813,7 +1813,7 @@ class BrowserManager:
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
-    async def solve_captcha(self, agent_id: str) -> dict:
+    async def detect_captcha(self, agent_id: str) -> dict:
         """Detect CAPTCHAs on the current page."""
         inst = await self.get_or_start(agent_id)
         inst.touch()

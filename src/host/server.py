@@ -2516,7 +2516,7 @@ def create_mesh_app(
 
     _ALLOWED_BROWSER_ACTIONS = frozenset({
         "navigate", "snapshot", "click", "type", "hover",
-        "screenshot", "reset", "focus", "status", "solve_captcha", "scroll",
+        "screenshot", "reset", "focus", "status", "detect_captcha", "scroll",
         "wait_for", "press_key", "go_back", "go_forward", "switch_tab",
     })
 
