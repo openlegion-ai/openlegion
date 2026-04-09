@@ -2608,6 +2608,10 @@ function dashboard() {
         proxy_url: '',
         proxy_username: '',
         proxy_password: '',
+        _current_proxy_host: cfg.proxy?.host || '',
+        _current_proxy_scheme: cfg.proxy?.scheme || '',
+        _current_proxy_has_credential: cfg.proxy?.has_credential || false,
+        _showProxyChange: false,
         _walletChains: Object.fromEntries(
           (cfg.wallet_available_chains || []).map(ch => {
             const allowed = cfg.wallet_allowed_chains || [];
@@ -4526,8 +4530,22 @@ function dashboard() {
 
     async focusBrowser(agentId) {
       try {
-        await fetch(`${window.__config.apiBase}/browser/${agentId}/focus`, { method: 'POST' });
-      } catch (e) { console.warn('focusBrowser failed:', e); }
+        const resp = await fetch(`${window.__config.apiBase}/browser/${agentId}/focus`, { method: 'POST' });
+        const data = await resp.json().catch(() => ({ success: false }));
+        if (!data.success) {
+          this.showToast('Browser focus failed — agent may not have a browser running', 5000);
+          this.showBrowserViewer = false;
+          this._browserFocusDone = false;
+          return false;
+        }
+        return true;
+      } catch (e) {
+        console.warn('focusBrowser failed:', e);
+        this.showToast('Could not connect to browser service', 5000);
+        this.showBrowserViewer = false;
+        this._browserFocusDone = false;
+        return false;
+      }
     },
 
     async toggleBrowser() {
@@ -4556,7 +4574,8 @@ function dashboard() {
         // Await focus so the correct agent's window is raised before
         // the iframe connects to KasmVNC.
         if (agentId) {
-          await this.focusBrowser(agentId);
+          const ok = await this.focusBrowser(agentId);
+          if (!ok) return;
         }
         // Staleness guard: if the user switched agents while we were
         // awaiting, abandon — the new agent's toggle will handle it.

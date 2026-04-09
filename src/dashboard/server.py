@@ -827,7 +827,14 @@ def create_dashboard_router(
             cred = proxy_cfg.get("credential", "")
             raw = os.environ.get(f"OPENLEGION_CRED_{cred}", "")
             proxy_info["url"] = _mask_proxy_url(raw) if raw else ""
-            proxy_info["has_credential"] = bool(raw)
+            if raw:
+                from urllib.parse import urlparse as _urlparse
+                _p = _urlparse(raw)
+                proxy_info["host"] = f"{_p.hostname}:{_p.port}" if _p.hostname and _p.port else (_p.hostname or "")
+                proxy_info["scheme"] = _p.scheme or "http"
+                proxy_info["has_credential"] = bool(_p.username)
+            else:
+                proxy_info["has_credential"] = False
         cfg_result["proxy"] = proxy_info
 
         vnc_url = _browser_vnc_url_for_request(request)
@@ -1080,6 +1087,8 @@ def create_dashboard_router(
                 updated.append("system_proxy_removed")
             else:
                 url = sp.get("url", "")
+                if url and url.strip().lower().startswith("socks"):
+                    raise HTTPException(400, "SOCKS5 proxies are not supported — please use an HTTP/HTTPS proxy")
                 username = sp.get("username", "")
                 password = sp.get("password", "")
                 full_url = _assemble_proxy_url(url, username, password) if username else url
@@ -1113,6 +1122,8 @@ def create_dashboard_router(
 
         if mode == "custom":
             url = body.get("url", "")
+            if url and url.strip().lower().startswith("socks"):
+                raise HTTPException(400, "SOCKS5 proxies are not supported — please use an HTTP/HTTPS proxy")
             username = body.get("username", "")
             password = body.get("password", "")
             full_url = _assemble_proxy_url(url, username, password) if username else url

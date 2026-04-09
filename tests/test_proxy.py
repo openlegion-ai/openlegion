@@ -17,8 +17,9 @@ class TestValidateProxyUrl:
     def test_valid_http(self):
         assert validate_proxy_url("http://proxy.example.com:8080") is True
 
-    def test_valid_socks5(self):
-        assert validate_proxy_url("socks5://user:pass@proxy.example.com:1080") is True
+    def test_socks5_rejected(self):
+        """SOCKS5 is no longer a supported proxy scheme — httpx[socks] removed."""
+        assert validate_proxy_url("socks5://user:pass@proxy.example.com:1080") is False
 
     def test_valid_https(self):
         assert validate_proxy_url("https://proxy.example.com:443") is True
@@ -39,16 +40,28 @@ class TestValidateProxyUrl:
         """Port 0 is not a usable proxy endpoint — reject as misconfiguration."""
         assert validate_proxy_url("http://proxy.example.com:0") is False
 
+    def test_http_and_https_are_only_valid_schemes(self):
+        """Only HTTP and HTTPS are accepted proxy schemes."""
+        assert validate_proxy_url("http://proxy.example.com:3128") is True
+        assert validate_proxy_url("https://proxy.example.com:443") is True
+        assert validate_proxy_url("socks5://proxy.example.com:1080") is False
+        assert validate_proxy_url("socks4://proxy.example.com:1080") is False
+        assert validate_proxy_url("socks5h://proxy.example.com:1080") is False
+
 
 class TestParseProxyUrl:
     def test_full_url_with_auth(self):
-        result = parse_proxy_url("socks5://user:p%40ss@host:1080")
+        result = parse_proxy_url("http://user:p%40ss@host:8080")
         assert result == {
-            "url": "socks5://host:1080",
+            "url": "http://host:8080",
             "username": "user",
             "password": "p@ss",
-            "full_url": "socks5://user:p%40ss@host:1080",
+            "full_url": "http://user:p%40ss@host:8080",
         }
+
+    def test_socks5_returns_none(self):
+        """SOCKS5 URLs are rejected — parse returns None."""
+        assert parse_proxy_url("socks5://user:p%40ss@host:1080") is None
 
     def test_url_without_auth(self):
         result = parse_proxy_url("http://host:8080")
@@ -72,10 +85,10 @@ class TestResolveAgentProxy:
                 "proxy": {"mode": "custom", "credential": "agent_test-agent_proxy"}
             }
         }
-        env = {"OPENLEGION_CRED_agent_test-agent_proxy": "socks5://u:p@host:1080"}
+        env = {"OPENLEGION_CRED_agent_test-agent_proxy": "http://u:p@host:8080"}
         with patch.dict(os.environ, env, clear=False):
             result = resolve_agent_proxy("test-agent", agents_cfg, {})
-        assert result == "socks5://u:p@host:1080"
+        assert result == "http://u:p@host:8080"
 
     def test_mode_custom_missing_credential_returns_none(self):
         """Custom mode with missing credential must NOT fall through to system proxy."""
@@ -109,17 +122,17 @@ class TestResolveAgentProxy:
 
     def test_mode_inherit_uses_system_proxy_env(self):
         agents_cfg = {"test-agent": {}}
-        env = {"OPENLEGION_SYSTEM_PROXY": "socks5://sys:p@host:1080"}
+        env = {"OPENLEGION_SYSTEM_PROXY": "http://sys:p@host:8080"}
         with patch.dict(os.environ, env, clear=False):
             result = resolve_agent_proxy("test-agent", agents_cfg, {})
-        assert result == "socks5://sys:p@host:1080"
+        assert result == "http://sys:p@host:8080"
 
     def test_system_proxy_takes_precedence_over_browser_proxy(self):
         """User override (OPENLEGION_SYSTEM_PROXY) wins over managed (BROWSER_PROXY_*)."""
         agents_cfg = {"test-agent": {}}
         env = {
             "BROWSER_PROXY_URL": "http://managed:8080",
-            "OPENLEGION_SYSTEM_PROXY": "socks5://self-hosted:1080",
+            "OPENLEGION_SYSTEM_PROXY": "https://self-hosted:1080",
         }
         with patch.dict(os.environ, env, clear=False):
             result = resolve_agent_proxy("test-agent", agents_cfg, {})
@@ -194,15 +207,15 @@ class TestBuildProxyEnvVars:
         assert result["NO_PROXY"] == "host.docker.internal,127.0.0.1,localhost,10.0.0.0/8,myhost"
 
     def test_mandatory_no_proxy_always_present(self):
-        result = build_proxy_env_vars("socks5://proxy:1080")
+        result = build_proxy_env_vars("https://proxy:1080")
         assert "host.docker.internal" in result["NO_PROXY"]
         assert "127.0.0.1" in result["NO_PROXY"]
         assert "localhost" in result["NO_PROXY"]
 
-    def test_socks5_proxy_url_preserved(self):
-        result = build_proxy_env_vars("socks5://user:pass@proxy:1080")
-        assert result["HTTP_PROXY"] == "socks5://user:pass@proxy:1080"
-        assert result["HTTPS_PROXY"] == "socks5://user:pass@proxy:1080"
+    def test_https_proxy_url_preserved(self):
+        result = build_proxy_env_vars("https://user:pass@proxy:1080")
+        assert result["HTTP_PROXY"] == "https://user:pass@proxy:1080"
+        assert result["HTTPS_PROXY"] == "https://user:pass@proxy:1080"
 
 
 class TestAssembleProxyUrl:
@@ -224,6 +237,6 @@ class TestAssembleProxyUrl:
         # Verify it roundtrips through validation
         assert validate_proxy_url(result) is True
 
-    def test_socks5_with_credentials(self):
-        result = _assemble_proxy_url("socks5://proxy:1080", username="u", password="p")
-        assert result == "socks5://u:p@proxy:1080"
+    def test_https_with_credentials(self):
+        result = _assemble_proxy_url("https://proxy:1080", username="u", password="p")
+        assert result == "https://u:p@proxy:1080"
