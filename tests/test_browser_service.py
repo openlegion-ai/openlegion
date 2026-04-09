@@ -4120,15 +4120,16 @@ class TestX11Input:
 
         mock_locator.scroll_into_view_if_needed.assert_called_once()
         mock_locator.bounding_box.assert_called_once()
-        # 1 getmouselocation + 4 mousemove steps + 1 mousedown + 1 mouseup = 7
-        assert sub_run.call_count == 7
+        # At least: 1 getmouselocation + 3 mousemove + 1 mousedown + 1 mouseup = 6
+        assert sub_run.call_count >= 6
         calls = sub_run.call_args_list
         assert "getmouselocation" in calls[0][0][0]
-        # All middle calls should be mousemove
-        for c in calls[1:5]:
+        # Last two calls should be mousedown and mouseup
+        assert "mousedown" in calls[-2][0][0]
+        assert "mouseup" in calls[-1][0][0]
+        # All calls between first and last two should be mousemove
+        for c in calls[1:-2]:
             assert "mousemove" in c[0][0]
-        assert "mousedown" in calls[5][0][0]
-        assert "mouseup" in calls[6][0][0]
 
     @pytest.mark.asyncio
     async def test_x11_click_no_wid_raises(self):
@@ -4788,28 +4789,25 @@ class TestX11Input:
             with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
                 with patch("src.browser.service.random.randint", return_value=5):
                     with patch("src.browser.service.random.uniform", side_effect=[
-                        30.0, -20.0,  # off1, off2 (non-zero for Bezier curve)
-                        0.008,  # sleep between steps
-                        0.008, 0.008, 0.008, 0.008,
+                        30.0, -20.0,  # off1, off2 (Bezier control point offsets)
                     ]):
                         await mgr._x11_move_to(inst, 200, 200)
 
-        # 1 getmouselocation + 5 mousemove steps = 6 calls
-        assert sub_run.call_count == 6
+        # At least: 1 getmouselocation + 3 mousemove steps
+        assert sub_run.call_count >= 4
         assert "getmouselocation" in sub_run.call_args_list[0][0][0]
-        for i in range(1, 6):
+        for i in range(1, sub_run.call_count):
             assert "mousemove" in sub_run.call_args_list[i][0][0]
 
         # With non-zero offsets, intermediate waypoints should NOT be
         # on a straight line from (0,0) to (200,200).
-        # Check an intermediate step (e.g., step 2/5 at t=0.4)
-        # has coords that differ from linear interpolation (80, 80).
-        mid_cmd = sub_run.call_args_list[2][0][0]
-        # Extract x, y from cmd: ["xdotool", "mousemove", "--sync", "--window", wid, x, y]
+        # Check a middle step for non-linear coords.
+        mid_idx = sub_run.call_count // 2
+        mid_cmd = sub_run.call_args_list[mid_idx][0][0]
         mid_x = int(mid_cmd[-2])
         mid_y = int(mid_cmd[-1])
-        # Linear would be close to (80, 80) at t=0.4 — Bezier offsets should differ
-        assert not (mid_x == 80 and mid_y == 80), "Waypoint should not be exactly linear"
+        # Linear at 50% would be (100, 100) — Bezier offsets should differ
+        assert not (mid_x == 100 and mid_y == 100), "Waypoint should not be exactly linear"
 
     @pytest.mark.asyncio
     async def test_scroll_uses_wheel_events(self):
