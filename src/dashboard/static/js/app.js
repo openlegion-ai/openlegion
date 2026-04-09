@@ -79,7 +79,7 @@ function dashboard() {
       'agent_state', 'message_sent', 'message_received',
       'tool_start', 'tool_result', 'text_delta', 'llm_call',
       'blackboard_write', 'health_change', 'notification', 'workspace_updated',
-      'heartbeat_complete', 'cron_change',
+      'heartbeat_complete', 'cron_change', 'credit_exhausted', 'credential_request',
     ],
 
     // Agent detail
@@ -1398,6 +1398,20 @@ function dashboard() {
       if (evt.type === 'credit_exhausted') {
         this.creditExhausted = true;
         this.creditExhaustedDismissed = false;
+        // Inject credit exhaustion message into the agent's chat
+        const agent = evt.agent;
+        if (agent && this.chatHistories[agent]) {
+          const recent = this.chatHistories[agent].slice(-3);
+          const alreadyShown = recent.some(m => m._creditExhausted);
+          if (!alreadyShown) {
+            this.chatHistories[agent].push({
+              role: 'credit_exhausted',
+              content: evt.data?.error || 'Credits depleted — LLM calls are currently failing.',
+              _creditExhausted: true,
+              ts: Date.now() / 1000,
+            });
+          }
+        }
       }
 
       // Clear credit exhausted state on successful LLM call
@@ -4052,8 +4066,10 @@ function dashboard() {
         if (!resp.ok) {
           let errMsg = `HTTP ${resp.status}`;
           try { const err = await resp.json(); errMsg = err.detail || errMsg; } catch (_) {}
+          const isCreditError = resp.status === 402 || /insufficient.*(fund|credit)|credit.*deplet|payment.*required/i.test(errMsg);
           this.chatHistories[agentId][idx].content = errMsg;
-          this.chatHistories[agentId][idx].role = 'error';
+          this.chatHistories[agentId][idx].role = isCreditError ? 'credit_exhausted' : 'error';
+          if (isCreditError) this.chatHistories[agentId][idx]._creditExhausted = true;
           this.chatHistories[agentId][idx].streaming = false;
           this.chatLoadingAgents[agentId] = false;
           this.chatStreamingAgents[agentId] = false;
@@ -4143,8 +4159,11 @@ function dashboard() {
               entry.phase = 'done';
               entry.tool_limit_reached = data.tool_limit_reached || false;
             } else if (data.type === 'error') {
-              entry.content = data.message || 'Stream error';
-              entry.role = 'error';
+              const errContent = data.message || 'Stream error';
+              const isCreditErr = /insufficient.*(fund|credit)|credit.*deplet|budget.*exceed/i.test(errContent);
+              entry.content = errContent;
+              entry.role = isCreditErr ? 'credit_exhausted' : 'error';
+              if (isCreditErr) entry._creditExhausted = true;
               entry.streaming = false;
               entry.phase = 'error';
               this._pushChatTimelinePhase(entry, 'error');
