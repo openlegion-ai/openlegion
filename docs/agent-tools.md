@@ -36,7 +36,7 @@ All agents share a single **browser service container** running Camoufox (a stea
 | `browser_get_elements` | -- | Accessibility tree snapshot with element refs (e1, e2, ...). Returns structured text, not a visual image. |
 | `browser_screenshot` | `full_page` | Take screenshot, return visual PNG image. |
 | `browser_click` | `ref` or `selector`, `force` | Click element by accessibility ref or CSS selector. `force` bypasses actionability checks. |
-| `browser_type` | `ref` or `selector`, `text` | Type into input field (supports `$CRED{name}` handles) |
+| `browser_type` | `ref` or `selector`, `text` | Type into input field |
 | `browser_hover` | `ref` or `selector` | Hover over an element to trigger dropdowns/tooltips. |
 | `browser_scroll` | `direction`, `amount`, `ref` | Scroll page up/down or scroll element into view. Default direction: `down`, default amount: one viewport height. |
 | `browser_wait_for` | `selector`, `state`, `timeout_ms` | Wait for a CSS selector to appear/disappear. `state`: `visible` (default), `attached`, `hidden`, `detached`. |

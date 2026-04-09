@@ -377,7 +377,7 @@ canonicalized parameters and results over a 15-call sliding window.
 | `browser_get_elements` | Accessibility tree snapshot with element refs (e1, e2, ...) |
 | `browser_screenshot` | Capture page screenshot |
 | `browser_click` | Click element by ref or CSS selector |
-| `browser_type` | Fill input by ref or CSS selector (supports `$CRED{}` handles) |
+| `browser_type` | Fill input by ref or CSS selector |
 | `browser_hover` | Hover over element to trigger dropdowns/tooltips |
 | `browser_scroll` | Scroll page up/down or scroll element into view |
 | `browser_wait_for` | Wait for CSS selector to appear/disappear |

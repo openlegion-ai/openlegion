@@ -124,8 +124,8 @@ agents:
       - If LinkedIn shows a login wall, use web_search results instead of direct navigation
       - If a page has bot detection, wait 3-5 seconds (wait_ms=3000) before extracting
       - If browser is stuck, use browser_reset to start fresh
-      - Use $CRED{linkedin_email} and $CRED{linkedin_password} with browser_type if
-        credentials are configured (optional — significantly improves LinkedIn data quality)
+      - If LinkedIn credentials are configured, use http_request with $CRED{linkedin_email}
+        and $CRED{linkedin_password} for API-based access (optional — improves data quality)
 
       ## Output
       When enrichment is complete for a company, hand_off to the formatter:
