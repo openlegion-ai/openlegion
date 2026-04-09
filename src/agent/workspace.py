@@ -147,6 +147,20 @@ class WorkspaceManager:
             old_agents.rename(new_instructions)
             logger.info("Migrated AGENTS.md → INSTRUCTIONS.md")
 
+        # Migration: mark existing instructions as playbook-aware.
+        # Only appends the sentinel — does NOT rewrite content, preserving
+        # any user customizations made via the dashboard.
+        instructions_file = self.root / "INSTRUCTIONS.md"
+        if (
+            instructions_file.exists()
+            and self._initial_instructions
+            and "<!-- playbook_v2 -->" in self._initial_instructions
+            and "<!-- playbook_v2 -->" not in instructions_file.read_text(errors="replace")
+        ):
+            with open(instructions_file, "a") as f:
+                f.write("\n<!-- playbook_v2 -->\n")
+            logger.info("Marked operator instructions as playbook-aware (v2)")
+
         for filename, default_content in _SCAFFOLD_FILES.items():
             path = self.root / filename
             if not path.exists():

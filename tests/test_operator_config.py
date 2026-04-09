@@ -235,11 +235,12 @@ class TestOperatorConstants:
     """Verify operator constants are populated, not placeholder."""
 
     def test_instructions_not_empty(self):
-        from src.cli.config import _OPERATOR_HEARTBEAT, _OPERATOR_INSTRUCTIONS, _OPERATOR_SOUL
-        assert len(_OPERATOR_INSTRUCTIONS) > 100
+        from src.cli.config import _OPERATOR_HEARTBEAT, _OPERATOR_SOUL
+        from src.cli.operator_playbooks import _OPERATOR_CORE
+        assert len(_OPERATOR_CORE) > 100
         assert len(_OPERATOR_SOUL) > 50
         assert len(_OPERATOR_HEARTBEAT) > 100
-        assert "Building Teams" in _OPERATOR_INSTRUCTIONS
+        assert "Routing Work" in _OPERATOR_CORE
 
     def test_allowed_tools_populated(self):
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS, _OPERATOR_HEARTBEAT_TOOLS
@@ -264,26 +265,33 @@ class TestOperatorConstants:
         assert "save_observations" in _OPERATOR_HEARTBEAT
         assert "notify_user" in _OPERATOR_HEARTBEAT
 
-    def test_instructions_has_core_sections(self):
-        from src.cli.config import _OPERATOR_INSTRUCTIONS
-        assert "Building Teams" in _OPERATOR_INSTRUCTIONS
-        assert "Editing Agents" in _OPERATOR_INSTRUCTIONS
-        assert "Routing Work" in _OPERATOR_INSTRUCTIONS
-        assert "Plan Limits" in _OPERATOR_INSTRUCTIONS
-        assert "Projects" in _OPERATOR_INSTRUCTIONS
+    def test_core_has_key_sections(self):
+        from src.cli.operator_playbooks import _OPERATOR_CORE
+        assert "Routing Work" in _OPERATOR_CORE
+        assert "Plan Limits" in _OPERATOR_CORE
+        assert "Assessment" in _OPERATOR_CORE
+        assert "Workflow Overview" in _OPERATOR_CORE
+        assert "playbook_v2" in _OPERATOR_CORE
 
-    def test_instructions_has_propose_edit(self):
-        from src.cli.config import _OPERATOR_INSTRUCTIONS
-        assert "propose_edit" in _OPERATOR_INSTRUCTIONS
-        assert "confirm_edit" in _OPERATOR_INSTRUCTIONS
-        assert "get_agent_profile" in _OPERATOR_INSTRUCTIONS
+    def test_playbooks_have_key_tools(self):
+        from src.cli.operator_playbooks import (
+            _PLAYBOOK_CREDENTIALS,
+            _PLAYBOOK_EDIT,
+            _PLAYBOOK_MONITOR,
+            _PLAYBOOK_TEAM_BUILD,
+        )
 
-    def test_instructions_has_plan_tiers(self):
-        from src.cli.config import _OPERATOR_INSTRUCTIONS
-        assert "Basic" in _OPERATOR_INSTRUCTIONS
-        assert "Growth" in _OPERATOR_INSTRUCTIONS
-        assert "Pro" in _OPERATOR_INSTRUCTIONS
-        assert "Self-hosted" in _OPERATOR_INSTRUCTIONS
+        assert "propose_edit" in _PLAYBOOK_TEAM_BUILD
+        assert "confirm_edit" in _PLAYBOOK_EDIT
+        assert "get_agent_profile" in _PLAYBOOK_MONITOR
+        assert "vault_list" in _PLAYBOOK_CREDENTIALS
+
+    def test_core_has_plan_tiers(self):
+        from src.cli.operator_playbooks import _OPERATOR_CORE
+        assert "Basic" in _OPERATOR_CORE
+        assert "Growth" in _OPERATOR_CORE
+        assert "Pro" in _OPERATOR_CORE
+        assert "Self-hosted" in _OPERATOR_CORE
 
 
 class TestEnsureOperatorUsesConfigModel(_TempConfigMixin):
