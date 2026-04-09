@@ -2838,6 +2838,29 @@ function dashboard() {
       finally { this.cronPauseLoading = { ...this.cronPauseLoading, [jobId]: false }; }
     },
 
+    async saveOpHeartbeat(schedule) {
+      const agent = this.agents.find(a => a.id === 'operator');
+      const jobId = agent?.heartbeat_job_id;
+      if (!jobId) { this.showToast('No heartbeat job found for operator'); return false; }
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/cron/${jobId}`, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
+          body: JSON.stringify({ schedule }),
+        });
+        if (resp.ok) {
+          this.showToast('Operator heartbeat updated');
+          this.fetchAgents();
+          this.fetchCronJobs();
+          return true;
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+          return false;
+        }
+      } catch (e) { this.showToast(`Error: ${e.message}`); return false; }
+    },
+
     async updateBudget(agentId, dailyUsd, monthlyUsd) {
       try {
         const body = {};
