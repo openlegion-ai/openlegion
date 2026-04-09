@@ -537,7 +537,6 @@ class BrowserManager:
             await inst.context.close()
         except Exception as e:
             logger.debug("Error closing browser for '%s': %s", agent_id, e)
-        self.redactor.clear_agent(agent_id)
         logger.info("Stopped browser for '%s'", agent_id)
 
     async def stop_all(self) -> None:

@@ -140,9 +140,8 @@ agents:
         - Capture both views
 
       Login-gated pricing:
-        - If credentials are configured ($CRED{site_email} / $CRED{site_password}),
-          use browser_type to log in before extracting
-        - Otherwise record "login_required" for that URL
+        - If a site requires login, record "login_required" for that URL
+        - Use http_request with $CRED handles for API-based authenticated access
 
     heartbeat: |
       On each heartbeat, check all configured pricing targets below.
