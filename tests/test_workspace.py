@@ -137,8 +137,52 @@ class TestWorkspaceScaffold:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_all_three_seeded_together(self):
-        """All three initial_* params work simultaneously."""
+    def test_initial_interface_seeds_interface_md(self):
+        """When initial_interface is provided, INTERFACE.md is seeded with that content."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            interface_content = (
+                "## Accepts\n- research requests\n## Produces\n- notes.md"
+            )
+            WorkspaceManager(
+                workspace_dir=tmpdir, initial_interface=interface_content,
+            )
+            root = Path(tmpdir)
+            content = (root / "INTERFACE.md").read_text()
+            assert content.startswith("# Interface")
+            assert "Accepts" in content
+            assert "research requests" in content
+            assert "notes.md" in content
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_initial_interface_does_not_overwrite_existing(self):
+        """If INTERFACE.md already exists, initial_interface is ignored."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            root = Path(tmpdir)
+            root.mkdir(exist_ok=True)
+            (root / "INTERFACE.md").write_text("# Custom contract\nDo not touch.")
+            WorkspaceManager(
+                workspace_dir=tmpdir, initial_interface="New contract",
+            )
+            assert (root / "INTERFACE.md").read_text() == "# Custom contract\nDo not touch."
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_initial_interface_empty_uses_default(self):
+        """When initial_interface is empty, default scaffold content is used."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            WorkspaceManager(workspace_dir=tmpdir, initial_interface="")
+            root = Path(tmpdir)
+            content = (root / "INTERFACE.md").read_text()
+            assert content.strip() == "# Interface"  # minimal stub
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_all_four_seeded_together(self):
+        """All four initial_* params work simultaneously."""
         tmpdir = tempfile.mkdtemp()
         try:
             WorkspaceManager(
@@ -146,11 +190,15 @@ class TestWorkspaceScaffold:
                 initial_instructions="Do research.",
                 initial_soul="You are curious.",
                 initial_heartbeat="Monitor news.",
+                initial_interface="Accepts research, produces notes.",
             )
             root = Path(tmpdir)
             assert "Do research." in (root / "INSTRUCTIONS.md").read_text()
             assert "You are curious." in (root / "SOUL.md").read_text()
             assert "Monitor news." in (root / "HEARTBEAT.md").read_text()
+            assert "Accepts research, produces notes." in (
+                root / "INTERFACE.md"
+            ).read_text()
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

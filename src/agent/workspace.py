@@ -121,11 +121,13 @@ class WorkspaceManager:
         initial_instructions: str = "",
         initial_soul: str = "",
         initial_heartbeat: str = "",
+        initial_interface: str = "",
     ):
         self.root = Path(workspace_dir)
         self._initial_instructions = initial_instructions
         self._initial_soul = initial_soul
         self._initial_heartbeat = initial_heartbeat
+        self._initial_interface = initial_interface
         self._ensure_scaffold()
 
         # Caches — invalidated by mtime changes or explicit writes
@@ -183,6 +185,13 @@ class WorkspaceManager:
                     content = (
                         "# Heartbeat Rules\n\n"
                         + self._initial_heartbeat.strip()
+                        + "\n"
+                    )
+                    path.write_text(content)
+                elif filename == "INTERFACE.md" and self._initial_interface:
+                    content = (
+                        "# Interface\n\n"
+                        + self._initial_interface.strip()
                         + "\n"
                     )
                     path.write_text(content)
