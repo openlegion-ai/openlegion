@@ -540,6 +540,344 @@ class TestDockerBackendSlimResources:
         assert backend.browser_service_url is not None
         assert backend.browser_vnc_url is None
 
+    def test_browser_has_net_admin_in_bridge_mode(self):
+        """Browser container gets the minimal cap set its entrypoint needs in bridge mode."""
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        # NET_ADMIN for iptables-restore; SETUID + SETGID so gosu can drop to UID 1000.
+        assert run_call.kwargs.get("cap_add") == ["NET_ADMIN", "SETUID", "SETGID"]
+        env = run_call.kwargs.get("environment", {})
+        # Filter must be active (not disabled) in the default bridge mode
+        assert "BROWSER_EGRESS_DISABLE" not in env
+
+    def test_browser_egress_filter_disabled_in_host_network(self):
+        """Host network mode shares host netns — iptables would mutate the host, so disable."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = _make_docker_backend(use_host_network=True)
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {"OPENLEGION_BROWSER_ALLOW_HOST_NETWORK": "1"}):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        # No NET_ADMIN in host network mode
+        assert "cap_add" not in run_call.kwargs
+        # Explicit opt-out signal so the entrypoint skips iptables entirely
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_EGRESS_DISABLE") == "1"
+
+    def test_browser_egress_allowlist_forwarded(self):
+        """Operator-supplied BROWSER_EGRESS_ALLOWLIST is forwarded to the container."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {"BROWSER_EGRESS_ALLOWLIST": "10.0.0.0/24,192.168.5.5/32"}):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_EGRESS_ALLOWLIST") == "10.0.0.0/24,192.168.5.5/32"
+
+    def test_browser_egress_disable_env_forwarded(self):
+        """BROWSER_EGRESS_DISABLE from host env is forwarded to the container."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {"BROWSER_EGRESS_DISABLE": "1"}):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_EGRESS_DISABLE") == "1"
+        # NET_ADMIN (+ SETUID/SETGID for gosu) is still added in bridge mode —
+        # operator opt-out is an entrypoint-level signal, not a cap-level signal.
+        assert run_call.kwargs.get("cap_add") == ["NET_ADMIN", "SETUID", "SETGID"]
+
+    def test_browser_host_network_emits_warning(self, caplog):
+        """Host network mode logs a loud warning about disabled SSRF filter."""
+        import logging
+        import os as _os
+
+        import docker as _docker
+
+        backend = _make_docker_backend(use_host_network=True)
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {"OPENLEGION_BROWSER_ALLOW_HOST_NETWORK": "1"}), \
+             caplog.at_level(logging.WARNING, logger="host.runtime"):
+            backend.start_browser_service()
+
+        # At least one WARNING record mentioning "egress filter" should be present
+        matches = [r for r in caplog.records
+                   if r.levelno >= logging.WARNING and "egress filter" in r.message.lower()]
+        assert matches, f"Expected warning about egress filter in host mode, got: {[r.message for r in caplog.records]}"
+
+    def test_browser_cap_drop_all_with_minimal_adds(self):
+        """Browser container drops Docker default caps and adds back only the minimum."""
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        assert run_call.kwargs.get("cap_drop") == ["ALL"]
+        assert run_call.kwargs.get("cap_add") == ["NET_ADMIN", "SETUID", "SETGID"]
+
+    def test_browser_host_network_hard_refuses_without_ack(self):
+        """Host network mode must raise unless OPENLEGION_BROWSER_ALLOW_HOST_NETWORK is set."""
+        import os as _os
+
+        import pytest
+
+        import docker as _docker
+
+        backend = _make_docker_backend(use_host_network=True)
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        # Ensure the ack var is unset for this test
+        with patch.dict(_os.environ, {}, clear=False):
+            _os.environ.pop("OPENLEGION_BROWSER_ALLOW_HOST_NETWORK", None)
+            with pytest.raises(RuntimeError, match="host network mode"):
+                backend.start_browser_service()
+
+        # Container.run should not have been called
+        assert not mock_client.containers.run.called
+
+    def test_browser_host_network_allowed_with_ack(self):
+        """With the explicit ack env var, host-network browser startup proceeds."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = _make_docker_backend(use_host_network=True)
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {"OPENLEGION_BROWSER_ALLOW_HOST_NETWORK": "1"}):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        assert run_call.kwargs.get("network_mode") == "host"
+        # No cap_add in host mode (host netns shares with host, NET_ADMIN would be dangerous)
+        assert "cap_add" not in run_call.kwargs
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_EGRESS_DISABLE") == "1"
+
+    def test_browser_private_ip_proxy_refused_without_allowlist(self):
+        """A private-IP literal proxy URL must refuse startup unless allowlisted."""
+        import os as _os
+
+        import pytest
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        with patch.dict(_os.environ, {"BROWSER_PROXY_URL": "http://10.0.0.5:3128"}, clear=False):
+            _os.environ.pop("BROWSER_EGRESS_ALLOWLIST", None)
+            with pytest.raises(RuntimeError, match="private IP literal"):
+                backend.start_browser_service()
+
+        assert not mock_client.containers.run.called
+
+    def test_browser_private_ip_proxy_allowed_with_explicit_allowlist(self):
+        """Private-IP proxy is fine as long as operator explicitly allowlists it."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {
+                 "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
+                 "BROWSER_EGRESS_ALLOWLIST": "10.0.0.5/32",
+             }):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_PROXY_URL") == "http://10.0.0.5:3128"
+        assert env.get("BROWSER_EGRESS_ALLOWLIST") == "10.0.0.5/32"
+
+    def test_browser_private_ip_proxy_refused_when_allowlist_does_not_cover(self):
+        """Private-IP proxy must refuse if BROWSER_EGRESS_ALLOWLIST is set but does not cover the proxy IP."""
+        import os as _os
+
+        import pytest
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        # Allowlist covers 192.168.x but proxy is on 10.0.0.5 — misconfiguration.
+        with patch.dict(_os.environ, {
+            "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
+            "BROWSER_EGRESS_ALLOWLIST": "192.168.1.0/24",
+        }):
+            with pytest.raises(RuntimeError, match="does not cover"):
+                backend.start_browser_service()
+
+        assert not mock_client.containers.run.called
+
+    def test_browser_private_ip_proxy_allowed_when_allowlist_covers_via_cidr(self):
+        """A CIDR covering the proxy IP (not just /32) should satisfy the coverage check."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # 10.0.0.5 is inside 10.0.0.0/24 — should pass.
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {
+                 "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
+                 "BROWSER_EGRESS_ALLOWLIST": "10.0.0.0/24",
+             }):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_EGRESS_ALLOWLIST") == "10.0.0.0/24"
+
+    def test_browser_private_ip_proxy_allowed_with_mixed_allowlist(self):
+        """Multi-entry allowlist where one entry covers the proxy should pass."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # First entry is irrelevant, second covers 10.0.0.5.
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {
+                 "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
+                 "BROWSER_EGRESS_ALLOWLIST": "172.16.0.0/12, 10.0.0.0/8",
+             }):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        assert mock_client.containers.run.called
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_EGRESS_ALLOWLIST") == "172.16.0.0/12, 10.0.0.0/8"
+
+    def test_browser_public_proxy_no_refusal(self):
+        """A public-IP proxy URL proceeds normally without any allowlist."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # 1.1.1.1 (Cloudflare) is genuinely public — not classified as private,
+        # loopback, link-local, or reserved by Python's ipaddress module, so the
+        # private-IP guard should not trip. BROWSER_EGRESS_ALLOWLIST stays unset.
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {"BROWSER_PROXY_URL": "http://1.1.1.1:3128"}, clear=False):
+            _os.environ.pop("BROWSER_EGRESS_ALLOWLIST", None)
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_PROXY_URL") == "http://1.1.1.1:3128"
+        assert "BROWSER_EGRESS_ALLOWLIST" not in env
+        assert mock_client.containers.run.called
+
     def test_containers_no_docker_init(self):
         """Docker init=True must NOT be set — Dockerfile ENTRYPOINT tini handles it.
 
@@ -907,4 +1245,95 @@ class TestEnvOverrides:
             skills_dir="",
             env_overrides=None,
         )
+
+
+class TestEntrypointHelpers:
+    """Unit tests for the bash validation helpers in docker/browser-entrypoint.sh.
+
+    The entrypoint script guards its install/exec section so that sourcing it
+    from a subshell only loads function definitions, allowing us to test
+    is_valid_ipv4 and is_valid_ipv4_cidr without Docker or root privileges.
+    """
+
+    @staticmethod
+    def _call(helper: str, arg: str) -> bool:
+        """Source the entrypoint and invoke a helper with the given arg.
+
+        Returns True if the helper returned 0 (valid), False otherwise.
+        Uses shlex.quote to prevent shell injection from test inputs.
+        """
+        import shlex
+        import subprocess
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parent.parent
+        script = repo_root / "docker" / "browser-entrypoint.sh"
+        if not script.exists():
+            import pytest
+            pytest.skip(f"entrypoint script not found at {script}")
+        # shellcheck-clean: source then call helper with quoted arg.
+        cmd = f"source {shlex.quote(str(script))} && {helper} {shlex.quote(arg)}"
+        result = subprocess.run(
+            ["bash", "-c", cmd],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+
+    # ── is_valid_ipv4 ─────────────────────────────────────────
+
+    def test_ipv4_accepts_typical_addresses(self):
+        for ip in ("10.0.0.5", "192.168.1.1", "1.2.3.4", "172.16.0.1", "8.8.8.8"):
+            assert self._call("is_valid_ipv4", ip), ip
+
+    def test_ipv4_accepts_boundary_octets(self):
+        for ip in ("0.0.0.0", "255.255.255.255", "0.1.2.255", "255.0.0.0"):
+            assert self._call("is_valid_ipv4", ip), ip
+
+    def test_ipv4_rejects_out_of_range_octets(self):
+        for ip in ("256.0.0.0", "999.999.999.999", "10.0.0.256", "300.1.2.3"):
+            assert not self._call("is_valid_ipv4", ip), ip
+
+    def test_ipv4_rejects_wrong_shape(self):
+        for ip in ("10.0.0", "10.0.0.5.5", "", "10..0.5", "10.0.0.", ".10.0.0.5"):
+            assert not self._call("is_valid_ipv4", ip), ip
+
+    def test_ipv4_rejects_non_numeric(self):
+        for ip in ("10.0.0.a", "localhost", "example.com", "10.0.0.5 ", " 10.0.0.5"):
+            assert not self._call("is_valid_ipv4", ip), ip
+
+    def test_ipv4_rejects_cidr_notation(self):
+        # The strict IP validator does not accept /cidr — that is is_valid_ipv4_cidr's job.
+        assert not self._call("is_valid_ipv4", "10.0.0.0/24")
+
+    def test_ipv4_rejects_negative_and_hex(self):
+        for ip in ("-1.0.0.0", "0x10.0.0.0", "10.0.0.-1"):
+            assert not self._call("is_valid_ipv4", ip), ip
+
+    # ── is_valid_ipv4_cidr ────────────────────────────────────
+
+    def test_cidr_accepts_valid(self):
+        for c in ("10.0.0.0/24", "192.168.1.1/32", "0.0.0.0/0",
+                  "255.255.255.255/32", "10.0.0.5"):  # bare IP defaults to /32
+            assert self._call("is_valid_ipv4_cidr", c), c
+
+    def test_cidr_accepts_boundary_prefix(self):
+        for c in ("10.0.0.0/0", "10.0.0.0/32", "10.0.0.0/1", "10.0.0.0/31"):
+            assert self._call("is_valid_ipv4_cidr", c), c
+
+    def test_cidr_rejects_out_of_range_prefix(self):
+        for c in ("10.0.0.0/33", "10.0.0.0/99", "10.0.0.0/-1"):
+            assert not self._call("is_valid_ipv4_cidr", c), c
+
+    def test_cidr_rejects_bad_prefix_format(self):
+        for c in ("10.0.0.0/abc", "10.0.0.0/", "10.0.0.0//24", "10.0.0.0/ 24"):
+            assert not self._call("is_valid_ipv4_cidr", c), c
+
+    def test_cidr_rejects_invalid_ip_portion(self):
+        for c in ("999.999.999.999/24", "10.0.0/24", "10.0.0.a/24", "/24"):
+            assert not self._call("is_valid_ipv4_cidr", c), c
+
+    def test_cidr_rejects_empty(self):
+        assert not self._call("is_valid_ipv4_cidr", "")
 

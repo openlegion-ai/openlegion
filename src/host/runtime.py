@@ -351,6 +351,22 @@ class DockerBackend(RuntimeBackend):
         """Start the shared browser service container."""
         import docker as _docker
 
+        # Host network mode disables the SSRF egress filter (iptables rules
+        # would mutate the host's network namespace instead of the container's).
+        # That is a real and silent security regression, so we require a second
+        # explicit opt-in from the operator to run the browser in host mode.
+        _host_net_ack = os.environ.get("OPENLEGION_BROWSER_ALLOW_HOST_NETWORK", "").strip()
+        if self.use_host_network and _host_net_ack not in ("1", "true", "yes"):
+            raise RuntimeError(
+                "Refusing to start the browser container in host network mode: "
+                "SSRF egress filter cannot be installed when the container shares "
+                "the host's network namespace. To proceed anyway (INSECURE — the "
+                "browser will have unrestricted access to the host's private "
+                "networks), set OPENLEGION_BROWSER_ALLOW_HOST_NETWORK=1. The "
+                "recommended fix is to unset OPENLEGION_HOST_NETWORK so the "
+                "browser runs on a bridge network with the filter active."
+            )
+
         self.browser_auth_token = secrets.token_urlsafe(32)
         mesh_host = "127.0.0.1" if self.use_host_network else "host.docker.internal"
 
@@ -390,9 +406,78 @@ class DockerBackend(RuntimeBackend):
             "IDLE_TIMEOUT_MINUTES": str(idle_timeout_minutes),
         }
 
-        for var in ("BROWSER_PROXY_URL", "BROWSER_PROXY_USER", "BROWSER_PROXY_PASS"):
+        for var in ("BROWSER_PROXY_URL", "BROWSER_PROXY_USER", "BROWSER_PROXY_PASS",
+                    "BROWSER_EGRESS_ALLOWLIST", "BROWSER_EGRESS_DISABLE"):
             if os.environ.get(var):
                 environment[var] = os.environ[var]
+
+        # If the operator configured a proxy whose host is a literal private IP,
+        # the egress filter will block the browser from reaching it unless the
+        # proxy CIDR is explicitly allowlisted. Detect misconfiguration at
+        # startup — BOTH the "no allowlist at all" case AND the "allowlist set
+        # but does not cover the proxy IP" case — instead of surfacing as a
+        # cryptic "browser cannot reach proxy" error after the container is
+        # already running. Hostname-based proxies are left alone (resolving
+        # them at startup would be brittle and racy).
+        proxy_url = os.environ.get("BROWSER_PROXY_URL", "").strip()
+        proxy_allowlist = os.environ.get("BROWSER_EGRESS_ALLOWLIST", "").strip()
+        if proxy_url:
+            try:
+                import ipaddress
+                from urllib.parse import urlparse
+                parsed = urlparse(proxy_url if "://" in proxy_url else f"http://{proxy_url}")
+                host = parsed.hostname or ""
+                # Only act on IP literals — hostnames are intentionally untouched.
+                try:
+                    ip_obj = ipaddress.ip_address(host)
+                except ValueError:
+                    ip_obj = None
+                _is_private = ip_obj is not None and (
+                    ip_obj.is_private
+                    or ip_obj.is_loopback
+                    or ip_obj.is_link_local
+                    or ip_obj.is_reserved
+                )
+                if _is_private:
+                    # Parse the allowlist (if any) and verify the proxy IP is
+                    # actually covered by at least one entry. Malformed entries
+                    # are skipped silently here — the entrypoint will warn on
+                    # them at container-start time.
+                    covered = False
+                    if proxy_allowlist:
+                        for cidr_str in proxy_allowlist.split(","):
+                            cidr_str = cidr_str.strip()
+                            if not cidr_str:
+                                continue
+                            try:
+                                network = ipaddress.ip_network(cidr_str, strict=False)
+                            except ValueError:
+                                continue
+                            if ip_obj in network:
+                                covered = True
+                                break
+                    if not covered:
+                        if proxy_allowlist:
+                            raise RuntimeError(
+                                f"BROWSER_PROXY_URL host {host} is a private IP "
+                                f"literal, but BROWSER_EGRESS_ALLOWLIST does not "
+                                f"cover it (current value: {proxy_allowlist!r}). "
+                                f"The browser container's egress filter will "
+                                f"block connections to {host}. Add {host}/32 or "
+                                f"a containing CIDR to BROWSER_EGRESS_ALLOWLIST."
+                            )
+                        raise RuntimeError(
+                            f"BROWSER_PROXY_URL host {host} is a private IP "
+                            f"literal, but BROWSER_EGRESS_ALLOWLIST is not set. "
+                            f"The browser container's egress filter will block "
+                            f"connections to {host}. Set "
+                            f"BROWSER_EGRESS_ALLOWLIST={host}/32 (or the "
+                            f"appropriate CIDR) to allow the proxy through."
+                        )
+            except RuntimeError:
+                raise
+            except Exception as e:
+                logger.warning("Could not parse BROWSER_PROXY_URL for validation: %s", e)
 
         with self._port_lock:
             api_port = self._next_port
@@ -413,16 +498,42 @@ class DockerBackend(RuntimeBackend):
             "cpu_quota": browser_cpu,
             "shm_size": browser_shm,
             "security_opt": ["no-new-privileges"],
+            # Drop Docker's default cap set. The browser container holds only the
+            # capabilities it actually needs. The init phase (running as root via
+            # the entrypoint) uses NET_ADMIN to install iptables rules, then calls
+            # gosu(1) which needs SETUID + SETGID to drop to UID 1000 before
+            # handing control to Firefox. After gosu, the long-running browser
+            # process runs with no effective capabilities (non-root users do not
+            # inherit caps), and no-new-privileges prevents re-acquisition via
+            # setuid binaries or file capabilities.
+            "cap_drop": ["ALL"],
         }
 
         if self.use_host_network:
             run_kwargs["network_mode"] = "host"
             environment["API_PORT"] = str(api_port)
             environment["VNC_PORT"] = str(vnc_port)
+            # Host network mode shares the host's network namespace. Installing
+            # iptables rules inside the container would mutate host networking,
+            # so we explicitly disable the egress filter and warn loudly. SSRF
+            # protection is off in this mode — use bridge networking in prod.
+            environment["BROWSER_EGRESS_DISABLE"] = "1"
+            logger.warning(
+                "Browser container is running in host network mode — SSRF "
+                "egress filter is DISABLED. Browser has unrestricted access "
+                "to the host's private networks. Use bridge networking "
+                "(use_host_network=False) for production deployments."
+            )
         else:
             run_kwargs["ports"] = {"8500/tcp": api_port, "6080/tcp": vnc_port}
             if platform.system() == "Linux":
                 run_kwargs["extra_hosts"] = {"host.docker.internal": "host-gateway"}
+            # Bridge network mode: grant minimal caps needed by the entrypoint.
+            # NET_ADMIN lets the root init phase install the iptables egress
+            # filter; SETUID + SETGID let gosu(1) drop to the non-root browser
+            # user before execing Firefox. All three are in the container's
+            # bounding set but unreachable after gosu (UID 1000, no ambient).
+            run_kwargs["cap_add"] = ["NET_ADMIN", "SETUID", "SETGID"]
 
         # Remove stale browser container
         try:

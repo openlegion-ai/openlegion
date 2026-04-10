@@ -2584,7 +2584,13 @@ def create_mesh_app(
         if action not in _ALLOWED_BROWSER_ACTIONS:
             raise HTTPException(400, f"Unknown browser action: {action}")
 
-        # SSRF protection: validate navigate URLs before forwarding to browser
+        # SSRF protection: early-reject for literal private-IP navigations so
+        # agents get a clean 400 rather than a cryptic browser error. The
+        # authoritative enforcement happens at the network layer inside the
+        # browser container via an iptables egress filter installed by
+        # docker/browser-entrypoint.sh — that layer covers DNS rebinding,
+        # HTTP redirects, subresource loads (img/script/iframe), XHR/fetch,
+        # and WebSockets, none of which can be gated at the Playwright API.
         if action == "navigate":
             nav_url = params.get("url", "")
             if nav_url:

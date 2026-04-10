@@ -3,9 +3,12 @@
 FROM python:3.12-slim
 
 # System packages: Openbox WM, tini, curl, plus GTK3/X11 libs for Camoufox (Firefox)
-# KasmVNC provides Xvnc (X server + VNC server) so no separate Xvfb needed
+# KasmVNC provides Xvnc (X server + VNC server) so no separate Xvfb needed.
+# iptables + gosu are used by docker/browser-entrypoint.sh to install the
+# SSRF egress filter as root, then drop privileges to the non-root browser user.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tini openbox wmctrl xdotool x11-xserver-utils unclutter-xfixes procps curl \
+    iptables gosu \
     libgtk-3-0 libatk1.0-0 libasound2 \
     libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libgbm1 \
     libpango-1.0-0 libcairo2 libdbus-glib-1-2 \
@@ -90,7 +93,25 @@ USER browser
 # Firefox goes to ~/.cache/camoufox/, GeoIP mmdb to the package dir
 RUN python -m camoufox fetch
 
+# Switch back to root so the entrypoint runs as root and can call
+# iptables-restore (needs CAP_NET_ADMIN) before dropping privileges via
+# gosu. Runtime applies cap_drop=["ALL"] + cap_add=["NET_ADMIN","SETUID",
+# "SETGID"] so the container's capability bounding set contains only
+# those three.
+#
+# After the entrypoint execs `tini -- gosu browser:browser python -m
+# src.browser`, tini (PID 1, root) retains the three caps in its
+# effective set for the container lifetime. No code in this repo asks
+# tini to exercise those caps — tini's job is to fork/exec its child
+# and reap zombies. The long-running Firefox/FastAPI process runs as
+# UID 1000 after gosu and has no effective capabilities (non-root
+# users do not inherit caps, and no-new-privileges prevents
+# re-acquisition via setuid binaries or file capabilities).
+USER root
+
+COPY docker/browser-entrypoint.sh /usr/local/bin/browser-entrypoint.sh
+RUN chmod +x /usr/local/bin/browser-entrypoint.sh
+
 # 8500: browser command API, 6080: KasmVNC web client
 EXPOSE 8500 6080
-ENTRYPOINT ["tini", "--"]
-CMD ["python", "-m", "src.browser"]
+ENTRYPOINT ["/usr/local/bin/browser-entrypoint.sh"]
