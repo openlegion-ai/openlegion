@@ -435,6 +435,24 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def request_browser_login(
+        self, url: str, service: str, description: str,
+    ) -> dict:
+        """Emit a browser login request event to the dashboard."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/browser-login-request",
+            json={
+                "agent_id": self.agent_id,
+                "url": url,
+                "service": service,
+                "description": description,
+            },
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def vault_store(self, name: str, value: str) -> dict:
         """Store a credential in the mesh vault. Returns handle."""
         client = await self._get_client()

@@ -389,6 +389,101 @@
                         </div>
                       </div>
                     </template>
+                    <!-- Browser login request card -->
+                    <template x-if="msg.role === 'browser_login_request'">
+                      <div class="flex justify-start gap-2.5">
+                        <div class="shrink-0 mt-1">
+                          <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
+                        </div>
+                        <div class="min-w-0" :class="msg._browserExpanded ? 'max-w-[95%]' : 'max-w-[80%]'">
+                          <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-violet-600/30"
+                            x-data="{ browserOpen: false, focusDone: false, focusing: false, vncLoaded: false }">
+                            <template x-if="!msg.completed && !msg.cancelled">
+                              <div>
+                                <div class="flex items-center gap-2 mb-2">
+                                  <svg class="w-4 h-4 text-violet-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                                    <line x1="8" y1="21" x2="16" y2="21"/>
+                                    <line x1="12" y1="17" x2="12" y2="21"/>
+                                  </svg>
+                                  <span class="text-xs font-medium text-violet-300" x-text="'Login needed: ' + msg.service"></span>
+                                  <template x-if="browserOpen">
+                                    <button @click="msg._browserExpanded = !msg._browserExpanded"
+                                      class="ml-auto text-gray-500 hover:text-gray-300 transition-colors"
+                                      :title="msg._browserExpanded ? 'Shrink' : 'Expand'">
+                                      <svg x-show="!msg._browserExpanded" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"/></svg>
+                                      <svg x-show="msg._browserExpanded" x-cloak class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 9L4 4m0 0v4m0-4h4m7 11l5 5m0 0v-4m0 4h-4M9 15l-5 5m0 0h4m-4 0v-4m11-7l5-5m0 0h-4m4 0v4"/></svg>
+                                    </button>
+                                  </template>
+                                </div>
+                                <p class="text-xs text-gray-300 mb-3" x-text="msg.content"></p>
+                                <!-- VNC viewer -->
+                                <template x-if="browserOpen">
+                                  <div class="mb-3">
+                                    <div class="relative rounded-lg overflow-hidden bg-gray-900 border border-gray-700" :style="msg._browserExpanded ? 'aspect-ratio: 16/9; max-width: 100%;' : 'aspect-ratio: 16/9; max-width: 480px;'">
+                                      <!-- Loading overlay — fades out when iframe loads -->
+                                      <div class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 z-10 transition-opacity duration-500"
+                                        :class="vncLoaded ? 'opacity-0 pointer-events-none' : 'opacity-100'">
+                                        <svg class="animate-spin h-6 w-6 text-violet-400 mb-2" fill="none" viewBox="0 0 24 24">
+                                          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                                          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                                        </svg>
+                                        <span class="text-xs text-gray-400">Connecting to browser...</span>
+                                      </div>
+                                      <iframe
+                                        :src="focusDone ? _getVncUrl() : ''"
+                                        class="w-full h-full border-0"
+                                        allow="clipboard-read; clipboard-write"
+                                        @load="if (focusDone) vncLoaded = true"
+                                      ></iframe>
+                                    </div>
+                                  </div>
+                                </template>
+                                <!-- Action buttons -->
+                                <div class="flex gap-2">
+                                  <template x-if="!browserOpen">
+                                    <button @click="if (!focusing && msg._from_agent) { if (!_getVncUrl()) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
+                                      class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors flex items-center justify-center gap-1.5">
+                                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                                      Open Browser
+                                    </button>
+                                  </template>
+                                  <template x-if="browserOpen">
+                                    <button @click="browserOpen = false; focusDone = false; vncLoaded = false; _completeBrowserLogin(msg, msg._from_agent)"
+                                      class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white transition-colors">
+                                      &#10003; Complete Login
+                                    </button>
+                                  </template>
+                                  <button @click="browserOpen = false; focusDone = false; vncLoaded = false; _cancelBrowserLogin(msg, msg._from_agent)"
+                                    class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                                    :class="browserOpen ? 'bg-gray-700 hover:bg-gray-600 text-gray-300' : 'bg-gray-700/50 hover:bg-gray-600 text-gray-400'">
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            </template>
+                            <!-- Completed state -->
+                            <template x-if="msg.completed">
+                              <div class="flex items-center gap-1.5 text-xs text-emerald-400">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                  <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+                                </svg>
+                                <span x-text="'Login completed. The agent can now access ' + msg.service + '.'"></span>
+                              </div>
+                            </template>
+                            <!-- Cancelled state -->
+                            <template x-if="msg.cancelled">
+                              <div class="flex items-center gap-1.5 text-xs text-gray-400">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                                </svg>
+                                <span x-text="'Login to ' + msg.service + ' was cancelled.'"></span>
+                              </div>
+                            </template>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
                     <!-- Agent/error/notification response -->
                     <template x-if="msg.role === 'agent' || msg.role === 'error' || msg.role === 'notification'">
                       <div class="flex justify-start gap-2.5">
@@ -5438,8 +5533,100 @@
                   </div>
                 </div>
               </template>
+              <!-- Browser login request card -->
+              <template x-if="msg.role === 'browser_login_request'">
+                <div class="flex justify-start">
+                  <div class="min-w-0" :class="msg._browserExpanded ? 'max-w-[95%]' : 'max-w-[80%]'">
+                    <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-violet-600/30"
+                      x-data="{ browserOpen: false, focusDone: false, focusing: false, vncLoaded: false }">
+                      <template x-if="!msg.completed && !msg.cancelled">
+                        <div>
+                          <div class="flex items-center gap-2 mb-2">
+                            <svg class="w-4 h-4 text-violet-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                              <line x1="8" y1="21" x2="16" y2="21"/>
+                              <line x1="12" y1="17" x2="12" y2="21"/>
+                            </svg>
+                            <span class="text-xs font-medium text-violet-300" x-text="'Login needed: ' + msg.service"></span>
+                            <template x-if="browserOpen">
+                              <button @click="msg._browserExpanded = !msg._browserExpanded"
+                                class="ml-auto text-gray-500 hover:text-gray-300 transition-colors"
+                                :title="msg._browserExpanded ? 'Shrink' : 'Expand'">
+                                <svg x-show="!msg._browserExpanded" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"/></svg>
+                                <svg x-show="msg._browserExpanded" x-cloak class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 9L4 4m0 0v4m0-4h4m7 11l5 5m0 0v-4m0 4h-4M9 15l-5 5m0 0h4m-4 0v-4m11-7l5-5m0 0h-4m4 0v4"/></svg>
+                              </button>
+                            </template>
+                          </div>
+                          <p class="text-xs text-gray-300 mb-3" x-text="msg.content"></p>
+                          <!-- VNC viewer -->
+                          <template x-if="browserOpen">
+                            <div class="mb-3">
+                              <div class="relative rounded-lg overflow-hidden bg-gray-900 border border-gray-700" :style="msg._browserExpanded ? 'aspect-ratio: 16/9; max-width: 100%;' : 'aspect-ratio: 16/9; max-width: 480px;'">
+                                <!-- Loading overlay — fades out when iframe loads -->
+                                <div class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 z-10 transition-opacity duration-500"
+                                  :class="vncLoaded ? 'opacity-0 pointer-events-none' : 'opacity-100'">
+                                  <svg class="animate-spin h-6 w-6 text-violet-400 mb-2" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                                  </svg>
+                                  <span class="text-xs text-gray-400">Connecting to browser...</span>
+                                </div>
+                                <iframe
+                                  :src="focusDone ? _getVncUrl() : ''"
+                                  class="w-full h-full border-0"
+                                  allow="clipboard-read; clipboard-write"
+                                  @load="if (focusDone) vncLoaded = true"
+                                ></iframe>
+                              </div>
+                            </div>
+                          </template>
+                          <!-- Action buttons -->
+                          <div class="flex gap-2">
+                            <template x-if="!browserOpen">
+                              <button @click="if (!focusing && activeChatId) { if (!_getVncUrl()) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(activeChatId).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
+                                class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors flex items-center justify-center gap-1.5">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                                Open Browser
+                              </button>
+                            </template>
+                            <template x-if="browserOpen">
+                              <button @click="browserOpen = false; focusDone = false; vncLoaded = false; _completeBrowserLogin(msg, activeChatId)"
+                                class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white transition-colors">
+                                &#10003; Complete Login
+                              </button>
+                            </template>
+                            <button @click="browserOpen = false; focusDone = false; vncLoaded = false; _cancelBrowserLogin(msg, activeChatId)"
+                              class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                              :class="browserOpen ? 'bg-gray-700 hover:bg-gray-600 text-gray-300' : 'bg-gray-700/50 hover:bg-gray-600 text-gray-400'">
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      </template>
+                      <!-- Completed state -->
+                      <template x-if="msg.completed">
+                        <div class="flex items-center gap-1.5 text-xs text-emerald-400">
+                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+                          </svg>
+                          <span x-text="'Login completed. The agent can now access ' + msg.service + '.'"></span>
+                        </div>
+                      </template>
+                      <!-- Cancelled state -->
+                      <template x-if="msg.cancelled">
+                        <div class="flex items-center gap-1.5 text-xs text-gray-400">
+                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                          </svg>
+                          <span x-text="'Login to ' + msg.service + ' was cancelled.'"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+              </template>
               <!-- Chat bubble -->
-              <template x-if="msg.role !== 'system' && msg.role !== 'credential_request' && msg.role !== 'credit_exhausted'">
+              <template x-if="msg.role !== 'system' && msg.role !== 'credential_request' && msg.role !== 'credit_exhausted' && msg.role !== 'browser_login_request'">
               <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
               <div class="max-w-[80%] px-3 py-2 rounded-2xl text-xs"
                 :class="{

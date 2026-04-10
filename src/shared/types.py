@@ -335,6 +335,10 @@ class DashboardEvent(BaseModel):
         "chat_reset",
         "credit_exhausted",
         "credential_request",
+        "credential_stored",
+        "browser_login_request",
+        "browser_login_completed",
+        "browser_login_cancelled",
     ]
     agent: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

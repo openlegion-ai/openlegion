@@ -1826,6 +1826,58 @@ def create_dashboard_router(
             event_bus.emit("credential_stored", data={"name": service})
         return {"stored": True, "service": service, "tier": "agent"}
 
+    @api_router.post("/api/browser-login/complete")
+    async def api_browser_login_complete(request: Request) -> dict:
+        """User completed browser login — notify the requesting agent."""
+        body = await request.json()
+        agent_id = body.get("agent_id", "").strip()
+        service = body.get("service", "").strip()[:128]
+        if not agent_id or not service:
+            raise HTTPException(status_code=400, detail="agent_id and service are required")
+        # Notify the agent that login is complete
+        if agent_id in agent_registry and lane_manager is not None:
+            from src.shared.trace import new_trace_id
+            from src.shared.utils import sanitize_for_prompt
+            try:
+                msg = sanitize_for_prompt(
+                    f"The user has completed the browser login for {service}. "
+                    f"The session (cookies, localStorage) is now saved in your browser profile. "
+                    f"You can resume using browser tools to interact with {service}."
+                )
+                await lane_manager.enqueue(
+                    agent_id, msg, mode="steer", trace_id=new_trace_id(),
+                )
+            except Exception:
+                pass
+        if event_bus:
+            event_bus.emit("browser_login_completed", agent=agent_id, data={"service": service})
+        return {"completed": True, "agent_id": agent_id, "service": service}
+
+    @api_router.post("/api/browser-login/cancel")
+    async def api_browser_login_cancel(request: Request) -> dict:
+        """User cancelled browser login — notify the requesting agent."""
+        body = await request.json()
+        agent_id = body.get("agent_id", "").strip()
+        service = body.get("service", "").strip()[:128]
+        if not agent_id or not service:
+            raise HTTPException(status_code=400, detail="agent_id and service are required")
+        if agent_id in agent_registry and lane_manager is not None:
+            from src.shared.trace import new_trace_id
+            from src.shared.utils import sanitize_for_prompt
+            try:
+                msg = sanitize_for_prompt(
+                    f"The user cancelled the browser login for {service}. "
+                    f"You may need to find an alternative approach or ask again later."
+                )
+                await lane_manager.enqueue(
+                    agent_id, msg, mode="steer", trace_id=new_trace_id(),
+                )
+            except Exception:
+                pass
+        if event_bus:
+            event_bus.emit("browser_login_cancelled", agent=agent_id, data={"service": service})
+        return {"cancelled": True, "agent_id": agent_id, "service": service}
+
     @api_router.post("/api/credentials/upload-env")
     async def api_upload_env(request: Request, file: UploadFile = File(...)) -> dict:
         """Bulk-import credentials from an uploaded .env file.
