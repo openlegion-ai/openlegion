@@ -208,7 +208,7 @@ class WorkspaceManager:
                 parts.append(f"## Session Log: {date.isoformat()}\n\n{content.strip()}")
         return "\n\n".join(parts) if parts else ""
 
-    _BOOTSTRAP_FILES = ("PROJECT.md", "SYSTEM.md", "INSTRUCTIONS.md", "SOUL.md", "USER.md", "MEMORY.md")
+    _BOOTSTRAP_FILES = ("PROJECT.md", "project.md", "SYSTEM.md", "INSTRUCTIONS.md", "SOUL.md", "USER.md", "MEMORY.md")
 
     @staticmethod
     def _get_mtime(path: Path) -> float:

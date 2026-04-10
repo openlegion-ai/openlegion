@@ -2088,20 +2088,18 @@ class CredentialVault:
                 }
                 if api_key:
                     llm_kwargs["api_key"] = api_key
-                return await litellm.acompletion(**llm_kwargs)
+                result = await litellm.acompletion(**llm_kwargs)
+                # Empty choices = failed generation — raise so failover can
+                # try the next model instead of marking this one healthy.
+                if not getattr(result, "choices", None):
+                    raise RuntimeError(
+                        f"LLM returned empty response (no choices) for model {model}"
+                    )
+                return result
 
             response, used_model = await self._call_llm_with_failover(
                 requested_model, _chat,
             )
-            if not response.choices:
-                logger.error(
-                    "LLM returned empty choices for model %s — raw response: %s",
-                    used_model, response,
-                )
-                return APIProxyResponse(
-                    success=False,
-                    error=f"LLM returned empty response (no choices) for model {used_model}",
-                )
             msg = response.choices[0].message
             usage = response.usage
             content, thinking_content = _extract_content(msg.content)

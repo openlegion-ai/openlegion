@@ -38,11 +38,18 @@ def _normalize_params_dict(params: object) -> dict:
     if isinstance(params, dict):
         return params
     if isinstance(params, list):
-        return {
-            p["name"]: {k: v for k, v in p.items() if k != "name"}
-            for p in params
-            if isinstance(p, dict) and "name" in p
-        }
+        result: dict = {}
+        for p in params:
+            if not isinstance(p, dict) or "name" not in p:
+                continue
+            name = p["name"]
+            if name in result:
+                logger.warning(
+                    "Skill params contain duplicate name %r — keeping first", name,
+                )
+                continue
+            result[name] = {k: v for k, v in p.items() if k != "name"}
+        return result
     return {}
 
 
@@ -471,7 +478,14 @@ class SkillRegistry:
                 if "items" in param_info:
                     prop["items"] = param_info["items"]
                 properties[param_name] = prop
-                if "default" not in param_info:
+                # Honor explicit required metadata as well as the default-based
+                # inference — list-form self-authored skills may carry
+                # `required: true` on individual params.
+                is_required = (
+                    param_info.get("required") is True
+                    or "default" not in param_info
+                )
+                if is_required:
                     required.append(param_name)
 
             tools.append({

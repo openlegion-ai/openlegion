@@ -139,7 +139,7 @@ agents:
       If nothing requires action, respond HEARTBEAT_OK immediately.
 
     permissions:
-      blackboard_read: ["gaps/*", "evaluations/*", "models/*", "requests/*", "tasks/*", "output/*", "status/*"]
+      blackboard_read: ["artifacts/*", "gaps/*", "evaluations/*", "models/*", "requests/*", "tasks/*", "output/*", "status/*"]
       blackboard_write: ["gaps/raw/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["gaps_ready", "new_gap_found"]
       can_subscribe: ["research_requested", "evaluation_complete"]
@@ -289,7 +289,7 @@ agents:
       If nothing requires action, respond HEARTBEAT_OK immediately.
 
     permissions:
-      blackboard_read: ["gaps/*", "evaluations/*", "models/*", "requests/*", "tasks/*", "output/*", "status/*"]
+      blackboard_read: ["artifacts/*", "gaps/*", "evaluations/*", "models/*", "requests/*", "tasks/*", "output/*", "status/*"]
       blackboard_write: ["evaluations/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["evaluation_complete", "more_evidence_needed"]
       can_subscribe: ["gaps_ready", "new_gap_found"]
@@ -498,8 +498,8 @@ agents:
       If nothing requires action, respond HEARTBEAT_OK immediately.
 
     permissions:
-      blackboard_read: ["gaps/*", "evaluations/*", "models/*", "requests/*", "tasks/*", "output/*", "status/*"]
-      blackboard_write: ["models/*", "tasks/*", "output/*", "status/*"]
+      blackboard_read: ["artifacts/*", "gaps/*", "evaluations/*", "models/*", "requests/*", "tasks/*", "output/*", "status/*"]
+      blackboard_write: ["artifacts/*", "models/*", "tasks/*", "output/*", "status/*"]
       can_publish: ["model_complete"]
       can_subscribe: ["evaluation_complete"]
     resources:
