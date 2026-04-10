@@ -395,6 +395,18 @@ class DockerBackend(RuntimeBackend):
             if os.environ.get(var):
                 environment[var] = os.environ[var]
 
+        # If the operator configured a proxy that might live on a private IP
+        # (corporate proxy, internal network), they need to also set
+        # BROWSER_EGRESS_ALLOWLIST so the egress filter lets the proxy IP
+        # through. Emit a one-shot heads-up so the footgun is visible in logs.
+        if os.environ.get("BROWSER_PROXY_URL") and not os.environ.get("BROWSER_EGRESS_ALLOWLIST"):
+            logger.info(
+                "BROWSER_PROXY_URL is set; if the proxy lives on a private IP "
+                "(RFC1918 / loopback / link-local), also set BROWSER_EGRESS_ALLOWLIST "
+                "to that CIDR — otherwise the browser container's egress filter "
+                "will block connections to the proxy."
+            )
+
         with self._port_lock:
             api_port = self._next_port
             self._next_port += 1

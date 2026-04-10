@@ -605,6 +605,54 @@ class TestDockerBackendSlimResources:
         env = run_call.kwargs.get("environment", {})
         assert env.get("BROWSER_EGRESS_ALLOWLIST") == "10.0.0.0/24,192.168.5.5/32"
 
+    def test_browser_egress_disable_env_forwarded(self):
+        """BROWSER_EGRESS_DISABLE from host env is forwarded to the container."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {"BROWSER_EGRESS_DISABLE": "1"}):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_EGRESS_DISABLE") == "1"
+        # NET_ADMIN is still added in bridge mode — operator opt-out is an
+        # entrypoint-level signal, not a cap-level signal.
+        assert run_call.kwargs.get("cap_add") == ["NET_ADMIN"]
+
+    def test_browser_host_network_emits_warning(self, caplog):
+        """Host network mode logs a loud warning about disabled SSRF filter."""
+        import logging
+
+        import docker as _docker
+
+        backend = _make_docker_backend(use_host_network=True)
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp), \
+             caplog.at_level(logging.WARNING, logger="host.runtime"):
+            backend.start_browser_service()
+
+        # At least one WARNING record mentioning "egress filter" should be present
+        matches = [r for r in caplog.records
+                   if r.levelno >= logging.WARNING and "egress filter" in r.message.lower()]
+        assert matches, f"Expected warning about egress filter in host mode, got: {[r.message for r in caplog.records]}"
+
     def test_containers_no_docker_init(self):
         """Docker init=True must NOT be set — Dockerfile ENTRYPOINT tini handles it.
 

@@ -42,17 +42,27 @@ install_egress_filter() {
 
   # Build ACCEPT rules for configured nameservers so DNS keeps working. Docker's
   # embedded resolver at 127.0.0.11 is reached over lo (allowed separately).
+  # Strict validation: reject anything that isn't a dotted-quad v4 literal.
   local dns_rules=""
   local ns
   for ns in $(awk '/^nameserver[ \t]/ { print $2 }' /etc/resolv.conf 2>/dev/null); do
     case "$ns" in *:*) continue ;; esac  # v4 table: skip v6 nameservers
+    # Reject newlines / control chars, then validate dotted-quad shape.
+    case "$ns" in
+      *[!0-9.]*|'') continue ;;
+    esac
+    if [[ ! "$ns" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      continue
+    fi
     dns_rules="${dns_rules}-A OUTPUT -d ${ns}/32 -p udp --dport 53 -j ACCEPT
 "
     dns_rules="${dns_rules}-A OUTPUT -d ${ns}/32 -p tcp --dport 53 -j ACCEPT
 "
   done
 
-  # Operator allowlist (comma-separated CIDRs). Useful for private-network proxies.
+  # Operator allowlist (comma-separated CIDRs). Useful for private-network
+  # proxies. Strict validation: reject anything that isn't an IPv4 / CIDR
+  # literal, and explicitly reject 0.0.0.0/0 (would defeat the filter).
   local allow_rules=""
   local cidr
   local old_ifs="$IFS"
@@ -61,12 +71,24 @@ install_egress_filter() {
     cidr="${cidr# }"
     cidr="${cidr% }"
     [ -z "$cidr" ] && continue
+    # Reject any control character or unexpected input before regex check.
+    case "$cidr" in
+      *[!0-9./]*) log "WARNING: ignoring invalid allowlist entry: ${cidr}"; continue ;;
+    esac
+    if [[ ! "$cidr" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]]; then
+      log "WARNING: ignoring invalid allowlist entry: ${cidr}"
+      continue
+    fi
+    if [ "$cidr" = "0.0.0.0/0" ]; then
+      log "WARNING: refusing to allowlist 0.0.0.0/0 — would defeat the egress filter"
+      continue
+    fi
     allow_rules="${allow_rules}-A OUTPUT -d ${cidr} -j ACCEPT
 "
   done
   IFS="$old_ifs"
 
-  iptables-restore <<EOF
+  if ! iptables-restore <<EOF
 *filter
 :INPUT ACCEPT [0:0]
 :FORWARD ACCEPT [0:0]
@@ -92,10 +114,20 @@ ${dns_rules}${allow_rules}
 
 COMMIT
 EOF
+  then
+    log "ERROR: iptables-restore failed to install the egress filter."
+    log "  Likely causes: kernel lacks nf_conntrack, or CAP_NET_ADMIN was"
+    log "  not granted at rule-install time (check cap_add in runtime.py)."
+    log "  Set BROWSER_EGRESS_DISABLE=1 to start without the filter (insecure)."
+    exit 1
+  fi
 
-  # IPv6 filtering. Kernel may lack IPv6 entirely; treat errors as non-fatal.
+  # IPv6 filtering. Kernel may lack IPv6 entirely; treat errors as non-fatal
+  # because IPv6 being off is a valid deployment state. If the kernel HAS
+  # IPv6 but the rule install fails, that is a hard error — we do not want
+  # to silently leave the v6 egress path wide open.
   if command -v ip6tables-restore >/dev/null 2>&1 && ip6tables -L OUTPUT -n >/dev/null 2>&1; then
-    ip6tables-restore <<'EOF'
+    if ! ip6tables-restore <<'EOF'
 *filter
 :INPUT ACCEPT [0:0]
 :FORWARD ACCEPT [0:0]
@@ -118,6 +150,11 @@ EOF
 
 COMMIT
 EOF
+    then
+      log "ERROR: ip6tables-restore failed — IPv6 is enabled but rules could not be installed."
+      log "  Refusing to continue with an unprotected IPv6 egress path."
+      exit 1
+    fi
   fi
 
   log "iptables egress filter installed (private IP ranges blocked)"
