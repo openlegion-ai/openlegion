@@ -1319,6 +1319,14 @@ class CredentialVault:
            blocks with the Claude Code identity as the mandatory first block.
         2. Add an override so the model follows the agent's actual instructions
            instead of defaulting to Claude Code behavior.
+        3. Drop ``temperature`` and ``top_p`` when they are not exactly 1.0.
+           Anthropic's Claude Code OAuth policy rejects any non-default
+           sampling value with a generic "Invalid request data" error. The
+           engine's default ``temperature=0.7`` (``src/agent/llm.py``) triggers
+           this on every request. Silently drop non-default values so the
+           request succeeds — the model falls back to Anthropic's default
+           sampling (temperature=1.0, top_p=1.0), which is the only
+           combination OAuth accepts.
         """
         identity = CredentialVault._CLAUDE_CODE_IDENTITY
         system_blocks: list[dict] = [{"type": "text", "text": identity}]
@@ -1331,6 +1339,22 @@ class CredentialVault:
             elif isinstance(existing, list):
                 system_blocks.extend(existing)
         body["system"] = system_blocks
+
+        # Claude Code OAuth restriction: drop non-default sampling params.
+        temp = body.get("temperature")
+        if temp is not None and temp != 1.0:
+            logger.debug(
+                "Anthropic OAuth: dropping temperature=%s (only 1.0 permitted)",
+                temp,
+            )
+            body.pop("temperature", None)
+        top_p = body.get("top_p")
+        if top_p is not None and top_p != 1.0:
+            logger.debug(
+                "Anthropic OAuth: dropping top_p=%s (only 1.0 permitted)",
+                top_p,
+            )
+            body.pop("top_p", None)
 
     async def _oauth_chat(
         self, request: APIProxyRequest, api_key: str, model: str,

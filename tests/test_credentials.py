@@ -1889,6 +1889,66 @@ class TestOAuthTokenHandling:
         body = CredentialVault._build_anthropic_body(params)
         assert body["top_p"] == 0.9
 
+    def test_patch_oauth_body_drops_non_default_temperature(self):
+        """Anthropic Claude Code OAuth rejects any temperature != 1.0.
+
+        Regression: the engine's default temperature=0.7 triggered
+        "Invalid request data" on every OAuth request, breaking the
+        operator agent's heartbeat cycle on VPS deployments.
+        """
+        body = {
+            "model": "claude-opus-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": "test",
+            "temperature": 0.7,
+        }
+        CredentialVault._patch_anthropic_oauth_body(body)
+        assert "temperature" not in body
+
+    def test_patch_oauth_body_keeps_default_temperature(self):
+        """temperature=1.0 is accepted by Anthropic OAuth and must not be dropped."""
+        body = {
+            "model": "claude-opus-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": "test",
+            "temperature": 1.0,
+        }
+        CredentialVault._patch_anthropic_oauth_body(body)
+        assert body["temperature"] == 1.0
+
+    def test_patch_oauth_body_drops_non_default_top_p(self):
+        """Anthropic Claude Code OAuth rejects any top_p != 1.0."""
+        body = {
+            "model": "claude-opus-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": "test",
+            "top_p": 0.9,
+        }
+        CredentialVault._patch_anthropic_oauth_body(body)
+        assert "top_p" not in body
+
+    def test_patch_oauth_body_keeps_default_top_p(self):
+        """top_p=1.0 is accepted by Anthropic OAuth and must not be dropped."""
+        body = {
+            "model": "claude-opus-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": "test",
+            "top_p": 1.0,
+        }
+        CredentialVault._patch_anthropic_oauth_body(body)
+        assert body["top_p"] == 1.0
+
+    def test_patch_oauth_body_absent_sampling_params_unchanged(self):
+        """When temperature/top_p are absent, body stays absent (don't inject defaults)."""
+        body = {
+            "model": "claude-opus-4-6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": "test",
+        }
+        CredentialVault._patch_anthropic_oauth_body(body)
+        assert "temperature" not in body
+        assert "top_p" not in body
+
     def test_build_anthropic_body_tool_choice_none_removes_tools(self):
         """tool_choice='none' removes tools from body entirely."""
         params = {
