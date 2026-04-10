@@ -353,6 +353,9 @@
                     <!-- Credential request card -->
                     <template x-if="msg.role === 'credential_request'">
                       <div class="flex justify-start gap-2.5">
+                        <div class="shrink-0 mt-1">
+                          <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
+                        </div>
                         <div class="max-w-[80%] min-w-0">
                           <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-indigo-600/30">
                             <div class="flex items-center gap-2 mb-2">
@@ -366,9 +369,9 @@
                             <div x-show="!msg.saved" x-data="{ credValue: '', saving: false, saveError: '' }">
                               <input type="password" x-model="credValue"
                                 class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none mb-2"
-                                :placeholder="'Enter ' + (msg.service || msg.name)">
+                                :placeholder="'Paste your ' + msg.name.replace(/[_.\-]/g, ' ').replace(/^\w/, c => c.toUpperCase())">
                               <div x-show="saveError" class="text-[10px] text-red-400 mb-1.5" x-text="saveError"></div>
-                              <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim()}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                              <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: msg._from_agent || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
                                 :disabled="!credValue.trim() || saving"
                                 class="w-full px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
                                 :class="credValue.trim() && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-500 cursor-not-allowed'">
@@ -5415,9 +5418,9 @@
                       <div x-show="!msg.saved" x-data="{ credValue: '', saving: false, saveError: '' }">
                         <input type="password" x-model="credValue"
                           class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none mb-2"
-                          :placeholder="'Enter ' + (msg.service || msg.name)">
+                          :placeholder="'Paste your ' + msg.name.replace(/[_.\-]/g, ' ').replace(/^\w/, c => c.toUpperCase())">
                         <div x-show="saveError" class="text-[10px] text-red-400 mb-1.5" x-text="saveError"></div>
-                        <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim()}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                        <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: activeChatId || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
                           :disabled="!credValue.trim() || saving"
                           class="w-full px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
                           :class="credValue.trim() && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-500 cursor-not-allowed'">
