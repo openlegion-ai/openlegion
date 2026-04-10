@@ -1655,6 +1655,69 @@ class TestOAuthTokenHandling:
         assert "type" not in value_schema
         assert value_schema["anyOf"] == [{"type": "string"}, {"type": "object"}]
 
+    def test_build_anthropic_body_does_not_crash_on_none_function(self):
+        """Malformed ``{"function": None}`` must not crash the OAuth seam.
+
+        Previously the code tested ``if "function" in t`` then dereferenced
+        ``func["name"]`` — crashing with TypeError when function was None.
+        The LiteLLM seam handled this correctly; the OAuth seam had diverged.
+        """
+        params = {
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [
+                {"type": "function", "function": None},
+                {"function": None},
+            ],
+        }
+        # Must not raise.
+        body = CredentialVault._build_anthropic_body(params)
+        # Both malformed tools passed through unchanged; Anthropic SDK will
+        # reject them at request time, but our body builder doesn't crash.
+        assert len(body["tools"]) == 2
+
+    def test_build_anthropic_body_mixed_shape_falls_back_to_input_schema(self):
+        """Tool with ``function`` but no ``parameters`` falls back to ``input_schema``.
+
+        The LiteLLM seam already has this behavior; the OAuth seam
+        previously substituted ``{"type": "object"}`` and dropped the
+        input_schema on the floor. Both seams must agree.
+        """
+        params = {
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [{
+                "function": {"name": "edge_case"},  # no parameters
+                "name": "edge_case",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": ["string", "object"]},
+                    },
+                },
+            }],
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        tool = body["tools"][0]
+        assert tool["name"] == "edge_case"
+        # input_schema was used and normalized
+        value_schema = tool["input_schema"]["properties"]["value"]
+        assert value_schema["anyOf"] == [{"type": "string"}, {"type": "object"}]
+        # Stripped OpenAI wrapper keys
+        assert "function" not in tool
+        assert "type" not in tool  # the OpenAI "type": "function" wrapper
+
+    def test_build_anthropic_body_non_dict_tool_passes_through(self):
+        """Non-dict tool entries pass through without crashing."""
+        params = {
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": ["not_a_dict", 42, None],
+        }
+        # Must not raise.
+        body = CredentialVault._build_anthropic_body(params)
+        assert body["tools"] == ["not_a_dict", 42, None]
+
     def test_normalize_tool_schema_for_anthropic_collapses_singleton_type_array(self):
         """Single-element type arrays collapse to a bare string."""
         result = CredentialVault._normalize_tool_schema_for_anthropic(

@@ -1092,6 +1092,13 @@ class CredentialVault:
         schema_type = normalized.get("type")
         if isinstance(schema_type, list):
             types = [t for t in schema_type if isinstance(t, str)]
+            # Intentionally lossy for malformed input: if a multi-type
+            # list contains no usable string types (empty list, or only
+            # non-strings like [None, True]), drop the ``type`` entirely.
+            # The alternative — leaving an invalid array — would be
+            # rejected by Anthropic with an unhelpful error. Silent
+            # widening lets the request proceed with type-agnostic
+            # validation, which is the least-bad outcome for bad input.
             if not types:
                 normalized.pop("type", None)
             elif len(types) == 1:
@@ -1208,23 +1215,37 @@ class CredentialVault:
         if tools:
             anthropic_tools = []
             for t in tools:
-                if "function" in t:
-                    func = t["function"]
+                if not isinstance(t, dict):
+                    # Unknown entry — pass through; Anthropic SDK will reject
+                    # with a clear error rather than us crashing here.
+                    anthropic_tools.append(t)
+                    continue
+                func = t.get("function")
+                if isinstance(func, dict) and "parameters" in func:
+                    # Well-formed OpenAI shape.
                     anthropic_tools.append({
-                        "name": func["name"],
+                        "name": func.get("name", ""),
                         "description": func.get("description", ""),
                         "input_schema": CredentialVault._normalize_tool_schema_for_anthropic(
-                            func.get("parameters", {"type": "object"})
+                            func["parameters"]
                         ),
                     })
-                elif isinstance(t, dict) and "input_schema" in t:
-                    anthropic_tools.append({
-                        **t,
-                        "input_schema": CredentialVault._normalize_tool_schema_for_anthropic(
-                            t["input_schema"]
-                        ),
-                    })
+                elif "input_schema" in t:
+                    # Already in Anthropic shape, OR an OpenAI-shaped tool that
+                    # has function without parameters but carries input_schema
+                    # as a fallback. Strip any OpenAI wrapper keys and normalize
+                    # the schema in place. Mirrors the LiteLLM seam fallback.
+                    out = {
+                        k: v for k, v in t.items()
+                        if k not in ("function", "type")
+                    }
+                    out["input_schema"] = CredentialVault._normalize_tool_schema_for_anthropic(
+                        t["input_schema"]
+                    )
+                    anthropic_tools.append(out)
                 else:
+                    # Neither well-formed OpenAI nor Anthropic — pass through.
+                    # We don't guess; the Anthropic SDK will reject cleanly.
                     anthropic_tools.append(t)
             body["tools"] = anthropic_tools
 
