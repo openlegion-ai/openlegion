@@ -621,3 +621,39 @@ def test_opportunity_finder_artifact_permissions():
     assert "artifacts/*" in modeler_writes, (
         "modeler must have artifacts/* in blackboard_write to register saved artifacts"
     )
+
+
+def test_all_templates_save_artifact_has_permission():
+    """Any agent using save_artifact must have artifacts/* in blackboard_write.
+
+    Regression guard for the template permission bug found in PR review.
+    save_artifact writes a file and registers metadata at artifacts/{agent}/{name}
+    on the blackboard. Without artifacts/* in blackboard_write, the registration
+    fails silently and the artifact is invisible to blackboard-based discovery.
+    """
+    template_dir = Path(__file__).resolve().parent.parent / "src" / "templates"
+    issues: list[str] = []
+
+    for yaml_file in sorted(template_dir.glob("*.yaml")):
+        with open(yaml_file) as f:
+            tpl = yaml.safe_load(f)
+
+        agents = tpl.get("agents", {}) or {}
+        for agent_id, agent in agents.items():
+            instructions = agent.get("instructions", "") or ""
+            if "save_artifact" not in instructions:
+                continue
+
+            perms = agent.get("permissions", {}) or {}
+            writes = perms.get("blackboard_write", []) or []
+
+            # Check for "*" wildcard or explicit "artifacts/*"
+            has_perm = any(w == "artifacts/*" or w == "*" for w in writes)
+
+            if not has_perm:
+                issues.append(
+                    f"{yaml_file.name}:{agent_id} uses save_artifact but "
+                    f"blackboard_write={writes} lacks artifacts/*"
+                )
+
+    assert not issues, "\n".join(issues)

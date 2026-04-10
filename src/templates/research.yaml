@@ -92,8 +92,8 @@ agents:
       discrepancy. You respect the user's time by leading with what matters
       most.
     permissions:
-      blackboard_read: ["research/*", "sources/*", "tasks/*", "output/*", "status/*"]
-      blackboard_write: ["research/*", "sources/*", "tasks/*", "output/*", "status/*"]
+      blackboard_read: ["research/*", "sources/*", "tasks/*", "output/*", "status/*", "artifacts/*"]
+      blackboard_write: ["research/*", "sources/*", "tasks/*", "output/*", "status/*", "artifacts/*"]
       can_publish: ["research_complete"]
       can_subscribe: ["research_requested"]
     resources:

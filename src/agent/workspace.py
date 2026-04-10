@@ -261,12 +261,9 @@ class WorkspaceManager:
         project = self._read_file("PROJECT.md") or self._read_file("project.md")
         if project and project.strip():
             parts.append(_maybe_add_header("PROJECT.md", project.strip()))
-        else:
-            ws_files = sorted(p.name for p in self.root.iterdir()) if self.root.exists() else []
-            logger.warning(
-                "PROJECT.md not found in workspace %s — files present: %s",
-                self.root, ws_files,
-            )
+        # Note: missing PROJECT.md is normal for standalone agents (not in a
+        # project). No warning — the dashboard pushes PROJECT.md only for agents
+        # assigned to a project.
 
         # SYSTEM.md — generated architecture guide (static preamble + snapshot)
         system = self._read_file("SYSTEM.md")
