@@ -351,6 +351,22 @@ class DockerBackend(RuntimeBackend):
         """Start the shared browser service container."""
         import docker as _docker
 
+        # Host network mode disables the SSRF egress filter (iptables rules
+        # would mutate the host's network namespace instead of the container's).
+        # That is a real and silent security regression, so we require a second
+        # explicit opt-in from the operator to run the browser in host mode.
+        _host_net_ack = os.environ.get("OPENLEGION_BROWSER_ALLOW_HOST_NETWORK", "").strip()
+        if self.use_host_network and _host_net_ack not in ("1", "true", "yes"):
+            raise RuntimeError(
+                "Refusing to start the browser container in host network mode: "
+                "SSRF egress filter cannot be installed when the container shares "
+                "the host's network namespace. To proceed anyway (INSECURE — the "
+                "browser will have unrestricted access to the host's private "
+                "networks), set OPENLEGION_BROWSER_ALLOW_HOST_NETWORK=1. The "
+                "recommended fix is to unset OPENLEGION_HOST_NETWORK so the "
+                "browser runs on a bridge network with the filter active."
+            )
+
         self.browser_auth_token = secrets.token_urlsafe(32)
         mesh_host = "127.0.0.1" if self.use_host_network else "host.docker.internal"
 
@@ -395,17 +411,42 @@ class DockerBackend(RuntimeBackend):
             if os.environ.get(var):
                 environment[var] = os.environ[var]
 
-        # If the operator configured a proxy that might live on a private IP
-        # (corporate proxy, internal network), they need to also set
-        # BROWSER_EGRESS_ALLOWLIST so the egress filter lets the proxy IP
-        # through. Emit a one-shot heads-up so the footgun is visible in logs.
-        if os.environ.get("BROWSER_PROXY_URL") and not os.environ.get("BROWSER_EGRESS_ALLOWLIST"):
-            logger.info(
-                "BROWSER_PROXY_URL is set; if the proxy lives on a private IP "
-                "(RFC1918 / loopback / link-local), also set BROWSER_EGRESS_ALLOWLIST "
-                "to that CIDR — otherwise the browser container's egress filter "
-                "will block connections to the proxy."
-            )
+        # If the operator configured a proxy whose host is a literal private IP,
+        # the egress filter will block the browser from reaching it unless the
+        # proxy CIDR is explicitly allowlisted. Detect this at startup and refuse
+        # instead of surfacing as a cryptic "browser cannot reach proxy" error
+        # after the browser container is already running. Hostname-based proxies
+        # are left alone (resolving them at startup would be brittle and racy).
+        proxy_url = os.environ.get("BROWSER_PROXY_URL", "").strip()
+        if proxy_url and not os.environ.get("BROWSER_EGRESS_ALLOWLIST"):
+            try:
+                import ipaddress
+                from urllib.parse import urlparse
+                parsed = urlparse(proxy_url if "://" in proxy_url else f"http://{proxy_url}")
+                host = parsed.hostname or ""
+                # Only act on IP literals — hostnames are intentionally untouched.
+                try:
+                    ip_obj = ipaddress.ip_address(host)
+                except ValueError:
+                    ip_obj = None
+                _is_private = ip_obj is not None and (
+                    ip_obj.is_private
+                    or ip_obj.is_loopback
+                    or ip_obj.is_link_local
+                    or ip_obj.is_reserved
+                )
+                if _is_private:
+                    raise RuntimeError(
+                        f"BROWSER_PROXY_URL host {host} is a private IP literal, "
+                        "but BROWSER_EGRESS_ALLOWLIST is not set. The browser "
+                        f"container's egress filter will block connections to {host}. "
+                        f"Set BROWSER_EGRESS_ALLOWLIST={host}/32 (or the appropriate "
+                        "CIDR) to allow the proxy through."
+                    )
+            except RuntimeError:
+                raise
+            except Exception as e:
+                logger.warning("Could not parse BROWSER_PROXY_URL for validation: %s", e)
 
         with self._port_lock:
             api_port = self._next_port
@@ -426,6 +467,15 @@ class DockerBackend(RuntimeBackend):
             "cpu_quota": browser_cpu,
             "shm_size": browser_shm,
             "security_opt": ["no-new-privileges"],
+            # Drop Docker's default cap set. The browser container holds only the
+            # capabilities it actually needs. The init phase (running as root via
+            # the entrypoint) uses NET_ADMIN to install iptables rules, then calls
+            # gosu(1) which needs SETUID + SETGID to drop to UID 1000 before
+            # handing control to Firefox. After gosu, the long-running browser
+            # process runs with no effective capabilities (non-root users do not
+            # inherit caps), and no-new-privileges prevents re-acquisition via
+            # setuid binaries or file capabilities.
+            "cap_drop": ["ALL"],
         }
 
         if self.use_host_network:
@@ -447,14 +497,12 @@ class DockerBackend(RuntimeBackend):
             run_kwargs["ports"] = {"8500/tcp": api_port, "6080/tcp": vnc_port}
             if platform.system() == "Linux":
                 run_kwargs["extra_hosts"] = {"host.docker.internal": "host-gateway"}
-            # Bridge network mode: grant NET_ADMIN so the entrypoint's root
-            # init phase can install an iptables egress filter blocking
-            # browser-initiated traffic to private IP ranges (defeats DNS
-            # rebinding and covers redirects/subresources/XHR/WebSockets
-            # uniformly, below the Playwright API). The long-running browser
-            # drops to the non-root 'browser' user via gosu before handling
-            # any agent traffic, so it cannot modify the rules at runtime.
-            run_kwargs["cap_add"] = ["NET_ADMIN"]
+            # Bridge network mode: grant minimal caps needed by the entrypoint.
+            # NET_ADMIN lets the root init phase install the iptables egress
+            # filter; SETUID + SETGID let gosu(1) drop to the non-root browser
+            # user before execing Firefox. All three are in the container's
+            # bounding set but unreachable after gosu (UID 1000, no ambient).
+            run_kwargs["cap_add"] = ["NET_ADMIN", "SETUID", "SETGID"]
 
         # Remove stale browser container
         try:

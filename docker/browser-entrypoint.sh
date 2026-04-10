@@ -22,6 +22,42 @@ set -e
 
 log() { echo "[egress-filter] $*" >&2; }
 
+# Validate that a string is a strict IPv4 literal (dotted quad, each octet 0-255).
+is_valid_ipv4() {
+  local s="$1" a b c d extra
+  case "$s" in *[!0-9.]*|'') return 1;; esac
+  local ifs_save="$IFS"
+  IFS=.
+  # shellcheck disable=SC2086
+  set -- $s
+  IFS="$ifs_save"
+  [ "$#" -eq 4 ] || return 1
+  for octet in "$@"; do
+    case "$octet" in
+      ''|*[!0-9]*) return 1;;
+    esac
+    # Strip leading zeros to avoid octal interpretation in arithmetic.
+    octet=$((10#$octet))
+    [ "$octet" -ge 0 ] && [ "$octet" -le 255 ] || return 1
+  done
+  return 0
+}
+
+# Validate that a string is either a strict IPv4 literal or IPv4/CIDR (prefix 0-32).
+is_valid_ipv4_cidr() {
+  local s="$1" ip prefix
+  case "$s" in *[!0-9./]*|'') return 1;; esac
+  case "$s" in
+    */*) ip="${s%/*}"; prefix="${s#*/}";;
+    *)   ip="$s";       prefix="32";;
+  esac
+  is_valid_ipv4 "$ip" || return 1
+  case "$prefix" in ''|*[!0-9]*) return 1;; esac
+  prefix=$((10#$prefix))
+  [ "$prefix" -ge 0 ] && [ "$prefix" -le 32 ] || return 1
+  return 0
+}
+
 install_egress_filter() {
   if [ "${BROWSER_EGRESS_DISABLE:-}" = "1" ]; then
     log "BROWSER_EGRESS_DISABLE=1 — skipping firewall setup (browser has unrestricted network access)"
@@ -47,11 +83,7 @@ install_egress_filter() {
   local ns
   for ns in $(awk '/^nameserver[ \t]/ { print $2 }' /etc/resolv.conf 2>/dev/null); do
     case "$ns" in *:*) continue ;; esac  # v4 table: skip v6 nameservers
-    # Reject newlines / control chars, then validate dotted-quad shape.
-    case "$ns" in
-      *[!0-9.]*|'') continue ;;
-    esac
-    if [[ ! "$ns" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    if ! is_valid_ipv4 "$ns"; then
       continue
     fi
     dns_rules="${dns_rules}-A OUTPUT -d ${ns}/32 -p udp --dport 53 -j ACCEPT
@@ -71,11 +103,7 @@ install_egress_filter() {
     cidr="${cidr# }"
     cidr="${cidr% }"
     [ -z "$cidr" ] && continue
-    # Reject any control character or unexpected input before regex check.
-    case "$cidr" in
-      *[!0-9./]*) log "WARNING: ignoring invalid allowlist entry: ${cidr}"; continue ;;
-    esac
-    if [[ ! "$cidr" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]]; then
+    if ! is_valid_ipv4_cidr "$cidr"; then
       log "WARNING: ignoring invalid allowlist entry: ${cidr}"
       continue
     fi
@@ -152,6 +180,8 @@ COMMIT
 EOF
     then
       log "ERROR: ip6tables-restore failed — IPv6 is enabled but rules could not be installed."
+      log "  Likely causes: kernel lacks nf_conntrack IPv6 module, or CAP_NET_ADMIN"
+      log "  was not granted at rule-install time (check cap_add in runtime.py)."
       log "  Refusing to continue with an unprotected IPv6 egress path."
       exit 1
     fi

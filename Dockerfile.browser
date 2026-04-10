@@ -95,8 +95,10 @@ RUN python -m camoufox fetch
 
 # Switch back to root so the entrypoint can install iptables egress rules
 # before dropping privileges via gosu. The long-running browser process
-# runs as UID 1000 (see docker/browser-entrypoint.sh); only the brief init
-# phase has CAP_NET_ADMIN. no-new-privileges still applies throughout.
+# runs as UID 1000 (see docker/browser-entrypoint.sh). Runtime applies
+# cap_drop=["ALL"] + cap_add=["NET_ADMIN","SETUID","SETGID"] so the init
+# phase holds only the capabilities it actually needs. no-new-privileges
+# prevents the non-root browser from re-acquiring capabilities.
 USER root
 
 COPY docker/browser-entrypoint.sh /usr/local/bin/browser-entrypoint.sh
