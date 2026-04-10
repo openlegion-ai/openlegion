@@ -187,6 +187,10 @@ function dashboard() {
     _browserSettingsDebounce: null,
     _browserDelayDebounce: null,
 
+    captchaSolverProvider: '',
+    captchaSolverKeyMasked: '',
+    captchaSolverSaving: false,
+
     // System settings
     systemSettings: null,
     systemSettingsLoading: false,
@@ -288,6 +292,7 @@ function dashboard() {
       { id: 'network', label: 'Network' },
       { id: 'storage', label: 'Storage' },
       { id: 'operator', label: 'Operator' },
+      { id: 'browser', label: 'Browser' },
       { id: 'settings', label: 'Settings' },
     ],
 
@@ -1227,6 +1232,11 @@ function dashboard() {
           this.fetchBrowserSettings();
           this.fetchSystemSettings();
         }
+        if (this.systemTab === 'browser') {
+          this.fetchBrowserSettings();
+          this.fetchSystemSettings();
+          this.fetchCaptchaSolver();
+        }
         if (this.systemTab === 'activity') {
           if (this.activityView === 'traces') {
             this.fetchTraces();
@@ -1248,6 +1258,7 @@ function dashboard() {
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'network') { this.loadNetworkProxy(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
+      if (tabId === 'browser') { this.fetchBrowserSettings(); this.fetchSystemSettings(); this.fetchCaptchaSolver(); }
       if (tabId === 'operator') {
         this.fetchAuditLog();
       }
@@ -3516,6 +3527,63 @@ function dashboard() {
       if (d <= 4.0) return 'Moderate';
       if (d <= 7.0) return 'Heavy';
       return 'Maximum';
+    },
+
+    async fetchCaptchaSolver() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/captcha-solver`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.captchaSolverProvider = data.provider || '';
+          this.captchaSolverKeyMasked = data.key_masked || '';
+        }
+      } catch (e) { console.warn('fetchCaptchaSolver failed:', e); }
+    },
+
+    async saveCaptchaSolver() {
+      this.captchaSolverSaving = true;
+      try {
+        const body = { provider: this.captchaSolverProvider };
+        const keyInput = document.getElementById('captcha-solver-key');
+        if (keyInput && keyInput.value) {
+          body.key = keyInput.value;
+        }
+        const resp = await fetch(`${window.__config.apiBase}/captcha-solver`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          this.captchaSolverProvider = data.provider || '';
+          this.captchaSolverKeyMasked = data.key_masked || '';
+          if (keyInput) keyInput.value = '';
+          this._showToast('CAPTCHA solver settings saved');
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this._showToast(err.detail || 'Failed to save', 'error');
+        }
+      } catch (e) {
+        console.warn('saveCaptchaSolver failed:', e);
+        this._showToast('Failed to save CAPTCHA solver settings', 'error');
+      }
+      this.captchaSolverSaving = false;
+    },
+
+    async removeCaptchaSolver() {
+      this.captchaSolverSaving = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/captcha-solver`, {
+          method: 'DELETE',
+          headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        });
+        if (resp.ok) {
+          this.captchaSolverProvider = '';
+          this.captchaSolverKeyMasked = '';
+          this._showToast('CAPTCHA solver removed');
+        }
+      } catch (e) { console.warn('removeCaptchaSolver failed:', e); }
+      this.captchaSolverSaving = false;
     },
 
     // ── Network / Proxy ────────────────────────────────
