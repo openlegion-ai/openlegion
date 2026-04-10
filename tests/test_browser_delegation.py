@@ -584,6 +584,39 @@ class TestBrowserCommandEndpoint:
         assert resp.status_code == 403
         assert "no browser access" in resp.text.lower()
 
+    @pytest.mark.asyncio
+    async def test_browser_command_rejects_non_string_target(self, tmp_path):
+        """A non-string target_agent_id must produce 400, not 500.
+
+        Defends ``_resolve_browser_target`` against arbitrary JSON shapes
+        coming through ``data.get("target_agent_id")``.
+        """
+        from httpx import ASGITransport, AsyncClient
+
+        app, _event_bus, _cm = _build_app(
+            tmp_path,
+            perms_map={
+                "operator": {"can_use_browser": False, "can_message": ["*"]},
+                "social-manager": {"can_use_browser": True},
+            },
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            for bad in ([1], {"x": 1}, 42):
+                resp = await client.post(
+                    "/mesh/browser/command",
+                    json={
+                        "action": "snapshot",
+                        "params": {},
+                        "target_agent_id": bad,
+                    },
+                    headers={"X-Agent-ID": "operator"},
+                )
+                assert resp.status_code == 400, (bad, resp.text)
+                assert "must be a string" in resp.text
+
 
 class TestBrowserLoginRequestEndpoint:
     """POST /mesh/browser-login-request delegation matrix."""
@@ -790,9 +823,19 @@ class TestBrowserLoginRequestEndpoint:
         event_bus.emit.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_rate_limit_consumed_by_caller_not_target(self, tmp_path, monkeypatch):
-        """Verify the notify rate limit is checked under the caller's id,
-        so a noisy caller can't exhaust the target's quota."""
+    async def test_rate_limit_charged_to_caller_not_target(self, tmp_path):
+        """The notify rate limit MUST be charged to the caller, never the
+        target. Defense-in-depth: the original PR attributed the limit to
+        the target, which would let one noisy caller exhaust an unrelated
+        peer's notify quota via repeated delegation.
+
+        Strategy: ``notify`` is 10/min. Spam 11 delegated requests from
+        operator → social-manager. If the bucket is keyed by caller
+        (operator), the 11th request returns 429. If it were keyed by
+        target, all 11 succeed (because operator's bucket is empty). We
+        also verify that after operator is exhausted, social-manager can
+        still issue its own request (target's bucket untouched).
+        """
         from httpx import ASGITransport, AsyncClient
 
         app, _event_bus, _cm = _build_app(
@@ -803,19 +846,11 @@ class TestBrowserLoginRequestEndpoint:
             },
         )
 
-        seen: list[str] = []
-
-        # Patch the rate limiter at the module level — _check_rate_limit is
-        # a closure inside create_mesh_app, so we monkey-patch the cost
-        # tracker's record_action which it ultimately consults. Instead, we
-        # spy by replacing the closure-bound function via a header echo:
-        # check that the response carries target_agent without raising and
-        # that the same caller can hit the endpoint twice without the rate
-        # limit being attributed to social-manager.
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            for _ in range(2):
+            statuses: list[int] = []
+            for _ in range(11):
                 resp = await client.post(
                     "/mesh/browser-login-request",
                     json={
@@ -827,5 +862,61 @@ class TestBrowserLoginRequestEndpoint:
                     },
                     headers={"X-Agent-ID": "operator"},
                 )
-                seen.append(resp.status_code)
-        assert seen == [200, 200], seen
+                statuses.append(resp.status_code)
+
+            # First 10 succeed; 11th hits the caller's notify limit (10/min).
+            assert statuses[:10] == [200] * 10, statuses
+            assert statuses[10] == 429, statuses
+            assert "Rate limit exceeded" in (
+                resp.json().get("detail") or ""
+            ), resp.text
+
+            # social-manager's own bucket must be untouched: it can still
+            # issue a self-path request even though operator just spammed
+            # 10 delegated requests targeting it.
+            resp = await client.post(
+                "/mesh/browser-login-request",
+                json={
+                    "agent_id": "social-manager",
+                    "url": "https://x.com/login",
+                    "service": "X",
+                    "description": "Log in",
+                },
+                headers={"X-Agent-ID": "social-manager"},
+            )
+            assert resp.status_code == 200, resp.text
+
+    @pytest.mark.asyncio
+    async def test_browser_login_request_rejects_non_string_target(self, tmp_path):
+        """A list/dict/int target_agent_id must produce 400, not 500.
+
+        Defends ``_resolve_browser_target`` against arbitrary JSON shapes
+        coming through ``data.get("target_agent_id")``.
+        """
+        from httpx import ASGITransport, AsyncClient
+
+        app, _event_bus, _cm = _build_app(
+            tmp_path,
+            perms_map={
+                "operator": {"can_use_browser": False, "can_message": ["*"]},
+                "social-manager": {"can_use_browser": True},
+            },
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            for bad in ([1], {"x": 1}, 42):
+                resp = await client.post(
+                    "/mesh/browser-login-request",
+                    json={
+                        "agent_id": "operator",
+                        "target_agent_id": bad,
+                        "url": "https://x.com/login",
+                        "service": "X",
+                        "description": "Log in",
+                    },
+                    headers={"X-Agent-ID": "operator"},
+                )
+                assert resp.status_code == 400, (bad, resp.text)
+                assert "must be a string" in resp.text

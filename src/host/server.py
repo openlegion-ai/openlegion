@@ -285,21 +285,29 @@ def create_mesh_app(
             return _extract_verified_agent_id(request)
         return agent_id
 
-    def _resolve_browser_target(caller_id: str, target_claim: str) -> str:
+    def _resolve_browser_target(caller_id: str, target_claim: object) -> str:
         """Resolve the effective browser-target agent_id for self/delegation paths.
 
-        - Empty/whitespace target_claim → self path (returns ``caller_id``).
+        - ``None``/empty/whitespace target_claim → self path (returns ``caller_id``).
         - target_claim equal to caller → self path (returns ``caller_id``).
         - Otherwise delegation: requires the caller to be permitted to
           message the target AND the target to have ``can_use_browser``.
           Raises ``HTTPException(403)`` on either gate failure.
+        - Non-string target_claim (e.g. list, dict, int) → ``HTTPException(400)``.
+          Callers pull this value out of the JSON body where it can be any
+          type, so we defensively reject non-strings rather than crashing
+          with ``AttributeError`` on ``.strip()``.
 
         Note: ``can_message`` semantically grants "send a chat message".
         Reusing it for browser delegation is intentional but means a
         worker that can message a peer can also navigate that peer's
         browser. Endpoints that call this helper accept that coupling.
         """
-        target = (target_claim or "").strip()
+        if target_claim is None or target_claim == "":
+            return caller_id
+        if not isinstance(target_claim, str):
+            raise HTTPException(400, "target_agent_id must be a string")
+        target = target_claim.strip()
         if not target or target == caller_id:
             return caller_id
         if not permissions.can_message(caller_id, target):

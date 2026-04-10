@@ -1771,6 +1771,93 @@ class TestDashboardSettingsProviderModels:
         assert len(data["provider_models"]) > 0
 
 
+# ── V2 Tests: Browser Login Delegation ──────────────────────
+
+
+class TestDashboardBrowserLoginDelegation:
+    """The /api/browser-login/complete and /cancel endpoints must route
+    to whichever ``agent_id`` the body specifies, not assume it's the
+    chat the user is currently looking at. This is the load-bearing
+    backend half of the dashboard fix that lets operator's cross-surfaced
+    delegated card forward Complete/Cancel to the real target agent.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        # Register social-manager so the endpoint's lane enqueue path is taken
+        self.components["agent_registry"]["social-manager"] = "http://localhost:8403"
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_complete_routes_to_specified_target(self):
+        """Posting agent_id=social-manager (the delegation target) must:
+        - Return 200 with that agent_id echoed back
+        - Emit ``browser_login_completed`` keyed by social-manager so the
+          dashboard's cross-surfacing logic flips both the operator-side
+          and target-side cards to ``completed``.
+        """
+        events: list[tuple] = []
+        original_emit = self.components["event_bus"].emit
+
+        def spy(event_type, **kwargs):
+            events.append((event_type, kwargs))
+            return original_emit(event_type, **kwargs)
+
+        self.components["event_bus"].emit = spy
+
+        resp = self.client.post(
+            "/dashboard/api/browser-login/complete",
+            json={"agent_id": "social-manager", "service": "X"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["completed"] is True
+        assert body["agent_id"] == "social-manager"
+        assert body["service"] == "X"
+
+        # Event must be keyed by the target so the JS sync loop in
+        # app.js (~line 1578) finds and updates both copies of the card.
+        completed = [e for e in events if e[0] == "browser_login_completed"]
+        assert len(completed) == 1
+        assert completed[0][1]["agent"] == "social-manager"
+        assert completed[0][1]["data"]["service"] == "X"
+
+    def test_cancel_routes_to_specified_target(self):
+        """Symmetrical: cancel must also key the event under the target."""
+        events: list[tuple] = []
+        original_emit = self.components["event_bus"].emit
+
+        def spy(event_type, **kwargs):
+            events.append((event_type, kwargs))
+            return original_emit(event_type, **kwargs)
+
+        self.components["event_bus"].emit = spy
+
+        resp = self.client.post(
+            "/dashboard/api/browser-login/cancel",
+            json={"agent_id": "social-manager", "service": "X"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["cancelled"] is True
+        assert body["agent_id"] == "social-manager"
+
+        cancelled = [e for e in events if e[0] == "browser_login_cancelled"]
+        assert len(cancelled) == 1
+        assert cancelled[0][1]["agent"] == "social-manager"
+
+    def test_complete_missing_agent_id_returns_400(self):
+        resp = self.client.post(
+            "/dashboard/api/browser-login/complete",
+            json={"service": "X"},
+        )
+        assert resp.status_code == 400
+
+
 # ── V2 Tests: Messages ──────────────────────────────────────
 
 
