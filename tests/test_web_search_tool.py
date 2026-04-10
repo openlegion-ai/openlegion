@@ -75,3 +75,23 @@ async def test_web_search_timeout_returns_descriptive_error(monkeypatch):
     assert result["provider"] == "duckduckgo_html"
     assert result["max_results_used"] == 3
     assert result["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_web_search_captcha_returns_actionable_error(monkeypatch):
+    from src.agent.builtins import web_search_tool
+
+    captcha_html = '<div class="anomaly-modal">bots use DuckDuckGo</div>'
+    monkeypatch.setattr(
+        web_search_tool.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _DummyClient(response=_DummyResponse(captcha_html)),
+    )
+
+    result = await web_search_tool.web_search("test query", max_results=5)
+
+    assert result["error_type"] == "captcha"
+    assert result["count"] == 0
+    assert result["results"] == []
+    assert "CAPTCHA" in result["error"]
+    assert "browser_navigate" in result["error"]

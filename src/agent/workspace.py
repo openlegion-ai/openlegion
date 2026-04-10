@@ -257,9 +257,16 @@ class WorkspaceManager:
         parts: list[str] = []
 
         # PROJECT.md has no individual cap but counts toward total
-        project = self._read_file("PROJECT.md")
+        # Accept both PROJECT.md (canonical) and project.md (created by dashboard)
+        project = self._read_file("PROJECT.md") or self._read_file("project.md")
         if project and project.strip():
             parts.append(_maybe_add_header("PROJECT.md", project.strip()))
+        else:
+            ws_files = sorted(p.name for p in self.root.iterdir()) if self.root.exists() else []
+            logger.warning(
+                "PROJECT.md not found in workspace %s — files present: %s",
+                self.root, ws_files,
+            )
 
         # SYSTEM.md — generated architecture guide (static preamble + snapshot)
         system = self._read_file("SYSTEM.md")

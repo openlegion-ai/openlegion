@@ -2093,6 +2093,15 @@ class CredentialVault:
             response, used_model = await self._call_llm_with_failover(
                 requested_model, _chat,
             )
+            if not response.choices:
+                logger.error(
+                    "LLM returned empty choices for model %s — raw response: %s",
+                    used_model, response,
+                )
+                return APIProxyResponse(
+                    success=False,
+                    error=f"LLM returned empty response (no choices) for model {used_model}",
+                )
             msg = response.choices[0].message
             usage = response.usage
             content, thinking_content = _extract_content(msg.content)
