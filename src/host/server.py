@@ -1071,8 +1071,33 @@ def create_mesh_app(
 
         Emits a ``browser_login_request`` event so the dashboard renders
         an interactive browser card with VNC viewer.
+
+        Supports delegation via ``target_agent_id``: when an orchestrator
+        (e.g. operator) sets up a login for a worker, the caller passes
+        the worker's ID and we emit the event under the worker's identity
+        so the dashboard's existing cross-surfacing logic routes it
+        correctly. Session cookies must land in the profile of the agent
+        that will use them — operator itself owns no browser, so it
+        delegates to the worker whose profile the cookies must target.
         """
-        agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        caller_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        target_claim = (data.get("target_agent_id") or "").strip()
+
+        if target_claim and target_claim != caller_id:
+            if not permissions.can_message(caller_id, target_claim):
+                raise HTTPException(
+                    403,
+                    "Cannot delegate browser login: target is not in your can_message allowlist",
+                )
+            if not permissions.can_use_browser(target_claim):
+                raise HTTPException(
+                    403,
+                    "Cannot delegate browser login: target agent has no browser access",
+                )
+            agent_id = target_claim
+        else:
+            agent_id = caller_id
+
         await _check_rate_limit("notify", agent_id)
 
         url = data.get("url", "").strip()
@@ -1095,7 +1120,7 @@ def create_mesh_app(
                 },
             )
 
-        return {"requested": True, "service": service}
+        return {"requested": True, "service": service, "target_agent": agent_id}
 
     @app.get("/mesh/agents")
     async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:
@@ -2565,15 +2590,37 @@ def create_mesh_app(
 
         Agents never talk to the browser service directly — the mesh
         enforces authentication and permission checks.
-        """
-        agent_id = _extract_verified_agent_id(request)
-        body = await request.json()
-        req_agent_id = body.get("agent_id", agent_id)
-        # Use verified identity, not the claimed one
-        req_agent_id = _resolve_agent_id(req_agent_id, request)
 
-        if not permissions.can_use_browser(req_agent_id):
-            raise HTTPException(403, "Browser access denied")
+        When the body includes ``target_agent_id``, this is a delegation:
+        the caller (e.g. operator) wants the command to run against the
+        target agent's browser profile. Authorized when the caller can
+        message the target and the target has browser access. Used so
+        orchestrators can set up browser logins on behalf of workers
+        without having their own browser (session cookies must land in
+        the worker's profile).
+        """
+        caller_id = _extract_verified_agent_id(request)
+        body = await request.json()
+        target_claim = (body.get("target_agent_id") or "").strip()
+
+        if target_claim and target_claim != caller_id:
+            # Delegation path: verify caller can message target, target has browser.
+            if not permissions.can_message(caller_id, target_claim):
+                raise HTTPException(
+                    403,
+                    "Cannot delegate browser: target is not in your can_message allowlist",
+                )
+            if not permissions.can_use_browser(target_claim):
+                raise HTTPException(
+                    403,
+                    "Cannot delegate browser: target agent has no browser access",
+                )
+            req_agent_id = target_claim
+        else:
+            # Self-browser path: caller acts on their own profile.
+            req_agent_id = caller_id
+            if not permissions.can_use_browser(req_agent_id):
+                raise HTTPException(403, "Browser access denied")
 
         action = body.get("action", "")
         params = body.get("params", {})

@@ -534,11 +534,17 @@ async def browser_detect_captcha(*, mesh_client=None) -> dict:
     name="request_browser_login",
     description=(
         "Ask the user to log in to a website through a live browser view "
-        "in their chat. The agent's browser navigates to the given URL, "
-        "and the user sees an interactive VNC viewer to complete the login. "
-        "The login session (cookies, localStorage) persists in the agent's "
-        "browser profile — you never see the password. After the user "
-        "finishes, you receive a notification."
+        "in their chat. Use this when an automation needs a cookie-based "
+        "login that can't be done via API keys (e.g. Twitter, LinkedIn, "
+        "TikTok web). The browser navigates to the login URL and an "
+        "interactive VNC viewer appears in the user's chat. After the user "
+        "finishes, you receive a notification.\n\n"
+        "IMPORTANT: session cookies persist in the TARGET agent's browser "
+        "profile. If you're orchestrating a login for another agent (e.g. "
+        "operator setting up a login for social-manager), pass ``agent_id`` "
+        "with the worker's ID so cookies land in their profile. If you're "
+        "the agent that will use the login yourself, omit ``agent_id`` "
+        "(defaults to self)."
     ),
     parameters={
         "url": {
@@ -553,12 +559,22 @@ async def browser_detect_captcha(*, mesh_client=None) -> dict:
             "type": "string",
             "description": "Tell the user what to do (e.g. 'Please log in to your TikTok account')",
         },
+        "agent_id": {
+            "type": "string",
+            "description": (
+                "Optional: target agent ID whose browser profile should "
+                "receive the login. Defaults to the calling agent. Use "
+                "this when orchestrating logins on behalf of another "
+                "agent — cookies persist in the target's profile."
+            ),
+            "default": "",
+        },
     },
     parallel_safe=False,
 )
 async def request_browser_login(
-    url: str, service: str, description: str,
-    *, mesh_client=None,
+    url: str, service: str, description: str, agent_id: str = "",
+    *, mesh_client=None, **_kw,
 ) -> dict:
     """Request user login via live browser view in chat."""
     if not mesh_client:
@@ -568,9 +584,13 @@ async def request_browser_login(
     if not service:
         return {"error": "service is required"}
 
-    # Navigate the agent's browser to the login page first
+    target = agent_id.strip() or None
+
+    # Navigate the target agent's browser to the login page first
     try:
-        await mesh_client.browser_command("navigate", {"url": url})
+        await mesh_client.browser_command(
+            "navigate", {"url": url}, target_agent_id=target,
+        )
     except Exception as e:
         return {"error": f"Failed to navigate browser to {url}: {e}"}
 
@@ -578,6 +598,7 @@ async def request_browser_login(
     try:
         await mesh_client.request_browser_login(
             url=url, service=service, description=description,
+            target_agent_id=target,
         )
     except Exception as e:
         logger.warning("Failed to emit browser login request for %s: %s", service, e)
@@ -585,6 +606,7 @@ async def request_browser_login(
             "requested": False,
             "service": service,
             "url": url,
+            "target_agent": target,
             "message": (
                 f"Browser navigated to {url} but failed to show the login card "
                 f"in the user's chat. Try calling notify_user to ask them to "
@@ -596,6 +618,7 @@ async def request_browser_login(
         "requested": True,
         "service": service,
         "url": url,
+        "target_agent": target,
         "message": (
             f"Browser login request sent to user. The browser is showing {url}. "
             f"Wait for the user to complete the login — you will be notified. "
