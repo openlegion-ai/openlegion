@@ -394,6 +394,11 @@ class DockerBackend(RuntimeBackend):
             if os.environ.get(var):
                 environment[var] = os.environ[var]
 
+        for var in ("CAPTCHA_SOLVER_PROVIDER", "CAPTCHA_SOLVER_KEY"):
+            env_val = os.environ.get(f"OPENLEGION_{var}") or os.environ.get(var)
+            if env_val:
+                environment[var] = env_val
+
         with self._port_lock:
             api_port = self._next_port
             self._next_port += 1

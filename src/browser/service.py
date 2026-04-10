@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
+from src.browser.captcha import get_solver
 from src.browser.redaction import CredentialRedactor
 from src.browser.stealth import build_launch_options
 from src.browser.timing import (
@@ -288,6 +289,7 @@ class BrowserManager:
         self.redactor = CredentialRedactor()
         self._proxy_configs: dict[str, dict | None] = {}
         self.boot_id: str = str(uuid.uuid4())
+        self._captcha_solver = get_solver()
 
     async def start_cleanup_loop(self):
         """Start background task that cleans up idle browsers."""
@@ -546,6 +548,8 @@ class BrowserManager:
         async with self._lock:
             for agent_id in list(self._instances.keys()):
                 await self._stop_instance(agent_id)
+        if self._captcha_solver:
+            await self._captcha_solver.close()
         if self._playwright:
             with contextlib.suppress(Exception):
                 await self._pw_context.__aexit__(None, None, None)
@@ -1807,11 +1811,10 @@ class BrowserManager:
                 return {"success": False, "error": str(e)}
 
     async def _check_captcha(self, inst: CamoufoxInstance) -> dict | None:
-        """Check for CAPTCHA elements on the current page.
+        """Check for CAPTCHA elements and attempt auto-solve if configured.
 
-        Returns a dict with captcha details if found, None otherwise.
-        Called automatically after navigation so agents are always
-        aware when a CAPTCHA is blocking progress.
+        Returns a dict with captcha details if found and unsolved, None if
+        no CAPTCHA or if it was solved automatically.
         """
         captcha_selectors = [
             'iframe[src*="recaptcha"]',
@@ -1825,6 +1828,16 @@ class BrowserManager:
         try:
             for sel in captcha_selectors:
                 if await inst.page.locator(sel).count() > 0:
+                    # Attempt auto-solve if a solver is configured
+                    if self._captcha_solver:
+                        logger.info("CAPTCHA detected (%s), attempting auto-solve", sel)
+                        solved = await self._captcha_solver.solve(
+                            inst.page, sel, inst.page.url,
+                        )
+                        if solved:
+                            return None  # solved — don't report to agent
+                        logger.warning("Auto-solve failed, falling back to manual")
+
                     return {
                         "type": sel,
                         "message": (
