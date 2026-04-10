@@ -1498,8 +1498,7 @@ class AgentLoop:
             except Exception as e:
                 self.state = "idle"
                 duration_ms = int((time.time() - start) * 1000)
-                import traceback
-                logger.error("Heartbeat failed: %s\n%s", e, traceback.format_exc())
+                logger.error("Heartbeat failed: %s", e, exc_info=True)
                 if self.workspace:
                     self.workspace.append_activity(
                         trigger="heartbeat",
@@ -2714,8 +2713,7 @@ class AgentLoop:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            import traceback
-            logger.error("Streaming chat failed: %s\n%s", e, traceback.format_exc())
+            logger.error("Streaming chat failed: %s", e, exc_info=True)
             msg = f"Error: {e}"
             if self.workspace:
                 self.workspace.append_chat_message("assistant", msg)
