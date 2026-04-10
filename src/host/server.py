@@ -285,6 +285,35 @@ def create_mesh_app(
             return _extract_verified_agent_id(request)
         return agent_id
 
+    def _resolve_browser_target(caller_id: str, target_claim: str) -> str:
+        """Resolve the effective browser-target agent_id for self/delegation paths.
+
+        - Empty/whitespace target_claim → self path (returns ``caller_id``).
+        - target_claim equal to caller → self path (returns ``caller_id``).
+        - Otherwise delegation: requires the caller to be permitted to
+          message the target AND the target to have ``can_use_browser``.
+          Raises ``HTTPException(403)`` on either gate failure.
+
+        Note: ``can_message`` semantically grants "send a chat message".
+        Reusing it for browser delegation is intentional but means a
+        worker that can message a peer can also navigate that peer's
+        browser. Endpoints that call this helper accept that coupling.
+        """
+        target = (target_claim or "").strip()
+        if not target or target == caller_id:
+            return caller_id
+        if not permissions.can_message(caller_id, target):
+            raise HTTPException(
+                403,
+                "Cannot delegate browser: target is not in your can_message allowlist",
+            )
+        if not permissions.can_use_browser(target):
+            raise HTTPException(
+                403,
+                "Cannot delegate browser: target agent has no browser access",
+            )
+        return target
+
     def _require_any_auth(request: Request) -> None:
         """Require any valid auth token (identity-agnostic).
 
@@ -1081,24 +1110,13 @@ def create_mesh_app(
         delegates to the worker whose profile the cookies must target.
         """
         caller_id = _resolve_agent_id(data.get("agent_id", ""), request)
-        target_claim = (data.get("target_agent_id") or "").strip()
+        agent_id = _resolve_browser_target(
+            caller_id, data.get("target_agent_id") or "",
+        )
 
-        if target_claim and target_claim != caller_id:
-            if not permissions.can_message(caller_id, target_claim):
-                raise HTTPException(
-                    403,
-                    "Cannot delegate browser login: target is not in your can_message allowlist",
-                )
-            if not permissions.can_use_browser(target_claim):
-                raise HTTPException(
-                    403,
-                    "Cannot delegate browser login: target agent has no browser access",
-                )
-            agent_id = target_claim
-        else:
-            agent_id = caller_id
-
-        await _check_rate_limit("notify", agent_id)
+        # Rate-limit on the caller, not the target — otherwise a noisy
+        # caller could exhaust an unrelated worker's notify quota.
+        await _check_rate_limit("notify", caller_id)
 
         url = data.get("url", "").strip()
         service = data.get("service", "").strip()
@@ -2601,26 +2619,16 @@ def create_mesh_app(
         """
         caller_id = _extract_verified_agent_id(request)
         body = await request.json()
-        target_claim = (body.get("target_agent_id") or "").strip()
+        req_agent_id = _resolve_browser_target(
+            caller_id, body.get("target_agent_id") or "",
+        )
 
-        if target_claim and target_claim != caller_id:
-            # Delegation path: verify caller can message target, target has browser.
-            if not permissions.can_message(caller_id, target_claim):
-                raise HTTPException(
-                    403,
-                    "Cannot delegate browser: target is not in your can_message allowlist",
-                )
-            if not permissions.can_use_browser(target_claim):
-                raise HTTPException(
-                    403,
-                    "Cannot delegate browser: target agent has no browser access",
-                )
-            req_agent_id = target_claim
-        else:
-            # Self-browser path: caller acts on their own profile.
-            req_agent_id = caller_id
-            if not permissions.can_use_browser(req_agent_id):
-                raise HTTPException(403, "Browser access denied")
+        # Self-browser path also has to satisfy can_use_browser.
+        # _resolve_browser_target already enforced this on the delegation
+        # path; here we close the gap when no target_agent_id was sent
+        # (or when target == caller).
+        if req_agent_id == caller_id and not permissions.can_use_browser(caller_id):
+            raise HTTPException(403, "Browser access denied")
 
         action = body.get("action", "")
         params = body.get("params", {})

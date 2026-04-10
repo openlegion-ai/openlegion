@@ -584,7 +584,10 @@ async def request_browser_login(
     if not service:
         return {"error": "service is required"}
 
-    target = agent_id.strip() or None
+    # Defensive: LLMs sometimes pass null/non-string despite the schema.
+    # Coerce to str so .strip() never raises and an empty/None claim
+    # falls through to the self-browser path.
+    target = (str(agent_id).strip() if agent_id else "") or None
 
     # Navigate the target agent's browser to the login page first
     try:
