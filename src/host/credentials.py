@@ -1023,6 +1023,37 @@ class CredentialVault:
         ):
             extra["reasoning_effort"] = "none"
 
+        # Anthropic's tool input_schema validator rejects array-valued
+        # ``type`` fields. Normalize tool schemas before handing them to
+        # LiteLLM on the non-OAuth Anthropic path. The OAuth fast path
+        # (``_build_anthropic_body``) applies the same normalization at
+        # its own seam.
+        if self._resolve_provider(model) == "anthropic" and extra.get("tools"):
+            normalized_tools: list = []
+            for tool in extra["tools"]:
+                if not isinstance(tool, dict):
+                    normalized_tools.append(tool)
+                    continue
+                func = tool.get("function")
+                if isinstance(func, dict) and "parameters" in func:
+                    new_func = {
+                        **func,
+                        "parameters": self._normalize_tool_schema_for_anthropic(
+                            func["parameters"]
+                        ),
+                    }
+                    normalized_tools.append({**tool, "function": new_func})
+                elif "input_schema" in tool:
+                    normalized_tools.append({
+                        **tool,
+                        "input_schema": self._normalize_tool_schema_for_anthropic(
+                            tool["input_schema"]
+                        ),
+                    })
+                else:
+                    normalized_tools.append(tool)
+            extra["tools"] = normalized_tools
+
         return sanitized, extra
 
     # ── OAuth direct-call helpers ────────────────────────────
@@ -1030,6 +1061,59 @@ class CredentialVault:
     # _oauth_headers has been removed — the Anthropic SDK handles auth
     # headers natively. For non-SDK callers (e.g. setup_wizard validation),
     # construct headers inline.
+
+    @staticmethod
+    def _normalize_tool_schema_for_anthropic(schema: object) -> object:
+        """Normalize tool JSON Schema fragments for Anthropic requests.
+
+        Anthropic's tool ``input_schema`` validator rejects array-valued ``type``
+        fields (e.g. ``"type": ["string", "object"]``) even though they are valid
+        JSON Schema. Convert them to the equivalent ``anyOf`` form, which Anthropic
+        does accept. Preserves ``null`` member types — Anthropic supports
+        nullability via ``anyOf`` with a ``null`` branch.
+
+        Keep this narrow and semantics-preserving. The concrete repo offender is
+        array-valued ``type`` in tool parameter schemas; do not broaden this into
+        a generic schema compiler without evidence of additional rejected forms.
+        """
+        if isinstance(schema, list):
+            return [
+                CredentialVault._normalize_tool_schema_for_anthropic(item)
+                for item in schema
+            ]
+        if not isinstance(schema, dict):
+            return schema
+
+        normalized = {
+            key: CredentialVault._normalize_tool_schema_for_anthropic(value)
+            for key, value in schema.items()
+        }
+
+        schema_type = normalized.get("type")
+        if isinstance(schema_type, list):
+            types = [t for t in schema_type if isinstance(t, str)]
+            # Intentionally lossy for malformed input: if a multi-type
+            # list contains no usable string types (empty list, or only
+            # non-strings like [None, True]), drop the ``type`` entirely.
+            # The alternative — leaving an invalid array — would be
+            # rejected by Anthropic with an unhelpful error. Silent
+            # widening lets the request proceed with type-agnostic
+            # validation, which is the least-bad outcome for bad input.
+            if not types:
+                normalized.pop("type", None)
+            elif len(types) == 1:
+                normalized["type"] = types[0]
+            elif any(k in normalized for k in ("anyOf", "oneOf", "allOf")):
+                # Multi-type alongside an existing union construct: drop the
+                # array ``type`` to keep the schema valid for Anthropic. The
+                # existing union stands. Slight semantic loosening — the
+                # alternative (sending an invalid schema) is worse.
+                normalized.pop("type", None)
+            else:
+                normalized.pop("type", None)
+                normalized["anyOf"] = [{"type": t} for t in types]
+
+        return normalized
 
     @staticmethod
     def _build_anthropic_body(params: dict) -> dict:
@@ -1131,14 +1215,37 @@ class CredentialVault:
         if tools:
             anthropic_tools = []
             for t in tools:
-                if "function" in t:
-                    func = t["function"]
+                if not isinstance(t, dict):
+                    # Unknown entry — pass through; Anthropic SDK will reject
+                    # with a clear error rather than us crashing here.
+                    anthropic_tools.append(t)
+                    continue
+                func = t.get("function")
+                if isinstance(func, dict) and "parameters" in func:
+                    # Well-formed OpenAI shape.
                     anthropic_tools.append({
-                        "name": func["name"],
+                        "name": func.get("name", ""),
                         "description": func.get("description", ""),
-                        "input_schema": func.get("parameters", {"type": "object"}),
+                        "input_schema": CredentialVault._normalize_tool_schema_for_anthropic(
+                            func["parameters"]
+                        ),
                     })
+                elif "input_schema" in t:
+                    # Already in Anthropic shape, OR an OpenAI-shaped tool that
+                    # has function without parameters but carries input_schema
+                    # as a fallback. Strip any OpenAI wrapper keys and normalize
+                    # the schema in place. Mirrors the LiteLLM seam fallback.
+                    out = {
+                        k: v for k, v in t.items()
+                        if k not in ("function", "type")
+                    }
+                    out["input_schema"] = CredentialVault._normalize_tool_schema_for_anthropic(
+                        t["input_schema"]
+                    )
+                    anthropic_tools.append(out)
                 else:
+                    # Neither well-formed OpenAI nor Anthropic — pass through.
+                    # We don't guess; the Anthropic SDK will reject cleanly.
                     anthropic_tools.append(t)
             body["tools"] = anthropic_tools
 
@@ -1212,6 +1319,14 @@ class CredentialVault:
            blocks with the Claude Code identity as the mandatory first block.
         2. Add an override so the model follows the agent's actual instructions
            instead of defaulting to Claude Code behavior.
+        3. Drop ``temperature`` and ``top_p`` when they are not exactly 1.0.
+           Anthropic's Claude Code OAuth policy rejects any non-default
+           sampling value with a generic "Invalid request data" error. The
+           engine's default ``temperature=0.7`` (``src/agent/llm.py``) triggers
+           this on every request. Silently drop non-default values so the
+           request succeeds — the model falls back to Anthropic's default
+           sampling (temperature=1.0, top_p=1.0), which is the only
+           combination OAuth accepts.
         """
         identity = CredentialVault._CLAUDE_CODE_IDENTITY
         system_blocks: list[dict] = [{"type": "text", "text": identity}]
@@ -1224,6 +1339,22 @@ class CredentialVault:
             elif isinstance(existing, list):
                 system_blocks.extend(existing)
         body["system"] = system_blocks
+
+        # Claude Code OAuth restriction: drop non-default sampling params.
+        temp = body.get("temperature")
+        if temp is not None and temp != 1.0:
+            logger.debug(
+                "Anthropic OAuth: dropping temperature=%s (only 1.0 permitted)",
+                temp,
+            )
+            body.pop("temperature", None)
+        top_p = body.get("top_p")
+        if top_p is not None and top_p != 1.0:
+            logger.debug(
+                "Anthropic OAuth: dropping top_p=%s (only 1.0 permitted)",
+                top_p,
+            )
+            body.pop("top_p", None)
 
     async def _oauth_chat(
         self, request: APIProxyRequest, api_key: str, model: str,
