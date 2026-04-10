@@ -1362,6 +1362,16 @@ class CredentialVault:
 
             # Emit final done event
             tokens_used = input_tokens + output_tokens
+            # Treat zero-output responses as a failure so the model falls out of
+            # rotation instead of staying healthy.
+            if not collected_content and not collected_thinking and not collected_tool_calls:
+                logger.warning(
+                    "Anthropic OAuth streaming: model %s produced no content/thinking/tool_calls — marking failure",
+                    model,
+                )
+                self._health_tracker.record_failure(model, "EmptyResponse", 0)
+                yield f"data: {json.dumps({'error': f'Model {model} returned empty response'})}\n\n"
+                return
             self._health_tracker.record_success(model)
             done_data: dict = {
                 "type": "done",
@@ -2025,6 +2035,14 @@ class CredentialVault:
                         return
 
             tokens_used = input_tokens + output_tokens
+            if not collected_content and not collected_thinking and not collected_tool_calls:
+                logger.warning(
+                    "OpenAI Codex streaming: model %s produced no content/thinking/tool_calls — marking failure",
+                    model,
+                )
+                self._health_tracker.record_failure(model, "EmptyResponse", 0)
+                yield f"data: {json.dumps({'error': f'Model {model} returned empty response'})}\n\n"
+                return
             self._health_tracker.record_success(model)
 
             done_data: dict = {
@@ -2370,12 +2388,17 @@ class CredentialVault:
                     "Model %s returned only reasoning tokens — using as content",
                     used_model,
                 )
-            elif not collected_content and not collected_thinking:
+            elif not collected_content and not collected_thinking and not collected_tool_calls:
                 logger.warning(
-                    "Model %s produced no content and no reasoning tokens "
-                    "(tokens_used=%d)",
+                    "Model %s produced no content, reasoning tokens, or tool calls "
+                    "(tokens_used=%d) — marking failure",
                     used_model, tokens_used,
                 )
+                self._health_tracker.record_failure(
+                    used_model, "EmptyResponse", 0,
+                )
+                yield f"data: {json.dumps({'error': f'Model {used_model} returned empty response'})}\n\n"
+                return
 
             self._health_tracker.record_success(used_model)
             done_data: dict = {

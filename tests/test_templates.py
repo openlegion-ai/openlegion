@@ -640,8 +640,15 @@ def test_all_templates_save_artifact_has_permission():
 
         agents = tpl.get("agents", {}) or {}
         for agent_id, agent in agents.items():
-            instructions = agent.get("instructions", "") or ""
-            if "save_artifact" not in instructions:
+            # Scan all live prompt fields, not just instructions
+            prompt_fields = [
+                agent.get("instructions", ""),
+                agent.get("heartbeat", ""),
+                agent.get("initial_interface", ""),
+                agent.get("soul", ""),
+            ]
+            combined = "\n".join(str(f) for f in prompt_fields if f)
+            if "save_artifact" not in combined:
                 continue
 
             perms = agent.get("permissions", {}) or {}
