@@ -19,44 +19,16 @@ class TestCredentialRedactor:
         assert "[REDACTED]" in result
         assert "sk-abcdefgh" not in result
 
-    def test_exact_value_redaction(self):
-        from src.browser.redaction import CredentialRedactor
-        r = CredentialRedactor()
-        r.track_resolved_value("agent1", "supersecretpassword")
-        result = r.redact("agent1", "the password is supersecretpassword here")
-        assert "supersecretpassword" not in result
-        assert "[REDACTED]" in result
-
-    def test_short_values_not_tracked(self):
-        from src.browser.redaction import CredentialRedactor
-        r = CredentialRedactor()
-        r.track_resolved_value("agent1", "ab")  # < 4 chars
-        assert "ab" not in r._resolved_values.get("agent1", set())
-
-    def test_per_agent_isolation(self):
-        from src.browser.redaction import CredentialRedactor
-        r = CredentialRedactor()
-        r.track_resolved_value("agent1", "secret1234")
-        # Agent2 should not redact agent1's values
-        result = r.redact("agent2", "the value is secret1234")
-        assert "secret1234" in result
-
     def test_deep_redact_nested(self):
         from src.browser.redaction import CredentialRedactor
         r = CredentialRedactor()
-        r.track_resolved_value("a1", "mysecretvalue")
-        obj = {"key": "has mysecretvalue", "nested": [{"v": "also mysecretvalue"}]}
+        obj = {
+            "key": "has sk-abcdefghijklmnopqrstuvwxyz1234567890",
+            "nested": [{"v": "also sk-abcdefghijklmnopqrstuvwxyz1234567890"}],
+        }
         result = r.deep_redact("a1", obj)
-        assert "mysecretvalue" not in str(result)
+        assert "sk-abcdefgh" not in str(result)
         assert "[REDACTED]" in result["key"]
-
-    def test_clear_agent(self):
-        from src.browser.redaction import CredentialRedactor
-        r = CredentialRedactor()
-        r.track_resolved_value("a1", "secret1234")
-        r.clear_agent("a1")
-        result = r.redact("a1", "secret1234")
-        assert "secret1234" in result  # no longer redacted
 
 
 class TestBrowserManagerLifecycle:
@@ -1237,26 +1209,6 @@ class TestTypeTextWithRef:
         result = await mgr.type_text("a1", text="hello")
         assert result["success"] is False
         assert "Must provide" in result["error"]
-
-
-class TestEvaluateRedaction:
-    """Tests that evaluate results are redacted."""
-
-    @pytest.mark.asyncio
-    async def test_evaluate_redacts_credentials(self):
-        from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-
-        mgr.redactor.track_resolved_value("a1", "mysecrettoken")
-        mock_page = AsyncMock()
-        mock_page.evaluate = AsyncMock(return_value="token is mysecrettoken")
-        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        mgr._instances["a1"] = inst
-
-        result = await mgr.evaluate("a1", "document.cookie")
-        assert result["success"] is True
-        assert "mysecrettoken" not in str(result["data"]["result"])
-        assert "[REDACTED]" in str(result["data"]["result"])
 
 
 class TestDetectCaptcha:

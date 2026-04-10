@@ -36,14 +36,14 @@ def _redact_credentials(text: str) -> str:
     return text
 
 
-def _deep_redact(obj, agent_id: str = ""):
+def _deep_redact(obj):
     """Recursively redact credential values from any JSON-serializable structure."""
     if isinstance(obj, str):
         return _redact_credentials(obj)
     if isinstance(obj, dict):
-        return {k: _deep_redact(v, agent_id) for k, v in obj.items()}
+        return {k: _deep_redact(v) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_deep_redact(item, agent_id) for item in obj]
+        return [_deep_redact(item) for item in obj]
     return obj
 
 
@@ -51,12 +51,11 @@ async def _browser_command(mesh_client, action: str, params: dict | None = None)
     """Send a browser command through mesh. Returns the result dict."""
     if not mesh_client:
         return {"error": "Browser requires mesh connectivity"}
-    agent_id = getattr(mesh_client, "agent_id", "unknown")
     try:
         result = await mesh_client.browser_command(action, params or {})
-        return _deep_redact(result, agent_id)
+        return _deep_redact(result)
     except Exception as e:
-        return {"error": _deep_redact(str(e), agent_id)}
+        return {"error": _deep_redact(str(e))}
 
 
 @skill(
@@ -203,11 +202,10 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
     """
     if not mesh_client:
         return {"error": "Browser requires mesh connectivity"}
-    agent_id = getattr(mesh_client, "agent_id", "unknown")
     try:
         raw = await mesh_client.browser_command("screenshot", {"full_page": full_page})
     except Exception as e:
-        return {"error": _deep_redact(str(e), agent_id)}
+        return {"error": _deep_redact(str(e))}
 
     # Pull out image data before redaction can corrupt it.
     # Browser service returns {"success": ..., "data": {"image_base64": ..., ...}}
@@ -217,7 +215,7 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
         if isinstance(data, dict) and data.get("image_base64"):
             image_data = data.pop("image_base64")
 
-    result = _deep_redact(raw, agent_id)
+    result = _deep_redact(raw)
 
     if image_data:
         result["_image"] = {"data": image_data, "media_type": "image/png"}

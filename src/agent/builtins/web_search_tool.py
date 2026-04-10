@@ -6,6 +6,8 @@ Available to every agent as a built-in skill.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 from html import unescape
 
@@ -13,6 +15,8 @@ import httpx
 
 from src.agent.skills import skill
 from src.shared.utils import sanitize_for_prompt
+
+logger = logging.getLogger("agent.web_search")
 
 _DEFAULT_MAX_RESULTS = 5
 _MAX_RESULTS = 10
@@ -25,9 +29,16 @@ _HEADERS = {
     ),
 }
 
+_CAPTCHA_SIGNALS = ("anomaly-modal", "bots use DuckDuckGo", "confirm this search was made by a human")
+
 
 def _strip_tags(html: str) -> str:
     return re.sub(r"<[^>]+>", "", unescape(html)).strip()
+
+
+def _is_captcha_response(html: str) -> bool:
+    """Detect DuckDuckGo CAPTCHA / bot-challenge pages."""
+    return any(signal in html for signal in _CAPTCHA_SIGNALS)
 
 
 def _parse_ddg_html(html: str, max_results: int) -> list[dict]:
@@ -88,14 +99,36 @@ async def web_search(query: str, max_results: int = 5) -> dict:
     """Search the web using DuckDuckGo (no API key needed)."""
     requested_max = max_results
     max_results = _normalize_max_results(max_results)
+    proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+        client_kwargs: dict = {"follow_redirects": True, "timeout": 15}
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
+        async with httpx.AsyncClient(**client_kwargs) as client:
             resp = await client.post(
                 "https://html.duckduckgo.com/html/",
                 data={"q": query},
                 headers=_HEADERS,
             )
             resp.raise_for_status()
+
+        if _is_captcha_response(resp.text):
+            logger.warning("DuckDuckGo returned CAPTCHA for query=%r", query)
+            return {
+                "query": query,
+                "results": [],
+                "count": 0,
+                "provider": _PROVIDER,
+                "max_results_requested": requested_max,
+                "max_results_used": max_results,
+                "error": (
+                    "DuckDuckGo returned a CAPTCHA challenge. "
+                    "Use browser_navigate to search Google directly, e.g. "
+                    "https://www.google.com/search?q=your+query"
+                ),
+                "error_type": "captcha",
+            }
 
         results = _parse_ddg_html(resp.text, max_results)
 
@@ -107,7 +140,7 @@ async def web_search(query: str, max_results: int = 5) -> dict:
                 "provider": _PROVIDER,
                 "max_results_requested": requested_max,
                 "max_results_used": max_results,
-                "note": "No results found. Try rephrasing or use http_request to visit a URL directly.",
+                "note": "No results found. Try rephrasing or use browser_navigate to search directly.",
             }
 
         return {
@@ -125,6 +158,7 @@ async def web_search(query: str, max_results: int = 5) -> dict:
             "query": query,
             "provider": _PROVIDER,
             "results": [],
+            "count": 0,
             "max_results_requested": requested_max,
             "max_results_used": max_results,
         }
@@ -139,6 +173,7 @@ async def web_search(query: str, max_results: int = 5) -> dict:
             "query": query,
             "provider": _PROVIDER,
             "results": [],
+            "count": 0,
             "max_results_requested": requested_max,
             "max_results_used": max_results,
         }
@@ -149,6 +184,7 @@ async def web_search(query: str, max_results: int = 5) -> dict:
             "query": query,
             "provider": _PROVIDER,
             "results": [],
+            "count": 0,
             "max_results_requested": requested_max,
             "max_results_used": max_results,
         }
@@ -159,6 +195,7 @@ async def web_search(query: str, max_results: int = 5) -> dict:
             "query": query,
             "provider": _PROVIDER,
             "results": [],
+            "count": 0,
             "max_results_requested": requested_max,
             "max_results_used": max_results,
         }

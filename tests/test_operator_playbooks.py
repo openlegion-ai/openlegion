@@ -1,5 +1,8 @@
 """Tests for operator playbook detection, state tracking, and content assembly."""
+
 from __future__ import annotations
+
+import pytest  # noqa: F401
 
 from src.cli.operator_playbooks import (
     _OPERATOR_CORE,
