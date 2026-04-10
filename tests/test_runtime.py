@@ -541,7 +541,7 @@ class TestDockerBackendSlimResources:
         assert backend.browser_vnc_url is None
 
     def test_browser_has_net_admin_in_bridge_mode(self):
-        """Browser container gets NET_ADMIN so its entrypoint can install iptables rules."""
+        """Browser container gets the minimal cap set its entrypoint needs in bridge mode."""
         import docker as _docker
 
         backend = self._make_backend()
@@ -556,7 +556,8 @@ class TestDockerBackendSlimResources:
             backend.start_browser_service()
 
         run_call = mock_client.containers.run.call_args
-        assert run_call.kwargs.get("cap_add") == ["NET_ADMIN"]
+        # NET_ADMIN for iptables-restore; SETUID + SETGID so gosu can drop to UID 1000.
+        assert run_call.kwargs.get("cap_add") == ["NET_ADMIN", "SETUID", "SETGID"]
         env = run_call.kwargs.get("environment", {})
         # Filter must be active (not disabled) in the default bridge mode
         assert "BROWSER_EGRESS_DISABLE" not in env
@@ -773,7 +774,7 @@ class TestDockerBackendSlimResources:
         assert env.get("BROWSER_EGRESS_ALLOWLIST") == "10.0.0.5/32"
 
     def test_browser_public_proxy_no_refusal(self):
-        """A public-IP proxy URL proceeds normally without allowlist."""
+        """A public-IP proxy URL proceeds normally without any allowlist."""
         import os as _os
 
         import docker as _docker
@@ -786,19 +787,18 @@ class TestDockerBackendSlimResources:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
+        # 1.1.1.1 (Cloudflare) is genuinely public — not classified as private,
+        # loopback, link-local, or reserved by Python's ipaddress module, so the
+        # private-IP guard should not trip. BROWSER_EGRESS_ALLOWLIST stays unset.
         with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {"BROWSER_PROXY_URL": "http://203.0.113.5:3128"}, clear=False):
+             patch.dict(_os.environ, {"BROWSER_PROXY_URL": "http://1.1.1.1:3128"}, clear=False):
             _os.environ.pop("BROWSER_EGRESS_ALLOWLIST", None)
-            # Should NOT raise — 203.0.113.x is TEST-NET-3, technically not private
-            # under ipaddress module classification (not private/loopback/link-local/reserved)
-            # Wait — 203.0.113.0/24 IS reserved (TEST-NET-3). Use a genuine public IP.
-            # Use Cloudflare 1.1.1.1 instead.
-            _os.environ["BROWSER_PROXY_URL"] = "http://1.1.1.1:3128"
             backend.start_browser_service()
 
         run_call = mock_client.containers.run.call_args
         env = run_call.kwargs.get("environment", {})
         assert env.get("BROWSER_PROXY_URL") == "http://1.1.1.1:3128"
+        assert "BROWSER_EGRESS_ALLOWLIST" not in env
         assert mock_client.containers.run.called
 
     def test_containers_no_docker_init(self):
