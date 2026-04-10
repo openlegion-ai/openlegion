@@ -1023,6 +1023,37 @@ class CredentialVault:
         ):
             extra["reasoning_effort"] = "none"
 
+        # Anthropic's tool input_schema validator rejects array-valued
+        # ``type`` fields. Normalize tool schemas before handing them to
+        # LiteLLM on the non-OAuth Anthropic path. The OAuth fast path
+        # (``_build_anthropic_body``) applies the same normalization at
+        # its own seam.
+        if self._resolve_provider(model) == "anthropic" and extra.get("tools"):
+            normalized_tools: list = []
+            for tool in extra["tools"]:
+                if not isinstance(tool, dict):
+                    normalized_tools.append(tool)
+                    continue
+                func = tool.get("function")
+                if isinstance(func, dict) and "parameters" in func:
+                    new_func = {
+                        **func,
+                        "parameters": self._normalize_tool_schema_for_anthropic(
+                            func["parameters"]
+                        ),
+                    }
+                    normalized_tools.append({**tool, "function": new_func})
+                elif "input_schema" in tool:
+                    normalized_tools.append({
+                        **tool,
+                        "input_schema": self._normalize_tool_schema_for_anthropic(
+                            tool["input_schema"]
+                        ),
+                    })
+                else:
+                    normalized_tools.append(tool)
+            extra["tools"] = normalized_tools
+
         return sanitized, extra
 
     # ── OAuth direct-call helpers ────────────────────────────
@@ -1030,6 +1061,46 @@ class CredentialVault:
     # _oauth_headers has been removed — the Anthropic SDK handles auth
     # headers natively. For non-SDK callers (e.g. setup_wizard validation),
     # construct headers inline.
+
+    @staticmethod
+    def _normalize_tool_schema_for_anthropic(schema: object) -> object:
+        """Normalize tool JSON Schema fragments for Anthropic requests.
+
+        Anthropic's tool ``input_schema`` validator rejects array-valued ``type``
+        fields (e.g. ``"type": ["string", "object"]``) even though they are valid
+        JSON Schema. Convert them to the equivalent ``anyOf`` form, which Anthropic
+        does accept. Preserves ``null`` member types — Anthropic supports
+        nullability via ``anyOf`` with a ``null`` branch.
+
+        Keep this narrow and semantics-preserving. The concrete repo offender is
+        array-valued ``type`` in tool parameter schemas; do not broaden this into
+        a generic schema compiler without evidence of additional rejected forms.
+        """
+        if isinstance(schema, list):
+            return [
+                CredentialVault._normalize_tool_schema_for_anthropic(item)
+                for item in schema
+            ]
+        if not isinstance(schema, dict):
+            return schema
+
+        normalized = {
+            key: CredentialVault._normalize_tool_schema_for_anthropic(value)
+            for key, value in schema.items()
+        }
+
+        schema_type = normalized.get("type")
+        if isinstance(schema_type, list):
+            types = [t for t in schema_type if isinstance(t, str)]
+            if not types:
+                normalized.pop("type", None)
+            elif len(types) == 1:
+                normalized["type"] = types[0]
+            elif not any(k in normalized for k in ("anyOf", "oneOf", "allOf")):
+                normalized.pop("type", None)
+                normalized["anyOf"] = [{"type": t} for t in types]
+
+        return normalized
 
     @staticmethod
     def _build_anthropic_body(params: dict) -> dict:
@@ -1136,7 +1207,16 @@ class CredentialVault:
                     anthropic_tools.append({
                         "name": func["name"],
                         "description": func.get("description", ""),
-                        "input_schema": func.get("parameters", {"type": "object"}),
+                        "input_schema": CredentialVault._normalize_tool_schema_for_anthropic(
+                            func.get("parameters", {"type": "object"})
+                        ),
+                    })
+                elif isinstance(t, dict) and "input_schema" in t:
+                    anthropic_tools.append({
+                        **t,
+                        "input_schema": CredentialVault._normalize_tool_schema_for_anthropic(
+                            t["input_schema"]
+                        ),
                     })
                 else:
                     anthropic_tools.append(t)

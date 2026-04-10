@@ -142,9 +142,26 @@ class TestPrepareParamsAllowlist:
         msgs, extra = cred_manager._prepare_llm_params(req, "openai/o3-mini")
         assert extra["reasoning_effort"] == "medium"
 
-    def test_tools_and_tool_choice_pass_through(self, cred_manager):
-        """tools and tool_choice should pass through."""
-        tools = [{"type": "function", "function": {"name": "test", "parameters": {}}}]
+    def test_anthropic_tools_are_normalized(self, cred_manager):
+        """Anthropic tools with array-valued `type` are normalized to anyOf.
+
+        Anthropic's tool input_schema validator rejects JSON Schema
+        `type: [..]` unions (e.g. propose_edit's ``value`` property). The
+        LiteLLM-path defense in ``_prepare_llm_params`` must normalize them
+        before handing tools off to LiteLLM for Anthropic providers.
+        """
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "propose_edit",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": ["string", "object"]},
+                    },
+                },
+            },
+        }]
         req = self._make_request({
             "model": "anthropic/claude-3-sonnet",
             "messages": [{"role": "user", "content": "hi"}],
@@ -152,6 +169,34 @@ class TestPrepareParamsAllowlist:
             "tool_choice": "auto",
         })
         msgs, extra = cred_manager._prepare_llm_params(req, "anthropic/claude-3-sonnet")
+        value_schema = (
+            extra["tools"][0]["function"]["parameters"]["properties"]["value"]
+        )
+        assert "type" not in value_schema
+        assert value_schema["anyOf"] == [{"type": "string"}, {"type": "object"}]
+        assert extra["tool_choice"] == "auto"
+
+    def test_non_anthropic_tools_still_pass_through(self, cred_manager):
+        """OpenAI-provider tools must pass through unchanged."""
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "propose_edit",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": ["string", "object"]},
+                    },
+                },
+            },
+        }]
+        req = self._make_request({
+            "model": "openai/gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": tools,
+            "tool_choice": "auto",
+        })
+        msgs, extra = cred_manager._prepare_llm_params(req, "openai/gpt-4o")
         assert extra["tools"] == tools
         assert extra["tool_choice"] == "auto"
 

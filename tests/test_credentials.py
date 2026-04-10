@@ -1602,6 +1602,95 @@ class TestOAuthTokenHandling:
         assert tool["description"] == "Search the web"
         assert "input_schema" in tool
 
+    def test_build_anthropic_body_normalizes_multi_type_schema(self):
+        """Multi-type `type` arrays in nested properties become `anyOf`.
+
+        Regression test for the Anthropic OAuth "Invalid request data"
+        failure caused by ``propose_edit`` declaring
+        ``"value": {"type": ["string", "object"]}``. Anthropic rejects
+        array-valued JSON Schema ``type`` in tool ``input_schema``.
+        """
+        params = {
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "propose_edit",
+                    "description": "Propose an edit",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "value": {"type": ["string", "object"]},
+                        },
+                    },
+                },
+            }],
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        value_schema = body["tools"][0]["input_schema"]["properties"]["value"]
+        assert "type" not in value_schema
+        assert value_schema["anyOf"] == [{"type": "string"}, {"type": "object"}]
+
+    def test_build_anthropic_body_normalizes_unwrapped_input_schema(self):
+        """Tools already in Anthropic shape still get schemas normalized."""
+        params = {
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [{
+                "name": "propose_edit",
+                "description": "Propose an edit",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": ["string", "object"]},
+                    },
+                },
+            }],
+        }
+        body = CredentialVault._build_anthropic_body(params)
+        tool = body["tools"][0]
+        assert tool["name"] == "propose_edit"
+        value_schema = tool["input_schema"]["properties"]["value"]
+        assert "type" not in value_schema
+        assert value_schema["anyOf"] == [{"type": "string"}, {"type": "object"}]
+
+    def test_normalize_tool_schema_for_anthropic_collapses_singleton_type_array(self):
+        """Single-element type arrays collapse to a bare string."""
+        result = CredentialVault._normalize_tool_schema_for_anthropic(
+            {"type": ["string"]}
+        )
+        assert result == {"type": "string"}
+
+    def test_normalize_tool_schema_for_anthropic_preserves_null_union(self):
+        """`null` is preserved in anyOf unions — do NOT strip it."""
+        result = CredentialVault._normalize_tool_schema_for_anthropic(
+            {"type": ["string", "null"]}
+        )
+        assert result == {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+        }
+
+    def test_normalize_tool_schema_for_anthropic_passthrough_single_type(self):
+        """Schemas without multi-type `type` are returned unchanged."""
+        original = {"type": "string", "description": "x"}
+        result = CredentialVault._normalize_tool_schema_for_anthropic(original)
+        assert result == {"type": "string", "description": "x"}
+
+    def test_normalize_tool_schema_for_anthropic_recurses_into_items(self):
+        """Nested items schemas are normalized recursively."""
+        original = {
+            "type": "array",
+            "items": {"type": ["string", "number"]},
+        }
+        result = CredentialVault._normalize_tool_schema_for_anthropic(original)
+        assert result == {
+            "type": "array",
+            "items": {
+                "anyOf": [{"type": "string"}, {"type": "number"}],
+            },
+        }
+
     def test_parse_anthropic_response_text(self):
         """Parses a simple text response."""
         data = {
@@ -2262,6 +2351,123 @@ async def test_oauth_stream_skips_preflight_even_when_over_budget(monkeypatch):
     assert any("done" in e for e in events)
     assert not any("Budget exceeded" in e for e in events)
     cost_tracker.preflight_check.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_oauth_chat_stream_normalizes_tool_schema_before_sdk_call(monkeypatch):
+    """End-to-end: multi-type tool schemas reach the SDK as `anyOf`.
+
+    Regression test for the Anthropic OAuth failure where
+    ``propose_edit``'s ``{"type": ["string", "object"]}`` value schema
+    tripped Anthropic's tool ``input_schema`` validator, yielding
+    "Invalid request data". The fix must normalize at the
+    ``_build_anthropic_body`` seam before the SDK sees the tool list.
+    """
+    import json as _json
+    import sys
+    import types as _types
+
+    captured: dict = {}
+
+    class _FakeAuthenticationError(Exception):
+        pass
+
+    class _FakeAPIStatusError(Exception):
+        pass
+
+    class _FakeMessageDelta:
+        type = "message_delta"
+        usage = _types.SimpleNamespace(output_tokens=5)
+
+    class _FakeStart:
+        type = "message_start"
+        message = _types.SimpleNamespace(
+            usage=_types.SimpleNamespace(input_tokens=10),
+        )
+
+    class _FakeTextDelta:
+        type = "content_block_delta"
+        delta = _types.SimpleNamespace(type="text_delta", text="Hello!")
+
+    class _FakeStream:
+        def __init__(self, events):
+            self._events = events
+
+        def __aiter__(self):
+            async def gen():
+                for evt in self._events:
+                    yield evt
+            return gen()
+
+    class _FakeMessages:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeStream([
+                _FakeStart(),
+                _FakeTextDelta(),
+                _FakeMessageDelta(),
+            ])
+
+    class _FakeAnthropicClient:
+        def __init__(self, *args, **kwargs):
+            self.messages = _FakeMessages()
+
+        async def close(self):
+            captured["_closed"] = True
+
+    fake_anthropic = _types.ModuleType("anthropic")
+    fake_anthropic.AsyncAnthropic = _FakeAnthropicClient
+    fake_anthropic.AuthenticationError = _FakeAuthenticationError
+    fake_anthropic.APIStatusError = _FakeAPIStatusError
+    monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
+
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
+    v = CredentialVault()
+
+    req = APIProxyRequest(
+        service="llm", action="chat",
+        params={
+            "model": "anthropic/claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "propose an edit"}],
+            "max_tokens": 256,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "propose_edit",
+                    "description": "Propose an edit",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "value": {"type": ["string", "object"]},
+                        },
+                    },
+                },
+            }],
+        },
+    )
+
+    events = []
+    async for event in v._oauth_chat_stream(
+        req, "sk-ant-oat01-" + "x" * 80, "anthropic/claude-sonnet-4-6",
+    ):
+        events.append(event)
+
+    # Close was called in the finally block.
+    assert captured.get("_closed") is True
+
+    # Tool schema was normalized: multi-type `value` → anyOf.
+    assert "tools" in captured
+    value_schema = captured["tools"][0]["input_schema"]["properties"]["value"]
+    assert "type" not in value_schema
+    assert value_schema["anyOf"] == [{"type": "string"}, {"type": "object"}]
+
+    # A done event was yielded after consuming the stream.
+    assert any("done" in e for e in events)
+    # Sanity: the done event parses as JSON with the expected type.
+    done_events = [e for e in events if '"type": "done"' in e]
+    assert done_events, "expected at least one done event"
+    payload = _json.loads(done_events[0].removeprefix("data: ").strip())
+    assert payload["type"] == "done"
 
 
 @pytest.mark.asyncio
