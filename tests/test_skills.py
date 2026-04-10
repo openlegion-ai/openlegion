@@ -931,3 +931,50 @@ async def test_list_style_params_end_to_end():
     # execute should coerce and call the skill successfully.
     result = await registry.execute("list_params_skill", {"q": 123})
     assert result == {"q": "123"}
+
+
+def test_normalize_params_dict_warns_on_duplicate_names(caplog):
+    params = [
+        {"name": "x", "type": "string", "description": "first"},
+        {"name": "x", "type": "integer", "description": "second"},
+    ]
+    with caplog.at_level("WARNING", logger="agent.skills"):
+        result = _normalize_params_dict(params)
+    # First wins, second discarded.
+    assert result == {"x": {"type": "string", "description": "first"}}
+    assert any("duplicate" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_list_style_params_explicit_required_honored():
+    """List-form params with explicit required:true should mark the param required."""
+    @skill(
+        name="explicit_required_skill",
+        description="skill with explicit required param",
+        parameters={"q": {"type": "string"}},
+    )
+    def explicit_fn(q: str = "default") -> dict:
+        return {"q": q}
+
+    registry = SkillRegistry.__new__(SkillRegistry)
+    registry.skills = dict(_skill_staging)
+    # List form with an explicit `required: true` flag on a param that also
+    # carries a `default` (which would normally mark it optional).
+    registry.skills["explicit_required_skill"]["parameters"] = [
+        {
+            "name": "q",
+            "type": "string",
+            "description": "query",
+            "required": True,
+            "default": "x",
+        },
+    ]
+    registry._descriptions_cache = {}
+    registry._tool_defs_cache = {}
+    registry._mcp_client = None
+
+    defs = registry.get_tool_definitions()
+    target = next(
+        d for d in defs if d["function"]["name"] == "explicit_required_skill"
+    )
+    assert "q" in target["function"]["parameters"]["required"]

@@ -595,3 +595,29 @@ class TestCreateAgentFromTemplate(_TempConfigMixin):
             cfg = yaml.safe_load(f)
         budget = cfg["agents"]["my_eng"].get("budget", {})
         assert budget.get("daily_usd") == 10.0
+
+
+def test_opportunity_finder_artifact_permissions():
+    """Modeler writes artifacts via save_artifact; researcher and evaluator
+    need to discover them. All three must grant artifacts/* on the blackboard
+    (read) and the modeler additionally on write.
+    """
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "templates" / "opportunity-finder.yaml"
+    )
+    data = yaml.safe_load(template_path.read_text())
+    agents = data["agents"]
+
+    for agent_id in ("gap-scout", "evaluator", "modeler"):
+        perms = agents[agent_id]["permissions"]
+        reads = perms.get("blackboard_read", [])
+        assert "artifacts/*" in reads, (
+            f"{agent_id} must be able to read artifacts/* on the blackboard"
+        )
+
+    # Modeler is the one calling save_artifact.
+    modeler_writes = agents["modeler"]["permissions"].get("blackboard_write", [])
+    assert "artifacts/*" in modeler_writes, (
+        "modeler must have artifacts/* in blackboard_write to register saved artifacts"
+    )

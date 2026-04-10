@@ -399,6 +399,9 @@ async def save_artifact(
 ) -> dict:
     if workspace_manager is None:
         return {"error": "No workspace_manager available"}
+
+    # Stage 1: write the file to disk. If this fails the work is lost, so
+    # return an error.
     try:
         artifacts_dir = Path(workspace_manager.root) / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -407,11 +410,19 @@ async def save_artifact(
             return {"error": f"Invalid artifact name: {name}"}
         filepath.parent.mkdir(parents=True, exist_ok=True)
         filepath.write_text(content)
+    except Exception as e:
+        return {"error": f"Failed to save artifact '{name}': {e}"}
 
-        # Register on blackboard (skip for standalone agents — no project blackboard)
-        if mesh_client and not mesh_client.is_standalone:
-            agent_id = mesh_client.agent_id
-            key = f"artifacts/{agent_id}/{name}"
+    # Stage 2: register on the blackboard so teammates can discover it.
+    # This is best-effort — if it fails (permissions, transient network),
+    # the file is still on disk so we report success with a warning rather
+    # than losing the work.
+    registered = True
+    registration_error: str | None = None
+    if mesh_client and not mesh_client.is_standalone:
+        agent_id = mesh_client.agent_id
+        key = f"artifacts/{agent_id}/{name}"
+        try:
             meta = {
                 "path": str(filepath),
                 "size": len(content),
@@ -420,10 +431,19 @@ async def save_artifact(
             if description:
                 meta["description"] = description
             await mesh_client.write_blackboard(key, meta)
+        except Exception as e:
+            logger.warning(
+                "save_artifact: file written but blackboard registration failed for %s: %s",
+                key, e,
+            )
+            registered = False
+            registration_error = str(e)
 
-        return {"saved": True, "path": str(filepath), "name": name}
-    except Exception as e:
-        return {"error": f"Failed to save artifact '{name}': {e}"}
+    result: dict = {"saved": True, "path": str(filepath), "name": name}
+    if not registered:
+        result["registered"] = False
+        result["registration_error"] = registration_error
+    return result
 
 
 @skill(

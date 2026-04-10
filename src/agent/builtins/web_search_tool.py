@@ -102,7 +102,10 @@ async def web_search(query: str, max_results: int = 5) -> dict:
     proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
 
     try:
-        client_kwargs: dict = {"follow_redirects": True, "timeout": 15}
+        # follow_redirects=False: the DDG HTML endpoint doesn't redirect
+        # legitimately, and enabling redirects creates SSRF risk without
+        # the hop validation that http_tool has.
+        client_kwargs: dict = {"follow_redirects": False, "timeout": 15}
         if proxy_url:
             client_kwargs["proxy"] = proxy_url
         async with httpx.AsyncClient(**client_kwargs) as client:

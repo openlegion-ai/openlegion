@@ -274,6 +274,52 @@ async def test_handle_llm_all_models_exhausted(monkeypatch):
     assert "down" in result.error
 
 
+async def test_handle_llm_empty_choices_triggers_failover(monkeypatch):
+    """HTTP 200 with empty choices must raise so failover kicks in —
+    otherwise the broken model gets marked healthy and keeps serving
+    empty responses.
+    """
+    monkeypatch.setenv("OPENLEGION_SYSTEM_GEMINI_API_KEY", "sk-gem")
+    monkeypatch.setenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", "sk-oai")
+    v = CredentialVault(
+        failover_config={"gemini/gemini-2.5-pro": ["openai/gpt-4o-mini"]},
+    )
+
+    call_count = 0
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if model.startswith("gemini/"):
+            # Simulate the broken response: HTTP 200, no choices.
+            resp = MagicMock()
+            resp.choices = []
+            return resp
+        # Fallback succeeds.
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = "recovered"
+        resp.choices[0].message.tool_calls = None
+        resp.usage = MagicMock()
+        resp.usage.total_tokens = 7
+        return resp
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "gemini/gemini-2.5-pro",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        result = await v.execute_api_call(req)
+
+    assert result.success, f"Expected failover to succeed, got: {result.error}"
+    assert result.data["content"] == "recovered"
+    assert result.data["model"] == "openai/gpt-4o-mini"
+    assert call_count == 2
+
+
 async def test_stream_failover(monkeypatch):
     """Streaming: first model fails on connection, second streams OK."""
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
