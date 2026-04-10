@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest  # noqa: F401
 
-from src.cli.operator_playbooks import (
+from src.shared.operator_playbooks import (
     _OPERATOR_CORE,
     _PLAYBOOK_CREDENTIALS,
     _PLAYBOOK_EDIT,

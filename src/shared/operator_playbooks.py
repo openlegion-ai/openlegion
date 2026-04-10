@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from src.shared.utils import setup_logging
 
-logger = setup_logging("cli.operator_playbooks")
+logger = setup_logging("shared.operator_playbooks")
 
 # ── Core instructions (always loaded) ─────────────────────────
 

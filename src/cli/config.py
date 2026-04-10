@@ -14,7 +14,7 @@ from pathlib import Path
 import click
 import yaml
 
-from src.cli.operator_playbooks import _OPERATOR_CORE
+from src.shared.operator_playbooks import _OPERATOR_CORE
 from src.shared.types import RESERVED_AGENT_IDS
 from src.shared.utils import truncate
 
