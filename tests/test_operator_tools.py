@@ -46,6 +46,26 @@ async def test_propose_edit_validates_field():
 
 
 @pytest.mark.asyncio
+async def test_propose_edit_accepts_interface_field():
+    """The 'interface' field should be valid and forwarded to the mesh."""
+    from src.agent.builtins.operator_tools import propose_edit
+
+    mc = MagicMock()
+    mc.propose_config_change = AsyncMock(
+        return_value={"change_id": "iface1", "preview_diff": "..."},
+    )
+    result = await propose_edit(
+        "writer", "interface", "Accepts research, produces notes.",
+        mesh_client=mc,
+    )
+    assert "error" not in result
+    assert result["change_id"] == "iface1"
+    mc.propose_config_change.assert_awaited_once_with(
+        "writer", "interface", "Accepts research, produces notes.",
+    )
+
+
+@pytest.mark.asyncio
 async def test_propose_edit_permission_ceiling_can_spawn():
     from src.agent.builtins.operator_tools import propose_edit
 

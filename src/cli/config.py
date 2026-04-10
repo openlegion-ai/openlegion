@@ -399,6 +399,7 @@ def _add_agent_to_config(
     initial_instructions: str = "",
     initial_soul: str = "",
     initial_heartbeat: str = "",
+    initial_interface: str = "",
     thinking: str = "",
     budget: dict | None = None,
     resources: dict | None = None,
@@ -422,6 +423,8 @@ def _add_agent_to_config(
         entry["initial_soul"] = initial_soul
     if initial_heartbeat:
         entry["initial_heartbeat"] = initial_heartbeat
+    if initial_interface:
+        entry["initial_interface"] = initial_interface
     if thinking:
         entry["thinking"] = thinking
     if budget:
@@ -897,6 +900,7 @@ def _apply_template(template_name: str, tpl: dict) -> list[str]:
         instructions = agent_def.get("instructions", "") or agent_def.get("system_prompt", "")
         soul = agent_def.get("soul", "")
         heartbeat = agent_def.get("heartbeat", "")
+        interface = agent_def.get("initial_interface", "") or agent_def.get("interface", "")
         thinking = agent_def.get("thinking", "")
         budget = agent_def.get("budget")
         agent_permissions = agent_def.get("permissions")
@@ -909,6 +913,7 @@ def _apply_template(template_name: str, tpl: dict) -> list[str]:
             initial_instructions=instructions,
             initial_soul=soul,
             initial_heartbeat=heartbeat,
+            initial_interface=interface,
             thinking=thinking,
             budget=budget,
             resources=resources,
@@ -976,6 +981,7 @@ def _create_agent_from_template(
     instructions = agent_def.get("instructions", "") or agent_def.get("system_prompt", "")
     soul = agent_def.get("soul", "")
     heartbeat = agent_def.get("heartbeat", "")
+    interface = agent_def.get("initial_interface", "") or agent_def.get("interface", "")
     thinking = agent_def.get("thinking", "")
     budget = agent_def.get("budget")
     resources = agent_def.get("resources")
@@ -988,6 +994,7 @@ def _create_agent_from_template(
         initial_instructions=instructions,
         initial_soul=soul,
         initial_heartbeat=heartbeat,
+        initial_interface=interface,
         thinking=thinking,
         budget=budget,
         resources=resources,

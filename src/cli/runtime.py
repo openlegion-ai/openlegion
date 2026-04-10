@@ -366,6 +366,9 @@ class RuntimeContext:
             initial_heartbeat = agent_cfg.get("initial_heartbeat", "")
             if initial_heartbeat:
                 agent_env["INITIAL_HEARTBEAT"] = initial_heartbeat
+            initial_interface = agent_cfg.get("initial_interface", "")
+            if initial_interface:
+                agent_env["INITIAL_INTERFACE"] = initial_interface
             if agent_id == _OPERATOR_AGENT_ID:
                 agent_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
 
@@ -432,6 +435,7 @@ class RuntimeContext:
                 self.runtime.extra_env.pop("INITIAL_INSTRUCTIONS", None)
                 self.runtime.extra_env.pop("INITIAL_SOUL", None)
                 self.runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
+                self.runtime.extra_env.pop("INITIAL_INTERFACE", None)
                 self.runtime.extra_env.pop("PROJECT_MD_PATH", None)
                 self.runtime.extra_env.pop("PROJECT_NAME", None)
                 self.runtime.extra_env.pop("HTTP_PROXY", None)

@@ -72,6 +72,7 @@ def main() -> None:
     initial_instructions = os.environ.get("INITIAL_INSTRUCTIONS", "")
     initial_soul = os.environ.get("INITIAL_SOUL", "")
     initial_heartbeat = os.environ.get("INITIAL_HEARTBEAT", "")
+    initial_interface = os.environ.get("INITIAL_INTERFACE", "")
 
     skills = SkillRegistry(skills_dir=skills_dir, mcp_client=mcp_client)
 
@@ -84,6 +85,7 @@ def main() -> None:
         initial_instructions=initial_instructions,
         initial_soul=initial_soul,
         initial_heartbeat=initial_heartbeat,
+        initial_interface=initial_interface,
     )
 
     # Copy host-mounted PROJECT.md into workspace (mounted at /app to avoid

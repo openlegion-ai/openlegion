@@ -31,7 +31,7 @@ _OPERATOR_PERMISSION_CEILING = {
 
 _VALID_FIELDS = frozenset({
     "instructions", "soul", "model", "role", "heartbeat",
-    "thinking", "budget", "permissions",
+    "interface", "thinking", "budget", "permissions",
 })
 
 _OPERATOR_AGENT_ID = "operator"
@@ -43,7 +43,7 @@ _OPERATOR_AGENT_ID = "operator"
         "Propose a change to an agent's configuration. Returns a preview diff "
         "and change_id for confirmation. Always show the preview to the user "
         "and wait for their approval before calling confirm_edit.\n\n"
-        "Fields: instructions, soul, model, role, heartbeat, thinking, budget, permissions.\n"
+        "Fields: instructions, soul, model, role, heartbeat, interface, thinking, budget, permissions.\n"
         "Value format: string for text fields, object for budget/permissions.\n"
         "- budget: {\"daily_usd\": float, \"monthly_usd\": float}\n"
         "- permissions: {\"can_use_browser\": bool, ...}\n"
@@ -60,7 +60,7 @@ _OPERATOR_AGENT_ID = "operator"
             "description": "Config field to change",
             "enum": [
                 "instructions", "soul", "model", "role", "heartbeat",
-                "thinking", "budget", "permissions",
+                "interface", "thinking", "budget", "permissions",
             ],
         },
         "value": {

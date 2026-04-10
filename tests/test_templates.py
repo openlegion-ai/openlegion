@@ -84,6 +84,18 @@ class TestAddAgentToConfig(_TempConfigMixin):
             cfg = yaml.safe_load(f)
         assert cfg["agents"]["dave"]["initial_heartbeat"] == "Check alerts."
 
+    def test_initial_interface(self):
+        _add_agent_to_config(
+            "iris", "scout", "openai/gpt-4o",
+            initial_interface="Accepts research, produces notes.",
+        )
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert (
+            cfg["agents"]["iris"]["initial_interface"]
+            == "Accepts research, produces notes."
+        )
+
     def test_thinking(self):
         _add_agent_to_config("eve", "analyst", "openai/gpt-4o", thinking="medium")
         with open(self._agents_path) as f:
@@ -112,6 +124,7 @@ class TestAddAgentToConfig(_TempConfigMixin):
         assert "initial_soul" not in agent
         assert "initial_heartbeat" not in agent
         assert "initial_instructions" not in agent
+        assert "initial_interface" not in agent
         assert "thinking" not in agent
         assert "budget" not in agent
         assert "resources" not in agent
@@ -123,6 +136,7 @@ class TestAddAgentToConfig(_TempConfigMixin):
             initial_instructions="Do stuff.",
             initial_soul="Be nice.",
             initial_heartbeat="Check things.",
+            initial_interface="Accepts X, produces Y.",
             thinking="high",
             budget={"daily_usd": 10.0},
             resources={"memory_limit": "512m"},
@@ -133,6 +147,7 @@ class TestAddAgentToConfig(_TempConfigMixin):
         assert agent["initial_instructions"] == "Do stuff."
         assert agent["initial_soul"] == "Be nice."
         assert agent["initial_heartbeat"] == "Check things."
+        assert agent["initial_interface"] == "Accepts X, produces Y."
         assert agent["thinking"] == "high"
         assert agent["budget"]["daily_usd"] == 10.0
         assert agent["resources"]["memory_limit"] == "512m"
@@ -257,6 +272,7 @@ class TestApplyTemplate(_TempConfigMixin):
                     "instructions": "Find sources.",
                     "soul": "You are curious.",
                     "heartbeat": "Check news.",
+                    "initial_interface": "Accepts research requests, produces notes.",
                     "thinking": "medium",
                     "budget": {"daily_usd": 5.0, "monthly_usd": 100.0},
                 },
@@ -272,8 +288,43 @@ class TestApplyTemplate(_TempConfigMixin):
         assert scout["initial_instructions"] == "Find sources."
         assert scout["initial_soul"] == "You are curious."
         assert scout["initial_heartbeat"] == "Check news."
+        assert (
+            scout["initial_interface"]
+            == "Accepts research requests, produces notes."
+        )
         assert scout["thinking"] == "medium"
         assert scout["budget"]["daily_usd"] == 5.0
+
+    def test_initial_interface_persisted_from_real_template(self):
+        """At least one bundled template declares initial_interface; applying
+        it must persist the contract to agents.yaml so peers can discover it."""
+        from src.cli.config import _load_templates
+        templates = _load_templates()
+        candidate = None
+        for tpl_name, tpl in templates.items():
+            for agent_id, agent_def in tpl.get("agents", {}).items():
+                if agent_def.get("initial_interface"):
+                    candidate = (tpl_name, agent_id, agent_def["initial_interface"])
+                    break
+            if candidate:
+                break
+
+        assert candidate is not None, (
+            "Expected at least one bundled template to declare "
+            "initial_interface for the pipeline test"
+        )
+        tpl_name, agent_id, expected_interface = candidate
+        full_tpl = templates[tpl_name]
+
+        with self._mock_config():
+            created = _apply_template(tpl_name, full_tpl)
+
+        assert agent_id in created
+        with open(self._agents_path) as f:
+            cfg = yaml.safe_load(f)
+        assert (
+            cfg["agents"][agent_id]["initial_interface"] == expected_interface
+        )
 
     def test_resources_written_in_single_pass(self):
         """Resources are included in the same agents.yaml write, not a separate re-read."""

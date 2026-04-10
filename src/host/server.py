@@ -1489,6 +1489,7 @@ def create_mesh_app(
                 ("INITIAL_INSTRUCTIONS", "initial_instructions"),
                 ("INITIAL_SOUL", "initial_soul"),
                 ("INITIAL_HEARTBEAT", "initial_heartbeat"),
+                ("INITIAL_INTERFACE", "initial_interface"),
             ):
                 val = acfg.get(cfg_key, "")
                 if val:
@@ -2236,10 +2237,15 @@ def create_mesh_app(
 
     # === Operator Config Endpoints ===
 
-    _VALID_CONFIG_FIELDS = {"instructions", "soul", "model", "role", "heartbeat", "thinking", "budget", "permissions"}
+    _VALID_CONFIG_FIELDS = {
+        "instructions", "soul", "model", "role", "heartbeat",
+        "interface", "thinking", "budget", "permissions",
+    }
     _CONFIG_FIELD_MAP = {
         "instructions": "initial_instructions", "soul": "initial_soul",
-        "heartbeat": "initial_heartbeat", "model": "model", "role": "role",
+        "heartbeat": "initial_heartbeat",
+        "interface": "initial_interface",
+        "model": "model", "role": "role",
         "thinking": "thinking", "budget": "budget",
     }
 
@@ -2358,6 +2364,7 @@ def create_mesh_app(
                 "instructions": "INSTRUCTIONS.md",
                 "soul": "SOUL.md",
                 "heartbeat": "HEARTBEAT.md",
+                "interface": "INTERFACE.md",
             }
             ws_file = workspace_map.get(field)
             if ws_file and isinstance(new_value, str):
