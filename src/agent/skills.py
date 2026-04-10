@@ -192,6 +192,14 @@ class SkillRegistry:
         # the type declared in the skill's parameter schema so that tool
         # functions don't crash with TypeError.
         param_schemas = info.get("parameters", {})
+        if isinstance(param_schemas, list):
+            param_schemas = {
+                p["name"]: {k: v for k, v in p.items() if k != "name"}
+                for p in param_schemas
+                if isinstance(p, dict) and "name" in p
+            }
+        if not isinstance(param_schemas, dict):
+            param_schemas = {}
         for key in list(call_args):
             schema = param_schemas.get(key)
             if not schema:
@@ -383,6 +391,15 @@ class SkillRegistry:
             elif exclude and name in exclude:
                 continue
             raw_params = info["parameters"]
+            # Normalise list-style params from self-authored skills
+            if isinstance(raw_params, list):
+                raw_params = {
+                    p["name"]: {k: v for k, v in p.items() if k != "name"}
+                    for p in raw_params
+                    if isinstance(p, dict) and "name" in p
+                }
+            if not isinstance(raw_params, dict):
+                raw_params = {}
             # MCP tools have full JSON Schema; extract from "properties"
             if info.get("function") == "mcp":
                 props = raw_params.get("properties", {})
@@ -432,6 +449,16 @@ class SkillRegistry:
                 continue
 
             # Built-in skills store a flat {param_name: {type, description, ...}} dict.
+            # Self-authored skills may provide a list of {name, type, description}
+            # dicts — normalise to the expected dict format.
+            if isinstance(params, list):
+                params = {
+                    p["name"]: {k: v for k, v in p.items() if k != "name"}
+                    for p in params
+                    if isinstance(p, dict) and "name" in p
+                }
+            if not isinstance(params, dict):
+                params = {}
             properties = {}
             required = []
             for param_name, param_info in params.items():
