@@ -236,7 +236,7 @@ class TestOperatorConstants:
 
     def test_instructions_not_empty(self):
         from src.cli.config import _OPERATOR_HEARTBEAT, _OPERATOR_SOUL
-        from src.cli.operator_playbooks import _OPERATOR_CORE
+        from src.shared.operator_playbooks import _OPERATOR_CORE
         assert len(_OPERATOR_CORE) > 100
         assert len(_OPERATOR_SOUL) > 50
         assert len(_OPERATOR_HEARTBEAT) > 100
@@ -266,7 +266,7 @@ class TestOperatorConstants:
         assert "notify_user" in _OPERATOR_HEARTBEAT
 
     def test_core_has_key_sections(self):
-        from src.cli.operator_playbooks import _OPERATOR_CORE
+        from src.shared.operator_playbooks import _OPERATOR_CORE
         assert "Routing Work" in _OPERATOR_CORE
         assert "Plan Limits" in _OPERATOR_CORE
         assert "Assessment" in _OPERATOR_CORE
@@ -274,7 +274,7 @@ class TestOperatorConstants:
         assert "playbook_v2" in _OPERATOR_CORE
 
     def test_playbooks_have_key_tools(self):
-        from src.cli.operator_playbooks import (
+        from src.shared.operator_playbooks import (
             _PLAYBOOK_CREDENTIALS,
             _PLAYBOOK_EDIT,
             _PLAYBOOK_MONITOR,
@@ -287,7 +287,7 @@ class TestOperatorConstants:
         assert "vault_list" in _PLAYBOOK_CREDENTIALS
 
     def test_core_has_plan_tiers(self):
-        from src.cli.operator_playbooks import _OPERATOR_CORE
+        from src.shared.operator_playbooks import _OPERATOR_CORE
         assert "Basic" in _OPERATOR_CORE
         assert "Growth" in _OPERATOR_CORE
         assert "Pro" in _OPERATOR_CORE

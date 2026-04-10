@@ -314,7 +314,7 @@ class AgentLoop:
         if not self._is_operator:
             return []
 
-        from src.cli.operator_playbooks import PLAYBOOK_STICKY_TURNS, extract_triggered_playbooks
+        from src.shared.operator_playbooks import PLAYBOOK_STICKY_TURNS, extract_triggered_playbooks
 
         # Scan only messages added since last check.
         # After context compaction, the message list may shrink — clamp the
@@ -344,7 +344,7 @@ class AgentLoop:
         """Increment turn counter for all active playbooks. Call once per user turn."""
         if not self._is_operator:
             return
-        from src.cli.operator_playbooks import PLAYBOOK_STICKY_TURNS
+        from src.shared.operator_playbooks import PLAYBOOK_STICKY_TURNS
 
         expired = [pb for pb, turns in self._operator_playbook_state.items() if turns > PLAYBOOK_STICKY_TURNS]
         for pb in expired:
@@ -2405,7 +2405,7 @@ class AgentLoop:
         if self._is_operator:
             active_playbooks = self._update_operator_playbooks()
             if active_playbooks:
-                from src.cli.operator_playbooks import get_playbook_content
+                from src.shared.operator_playbooks import get_playbook_content
 
                 playbook_text = get_playbook_content(active_playbooks)
                 if playbook_text:
