@@ -101,12 +101,12 @@ RUN python -m camoufox fetch
 #
 # After the entrypoint execs `tini -- gosu browser:browser python -m
 # src.browser`, tini (PID 1, root) retains the three caps in its
-# effective set for the container lifetime — tini is a minimal init
-# that does not exercise them; it only forks/execs its child and reaps
-# zombies. The long-running Firefox/FastAPI process runs as UID 1000
-# after gosu and has no effective capabilities (non-root users do not
-# inherit caps, and no-new-privileges prevents re-acquisition via
-# setuid binaries or file capabilities).
+# effective set for the container lifetime. No code in this repo asks
+# tini to exercise those caps — tini's job is to fork/exec its child
+# and reap zombies. The long-running Firefox/FastAPI process runs as
+# UID 1000 after gosu and has no effective capabilities (non-root
+# users do not inherit caps, and no-new-privileges prevents
+# re-acquisition via setuid binaries or file capabilities).
 USER root
 
 COPY docker/browser-entrypoint.sh /usr/local/bin/browser-entrypoint.sh

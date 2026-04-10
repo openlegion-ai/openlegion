@@ -773,6 +773,83 @@ class TestDockerBackendSlimResources:
         assert env.get("BROWSER_PROXY_URL") == "http://10.0.0.5:3128"
         assert env.get("BROWSER_EGRESS_ALLOWLIST") == "10.0.0.5/32"
 
+    def test_browser_private_ip_proxy_refused_when_allowlist_does_not_cover(self):
+        """Private-IP proxy must refuse if BROWSER_EGRESS_ALLOWLIST is set but does not cover the proxy IP."""
+        import os as _os
+
+        import pytest
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        # Allowlist covers 192.168.x but proxy is on 10.0.0.5 — misconfiguration.
+        with patch.dict(_os.environ, {
+            "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
+            "BROWSER_EGRESS_ALLOWLIST": "192.168.1.0/24",
+        }):
+            with pytest.raises(RuntimeError, match="does not cover"):
+                backend.start_browser_service()
+
+        assert not mock_client.containers.run.called
+
+    def test_browser_private_ip_proxy_allowed_when_allowlist_covers_via_cidr(self):
+        """A CIDR covering the proxy IP (not just /32) should satisfy the coverage check."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # 10.0.0.5 is inside 10.0.0.0/24 — should pass.
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {
+                 "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
+                 "BROWSER_EGRESS_ALLOWLIST": "10.0.0.0/24",
+             }):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_EGRESS_ALLOWLIST") == "10.0.0.0/24"
+
+    def test_browser_private_ip_proxy_allowed_with_mixed_allowlist(self):
+        """Multi-entry allowlist where one entry covers the proxy should pass."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # First entry is irrelevant, second covers 10.0.0.5.
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {
+                 "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
+                 "BROWSER_EGRESS_ALLOWLIST": "172.16.0.0/12, 10.0.0.0/8",
+             }):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        assert mock_client.containers.run.called
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_EGRESS_ALLOWLIST") == "172.16.0.0/12, 10.0.0.0/8"
+
     def test_browser_public_proxy_no_refusal(self):
         """A public-IP proxy URL proceeds normally without any allowlist."""
         import os as _os

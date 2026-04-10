@@ -413,13 +413,15 @@ class DockerBackend(RuntimeBackend):
 
         # If the operator configured a proxy whose host is a literal private IP,
         # the egress filter will block the browser from reaching it unless the
-        # proxy CIDR is explicitly allowlisted. Detect this at startup and refuse
-        # instead of surfacing as a cryptic "browser cannot reach proxy" error
-        # after the browser container is already running. Hostname-based proxies
-        # are left alone (resolving them at startup would be brittle and racy).
+        # proxy CIDR is explicitly allowlisted. Detect misconfiguration at
+        # startup — BOTH the "no allowlist at all" case AND the "allowlist set
+        # but does not cover the proxy IP" case — instead of surfacing as a
+        # cryptic "browser cannot reach proxy" error after the container is
+        # already running. Hostname-based proxies are left alone (resolving
+        # them at startup would be brittle and racy).
         proxy_url = os.environ.get("BROWSER_PROXY_URL", "").strip()
         proxy_allowlist = os.environ.get("BROWSER_EGRESS_ALLOWLIST", "").strip()
-        if proxy_url and not proxy_allowlist:
+        if proxy_url:
             try:
                 import ipaddress
                 from urllib.parse import urlparse
@@ -437,13 +439,41 @@ class DockerBackend(RuntimeBackend):
                     or ip_obj.is_reserved
                 )
                 if _is_private:
-                    raise RuntimeError(
-                        f"BROWSER_PROXY_URL host {host} is a private IP literal, "
-                        "but BROWSER_EGRESS_ALLOWLIST is not set. The browser "
-                        f"container's egress filter will block connections to {host}. "
-                        f"Set BROWSER_EGRESS_ALLOWLIST={host}/32 (or the appropriate "
-                        "CIDR) to allow the proxy through."
-                    )
+                    # Parse the allowlist (if any) and verify the proxy IP is
+                    # actually covered by at least one entry. Malformed entries
+                    # are skipped silently here — the entrypoint will warn on
+                    # them at container-start time.
+                    covered = False
+                    if proxy_allowlist:
+                        for cidr_str in proxy_allowlist.split(","):
+                            cidr_str = cidr_str.strip()
+                            if not cidr_str:
+                                continue
+                            try:
+                                network = ipaddress.ip_network(cidr_str, strict=False)
+                            except ValueError:
+                                continue
+                            if ip_obj in network:
+                                covered = True
+                                break
+                    if not covered:
+                        if proxy_allowlist:
+                            raise RuntimeError(
+                                f"BROWSER_PROXY_URL host {host} is a private IP "
+                                f"literal, but BROWSER_EGRESS_ALLOWLIST does not "
+                                f"cover it (current value: {proxy_allowlist!r}). "
+                                f"The browser container's egress filter will "
+                                f"block connections to {host}. Add {host}/32 or "
+                                f"a containing CIDR to BROWSER_EGRESS_ALLOWLIST."
+                            )
+                        raise RuntimeError(
+                            f"BROWSER_PROXY_URL host {host} is a private IP "
+                            f"literal, but BROWSER_EGRESS_ALLOWLIST is not set. "
+                            f"The browser container's egress filter will block "
+                            f"connections to {host}. Set "
+                            f"BROWSER_EGRESS_ALLOWLIST={host}/32 (or the "
+                            f"appropriate CIDR) to allow the proxy through."
+                        )
             except RuntimeError:
                 raise
             except Exception as e:
