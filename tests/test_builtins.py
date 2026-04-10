@@ -1970,6 +1970,40 @@ class TestStandaloneBlackboardGuards:
         mc.write_blackboard.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_save_artifact_blackboard_failure_is_graceful(self, tmp_path):
+        """If file write succeeds but blackboard registration fails, the file
+        is still saved and the result reports registered=False with the error."""
+        from src.agent.builtins.mesh_tool import save_artifact
+
+        workspace_manager = MagicMock()
+        workspace_manager.root = str(tmp_path)
+
+        mesh_client = MagicMock()
+        mesh_client.is_standalone = False
+        mesh_client.agent_id = "test-agent"
+        mesh_client.write_blackboard = AsyncMock(
+            side_effect=PermissionError("Agent cannot write to artifacts/*")
+        )
+
+        result = await save_artifact(
+            name="test.md",
+            content="test content",
+            description="a test artifact",
+            mesh_client=mesh_client,
+            workspace_manager=workspace_manager,
+        )
+
+        # File should be saved to disk
+        assert result["saved"] is True
+        assert (tmp_path / "artifacts" / "test.md").read_text() == "test content"
+        # Registration should be marked as failed
+        assert result["registered"] is False
+        assert (
+            "artifacts/*" in result["registration_error"]
+            or "Permission" in result["registration_error"]
+        )
+
+    @pytest.mark.asyncio
     async def test_read_blackboard_allowed_for_project_agent(self):
         """Project agents are NOT blocked by the standalone guard."""
         from src.agent.builtins.mesh_tool import read_blackboard
