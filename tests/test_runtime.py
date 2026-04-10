@@ -540,6 +540,71 @@ class TestDockerBackendSlimResources:
         assert backend.browser_service_url is not None
         assert backend.browser_vnc_url is None
 
+    def test_browser_has_net_admin_in_bridge_mode(self):
+        """Browser container gets NET_ADMIN so its entrypoint can install iptables rules."""
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        assert run_call.kwargs.get("cap_add") == ["NET_ADMIN"]
+        env = run_call.kwargs.get("environment", {})
+        # Filter must be active (not disabled) in the default bridge mode
+        assert "BROWSER_EGRESS_DISABLE" not in env
+
+    def test_browser_egress_filter_disabled_in_host_network(self):
+        """Host network mode shares host netns — iptables would mutate the host, so disable."""
+        import docker as _docker
+
+        backend = _make_docker_backend(use_host_network=True)
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        # No NET_ADMIN in host network mode
+        assert "cap_add" not in run_call.kwargs
+        # Explicit opt-out signal so the entrypoint skips iptables entirely
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_EGRESS_DISABLE") == "1"
+
+    def test_browser_egress_allowlist_forwarded(self):
+        """Operator-supplied BROWSER_EGRESS_ALLOWLIST is forwarded to the container."""
+        import os as _os
+
+        import docker as _docker
+
+        backend = self._make_backend()
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("nope")
+        backend.client = mock_client
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch("httpx.get", return_value=mock_resp), \
+             patch.dict(_os.environ, {"BROWSER_EGRESS_ALLOWLIST": "10.0.0.0/24,192.168.5.5/32"}):
+            backend.start_browser_service()
+
+        run_call = mock_client.containers.run.call_args
+        env = run_call.kwargs.get("environment", {})
+        assert env.get("BROWSER_EGRESS_ALLOWLIST") == "10.0.0.0/24,192.168.5.5/32"
+
     def test_containers_no_docker_init(self):
         """Docker init=True must NOT be set — Dockerfile ENTRYPOINT tini handles it.
 

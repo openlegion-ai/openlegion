@@ -3,9 +3,12 @@
 FROM python:3.12-slim
 
 # System packages: Openbox WM, tini, curl, plus GTK3/X11 libs for Camoufox (Firefox)
-# KasmVNC provides Xvnc (X server + VNC server) so no separate Xvfb needed
+# KasmVNC provides Xvnc (X server + VNC server) so no separate Xvfb needed.
+# iptables + gosu are used by docker/browser-entrypoint.sh to install the
+# SSRF egress filter as root, then drop privileges to the non-root browser user.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tini openbox wmctrl xdotool x11-xserver-utils unclutter-xfixes procps curl \
+    iptables gosu \
     libgtk-3-0 libatk1.0-0 libasound2 \
     libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libgbm1 \
     libpango-1.0-0 libcairo2 libdbus-glib-1-2 \
@@ -90,7 +93,15 @@ USER browser
 # Firefox goes to ~/.cache/camoufox/, GeoIP mmdb to the package dir
 RUN python -m camoufox fetch
 
+# Switch back to root so the entrypoint can install iptables egress rules
+# before dropping privileges via gosu. The long-running browser process
+# runs as UID 1000 (see docker/browser-entrypoint.sh); only the brief init
+# phase has CAP_NET_ADMIN. no-new-privileges still applies throughout.
+USER root
+
+COPY docker/browser-entrypoint.sh /usr/local/bin/browser-entrypoint.sh
+RUN chmod +x /usr/local/bin/browser-entrypoint.sh
+
 # 8500: browser command API, 6080: KasmVNC web client
 EXPOSE 8500 6080
-ENTRYPOINT ["tini", "--"]
-CMD ["python", "-m", "src.browser"]
+ENTRYPOINT ["/usr/local/bin/browser-entrypoint.sh"]

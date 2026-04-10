@@ -390,7 +390,8 @@ class DockerBackend(RuntimeBackend):
             "IDLE_TIMEOUT_MINUTES": str(idle_timeout_minutes),
         }
 
-        for var in ("BROWSER_PROXY_URL", "BROWSER_PROXY_USER", "BROWSER_PROXY_PASS"):
+        for var in ("BROWSER_PROXY_URL", "BROWSER_PROXY_USER", "BROWSER_PROXY_PASS",
+                    "BROWSER_EGRESS_ALLOWLIST", "BROWSER_EGRESS_DISABLE"):
             if os.environ.get(var):
                 environment[var] = os.environ[var]
 
@@ -419,10 +420,29 @@ class DockerBackend(RuntimeBackend):
             run_kwargs["network_mode"] = "host"
             environment["API_PORT"] = str(api_port)
             environment["VNC_PORT"] = str(vnc_port)
+            # Host network mode shares the host's network namespace. Installing
+            # iptables rules inside the container would mutate host networking,
+            # so we explicitly disable the egress filter and warn loudly. SSRF
+            # protection is off in this mode — use bridge networking in prod.
+            environment["BROWSER_EGRESS_DISABLE"] = "1"
+            logger.warning(
+                "Browser container is running in host network mode — SSRF "
+                "egress filter is DISABLED. Browser has unrestricted access "
+                "to the host's private networks. Use bridge networking "
+                "(use_host_network=False) for production deployments."
+            )
         else:
             run_kwargs["ports"] = {"8500/tcp": api_port, "6080/tcp": vnc_port}
             if platform.system() == "Linux":
                 run_kwargs["extra_hosts"] = {"host.docker.internal": "host-gateway"}
+            # Bridge network mode: grant NET_ADMIN so the entrypoint's root
+            # init phase can install an iptables egress filter blocking
+            # browser-initiated traffic to private IP ranges (defeats DNS
+            # rebinding and covers redirects/subresources/XHR/WebSockets
+            # uniformly, below the Playwright API). The long-running browser
+            # drops to the non-root 'browser' user via gosu before handling
+            # any agent traffic, so it cannot modify the rules at runtime.
+            run_kwargs["cap_add"] = ["NET_ADMIN"]
 
         # Remove stale browser container
         try:
