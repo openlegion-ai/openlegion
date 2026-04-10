@@ -89,6 +89,8 @@ class StructuredFormatter(logging.Formatter):
             "module": record.name,
             "message": record.getMessage(),
         }
+        if record.exc_info:
+            log_entry["exception"] = self.formatException(record.exc_info)
         if hasattr(record, "extra_data"):
             log_entry.update(record.extra_data)
         return json.dumps(log_entry)
@@ -100,7 +102,10 @@ class TextFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.now(UTC).strftime("%H:%M:%S")
         msg = record.getMessage()
-        return f"{ts} [{record.levelname:<5}] {record.name}: {msg}"
+        line = f"{ts} [{record.levelname:<5}] {record.name}: {msg}"
+        if record.exc_info:
+            line += "\n" + self.formatException(record.exc_info)
+        return line
 
 
 def setup_logging(name: str, level: str = "INFO") -> logging.Logger:

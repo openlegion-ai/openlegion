@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.agent.skills import SkillRegistry, _skill_staging, skill
+from src.agent.skills import (
+    SkillRegistry,
+    _normalize_params_dict,
+    _skill_staging,
+    skill,
+)
 
 
 def setup_function():
@@ -859,3 +864,70 @@ async def test_execute_non_dict_arguments_treated_as_empty():
     for bad_args in [42, [1, 2], "hello", True, 0]:
         result = await registry.execute("safe_tool", bad_args)
         assert result == {"verbose": False}, f"Failed for arguments={bad_args!r}"
+
+
+# ── _normalize_params_dict ─────────────────────────────────────────────
+
+
+def test_normalize_params_dict_passes_through_dict():
+    params = {"x": {"type": "string"}}
+    assert _normalize_params_dict(params) == params
+
+
+def test_normalize_params_dict_converts_list():
+    params = [{"name": "x", "type": "string", "description": "an x"}]
+    result = _normalize_params_dict(params)
+    assert result == {"x": {"type": "string", "description": "an x"}}
+
+
+def test_normalize_params_dict_empty_for_invalid():
+    assert _normalize_params_dict("invalid") == {}
+    assert _normalize_params_dict(None) == {}
+    assert _normalize_params_dict(42) == {}
+
+
+def test_normalize_params_dict_skips_malformed_list_items():
+    params = [
+        {"name": "x", "type": "string"},
+        {"type": "string"},  # missing name
+        "not a dict",
+    ]
+    result = _normalize_params_dict(params)
+    assert result == {"x": {"type": "string"}}
+
+
+@pytest.mark.asyncio
+async def test_list_style_params_end_to_end():
+    """Skills with list-style params should work across all three entry points."""
+    @skill(
+        name="list_params_skill",
+        description="skill with list-style params",
+        parameters={"q": {"type": "string", "description": "query"}},
+    )
+    def list_fn(q: str) -> dict:
+        return {"q": q}
+
+    registry = SkillRegistry.__new__(SkillRegistry)
+    registry.skills = dict(_skill_staging)
+    # Simulate a self-authored skill that declared params as a list.
+    registry.skills["list_params_skill"]["parameters"] = [
+        {"name": "q", "type": "string", "description": "query"},
+    ]
+    registry._descriptions_cache = {}
+    registry._tool_defs_cache = {}
+    registry._mcp_client = None
+
+    # get_descriptions should not crash and should include the param.
+    descriptions = registry.get_descriptions()
+    assert "list_params_skill" in descriptions
+    assert "q: string" in descriptions
+
+    # get_tool_definitions should produce an OpenAI-style tool definition.
+    defs = registry.get_tool_definitions()
+    target = next(d for d in defs if d["function"]["name"] == "list_params_skill")
+    assert "q" in target["function"]["parameters"]["properties"]
+    assert target["function"]["parameters"]["properties"]["q"]["type"] == "string"
+
+    # execute should coerce and call the skill successfully.
+    result = await registry.execute("list_params_skill", {"q": 123})
+    assert result == {"q": "123"}

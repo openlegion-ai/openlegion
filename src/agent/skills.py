@@ -27,6 +27,25 @@ _skill_staging: dict[str, dict] = {}
 _skill_staging_lock = threading.Lock()
 
 
+def _normalize_params_dict(params: object) -> dict:
+    """Normalize skill parameters to the canonical dict shape.
+
+    Self-authored skills sometimes declare parameters as a list of
+    {name, type, description, ...} dicts instead of the canonical
+    {name: {type, description, ...}} dict. Normalize list form to dict
+    form; return empty dict for anything else unparseable.
+    """
+    if isinstance(params, dict):
+        return params
+    if isinstance(params, list):
+        return {
+            p["name"]: {k: v for k, v in p.items() if k != "name"}
+            for p in params
+            if isinstance(p, dict) and "name" in p
+        }
+    return {}
+
+
 def skill(
     name: str,
     description: str,
@@ -191,15 +210,7 @@ class SkillRegistry:
         # (e.g. "5" instead of 5 for an integer parameter).  Coerce to
         # the type declared in the skill's parameter schema so that tool
         # functions don't crash with TypeError.
-        param_schemas = info.get("parameters", {})
-        if isinstance(param_schemas, list):
-            param_schemas = {
-                p["name"]: {k: v for k, v in p.items() if k != "name"}
-                for p in param_schemas
-                if isinstance(p, dict) and "name" in p
-            }
-        if not isinstance(param_schemas, dict):
-            param_schemas = {}
+        param_schemas = _normalize_params_dict(info.get("parameters", {}))
         for key in list(call_args):
             schema = param_schemas.get(key)
             if not schema:
@@ -390,16 +401,7 @@ class SkillRegistry:
                     continue
             elif exclude and name in exclude:
                 continue
-            raw_params = info["parameters"]
-            # Normalise list-style params from self-authored skills
-            if isinstance(raw_params, list):
-                raw_params = {
-                    p["name"]: {k: v for k, v in p.items() if k != "name"}
-                    for p in raw_params
-                    if isinstance(p, dict) and "name" in p
-                }
-            if not isinstance(raw_params, dict):
-                raw_params = {}
+            raw_params = _normalize_params_dict(info["parameters"])
             # MCP tools have full JSON Schema; extract from "properties"
             if info.get("function") == "mcp":
                 props = raw_params.get("properties", {})
@@ -451,14 +453,7 @@ class SkillRegistry:
             # Built-in skills store a flat {param_name: {type, description, ...}} dict.
             # Self-authored skills may provide a list of {name, type, description}
             # dicts — normalise to the expected dict format.
-            if isinstance(params, list):
-                params = {
-                    p["name"]: {k: v for k, v in p.items() if k != "name"}
-                    for p in params
-                    if isinstance(p, dict) and "name" in p
-                }
-            if not isinstance(params, dict):
-                params = {}
+            params = _normalize_params_dict(params)
             properties = {}
             required = []
             for param_name, param_info in params.items():
