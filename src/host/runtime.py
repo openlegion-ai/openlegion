@@ -418,7 +418,8 @@ class DockerBackend(RuntimeBackend):
         # after the browser container is already running. Hostname-based proxies
         # are left alone (resolving them at startup would be brittle and racy).
         proxy_url = os.environ.get("BROWSER_PROXY_URL", "").strip()
-        if proxy_url and not os.environ.get("BROWSER_EGRESS_ALLOWLIST"):
+        proxy_allowlist = os.environ.get("BROWSER_EGRESS_ALLOWLIST", "").strip()
+        if proxy_url and not proxy_allowlist:
             try:
                 import ipaddress
                 from urllib.parse import urlparse

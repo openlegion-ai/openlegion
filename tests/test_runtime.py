@@ -1169,3 +1169,94 @@ class TestEnvOverrides:
             env_overrides=None,
         )
 
+
+class TestEntrypointHelpers:
+    """Unit tests for the bash validation helpers in docker/browser-entrypoint.sh.
+
+    The entrypoint script guards its install/exec section so that sourcing it
+    from a subshell only loads function definitions, allowing us to test
+    is_valid_ipv4 and is_valid_ipv4_cidr without Docker or root privileges.
+    """
+
+    @staticmethod
+    def _call(helper: str, arg: str) -> bool:
+        """Source the entrypoint and invoke a helper with the given arg.
+
+        Returns True if the helper returned 0 (valid), False otherwise.
+        Uses shlex.quote to prevent shell injection from test inputs.
+        """
+        import shlex
+        import subprocess
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parent.parent
+        script = repo_root / "docker" / "browser-entrypoint.sh"
+        if not script.exists():
+            import pytest
+            pytest.skip(f"entrypoint script not found at {script}")
+        # shellcheck-clean: source then call helper with quoted arg.
+        cmd = f"source {shlex.quote(str(script))} && {helper} {shlex.quote(arg)}"
+        result = subprocess.run(
+            ["bash", "-c", cmd],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+
+    # ── is_valid_ipv4 ─────────────────────────────────────────
+
+    def test_ipv4_accepts_typical_addresses(self):
+        for ip in ("10.0.0.5", "192.168.1.1", "1.2.3.4", "172.16.0.1", "8.8.8.8"):
+            assert self._call("is_valid_ipv4", ip), ip
+
+    def test_ipv4_accepts_boundary_octets(self):
+        for ip in ("0.0.0.0", "255.255.255.255", "0.1.2.255", "255.0.0.0"):
+            assert self._call("is_valid_ipv4", ip), ip
+
+    def test_ipv4_rejects_out_of_range_octets(self):
+        for ip in ("256.0.0.0", "999.999.999.999", "10.0.0.256", "300.1.2.3"):
+            assert not self._call("is_valid_ipv4", ip), ip
+
+    def test_ipv4_rejects_wrong_shape(self):
+        for ip in ("10.0.0", "10.0.0.5.5", "", "10..0.5", "10.0.0.", ".10.0.0.5"):
+            assert not self._call("is_valid_ipv4", ip), ip
+
+    def test_ipv4_rejects_non_numeric(self):
+        for ip in ("10.0.0.a", "localhost", "example.com", "10.0.0.5 ", " 10.0.0.5"):
+            assert not self._call("is_valid_ipv4", ip), ip
+
+    def test_ipv4_rejects_cidr_notation(self):
+        # The strict IP validator does not accept /cidr — that is is_valid_ipv4_cidr's job.
+        assert not self._call("is_valid_ipv4", "10.0.0.0/24")
+
+    def test_ipv4_rejects_negative_and_hex(self):
+        for ip in ("-1.0.0.0", "0x10.0.0.0", "10.0.0.-1"):
+            assert not self._call("is_valid_ipv4", ip), ip
+
+    # ── is_valid_ipv4_cidr ────────────────────────────────────
+
+    def test_cidr_accepts_valid(self):
+        for c in ("10.0.0.0/24", "192.168.1.1/32", "0.0.0.0/0",
+                  "255.255.255.255/32", "10.0.0.5"):  # bare IP defaults to /32
+            assert self._call("is_valid_ipv4_cidr", c), c
+
+    def test_cidr_accepts_boundary_prefix(self):
+        for c in ("10.0.0.0/0", "10.0.0.0/32", "10.0.0.0/1", "10.0.0.0/31"):
+            assert self._call("is_valid_ipv4_cidr", c), c
+
+    def test_cidr_rejects_out_of_range_prefix(self):
+        for c in ("10.0.0.0/33", "10.0.0.0/99", "10.0.0.0/-1"):
+            assert not self._call("is_valid_ipv4_cidr", c), c
+
+    def test_cidr_rejects_bad_prefix_format(self):
+        for c in ("10.0.0.0/abc", "10.0.0.0/", "10.0.0.0//24", "10.0.0.0/ 24"):
+            assert not self._call("is_valid_ipv4_cidr", c), c
+
+    def test_cidr_rejects_invalid_ip_portion(self):
+        for c in ("999.999.999.999/24", "10.0.0/24", "10.0.0.a/24", "/24"):
+            assert not self._call("is_valid_ipv4_cidr", c), c
+
+    def test_cidr_rejects_empty(self):
+        assert not self._call("is_valid_ipv4_cidr", "")
+

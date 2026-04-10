@@ -93,12 +93,20 @@ USER browser
 # Firefox goes to ~/.cache/camoufox/, GeoIP mmdb to the package dir
 RUN python -m camoufox fetch
 
-# Switch back to root so the entrypoint can install iptables egress rules
-# before dropping privileges via gosu. The long-running browser process
-# runs as UID 1000 (see docker/browser-entrypoint.sh). Runtime applies
-# cap_drop=["ALL"] + cap_add=["NET_ADMIN","SETUID","SETGID"] so the init
-# phase holds only the capabilities it actually needs. no-new-privileges
-# prevents the non-root browser from re-acquiring capabilities.
+# Switch back to root so the entrypoint runs as root and can call
+# iptables-restore (needs CAP_NET_ADMIN) before dropping privileges via
+# gosu. Runtime applies cap_drop=["ALL"] + cap_add=["NET_ADMIN","SETUID",
+# "SETGID"] so the container's capability bounding set contains only
+# those three.
+#
+# After the entrypoint execs `tini -- gosu browser:browser python -m
+# src.browser`, tini (PID 1, root) retains the three caps in its
+# effective set for the container lifetime — tini is a minimal init
+# that does not exercise them; it only forks/execs its child and reaps
+# zombies. The long-running Firefox/FastAPI process runs as UID 1000
+# after gosu and has no effective capabilities (non-root users do not
+# inherit caps, and no-new-privileges prevents re-acquisition via
+# setuid binaries or file capabilities).
 USER root
 
 COPY docker/browser-entrypoint.sh /usr/local/bin/browser-entrypoint.sh

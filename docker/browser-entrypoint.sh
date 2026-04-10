@@ -100,8 +100,9 @@ install_egress_filter() {
   local old_ifs="$IFS"
   IFS=','
   for cidr in ${BROWSER_EGRESS_ALLOWLIST:-}; do
-    cidr="${cidr# }"
-    cidr="${cidr% }"
+    # Strip leading and trailing whitespace (handles multiple spaces/tabs).
+    cidr="${cidr#"${cidr%%[![:space:]]*}"}"
+    cidr="${cidr%"${cidr##*[![:space:]]}"}"
     [ -z "$cidr" ] && continue
     if ! is_valid_ipv4_cidr "$cidr"; then
       log "WARNING: ignoring invalid allowlist entry: ${cidr}"
@@ -122,6 +123,11 @@ install_egress_filter() {
 :FORWARD ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
 
+# Loopback is allowed: Firefox can reach in-container services on 127.0.0.1
+# (KasmVNC on 6080, FastAPI on 8500). /browser/* requires bearer auth; the
+# /uploads/* endpoint is intentionally unauthenticated so the browser can
+# navigate to user-uploaded files. Narrowing this rule would require per-port
+# allowlists that must be kept in sync with service.py.
 -A OUTPUT -o lo -j ACCEPT
 -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 ${dns_rules}${allow_rules}
@@ -161,6 +167,7 @@ EOF
 :FORWARD ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
 
+# Loopback is allowed — see IPv4 table comment above for rationale.
 -A OUTPUT -o lo -j ACCEPT
 -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
@@ -190,8 +197,14 @@ EOF
   log "iptables egress filter installed (private IP ranges blocked)"
 }
 
-install_egress_filter
-
-# tini must be PID 1 to reap zombies. exec into tini, which then runs gosu to
-# drop to the non-root browser user before launching the FastAPI service.
-exec tini -- gosu browser:browser python -m src.browser
+# When this script is executed directly (as Docker ENTRYPOINT), install the
+# egress filter then exec into tini→gosu→python. When sourced (e.g. from a
+# unit test that wants to call is_valid_ipv4 / is_valid_ipv4_cidr directly),
+# do nothing at load time so the tests can invoke the helpers without side
+# effects. ${BASH_SOURCE[0]} differs from ${0} when sourced.
+if [ "${BASH_SOURCE[0]:-$0}" = "${0}" ]; then
+  install_egress_filter
+  # tini must be PID 1 to reap zombies. exec into tini, which then runs gosu
+  # to drop to the non-root browser user before launching the FastAPI service.
+  exec tini -- gosu browser:browser python -m src.browser
+fi
