@@ -200,6 +200,49 @@ class TestPrepareParamsAllowlist:
         assert extra["tools"] == tools
         assert extra["tool_choice"] == "auto"
 
+    def test_anthropic_input_schema_tools_are_normalized(self, cred_manager):
+        """Anthropic-shape tools (with ``input_schema``) get normalized too.
+
+        Some callers (e.g. MCP, custom tool builders) emit Anthropic shape
+        directly rather than the OpenAI ``function`` wrapper. The LiteLLM-path
+        defense must normalize both shapes.
+        """
+        tools = [{
+            "name": "propose_edit",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "value": {"type": ["string", "object"]},
+                },
+            },
+        }]
+        req = self._make_request({
+            "model": "anthropic/claude-3-sonnet",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": tools,
+        })
+        msgs, extra = cred_manager._prepare_llm_params(req, "anthropic/claude-3-sonnet")
+        value_schema = (
+            extra["tools"][0]["input_schema"]["properties"]["value"]
+        )
+        assert "type" not in value_schema
+        assert value_schema["anyOf"] == [{"type": "string"}, {"type": "object"}]
+
+    def test_anthropic_unknown_shape_tools_pass_through(self, cred_manager):
+        """Tools that match neither shape pass through without crashing.
+
+        Defensive: a malformed or future tool shape should not cause the
+        normalization block to raise. It just passes through unchanged.
+        """
+        tools = [{"unknown_key": "value"}]
+        req = self._make_request({
+            "model": "anthropic/claude-3-sonnet",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": tools,
+        })
+        msgs, extra = cred_manager._prepare_llm_params(req, "anthropic/claude-3-sonnet")
+        assert extra["tools"] == tools
+
     def test_multiple_dangerous_params_all_blocked(self, cred_manager):
         """Multiple dangerous params should all be blocked simultaneously."""
         req = self._make_request({

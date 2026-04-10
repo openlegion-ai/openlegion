@@ -1691,6 +1691,55 @@ class TestOAuthTokenHandling:
             },
         }
 
+    def test_normalize_tool_schema_for_anthropic_drops_type_when_anyof_exists(self):
+        """Multi-type alongside existing anyOf drops the array type.
+
+        Sending both ``type: [...]`` and ``anyOf`` to Anthropic produces
+        an invalid request. The existing ``anyOf`` stands; the multi-type
+        is removed. Semantic loosening is preferable to rejection.
+        """
+        schema = {
+            "type": ["string", "object"],
+            "anyOf": [{"const": "yes"}, {"const": "no"}],
+        }
+        result = CredentialVault._normalize_tool_schema_for_anthropic(schema)
+        assert "type" not in result
+        assert result["anyOf"] == [{"const": "yes"}, {"const": "no"}]
+
+    def test_normalize_tool_schema_for_anthropic_drops_type_when_oneof_exists(self):
+        """Same rule for `oneOf` — drop the array type, keep the union."""
+        schema = {
+            "type": ["string", "number"],
+            "oneOf": [{"const": 1}, {"const": "one"}],
+        }
+        result = CredentialVault._normalize_tool_schema_for_anthropic(schema)
+        assert "type" not in result
+        assert result["oneOf"] == [{"const": 1}, {"const": "one"}]
+
+    def test_normalize_tool_schema_for_anthropic_drops_type_when_allof_exists(self):
+        """Same rule for `allOf` — drop the array type, keep the union."""
+        schema = {
+            "type": ["string", "object"],
+            "allOf": [{"description": "x"}],
+        }
+        result = CredentialVault._normalize_tool_schema_for_anthropic(schema)
+        assert "type" not in result
+        assert result["allOf"] == [{"description": "x"}]
+
+    def test_normalize_tool_schema_for_anthropic_recurses_into_anyof_branches(self):
+        """Nested multi-type schemas inside anyOf branches are normalized."""
+        schema = {
+            "anyOf": [
+                {"type": ["string", "number"]},
+                {"type": "object"},
+            ],
+        }
+        result = CredentialVault._normalize_tool_schema_for_anthropic(schema)
+        # First branch: multi-type was converted to anyOf (no anyOf sibling there)
+        assert result["anyOf"][0] == {"anyOf": [{"type": "string"}, {"type": "number"}]}
+        # Second branch unchanged
+        assert result["anyOf"][1] == {"type": "object"}
+
     def test_parse_anthropic_response_text(self):
         """Parses a simple text response."""
         data = {
@@ -2421,7 +2470,6 @@ async def test_oauth_chat_stream_normalizes_tool_schema_before_sdk_call(monkeypa
     fake_anthropic.APIStatusError = _FakeAPIStatusError
     monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
 
-    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
     v = CredentialVault()
 
     req = APIProxyRequest(

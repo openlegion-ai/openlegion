@@ -1096,7 +1096,13 @@ class CredentialVault:
                 normalized.pop("type", None)
             elif len(types) == 1:
                 normalized["type"] = types[0]
-            elif not any(k in normalized for k in ("anyOf", "oneOf", "allOf")):
+            elif any(k in normalized for k in ("anyOf", "oneOf", "allOf")):
+                # Multi-type alongside an existing union construct: drop the
+                # array ``type`` to keep the schema valid for Anthropic. The
+                # existing union stands. Slight semantic loosening — the
+                # alternative (sending an invalid schema) is worse.
+                normalized.pop("type", None)
+            else:
                 normalized.pop("type", None)
                 normalized["anyOf"] = [{"type": t} for t in types]
 
