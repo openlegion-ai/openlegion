@@ -40,7 +40,7 @@ WORKDIR /app
 COPY pyproject.toml .
 RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip \
     && pip install --no-cache-dir --root-user-action=ignore \
-    "camoufox[geoip]" fastapi uvicorn pydantic
+    "camoufox[geoip]" fastapi uvicorn pydantic httpx
 
 # Application code
 COPY src/browser/ /app/src/browser/
