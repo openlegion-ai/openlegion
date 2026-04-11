@@ -244,10 +244,20 @@ class TestOperatorConstants:
 
     def test_allowed_tools_populated(self):
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS, _OPERATOR_HEARTBEAT_TOOLS
-        assert len(_OPERATOR_ALLOWED_TOOLS) == 22
+        assert len(_OPERATOR_ALLOWED_TOOLS) == 23
         assert len(_OPERATOR_HEARTBEAT_TOOLS) == 5
         # Heartbeat tools should be a subset of allowed tools
         assert set(_OPERATOR_HEARTBEAT_TOOLS).issubset(set(_OPERATOR_ALLOWED_TOOLS))
+
+    def test_request_browser_login_in_allowlist(self):
+        """Operator must be allowed to delegate browser login requests to workers.
+
+        Operator itself has ``can_use_browser: False`` by design — it uses
+        the delegation path (``request_browser_login(agent_id=worker)``)
+        so session cookies land in the worker's browser profile.
+        """
+        from src.cli.config import _OPERATOR_ALLOWED_TOOLS
+        assert "request_browser_login" in _OPERATOR_ALLOWED_TOOLS
 
     def test_operator_agent_id(self):
         from src.cli.config import _OPERATOR_AGENT_ID

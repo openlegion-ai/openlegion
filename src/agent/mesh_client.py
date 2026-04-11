@@ -437,17 +437,27 @@ class MeshClient:
 
     async def request_browser_login(
         self, url: str, service: str, description: str,
+        target_agent_id: str | None = None,
     ) -> dict:
-        """Emit a browser login request event to the dashboard."""
+        """Emit a browser login request event to the dashboard.
+
+        When ``target_agent_id`` is set, the login card is routed to the
+        target agent's browser profile (orchestration/delegation). The
+        mesh enforces that the caller can message the target and the
+        target has browser access.
+        """
         client = await self._get_client()
+        body: dict = {
+            "agent_id": self.agent_id,
+            "url": url,
+            "service": service,
+            "description": description,
+        }
+        if target_agent_id:
+            body["target_agent_id"] = target_agent_id
         response = await client.post(
             f"{self.mesh_url}/mesh/browser-login-request",
-            json={
-                "agent_id": self.agent_id,
-                "url": url,
-                "service": service,
-                "description": description,
-            },
+            json=body,
             headers=self._trace_headers(),
         )
         response.raise_for_status()
@@ -744,16 +754,29 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
-    async def browser_command(self, action: str, params: dict | None = None) -> dict:
-        """Send a browser command through the mesh to the shared browser service."""
+    async def browser_command(
+        self, action: str, params: dict | None = None,
+        target_agent_id: str | None = None,
+    ) -> dict:
+        """Send a browser command through the mesh to the shared browser service.
+
+        When ``target_agent_id`` is set, the command is delegated to the
+        target agent's browser profile (used by orchestrators like
+        operator). The mesh validates that the caller can message the
+        target and the target has browser access. When omitted, the
+        command acts on the caller's own browser profile.
+        """
         client = await self._get_client()
+        body: dict = {
+            "agent_id": self.agent_id,
+            "action": action,
+            "params": params or {},
+        }
+        if target_agent_id:
+            body["target_agent_id"] = target_agent_id
         response = await client.post(
             f"{self.mesh_url}/mesh/browser/command",
-            json={
-                "agent_id": self.agent_id,
-                "action": action,
-                "params": params or {},
-            },
+            json=body,
             timeout=60,
             headers=self._trace_headers(),
         )

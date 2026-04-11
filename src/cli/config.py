@@ -1213,12 +1213,12 @@ _OPERATOR_AGENT_ID = "operator"
 _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # Heartbeat tier (5)
     "list_agents", "get_agent_profile", "get_system_status", "notify_user", "save_observations",
-    # Chat tier (+17)
+    # Chat tier (+18)
     "list_templates", "apply_template", "hand_off", "check_inbox", "update_status",
     "read_agent_history", "propose_edit", "confirm_edit", "create_agent",
     "list_projects", "get_project", "create_project",
     "add_agents_to_project", "remove_agents_from_project", "update_project_context",
-    "vault_list", "request_credential",
+    "vault_list", "request_credential", "request_browser_login",
 ]
 
 _OPERATOR_HEARTBEAT_TOOLS: list[str] = [

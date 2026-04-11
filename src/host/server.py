@@ -285,6 +285,43 @@ def create_mesh_app(
             return _extract_verified_agent_id(request)
         return agent_id
 
+    def _resolve_browser_target(caller_id: str, target_claim: object) -> str:
+        """Resolve the effective browser-target agent_id for self/delegation paths.
+
+        - ``None``/empty/whitespace target_claim → self path (returns ``caller_id``).
+        - target_claim equal to caller → self path (returns ``caller_id``).
+        - Otherwise delegation: requires the caller to be permitted to
+          message the target AND the target to have ``can_use_browser``.
+          Raises ``HTTPException(403)`` on either gate failure.
+        - Non-string target_claim (e.g. list, dict, int) → ``HTTPException(400)``.
+          Callers pull this value out of the JSON body where it can be any
+          type, so we defensively reject non-strings rather than crashing
+          with ``AttributeError`` on ``.strip()``.
+
+        Note: ``can_message`` semantically grants "send a chat message".
+        Reusing it for browser delegation is intentional but means a
+        worker that can message a peer can also navigate that peer's
+        browser. Endpoints that call this helper accept that coupling.
+        """
+        if target_claim is None or target_claim == "":
+            return caller_id
+        if not isinstance(target_claim, str):
+            raise HTTPException(400, "target_agent_id must be a string")
+        target = target_claim.strip()
+        if not target or target == caller_id:
+            return caller_id
+        if not permissions.can_message(caller_id, target):
+            raise HTTPException(
+                403,
+                "Cannot delegate browser: target is not in your can_message allowlist",
+            )
+        if not permissions.can_use_browser(target):
+            raise HTTPException(
+                403,
+                "Cannot delegate browser: target agent has no browser access",
+            )
+        return target
+
     def _require_any_auth(request: Request) -> None:
         """Require any valid auth token (identity-agnostic).
 
@@ -1071,9 +1108,23 @@ def create_mesh_app(
 
         Emits a ``browser_login_request`` event so the dashboard renders
         an interactive browser card with VNC viewer.
+
+        Supports delegation via ``target_agent_id``: when an orchestrator
+        (e.g. operator) sets up a login for a worker, the caller passes
+        the worker's ID and we emit the event under the worker's identity
+        so the dashboard's existing cross-surfacing logic routes it
+        correctly. Session cookies must land in the profile of the agent
+        that will use them — operator itself owns no browser, so it
+        delegates to the worker whose profile the cookies must target.
         """
-        agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
-        await _check_rate_limit("notify", agent_id)
+        caller_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        agent_id = _resolve_browser_target(
+            caller_id, data.get("target_agent_id") or "",
+        )
+
+        # Rate-limit on the caller, not the target — otherwise a noisy
+        # caller could exhaust an unrelated worker's notify quota.
+        await _check_rate_limit("notify", caller_id)
 
         url = data.get("url", "").strip()
         service = data.get("service", "").strip()
@@ -1095,7 +1146,7 @@ def create_mesh_app(
                 },
             )
 
-        return {"requested": True, "service": service}
+        return {"requested": True, "service": service, "target_agent": agent_id}
 
     @app.get("/mesh/agents")
     async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:
@@ -2565,14 +2616,26 @@ def create_mesh_app(
 
         Agents never talk to the browser service directly — the mesh
         enforces authentication and permission checks.
-        """
-        agent_id = _extract_verified_agent_id(request)
-        body = await request.json()
-        req_agent_id = body.get("agent_id", agent_id)
-        # Use verified identity, not the claimed one
-        req_agent_id = _resolve_agent_id(req_agent_id, request)
 
-        if not permissions.can_use_browser(req_agent_id):
+        When the body includes ``target_agent_id``, this is a delegation:
+        the caller (e.g. operator) wants the command to run against the
+        target agent's browser profile. Authorized when the caller can
+        message the target and the target has browser access. Used so
+        orchestrators can set up browser logins on behalf of workers
+        without having their own browser (session cookies must land in
+        the worker's profile).
+        """
+        caller_id = _extract_verified_agent_id(request)
+        body = await request.json()
+        req_agent_id = _resolve_browser_target(
+            caller_id, body.get("target_agent_id") or "",
+        )
+
+        # Self-browser path also has to satisfy can_use_browser.
+        # _resolve_browser_target already enforced this on the delegation
+        # path; here we close the gap when no target_agent_id was sent
+        # (or when target == caller).
+        if req_agent_id == caller_id and not permissions.can_use_browser(caller_id):
             raise HTTPException(403, "Browser access denied")
 
         action = body.get("action", "")
