@@ -519,8 +519,9 @@ async def browser_switch_tab(tab_index: int = -1, *, mesh_client=None) -> dict:
     name="browser_detect_captcha",
     description=(
         "Detect CAPTCHAs (reCAPTCHA, hCaptcha, Cloudflare Turnstile) on the "
-        "current page. If found, the CAPTCHA must be solved manually via VNC. "
-        "Usually not needed — browser_navigate auto-detects CAPTCHAs."
+        "current page. When a CAPTCHA solver is configured, CAPTCHAs are "
+        "solved automatically after navigation. If auto-solving fails or no "
+        "solver is configured, the CAPTCHA must be solved manually via VNC."
     ),
     parameters={},
     parallel_safe=False,

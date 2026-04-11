@@ -2967,6 +2967,57 @@ def create_dashboard_router(
             "delay": settings.get("browser_delay", 0.0),
         }
 
+    # ── CAPTCHA solver settings ───────────────────────────────
+
+    @api_router.get("/api/captcha-solver")
+    async def api_get_captcha_solver() -> dict:
+        """Return CAPTCHA solver configuration (key is masked)."""
+        settings = _load_settings()
+        provider = settings.get("captcha_solver_provider", "")
+        key = settings.get("captcha_solver_key", "")
+        return {
+            "provider": provider,
+            "key_masked": f"...{key[-4:]}" if len(key) >= 4 else "",
+        }
+
+    @api_router.post("/api/captcha-solver")
+    async def api_set_captcha_solver(request: Request) -> dict:
+        """Save CAPTCHA solver provider and API key."""
+        await _csrf_check(request)
+        body = await request.json()
+        provider = body.get("provider", "").strip().lower()
+        key = body.get("key", "").strip()
+
+        if provider and provider not in ("2captcha", "capsolver"):
+            raise HTTPException(400, "provider must be '2captcha' or 'capsolver'")
+
+        with _settings_lock:
+            settings = _load_settings()
+            settings["captcha_solver_provider"] = provider
+            if key:
+                settings["captcha_solver_key"] = key
+            elif not provider:
+                settings.pop("captcha_solver_key", None)
+            _save_settings(settings)
+
+        settings = _load_settings()
+        stored_key = settings.get("captcha_solver_key", "")
+        return {
+            "provider": settings.get("captcha_solver_provider", ""),
+            "key_masked": f"...{stored_key[-4:]}" if len(stored_key) >= 4 else "",
+        }
+
+    @api_router.delete("/api/captcha-solver")
+    async def api_delete_captcha_solver(request: Request) -> dict:
+        """Remove CAPTCHA solver configuration."""
+        await _csrf_check(request)
+        with _settings_lock:
+            settings = _load_settings()
+            settings.pop("captcha_solver_provider", None)
+            settings.pop("captcha_solver_key", None)
+            _save_settings(settings)
+        return {"removed": True}
+
     # ── System settings (consolidated) ────────────────────────
 
     _SYSTEM_SETTINGS_VALIDATORS: dict[str, tuple[type, float, float]] = {
@@ -3104,6 +3155,13 @@ def create_dashboard_router(
                 }.items():
                     if cfg_key in sys_settings:
                         runtime.extra_env[env_key] = str(sys_settings[cfg_key])
+                # Push CAPTCHA solver config to env for browser service
+                _solver_provider = sys_settings.get("captcha_solver_provider", "")
+                _solver_key = sys_settings.get("captcha_solver_key", "")
+                if _solver_provider:
+                    os.environ["OPENLEGION_CAPTCHA_SOLVER_PROVIDER"] = _solver_provider
+                if _solver_key:
+                    os.environ["OPENLEGION_CAPTCHA_SOLVER_KEY"] = _solver_key
             except (ValueError, OSError):
                 pass
 

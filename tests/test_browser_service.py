@@ -3,6 +3,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from src.browser.service import BrowserManager, CamoufoxInstance
@@ -2832,6 +2833,7 @@ class TestCaptchaDetection:
         from src.browser.service import BrowserManager
 
         mgr = BrowserManager.__new__(BrowserManager)
+        mgr._captcha_solver = None
         inst = MagicMock()
         inst.page = AsyncMock()
         inst.lock = asyncio.Lock()
@@ -2881,6 +2883,7 @@ class TestCaptchaDetection:
         from src.browser.service import BrowserManager
 
         mgr = BrowserManager.__new__(BrowserManager)
+        mgr._captcha_solver = None
         inst = MagicMock()
         inst.page = AsyncMock()
         inst.lock = asyncio.Lock()
@@ -5033,3 +5036,214 @@ class TestBrowserManagerProxyConfig:
         manager.set_proxy_config("agent-1", {"url": "http://host:8080"})
         manager.set_proxy_config("agent-1", None)
         assert manager.get_proxy_config("agent-1") is None
+
+
+# ── CAPTCHA solver tests ─────────────────────────────────────────────────────
+
+
+class TestGetSolver:
+    """Tests for captcha.get_solver() factory function."""
+
+    def test_get_solver_returns_none_when_not_configured(self):
+        """No env vars → None."""
+        with patch.dict("os.environ", {}, clear=True):
+            from src.browser.captcha import get_solver
+            assert get_solver() is None
+
+    def test_get_solver_returns_solver_when_configured(self):
+        """Valid provider + key → CaptchaSolver instance."""
+        with patch.dict("os.environ", {
+            "CAPTCHA_SOLVER_PROVIDER": "2captcha",
+            "CAPTCHA_SOLVER_KEY": "test-key-123",
+        }):
+            from src.browser.captcha import CaptchaSolver, get_solver
+            solver = get_solver()
+            assert isinstance(solver, CaptchaSolver)
+            assert solver.provider == "2captcha"
+            assert solver.api_key == "test-key-123"
+
+    def test_get_solver_rejects_unknown_provider(self):
+        """Unknown provider → None with warning."""
+        with patch.dict("os.environ", {
+            "CAPTCHA_SOLVER_PROVIDER": "badprovider",
+            "CAPTCHA_SOLVER_KEY": "key",
+        }):
+            from src.browser.captcha import get_solver
+            assert get_solver() is None
+
+
+class TestClassifyCaptcha:
+    """Tests for captcha._classify_captcha()."""
+
+    def test_classify_captcha(self):
+        from src.browser.captcha import _classify_captcha
+        assert _classify_captcha('iframe[src*="recaptcha"]') == "recaptcha"
+        assert _classify_captcha('iframe[src*="hcaptcha"]') == "hcaptcha"
+        assert _classify_captcha('iframe[src*="challenges.cloudflare.com"]') == "turnstile"
+        assert _classify_captcha('[class*="cf-turnstile"]') == "turnstile"
+        assert _classify_captcha('#captcha') == "recaptcha"  # generic fallback
+        assert _classify_captcha('[class*="captcha"]') == "recaptcha"
+        assert _classify_captcha("something-unknown") == "recaptcha"  # default
+
+
+class TestCaptchaSolverSolve:
+    """Tests for CaptchaSolver.solve() and provider flows."""
+
+    @pytest.mark.asyncio
+    async def test_solve_2captcha_success(self):
+        """Mock a successful 2Captcha create+poll flow."""
+        from src.browser.captcha import CaptchaSolver
+
+        solver = CaptchaSolver("2captcha", "test-key")
+
+        # Mock page
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value="site-key-abc")
+        page.url = "https://example.com"
+
+        # Mock httpx responses
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.is_closed = False
+
+        create_resp = MagicMock()
+        create_resp.json.return_value = {"errorId": 0, "taskId": "task-123"}
+        create_resp.raise_for_status = MagicMock()
+
+        poll_resp = MagicMock()
+        poll_resp.json.return_value = {
+            "errorId": 0,
+            "status": "ready",
+            "solution": {"gRecaptchaResponse": "solved-token-xyz"},
+        }
+        poll_resp.raise_for_status = MagicMock()
+
+        mock_client.post = AsyncMock(side_effect=[create_resp, poll_resp])
+        solver._client = mock_client
+
+        result = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
+        assert result is True
+        # Verify token was injected
+        page.evaluate.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_solve_capsolver_success(self):
+        """Mock a successful CapSolver create+poll flow."""
+        from src.browser.captcha import CaptchaSolver
+
+        solver = CaptchaSolver("capsolver", "cap-key")
+
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value="site-key-abc")
+        page.url = "https://example.com"
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.is_closed = False
+
+        create_resp = MagicMock()
+        create_resp.json.return_value = {"errorId": 0, "taskId": "task-456"}
+        create_resp.raise_for_status = MagicMock()
+
+        poll_resp = MagicMock()
+        poll_resp.json.return_value = {
+            "errorId": 0,
+            "status": "ready",
+            "solution": {"token": "capsolver-token-xyz"},
+        }
+        poll_resp.raise_for_status = MagicMock()
+
+        mock_client.post = AsyncMock(side_effect=[create_resp, poll_resp])
+        solver._client = mock_client
+
+        result = await solver.solve(page, 'iframe[src*="hcaptcha"]', "https://example.com")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_solve_timeout(self):
+        """Verify timeout when solving takes too long."""
+        from src.browser.captcha import CaptchaSolver
+
+        solver = CaptchaSolver("2captcha", "test-key")
+
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value="site-key-abc")
+        page.url = "https://example.com"
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.is_closed = False
+
+        create_resp = MagicMock()
+        create_resp.json.return_value = {"errorId": 0, "taskId": "task-789"}
+        create_resp.raise_for_status = MagicMock()
+
+        # Poll always returns processing — will eventually time out
+        poll_resp = MagicMock()
+        poll_resp.json.return_value = {"errorId": 0, "status": "processing"}
+        poll_resp.raise_for_status = MagicMock()
+
+        mock_client.post = AsyncMock(side_effect=[create_resp] + [poll_resp] * 100)
+        solver._client = mock_client
+
+        # Patch _SOLVE_TIMEOUT to make test fast
+        with patch("src.browser.captcha._SOLVE_TIMEOUT", 0.1), \
+             patch("src.browser.captcha._POLL_INTERVAL", 0.01):
+            result = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_solve_no_sitekey_returns_false(self):
+        """Page with no sitekey → solve returns False."""
+        from src.browser.captcha import CaptchaSolver
+
+        solver = CaptchaSolver("2captcha", "test-key")
+
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=None)  # no sitekey found
+        page.url = "https://example.com"
+
+        result = await solver.solve(page, 'iframe[src*="recaptcha"]', "https://example.com")
+        assert result is False
+
+
+class TestCheckCaptchaAutoSolve:
+    """Tests for BrowserManager._check_captcha with auto-solve integration."""
+
+    @pytest.mark.asyncio
+    async def test_check_captcha_auto_solves(self):
+        """When solver succeeds, _check_captcha returns None (no CAPTCHA reported)."""
+        manager = BrowserManager(profiles_dir="/tmp/test_profiles_captcha1")
+
+        mock_solver = AsyncMock()
+        mock_solver.solve = AsyncMock(return_value=True)
+        manager._captcha_solver = mock_solver
+
+        # Mock instance with a page that has a CAPTCHA (no spec — CamoufoxInstance
+        # restricts .page access)
+        inst = MagicMock()
+        mock_locator = MagicMock()
+        mock_locator.count = AsyncMock(return_value=1)
+        inst.page.locator = MagicMock(return_value=mock_locator)
+        inst.page.url = "https://example.com"
+
+        result = await manager._check_captcha(inst)
+        assert result is None  # solved — not reported
+        mock_solver.solve.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_check_captcha_falls_back_on_failure(self):
+        """When solver fails, _check_captcha returns fallback dict."""
+        manager = BrowserManager(profiles_dir="/tmp/test_profiles_captcha2")
+
+        mock_solver = AsyncMock()
+        mock_solver.solve = AsyncMock(return_value=False)
+        manager._captcha_solver = mock_solver
+
+        inst = MagicMock()
+        mock_locator = MagicMock()
+        mock_locator.count = AsyncMock(return_value=1)
+        inst.page.locator = MagicMock(return_value=mock_locator)
+        inst.page.url = "https://example.com"
+
+        result = await manager._check_captcha(inst)
+        assert result is not None
+        assert "CAPTCHA detected" in result["message"]
+        mock_solver.solve.assert_called_once()
