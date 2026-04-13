@@ -38,12 +38,12 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `models.py` | Model cost/context window registry backed by LiteLLM, `estimate_cost()` |
 | **`src/agent/`** | |
 | `loop.py` | Agent execution loop (task + chat mode). `MAX_ITERATIONS=20`, `CHAT_MAX_TOOL_ROUNDS=30`, `CHAT_MAX_TOTAL_ROUNDS=200`, `_MAX_SESSION_CONTINUES=5`, `HEARTBEAT_MAX_ITERATIONS=10`. Env-var bounds clamped via `_clamp_env()`. |
-| `server.py` | Agent FastAPI server (27 endpoints). `_FILE_CAPS` enforced on workspace writes (HTTP 413). |
+| `server.py` | Agent FastAPI server (27 endpoints). `_FILE_CAPS` (7 entries) enforced on workspace writes (HTTP 413). `_WORKSPACE_ALLOWLIST` frozenset gates reads/writes. |
 | `llm.py` | LLM client — routes through mesh proxy, never holds keys |
 | `context.py` | Context window management (write-then-compact, `_SUMMARIZATION_INPUT_LIMIT=20_000`). Empty summary falls back to hard prune. |
 | `skills.py` | Skill registry and tool discovery |
 | `memory.py` | Per-agent SQLite + sqlite-vec + FTS5 memory store |
-| `workspace.py` | Persistent markdown workspace. Bootstrap files: PROJECT.md, SYSTEM.md, INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md. Also manages HEARTBEAT.md (loaded separately), daily logs, learnings. |
+| `workspace.py` | Persistent markdown workspace. Bootstrap files: PROJECT.md, SYSTEM.md, INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md, INTERFACE.md. Also manages HEARTBEAT.md (loaded separately), daily logs, learnings. |
 | `mesh_client.py` | Agent-side HTTP client for mesh communication |
 | `loop_detector.py` | Tool loop detection with escalating responses (warn/block/terminate) |
 | `mcp_client.py` | MCP tool server client and lifecycle |
@@ -63,8 +63,10 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `subagent_tool.py` | In-process subagents (MAX_DEPTH=2, MAX_CONCURRENT=3, MAX_TTL=600s, DEFAULT_MAX_ITERATIONS=10) |
 | `introspect_tool.py` | Runtime state query (permissions, budget, fleet, cron, health) |
 | `wallet_tool.py` | Wallet operations — get address, get balance, read contract, transfer, execute (Ethereum + Solana) |
+| `fleet_tool.py` | Operator-only fleet management tools (`list_templates`, `apply_template`) |
+| `operator_tools.py` | Operator-only tools for fleet/project orchestration (`propose_edit`, `confirm_edit`, `save_observations`, `read_agent_history`, `create_agent`, `list_projects`, `get_project`, `create_project`, `add_agents_to_project`, `remove_agents_from_project`, `update_project_context`) |
 | **`src/host/`** | |
-| `server.py` | Mesh FastAPI app factory — 43 endpoints, all permission-checked. `_RATE_LIMITS` dict (13 entries). VNC reverse proxy with agent token rejection. Localhost validation for `x-mesh-internal`. |
+| `server.py` | Mesh FastAPI app factory — ~60 endpoints, all permission-checked. `_RATE_LIMITS` dict (16 entries: 14 static + `ext_credentials`/`ext_status` added at external-API init). VNC reverse proxy with agent token rejection. Localhost validation for `x-mesh-internal`. |
 | `mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter |
 | `runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. Container security: non-root UID 1000, `cap_drop=[ALL]`, `no-new-privileges`, `read_only=True`, `tmpfs=/tmp` (100m, noexec, nosuid), `mem_limit=384m`, `cpu_quota=15000` (0.15 CPU), `pids_limit=256`. |
 | `transport.py` | Transport ABC → HttpTransport / SandboxTransport |
@@ -97,7 +99,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `slack.py` | Slack adapter (Socket Mode, sanitized streaming) |
 | `whatsapp.py` | WhatsApp Cloud API adapter (`X-Hub-Signature-256` verification, warns when signature verification disabled) |
 | **`src/dashboard/`** | |
-| `server.py` | Dashboard FastAPI router + 95 API endpoints + VNC URL injection. Alpine.js SPA with `autoescape=True`, CSP headers, CSRF via `X-Requested-With` requirement on state-changing endpoints. |
+| `server.py` | Dashboard FastAPI router + 106 API endpoints + VNC URL injection. Alpine.js SPA with `autoescape=True`, CSP headers, CSRF via `X-Requested-With` requirement on state-changing endpoints. |
 | `events.py` | EventBus for real-time WebSocket streaming. `threading.Lock` on `emit()`. |
 | `auth.py` | Session cookie verification for dashboard access |
 | `static/` | JS (app.js, websocket.js), CSS, avatars (50 SVGs), favicons |
@@ -109,7 +111,7 @@ Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agen
 | `repl.py` | REPLSession — interactive command dispatch |
 | `channels.py` | ChannelManager — messaging channel lifecycle |
 | `formatting.py` | Tool display, styled output, response rendering |
-| **`src/templates/`** | 11 YAML fleet templates: starter, content, deep-research, devteam, monitor, sales, competitive-intel, lead-enrichment, price-intelligence, review-ops, social-listening |
+| **`src/templates/`** | 13 YAML fleet templates: starter, content, deep-research, devteam, monitor, sales, competitive-intel, lead-enrichment, price-intelligence, review-ops, social-listening, research, opportunity-finder |
 | **Other** | |
 | `src/setup_wizard.py` | Interactive setup wizard with validation |
 | `src/marketplace.py` | Git-based skill marketplace (install/remove, git hooks disabled via `core.hooksPath=/dev/null`) |
@@ -123,7 +125,7 @@ The engine has NO direct dependencies on app/ or provisioner/. No imports, no ca
 ### Provisioner → Engine
 
 Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
-- Deploys code via `git clone` in cloud-init, updates via `update.sh` (git pull + Docker rebuild)
+- Deploys code via `git clone` in cloud-init. An `update.sh` script is shipped alongside, but the live update path in `provisioner/app/services/ssh.py:run_update()` runs the equivalent commands inline over SSH (git pull + Docker rebuild + `systemctl restart openlegion`).
 - Writes `.env` with API keys and config via SSH (base64 encoded to prevent injection)
 - Health checks by SSH-ing to localhost and hitting `GET /mesh/agents` with `x-mesh-internal: 1`
 - Starts/stops via `systemctl restart openlegion`
@@ -155,7 +157,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 ### Error Handling
 - Domain-specific exceptions propagated with context
 - Overly broad catches avoided — transient vs permanent distinguished
-- `sanitize_for_prompt()` strips invisible Unicode across all input boundaries (~60 call sites across 16 source files)
+- `sanitize_for_prompt()` strips invisible Unicode across all input boundaries (88 call sites across 16 source files)
 - Security errors return generic messages (no leaking internals)
 
 ### Async Patterns
@@ -182,7 +184,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - **Agents never hold API keys.** All LLM/API calls go through mesh credential vault.
 - **No `eval()`/`exec()` on untrusted input.** Skill self-authoring uses AST validation.
 - **Permission checks on all mesh endpoints.** Default deny.
-- **Rate limits on state-mutating mesh endpoints.** 13 rate-limited categories defined in `server.py:_RATE_LIMITS`.
+- **Rate limits on state-mutating mesh endpoints.** 16 rate-limited categories defined in `server.py:_RATE_LIMITS` (14 static + 2 added at external-API init).
 - **File path traversal protection.** Two-stage validation in `file_tool.py` (reject `..` before resolution, then walk with symlink resolution via `lstat()`). Workspace `_read_file()` uses `resolve` + `is_relative_to`.
 - **Agent container hardening.** Non-root (UID 1000), `no-new-privileges`, `cap_drop=[ALL]`, `read_only=True`, `tmpfs=/tmp` (100m, noexec, nosuid), 384MB memory, 0.15 CPU, `pids_limit=256`. Browser service container has a different posture (writable /home/browser for Firefox state) — see **Browser container network egress filter** below for its privilege model.
 - **All untrusted text sanitized** via `sanitize_for_prompt()` before reaching LLM context.
@@ -194,7 +196,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - **Bounded execution.** 20 iterations for tasks, 30 tool rounds for chat, 200 total chat rounds, token budgets per task. Env-var bounds clamped with validation.
 - **Write-then-compact.** Before discarding context, important facts flush to MEMORY.md. Empty summary falls back to hard prune.
 - **CSRF protection.** Dashboard state-changing endpoints require `X-Requested-With` header.
-- **Workspace file caps.** `_FILE_CAPS` enforced on workspace writes (HTTP 413).
+- **Workspace file caps.** `_FILE_CAPS` enforced on workspace writes (HTTP 413). 7 entries: `SOUL.md: 4000`, `INSTRUCTIONS.md: 12000`, `AGENTS.md: 12000`, `USER.md: 4000`, `MEMORY.md: 16000`, `HEARTBEAT.md: None` (uncapped), `INTERFACE.md: 4000`.
 - **Webhook body size limit.** 1MB with Content-Length pre-check.
 - **Wallet seed protection.** Seed reveal endpoint returns HTTP 410 (seed shown once at init). Init response has `Cache-Control: no-store`.
 - **Env file permissions.** `.agent.env` written with `chmod(0o600)`.
@@ -237,7 +239,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 6. **`src/shared/types.py` is the contract.** Every cross-component message is a Pydantic model here (335 lines, 24 models).
 7. **LLM tool-calling message roles must alternate.** `user → assistant(tool_calls) → tool(result) → assistant`. `_trim_context` merges summary into first user message to preserve this invariant.
 8. **busy_timeout variance.** Traces uses 5000ms while other SQLite connections use 30000ms.
-9. **Monolithic server files.** `dashboard/server.py` (~3045 lines, 95 endpoints) and `host/server.py` (~1566 lines, 43 endpoints) are single function-scoped definitions.
+9. **Monolithic server files.** `dashboard/server.py` (~3045 lines, 106 endpoints) and `host/server.py` (~1566 lines, ~60 endpoints) are single function-scoped definitions.
 10. **`containers.py` backward-compat alias.** Only consumed by E2E tests.
 
 ## Git Workflow
@@ -360,4 +362,55 @@ pytest tests/test_loop.py -x -v
 
 ## Review State
 
-(Empty — ready for the next review cycle)
+### Documentation Alignment Audit — 2026-04-13 (✅ complete)
+
+**Worktree:** `docs/alignment-audit` (off `main`). **Scope:** `docs/*` + `README.md` + `QUICKSTART.md` (13 files, ~3900 lines).
+
+**Method.** Phase 1 spawned 5 parallel subagents to extract factual inventories from the codebase (commands, config/env, lifecycle, security, tools/integrations) → merged as Code Truth at `/tmp/engine-docs-audit/code-truth.md`. Phase 2 spawned 5 more subagents to cross-reference every claim in every doc file against Code Truth. Full discrepancy report at `/tmp/engine-docs-audit/discrepancy-report.md`; per-file findings at `/tmp/engine-docs-audit/phase2/`.
+
+**Totals.** 22 🔴 lies · 25 🟡 stale · 53 🟢 missing · 31 🔵 vague · 7 ❌ broken examples.
+
+**Highest-impact corrections (🔴):**
+- **"No external network" for agents is false** (README.md §Trust Zones line 222, docs/architecture.md line 20, docs/security.md line 30). Agents run on a standard Docker bridge with NAT egress; SSRF is enforced at the application layer (`src/host/runtime.py:165-174`).
+- **Blackboard tool names wrong** in README.md lines 396–398 and docs/agent-tools.md lines 62–64 (`read_shared_state`/`write_shared_state`/`list_shared_state` do not exist; actual names are `read_blackboard`/`write_blackboard`/`list_blackboard`).
+- **All six MCP `@anthropic/mcp-server-*` package names in docs/mcp.md:124–130 are wrong**; real scope is `@modelcontextprotocol/server-*`. Users installing them get package-not-found errors.
+- **`TaskAssignment` Pydantic example raises `ValidationError`** (docs/development.md:169–178) — missing required `workflow_id` and `step_id` fields.
+- **`allowed_credentials: ["*"]` is NOT the default for new agents** (docs/security.md:73); the Pydantic default is `[]` (deny all).
+- **`set_cron` parameters incomplete** — entire tool-mode (direct tool call without LLM) is invisible (docs/agent-tools.md:85 missing `tool_name`/`tool_params`).
+- **Fleet template table in README lines 656–666 has five wrong agent rosters** (`deep-research`, `competitive-intel`, `monitor`, `social-listening`, `lead-enrichment`) and two templates missing (`opportunity-finder`, `research`).
+- **Memory size caps wrong** — INSTRUCTIONS.md is 12K not 8K (docs/memory.md:81, docs/dashboard.md:102); bootstrap total is 48K not 40K (docs/memory.md:89); FTS5 uses unicode61 not trigram tokenizer (docs/memory.md:143); 90% "emergency hard-prune" threshold doesn't exist as a separate code path.
+- **QUICKSTART.md:278** says browser is Chromium; it's Camoufox (stealth Firefox). Build is two images (~1 + ~3 min), not a single "~2 min" build.
+- **`OPENLEGION_MAX_PROJECTS=0` disables projects, not "unlimited"** (docs/configuration.md:277). Unlimited is when the var is absent.
+- **Heartbeat "starts with scaffold prefix"** (docs/triggering.md:195) — actual check is exact equality `rules.strip() == "# Heartbeat Rules"` (`src/agent/server.py:449`).
+
+**Most serious gaps (🟢):**
+- `docs/channels.md` omits `WHATSAPP_APP_SECRET` (production requirement for X-Hub-Signature-256 webhook verification).
+- `docs/dashboard.md` has zero coverage of auth/CSRF/SSO flow (`ol_session` cookie, `X-Requested-With` requirement, VNC bearer-token rejection, hosted vs dev mode).
+- `coordination_tool.py` (4 tools), `operator_tools.py` (10 tools), and `fleet_tool.py` (2 tools) are entirely undocumented in `docs/agent-tools.md`.
+- `docs/configuration.md` missing: `OPENLEGION_SYSTEM_PROXY`, `HTTP_PROXY`/`HTTPS_PROXY`, `OPENLEGION_TOOL_TIMEOUT`, execution-limit env vars, `INTERFACE.md` bootstrap file, `config/settings.json`, `config/network.yaml`.
+- Tool-mode cron (direct tool invocation without LLM) entirely absent from `docs/triggering.md`.
+- `_UPDATABLE_FIELDS` for cron PUT is `{"schedule", "message", "enabled", "suppress_empty", "tool_name", "tool_params"}` — docs only mention schedule/message.
+- Webhook HMAC signature verification (`require_signature=True`, `X-Webhook-Signature` header) absent from `docs/security.md`.
+- `docs/development.md`: 7 test files missing from test-file map; `src/host/wallet.py`, `src/host/api_keys.py`, `src/shared/models.py`, `src/cli/proxy.py`, and several builtins missing from project tree; test count "2240" should be ~3121; dev dependency table missing `pytest-cov`, `pytest-xdist`, `websockets`, `pypdf`, `anthropic`, `python-multipart`.
+- `docs/dashboard.md` API endpoint table missing ~40+ real endpoints (wallet, network/proxy, external-api-keys, audit, storage, uploads, system-settings, etc.).
+
+**CLAUDE.md staleness found while extracting Code Truth (informational — technically outside scope):**
+- Tool modules listed: 14 → 16 exist (`fleet_tool.py`, `operator_tools.py` missing).
+- `_RATE_LIMITS`: "13 entries" → 16 (14 static + 2 runtime-added).
+- Fleet templates: "11" → 13 (`research.yaml`, `opportunity-finder.yaml` missing).
+- Mesh endpoints: "~43" → ~60.
+- `sanitize_for_prompt()` call sites: "~60" → 88.
+- `_FILE_CAPS` described as 2 entries → actually 7.
+
+**Phase 3 — fixes applied.** 6 parallel subagents edited 13 files: `README.md`, `QUICKSTART.md`, `CLAUDE.md`, and `docs/{agent-tools,architecture,channels,configuration,dashboard,development,mcp,memory,security,triggering}.md`. Priority order applied: 🔴 lies → 🟡 stale → ❌ broken → 🟢 missing → 🔵 vague. Scope expansions: (a) `CLAUDE.md` module table / counts / endpoint stats were refreshed alongside the main scope; (b) operator-only tools (`fleet_tool.py`, `operator_tools.py`) documented in a clearly-labeled section; (c) `skills/README.md` blackboard-tool-name fix applied as collateral cleanup when grep'd up during verification.
+
+**Verification.** Two final-pass subagents ran against the post-fix tree:
+1. Spot-check of all 14 highest-impact fixes against current doc text + source code — PASS on every check, zero regressions.
+2. Cross-repo sanity check against `app/` and `provisioner/` for SSO and deployment claims — all PASS except one minor `update.sh` mechanism note (engine docs said "updates via `update.sh`" but provisioner's `ssh.py:run_update()` actually runs the equivalent commands inline). Fixed in the §Cross-Repo Integration line above.
+
+**Artifacts (retained in `/tmp/engine-docs-audit/` for reference):**
+- `code-truth.md` + `phase1/01..05.md` — factual inventories from reading the code
+- `phase2/A..E.md` — per-file discrepancy reports
+- `discrepancy-report.md` — consolidated findings
+
+**Worktree state.** `docs/alignment-audit` branch off `main`, 13 tracked files modified + 1 collateral (`skills/README.md`). Ready for commit and PR.

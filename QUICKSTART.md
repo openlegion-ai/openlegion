@@ -191,6 +191,8 @@ python -m venv .venv
 
 > PowerShell blocks the script? Run: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
 
+> After install, `openlegion` is available only inside the venv. Either activate it (`".venv\Scripts\Activate.ps1"`) before use, or run `openlegion` as `.venv\Scripts\openlegion.exe`. To make it available globally, add the `.venv\Scripts\` directory to your PATH.
+
 </details>
 
 > First install downloads ~70 packages and takes 2-3 minutes. Subsequent installs use pip's cache and are much faster.
@@ -210,7 +212,7 @@ On first run (no credentials configured), `openlegion start` offers three paths:
 2. **Open the dashboard** — configure everything via the web UI at `/dashboard`
 3. **Skip** — start the runtime and use `/addkey` later in the REPL
 
-The Docker image builds automatically on your first `openlegion start` (~2 min). Config files (`config/mesh.yaml`, `config/agents.yaml`, `config/permissions.json`) are created automatically during setup.
+Two Docker images build automatically on first run: the agent image (~1 min) and browser service image (Camoufox + KasmVNC, ~3 min). Config files (`config/mesh.yaml`, `config/agents.yaml`, `config/permissions.json`) are created automatically during setup.
 
 ---
 
@@ -221,7 +223,7 @@ The Docker image builds automatically on your first `openlegion start` (~2 min).
 /costs              # per-agent LLM spend
 /agents             # list running agents
 /broadcast Hello!   # message all agents
-/quit               # stop everything
+/quit               # exit REPL and stop runtime (foreground mode; use openlegion stop for background mode)
 ```
 
 ---
@@ -241,11 +243,13 @@ Use `/add` in the REPL to add more agents to a running system.
 Add channel tokens to `.env`:
 
 ```bash
-OPENLEGION_CRED_TELEGRAM_BOT_TOKEN=123456:ABC...
-OPENLEGION_CRED_DISCORD_BOT_TOKEN=MTIz...
+OPENLEGION_SYSTEM_TELEGRAM_BOT_TOKEN=123456:ABC...
+OPENLEGION_SYSTEM_DISCORD_BOT_TOKEN=MTIz...
 ```
 
-On next `openlegion start`, a pairing code appears — send it to your bot to link.
+The `OPENLEGION_SYSTEM_*` form is the recommended host-level tier. The `OPENLEGION_CRED_*` form and bare env vars (e.g., `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`) also work.
+
+On next `openlegion start`, a pairing code appears — send `/start <code>` to your Telegram bot (or DM `/start <code>` to your Discord bot) to link.
 
 ### Docker Sandbox (maximum security)
 
@@ -275,6 +279,6 @@ openlegion start --sandbox
 | `python3: command not found` | Install Python 3.10+ (see above). On Windows, use `python` instead of `python3`. |
 | `pip install` is slow | First install downloads ~70 packages (2-3 min). This is normal. Subsequent installs are fast. |
 | `pip install` permission error | Activate the venv first — don't install globally. |
-| Docker build is slow | First build downloads base image + Chromium (~2 min). Rebuilds are fast. |
+| Docker build is slow | First build downloads base image + Camoufox (stealth Firefox) (~3 min for browser image, ~1 min for agent image). Rebuilds are fast. |
 | Agent not responding | `openlegion status` to check health. Verify API key has credits. |
 | PowerShell blocks scripts | `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` |

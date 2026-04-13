@@ -87,13 +87,15 @@ curl -X PUT -H "Authorization: Bearer $MESH_AUTH_TOKEN" \
   -d '{"schedule": "every 1h", "message": "Updated message"}'
 ```
 
+The updatable fields (`_UPDATABLE_FIELDS`) are: `schedule`, `message`, `enabled`, `suppress_empty`, `tool_name`, and `tool_params`. All other fields (e.g., `agent`, `heartbeat`) are immutable after creation. To enable or disable a job without deleting it, set `enabled: true` or `enabled: false`.
+
 **Via agent tools:**
 - `list_cron()` -- list all jobs for the agent
 - `remove_cron(job_id)` -- remove a job
 
 ### Empty Response Suppression
 
-By default, cron jobs suppress empty or trivial agent responses (e.g., "ok", "nothing to do"). This prevents notification spam when an agent has nothing to report. Disable with `suppress_empty: false`.
+By default, cron jobs suppress empty or trivial agent responses. The complete set of suppressed response strings is: `""` (empty), `"ok"`, `"heartbeat_ok"`, `"nothing to do"`, `"no updates"`. This prevents notification spam when an agent has nothing to report. Disable with `suppress_empty: false`.
 
 ## Heartbeats
 
@@ -130,7 +132,7 @@ Agent: I'll monitor the system every 30 minutes.
 → set_cron(schedule="every 30m", heartbeat=true)
 ```
 
-The probes (disk_usage, pending_signals, pending_tasks) run automatically -- you don't need to specify them. Define your escalation rules in `HEARTBEAT.md` instead.
+The three probes (`disk_usage`, `pending_signals`, `pending_tasks`) run automatically -- you don't need to specify them, and you cannot add custom probes. Define your escalation rules in `HEARTBEAT.md` instead.
 
 **Via mesh API** (add `heartbeat: true`):
 
@@ -181,7 +183,7 @@ When a heartbeat fires, the agent receives a single message with all the context
 | Section | Content | Source |
 |---------|---------|--------|
 | **Your Heartbeat Rules** | Custom HEARTBEAT.md content | Agent's `/heartbeat-context` endpoint |
-| **Your Recent Activity** | Last 2 days of daily logs (capped at 4000 chars) | Agent's `/heartbeat-context` endpoint |
+| **Your Recent Activity** | Last 2 days of daily logs (capped at 4000 chars) | Agent's `/heartbeat-context` endpoint (transport cap 8000 chars); 4000-char display cap applied by cron scheduler |
 | **Probe Alerts** | Triggered probe results with details | Deterministic probes |
 | **Pending Signals** | Actual blackboard signal content (up to 5 items) | Blackboard `signals/{agent}` |
 | **Pending Tasks** | Actual blackboard task content (up to 5 items) | Blackboard `tasks/{agent}` |
@@ -192,11 +194,36 @@ This replaces the previous pattern where agents had to waste tool calls reading 
 
 Heartbeats skip the LLM dispatch entirely (zero cost) when all three conditions are met:
 
-1. **HEARTBEAT.md is default** — empty or starts with the scaffold prefix
+1. **HEARTBEAT.md is default** — the file is empty (after stripping whitespace) or its content is **exactly** `# Heartbeat Rules` (exact equality, not prefix matching). A file containing `# Heartbeat Rules` followed by any additional content is considered customized and will be sent to the LLM.
 2. **No recent activity** — daily logs are empty
 3. **No probes triggered** — disk usage normal, no pending signals or tasks
 
 This makes always-on heartbeats economically viable even at high frequencies.
+
+## Tool-Mode Cron
+
+In addition to dispatching a message to an agent (message mode) or running a heartbeat (heartbeat mode), cron jobs can invoke a tool directly — **without any LLM call**. This is useful for fully deterministic periodic operations where no reasoning is needed.
+
+Set `tool_name` (and optionally `tool_params` as a JSON-encoded dict) when creating a job:
+
+**Via mesh API:**
+
+```bash
+curl -X POST http://localhost:8420/mesh/cron \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $MESH_AUTH_TOKEN" \
+  -d '{
+    "agent_id": "researcher",
+    "schedule": "every 1h",
+    "message": "",
+    "tool_name": "web_search",
+    "tool_params": "{\"query\": \"openlegion news\"}"
+  }'
+```
+
+When `tool_name` is set, the cron scheduler calls the tool directly via the agent's invoke endpoint, bypassing the LLM entirely. The tool result is recorded in traces and, if non-empty and `suppress_empty` is not false, logged. The `message` field is ignored when `tool_name` is present.
+
+Both `tool_name` and `tool_params` are in the `_UPDATABLE_FIELDS` set and can be changed via `PUT /mesh/cron/<job_id>`.
 
 ## Webhooks
 
@@ -209,6 +236,29 @@ curl -X POST http://localhost:8420/webhook/hook/<hook_id> \
 ```
 
 The webhook payload is included in the message dispatched to the configured agent.
+
+### Webhook Signature Verification
+
+Webhooks can optionally require HMAC-SHA256 signature verification. When a webhook is created with `require_signature: true`, the server generates a random 32-byte hex secret and returns it once. Callers must include the signature in the `X-Webhook-Signature` header (not to be confused with WhatsApp's `X-Hub-Signature-256`):
+
+```bash
+# Create a webhook with signature verification
+curl -X POST http://localhost:8420/mesh/webhooks \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $MESH_AUTH_TOKEN" \
+  -d '{"agent": "researcher", "name": "my-hook", "require_signature": true}'
+# Response includes "secret": "<hex>" -- save this, it is shown once
+
+# Send a signed payload
+BODY='{"company": "Acme"}'
+SIG=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
+curl -X POST http://localhost:8420/webhook/hook/<hook_id> \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Signature: $SIG" \
+  -d "$BODY"
+```
+
+Unsigned requests to a signature-required webhook are rejected with HTTP 401.
 
 ## Pub/Sub Events
 
@@ -261,7 +311,7 @@ Poll directories for new or modified files matching glob patterns. Uses polling 
 
 ### Configuration
 
-File watchers are configured programmatically via the `FileWatcher.watch()` method. Each watcher specifies:
+File watchers are configured programmatically via the `FileWatcher.watch()` method. There is no dashboard UI, CLI command, or YAML config for file watchers -- they must be registered in code (e.g., from a custom channel integration or startup hook). Each watcher specifies:
 
 | Field | Type | Description |
 |-------|------|-------------|

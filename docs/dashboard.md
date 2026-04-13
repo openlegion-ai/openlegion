@@ -6,7 +6,7 @@ Real-time web dashboard for fleet observability and management.
 
 The dashboard is served at `http://localhost:8420/dashboard` (or whatever port the mesh is configured on). It provides a live view of your agent fleet across three main tabs with a consolidated navigation bar, slide-over chat panels, and a keyboard command palette.
 
-No additional setup is required -- the dashboard starts automatically with `openlegion start`.
+No additional setup is required -- the dashboard starts automatically with `openlegion start`. In self-hosted and local dev mode, the dashboard is open to anyone who can reach port 8420. In hosted mode (subdomain deployments), SSO authentication is required; see [Authentication](#authentication) for details.
 
 ## Navigation
 
@@ -16,7 +16,7 @@ The dashboard uses a consolidated three-tab layout:
 |-----|--------------|
 | **Fleet** | Agent cards, agent detail views, configuration editing |
 | **Activity** | Traces, live events, blackboard, costs, and automation |
-| **System** | Credentials, pub/sub, model pricing |
+| **System** | Credentials, pub/sub, model pricing, network/proxy settings |
 
 A command palette (**Cmd+K** / **Ctrl+K**) provides quick access to agents, actions, and navigation. The search button in the nav bar also opens it.
 
@@ -51,7 +51,7 @@ When a project is selected, a PROJECT.md banner appears above the agent grid. Ed
 
 Overview of all registered agents showing health status, activity state (idle/thinking/tool), daily cost, token usage, and restart count. Click any agent card to drill down into its detail view with cost breakdowns, budget bars, workspace file editor, and recent events. Also includes agent configuration management -- view and edit each agent's model, role, system prompt, and daily budget. Changes that require a restart (model) are flagged.
 
-All agents show an embedded KasmVNC viewer in their detail view, providing a live view of the agent's browser session.
+When the shared browser service is running, an embedded KasmVNC viewer appears in each agent's detail view, providing a live view of the browser session. If the browser service has not started or is unavailable, the VNC viewer is not shown.
 
 ## Activity Tab
 
@@ -70,6 +70,8 @@ Sub-views toggled via a tab bar at the top of the panel:
 ## System Tab
 
 Environment overview showing configured credentials with tier labels (system or agent, names only, never values), pub/sub subscriptions, and model pricing tables. Add new credentials from a dropdown of LLM providers, known agent tools (Brave Search, Apollo, Hunter), or custom service names.
+
+The System tab also hosts a **Network** subsection for fleet-wide and per-agent proxy configuration (`GET/PUT /api/network/proxy`, `PUT /api/agents/{id}/proxy`). See [Proxy Configuration](#proxy-configuration) for details.
 
 ## Agent Management
 
@@ -99,7 +101,7 @@ The agent detail view features a tabbed **Agent Settings** panel for viewing and
 
 | Tab | Contents | Description |
 |-----|----------|-------------|
-| **Identity** | `SOUL.md` (4K cap), `INSTRUCTIONS.md` (8K cap) | Personality, tone, operating procedures, domain knowledge |
+| **Identity** | `SOUL.md` (4K cap), `INSTRUCTIONS.md` (12K cap) | Personality, tone, operating procedures, domain knowledge |
 | **Memory** | `MEMORY.md` (16K cap), `USER.md` (4K cap), `HEARTBEAT.md` (no cap) | Long-term facts, user preferences, autonomous heartbeat rules |
 | **Config** | Model, role, budget, credential access | Agent configuration (model changes trigger restart) |
 | **Logs** | Activity + Learnings (read-only) | Daily session logs and recorded errors/corrections |
@@ -200,13 +202,50 @@ Click **Del** on any entry row. History namespace entries are protected and cann
 
 The dashboard connects to the mesh via WebSocket at `/ws/events`. Events are streamed in real-time with optional agent and type filters. The connection indicator in the top-right shows live/disconnected status. On disconnect, the WebSocket client automatically reconnects with exponential backoff.
 
+## Authentication
+
+### Dev vs Hosted Mode
+
+The dashboard operates in two modes:
+
+- **Dev / self-hosted mode** — when `/opt/openlegion/.access_token` does not exist (the default for local installs), all requests are allowed. No cookie or SSO is required.
+- **Hosted mode** — when `/opt/openlegion/.subdomain` exists (subdomain deployments via the OpenLegion cloud), the `ol_session` cookie is required on every request. Access without a valid cookie is rejected with HTTP 401/403.
+
+### Session Cookie (`ol_session`)
+
+In hosted mode, the Caddy reverse proxy runs a `forward_auth` gate at `/__auth/callback`. The SSO flow is:
+
+1. The app generates an HMAC token: `HMAC-SHA256(access_token, "{subdomain}:{expiry}")` → `{expiry}.{signature}`
+2. The user is redirected to `https://{subdomain}.engine.openlegion.ai/__auth/callback?token=...`
+3. The auth gate verifies the HMAC, sets the `ol_session` cookie (one-time-use — replay attacks are blocked), and redirects to the dashboard
+4. Caddy `forward_auth` verifies the cookie on every subsequent request
+
+The cookie is valid for up to 24 hours (enforced by the engine, independent of the auth gate's issued expiry). The cookie key is derived from the access token on disk via HMAC-SHA256.
+
+### CSRF Protection
+
+All state-changing endpoints (POST, PUT, DELETE, PATCH) require the `X-Requested-With` header. Browsers block this custom header on cross-origin requests (CORS preflight), preventing CSRF attacks on cookie-authenticated sessions. GET, HEAD, and OPTIONS are exempt.
+
+```bash
+# Example: include X-Requested-With on state-changing dashboard API calls
+curl -X POST http://localhost:8420/dashboard/api/cron \
+  -H "X-Requested-With: XMLHttpRequest" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "researcher", "schedule": "every 1h", "message": "Check leads"}'
+```
+
+### VNC Proxy
+
+The VNC reverse proxy at `/vnc/` rejects agent Bearer tokens. Only `ol_session` cookie authentication (dashboard auth) is accepted for VNC access, preventing agents from directly reading the shared browser screen.
+
 ## API Endpoints
 
-All dashboard API endpoints are prefixed with `/dashboard/api/`.
+All dashboard API endpoints are prefixed with `/dashboard/api/`. The SPA root is served at `GET /dashboard/` (HTML, not an API endpoint). State-changing endpoints (POST/PUT/DELETE/PATCH) require the `X-Requested-With` header; see [Authentication](#authentication).
+
+**Agents**
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/dashboard/` | Serve dashboard HTML |
 | `GET` | `/dashboard/api/agents` | Agent overview with health and costs |
 | `POST` | `/dashboard/api/agents` | Create a new agent |
 | `GET` | `/dashboard/api/agents/{id}` | Agent detail with spend and budget |
@@ -215,59 +254,192 @@ All dashboard API endpoints are prefixed with `/dashboard/api/`.
 | `PUT` | `/dashboard/api/agents/{id}/config` | Update agent configuration |
 | `GET` | `/dashboard/api/agents/{id}/status` | Agent status from container |
 | `GET` | `/dashboard/api/agents/{id}/capabilities` | Agent capabilities and tools |
-| `POST` | `/dashboard/api/agents/{id}/chat` | Non-streaming chat (request/response) |
-| `POST` | `/dashboard/api/agents/{id}/chat/stream` | SSE streaming chat (token-level) |
-| `POST` | `/dashboard/api/agents/{id}/steer` | Update agent system prompt live |
-| `POST` | `/dashboard/api/agents/{id}/reset` | Reset agent conversation history |
 | `POST` | `/dashboard/api/agents/{id}/restart` | Restart an agent |
 | `PUT` | `/dashboard/api/agents/{id}/budget` | Update agent budget |
 | `GET` | `/dashboard/api/agents/{id}/permissions` | Agent credential and API permissions |
 | `PUT` | `/dashboard/api/agents/{id}/permissions` | Update credential access patterns |
+| `GET` | `/dashboard/api/agents/{id}/activity` | Agent activity events |
+| `POST` | `/dashboard/api/restart-agents` | Restart all agent containers and the browser service |
+
+**Chat**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/dashboard/api/agents/{id}/chat` | Non-streaming chat (request/response) |
+| `POST` | `/dashboard/api/agents/{id}/chat/stream` | SSE streaming chat (token-level) |
+| `GET` | `/dashboard/api/agents/{id}/chat/history` | Retrieve conversation history for agent |
+| `POST` | `/dashboard/api/agents/{id}/steer` | Update agent system prompt live |
+| `POST` | `/dashboard/api/agents/{id}/reset` | Reset agent conversation history |
+| `POST` | `/dashboard/api/broadcast` | Send message to all agents |
+| `POST` | `/dashboard/api/broadcast/stream` | SSE streaming broadcast to all agents |
+
+**Workspace**
+
+| Method | Path | Description |
+|--------|------|-------------|
 | `GET` | `/dashboard/api/agents/{id}/workspace` | List agent workspace files (with cap, is_default) |
 | `GET` | `/dashboard/api/agents/{id}/workspace/{file}` | Read workspace file content |
 | `PUT` | `/dashboard/api/agents/{id}/workspace/{file}` | Write workspace file content |
 | `GET` | `/dashboard/api/agents/{id}/workspace-logs?days=N` | Read daily logs (read-only, default 3 days) |
 | `GET` | `/dashboard/api/agents/{id}/workspace-learnings` | Read errors and corrections (read-only) |
+
+**Artifacts & Uploads**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/dashboard/api/agents/{id}/artifacts` | List agent artifacts |
+| `GET` | `/dashboard/api/agents/{id}/artifacts/{name}` | Download an artifact |
+| `DELETE` | `/dashboard/api/agents/{id}/artifacts/{name}` | Delete an artifact |
+| `GET` | `/dashboard/api/agents/{id}/files` | List files in agent data volume |
+| `GET` | `/dashboard/api/agents/{id}/files/{path}` | Read a file from agent data volume |
+| `GET` | `/dashboard/api/uploads` | List uploads |
+| `POST` | `/dashboard/api/uploads/{name}` | Upload a file |
+| `GET` | `/dashboard/api/uploads/{name}/download` | Download an uploaded file |
+| `DELETE` | `/dashboard/api/uploads/{name}` | Delete an uploaded file |
+
+**Blackboard**
+
+| Method | Path | Description |
+|--------|------|-------------|
 | `GET` | `/dashboard/api/blackboard` | List blackboard entries |
 | `PUT` | `/dashboard/api/blackboard/{key}` | Write blackboard entry |
 | `DELETE` | `/dashboard/api/blackboard/{key}` | Delete blackboard entry |
+
+**Credentials**
+
+| Method | Path | Description |
+|--------|------|-------------|
 | `POST` | `/dashboard/api/credentials` | Add a credential to the vault |
 | `DELETE` | `/dashboard/api/credentials/{name}` | Remove a credential |
+| `POST` | `/dashboard/api/credentials/validate` | Validate a credential (check if set) |
+| `POST` | `/dashboard/api/credentials/agent` | Add an agent-tier credential |
+| `GET` | `/dashboard/api/credentials/{name}/value` | Retrieve masked credential value |
+| `POST` | `/dashboard/api/credentials/upload-env` | Bulk-import credentials from an .env file |
+
+**External API Keys**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/dashboard/api/external-api-keys` | List named external API keys |
+| `POST` | `/dashboard/api/external-api-keys` | Add an external API key |
+| `DELETE` | `/dashboard/api/external-api-keys/{key_id}` | Remove an external API key |
+
+**Costs & Budgets**
+
+| Method | Path | Description |
+|--------|------|-------------|
 | `GET` | `/dashboard/api/costs/{agent_id}` | Cost data for a specific agent |
 | `GET` | `/dashboard/api/costs` | Cost data with optional period |
+
+**Projects**
+
+| Method | Path | Description |
+|--------|------|-------------|
 | `GET` | `/dashboard/api/projects` | List all projects with members |
 | `POST` | `/dashboard/api/projects` | Create a new project |
 | `DELETE` | `/dashboard/api/projects/{name}` | Delete a project |
 | `POST` | `/dashboard/api/projects/{name}/members` | Add agent to project (auto-restarts agent) |
 | `DELETE` | `/dashboard/api/projects/{name}/members/{agent}` | Remove agent from project (auto-restarts agent) |
-| `GET` | `/dashboard/api/project?project={name}` | Read project's PROJECT.md (requires project param) |
-| `PUT` | `/dashboard/api/project?project={name}` | Update project's PROJECT.md (requires project param) |
-| `GET` | `/dashboard/api/traces` | Recent trace events |
-| `GET` | `/dashboard/api/traces/{id}` | Trace detail |
-| `GET` | `/dashboard/api/queues` | Queue status per agent |
+| `GET` | `/dashboard/api/project?project={name}` | Read project's PROJECT.md |
+| `PUT` | `/dashboard/api/project?project={name}` | Update project's PROJECT.md |
+
+**Automation (Cron)**
+
+| Method | Path | Description |
+|--------|------|-------------|
 | `GET` | `/dashboard/api/cron` | List cron jobs |
 | `POST` | `/dashboard/api/cron` | Create a cron job |
-| `POST` | `/dashboard/api/cron/{id}/run` | Trigger cron job |
-| `PUT` | `/dashboard/api/cron/{id}` | Update cron job schedule |
+| `POST` | `/dashboard/api/cron/{id}/run` | Trigger cron job immediately |
+| `PUT` | `/dashboard/api/cron/{id}` | Update cron job fields |
 | `POST` | `/dashboard/api/cron/{id}/pause` | Pause cron job |
 | `POST` | `/dashboard/api/cron/{id}/resume` | Resume cron job |
 | `DELETE` | `/dashboard/api/cron/{id}` | Delete cron job |
-| `GET` | `/dashboard/api/settings` | Environment settings |
-| `POST` | `/dashboard/api/credentials/validate` | Validate a credential (check if set) |
-| `GET` | `/dashboard/api/model-health` | Model health and failover status |
-| `POST` | `/dashboard/api/channels/{type}/connect` | Connect a messaging channel |
-| `POST` | `/dashboard/api/channels/{type}/disconnect` | Disconnect a messaging channel |
-| `POST` | `/dashboard/api/broadcast` | Send message to all agents |
-| `POST` | `/dashboard/api/broadcast/stream` | SSE streaming broadcast to all agents |
-| `GET` | `/dashboard/api/messages` | Recent message log |
+
+**Webhooks**
+
+| Method | Path | Description |
+|--------|------|-------------|
 | `GET` | `/dashboard/api/webhooks` | List configured webhooks |
 | `POST` | `/dashboard/api/webhooks` | Create a webhook endpoint |
-| `DELETE` | `/dashboard/api/webhooks/{name}` | Delete a webhook |
-| `POST` | `/dashboard/api/webhooks/{name}/test` | Send test payload to webhook |
-| `GET` | `/dashboard/api/logs` | Runtime logs (query: lines, level) |
+| `DELETE` | `/dashboard/api/webhooks/{hook_id}` | Delete a webhook |
+| `PATCH` | `/dashboard/api/webhooks/{hook_id}` | Update webhook configuration (name, agent, instructions, signature) |
+| `POST` | `/dashboard/api/webhooks/{hook_id}/test` | Send test payload to webhook |
+
+**Channels**
+
+| Method | Path | Description |
+|--------|------|-------------|
 | `GET` | `/dashboard/api/channels` | List connected messaging channels |
+| `POST` | `/dashboard/api/channels/{type}/connect` | Connect a messaging channel |
+| `POST` | `/dashboard/api/channels/{type}/disconnect` | Disconnect a messaging channel |
+| `GET` | `/dashboard/api/comms/activity` | Messaging channel activity log |
+| `GET` | `/dashboard/api/messages` | Recent message log |
+
+**Network / Proxy**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/dashboard/api/network/proxy` | Get fleet-wide proxy configuration |
+| `PUT` | `/dashboard/api/network/proxy` | Set fleet-wide proxy configuration |
+| `PUT` | `/dashboard/api/agents/{id}/proxy` | Set per-agent proxy override |
+
+**Wallet**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/dashboard/api/wallet/init` | Initialize wallet (generates seed; shown once) |
+| `GET` | `/dashboard/api/wallet/seed` | Retrieve wallet seed (HTTP 410 after first reveal) |
+| `GET` | `/dashboard/api/wallet/addresses` | List wallet addresses (Ethereum + Solana) |
+| `GET` | `/dashboard/api/wallet/rpc` | Get configured RPC endpoints |
+| `PUT` | `/dashboard/api/wallet/rpc` | Update RPC endpoints |
+| `POST` | `/dashboard/api/wallet/enable/{agent_id}` | Enable wallet access for an agent |
+
+**Storage**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/dashboard/api/storage` | Storage overview |
+| `GET` | `/dashboard/api/storage/databases` | List agent SQLite databases |
+| `POST` | `/dashboard/api/storage/databases/{db_id}/purge` | Purge a database |
+
+**Audit**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/dashboard/api/traces` | Recent trace events |
+| `GET` | `/dashboard/api/traces/{id}` | Trace detail |
+| `GET` | `/dashboard/api/audit` | Agent audit log |
+| `GET` | `/dashboard/api/operator-audit` | Operator-level audit log |
+| `GET` | `/dashboard/api/queues` | Queue status per agent |
+
+**System & Settings**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/dashboard/api/settings` | Environment settings (includes default_model) |
+| `GET` | `/dashboard/api/system-settings` | System-level settings |
+| `POST` | `/dashboard/api/system-settings` | Update system-level settings |
+| `GET` | `/dashboard/api/browser-settings` | Browser service settings |
+| `POST` | `/dashboard/api/browser-settings` | Update browser service settings |
+| `POST` | `/dashboard/api/default-model` | Set the default LLM model in mesh.yaml |
+| `GET` | `/dashboard/api/model-health` | Model health and failover status — per-model success/failure counts, cooldown status, and active model in the failover chain |
 | `GET` | `/dashboard/api/agent-templates` | Available agent fleet templates |
+| `GET` | `/dashboard/api/fleet/templates` | Fleet template list (alternate endpoint) |
+| `GET` | `/dashboard/api/logs` | Runtime logs (query: lines, level) |
+
+**Browser**
+
+| Method | Path | Description |
+|--------|------|-------------|
 | `POST` | `/dashboard/api/browser/{agent_id}/focus` | Focus browser window for agent |
+| `POST` | `/dashboard/api/browser/{agent_id}/reset` | Reset browser session for agent |
+| `POST` | `/dashboard/api/browser-login/complete` | Complete a browser login flow |
+| `POST` | `/dashboard/api/browser-login/cancel` | Cancel a browser login flow |
+
+**WebSocket**
+
+| Method | Path | Description |
+|--------|------|-------------|
 | `WS` | `/ws/events` | Real-time event stream |
 
 ## Accessibility

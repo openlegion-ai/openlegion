@@ -94,6 +94,12 @@ pytest tests/ -x
 | `src/dashboard/events.py` | `tests/test_events.py` |
 | `src/agent/memory.py` (fallback) | `tests/test_embedding_fallback.py` |
 | Cross-component | `tests/test_integration.py` |
+| `src/agent/builtins/wallet_tool.py` | `tests/test_wallet.py`, `tests/test_wallet_tool.py` |
+| `src/host/wallet.py` | `tests/test_wallet_endpoints.py` |
+| `src/agent/builtins/image_gen_tool.py` | `tests/test_image_gen.py` |
+| `src/agent/builtins/coordination_tool.py` | `tests/test_coordination.py` |
+| `src/host/permissions.py` | `tests/test_permissions.py` |
+| `src/host/api_keys.py` | `tests/test_api_keys.py` |
 
 ### Testing Conventions
 
@@ -168,13 +174,23 @@ Cross-component messages use Pydantic models from `src/shared/types.py`. Interna
 ```python
 # In src/shared/types.py
 class TaskAssignment(BaseModel):
-    task_id: str
+    task_id: str                          # auto-generated if omitted
+    workflow_id: str                      # required
+    step_id: str                          # required
     task_type: str
-    input_data: dict
+    input_data: dict[str, Any]
+    context: dict[str, Any] = {}
     timeout: int = 120
+    max_retries: int = 0
+    token_budget: TokenBudget | None = None
 
 # Used at component boundaries — dispatching tasks to agents
-assignment = TaskAssignment(task_type="research", input_data={"company": "Acme Corp"})
+assignment = TaskAssignment(
+    workflow_id="wf_123",
+    step_id="step_1",
+    task_type="research",
+    input_data={"company": "Acme Corp"},
+)
 ```
 
 ### SQLite for All State
@@ -221,7 +237,7 @@ async def your_tool(param1: str, param2: int = 10, *, mesh_client=None) -> dict:
 2. Enforce permissions -- check `permissions.can_*()` before acting
 3. Use Pydantic models from `src/shared/types.py`
 4. Add a method to `src/agent/mesh_client.py` if agents need to call it
-5. Add tests in `tests/test_mesh.py`
+5. Add HTTP endpoint tests in `tests/test_dashboard.py` (which covers `create_mesh_app()` HTTP handlers). Reserve `tests/test_mesh.py` for blackboard/pubsub layer tests.
 
 ```python
 @app.post("/mesh/your_endpoint")
@@ -269,7 +285,12 @@ openlegion/
 │   │       ├── introspect_tool.py # Live runtime state queries
 │   │       ├── skill_tool.py    # Custom skill creation + reload
 │   │       ├── subagent_tool.py # In-process subagent spawning
-│   │       └── web_search_tool.py  # DuckDuckGo search
+│   │       ├── web_search_tool.py  # DuckDuckGo search
+│   │       ├── wallet_tool.py   # Blockchain wallet operations (address, balance, transfer)
+│   │       ├── image_gen_tool.py # Image generation via Gemini or DALL-E 3
+│   │       ├── coordination_tool.py # Structured multi-agent coordination (hand_off, check_inbox)
+│   │       ├── fleet_tool.py    # Fleet management (operator-agent only)
+│   │       └── operator_tools.py # Operator-privileged tools (operator-agent only)
 │   ├── host/                    # Runs on the host machine
 │   │   ├── server.py            # Mesh FastAPI app
 │   │   ├── mesh.py              # Blackboard, PubSub, routing
@@ -286,7 +307,9 @@ openlegion/
 │   │   ├── watchers.py          # File watchers
 │   │   ├── containers.py        # Backward-compat alias for DockerBackend
 │   │   ├── traces.py            # Request tracing and diagnostics
-│   │   └── transcript.py        # Provider-specific transcript sanitization
+│   │   ├── transcript.py        # Provider-specific transcript sanitization
+│   │   ├── wallet.py            # Ethereum + Solana wallet signing service
+│   │   └── api_keys.py          # Named API key management (salted SHA-256, config/api_keys.json)
 │   ├── channels/                # Messaging adapters
 │   │   ├── base.py              # Abstract channel
 │   │   ├── telegram.py          # Telegram bot
@@ -296,7 +319,8 @@ openlegion/
 │   ├── shared/                  # Shared between host and agent
 │   │   ├── types.py             # Pydantic contracts
 │   │   ├── utils.py             # Logging, ID generation
-│   │   └── trace.py             # Distributed trace context
+│   │   ├── trace.py             # Distributed trace context
+│   │   └── models.py            # Model cost/context window registry (LiteLLM-backed)
 │   ├── dashboard/               # Web dashboard
 │   │   ├── server.py            # FastAPI router + API endpoints
 │   │   ├── events.py            # EventBus for real-time streaming
@@ -311,13 +335,14 @@ openlegion/
 │       ├── runtime.py           # RuntimeContext lifecycle management
 │       ├── repl.py              # REPLSession interactive dispatch
 │       ├── channels.py          # ChannelManager messaging lifecycle
-│       └── formatting.py        # Tool display and styled output
+│       ├── formatting.py        # Tool display and styled output
+│       └── proxy.py             # Proxy env var builder (build_proxy_env_vars)
 ├── config/                      # Runtime configuration
 │   ├── agents.yaml
 │   ├── mesh.yaml
 │   ├── permissions.json
 │   └── cron.json
-├── tests/                       # Test suite (2240 tests)
+├── tests/                       # Test suite (~3100 tests)
 │   └── fixtures/                # Test fixtures (echo MCP server, etc.)
 ├── Dockerfile.agent             # Agent container image
 └── pyproject.toml               # Project metadata
@@ -338,6 +363,10 @@ openlegion/
 | `pyyaml` | Config parsing |
 | `python-dotenv` | `.env` file loading |
 | `sqlite-vec` | Vector search for memory |
+| `websockets` | Dashboard real-time streaming |
+| `pypdf` | PDF text extraction for attachments |
+| `anthropic` | Anthropic SDK (used by litellm) |
+| `python-multipart` | Multipart form data parsing |
 
 ### Agent-Side (installed in container via Dockerfile)
 
@@ -354,7 +383,7 @@ openlegion/
 
 | Group | Packages | Purpose |
 |-------|----------|---------|
-| `dev` | `pytest`, `pytest-asyncio`, `ruff` | Testing and linting |
+| `dev` | `pytest`, `pytest-asyncio`, `pytest-cov`, `pytest-xdist`, `ruff` | Testing, coverage, and linting |
 | `mcp` | `mcp>=1.0` | MCP tool support |
 | `channels` | `python-telegram-bot`, `discord.py`, `slack-bolt` | Messaging channels |
 

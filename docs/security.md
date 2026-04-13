@@ -27,7 +27,7 @@ Agents run as non-root (UID 1000) with:
 - Read-only root filesystem (`read_only: True`)
 - Tmpfs at `/tmp` (100MB, noexec, nosuid)
 - No host filesystem access (only `/data` volume)
-- Internal bridge network (no external egress) — agents can only reach the mesh host
+- Regular Docker bridge network — agents have internet egress. External-network access is restricted at the application layer via SSRF protection in `src/agent/builtins/http_tool.py` (blocks private/CGNAT/IPv4-mapped/6to4/Teredo ranges, DNS pinning, max 5 redirects with revalidation at each hop, strips `Authorization` on cross-origin redirects).
 
 ```bash
 openlegion start  # Default container isolation
@@ -70,9 +70,9 @@ System credentials are identified by matching known provider names (`anthropic`,
 
 Per-agent access is controlled by `allowed_credentials` glob patterns in `config/permissions.json`:
 
-- `["*"]` -- access all agent-tier credentials (default for new agents)
+- `["*"]` -- grants access to all agent-tier credentials
 - `["brave_search_*", "myapp_*"]` -- access only matching names
-- `[]` -- no vault access
+- `[]` -- no vault access (Pydantic default — deny all unless explicitly configured)
 
 Even with `allowed_credentials: ["*"]`, system credentials are **always** blocked. Agents also cannot store or overwrite system credential names via `vault_store`.
 
@@ -130,14 +130,25 @@ Agent HTTP requests (`src/agent/builtins/http_tool.py`) are blocked from reachin
 - IPv4-mapped IPv6 addresses (e.g., `::ffff:127.0.0.1`) are also blocked
 - CGNAT range (100.64.0.0/10, RFC 6598) is also blocked
 - Prevents agents from using the HTTP tool to scan internal networks or access host services
-- SOCKS5 proxy URLs are rejected server-side with HTTP 400 — only HTTP/HTTPS proxies are supported
+
+**Proxy Configuration note:** SOCKS5 proxies are rejected when configuring system or per-agent proxies via the dashboard (HTTP 400 — only HTTP/HTTPS proxies are supported for proxy settings). The agent `http_request` tool itself uses whatever proxy is injected at container startup.
 
 ### Path Traversal Prevention
 
-Agent file tools (`src/agent/builtins/file_tool.py`) validate all paths are within `/data`:
-- Resolves symlinks before checking
-- Rejects `../` traversal attempts
-- All file operations are scoped to the container's `/data` volume
+Agent file tools (`src/agent/builtins/file_tool.py`) validate all paths through four stages:
+1. **Stage 0 — Absolute path rejection**: strips the `/data/` prefix from the candidate path; any remaining absolute path is rejected outright.
+2. **Stage 1 — Pre-resolution `..` check**: walks every path component and rejects any `..` segment *before* filesystem resolution — catches traversal attempts that rely on resolution order.
+3. **Stage 2 — Symlink-safe walk**: resolves each path component individually using `lstat()` to detect symlinks at every step, preventing symlink chains that point outside `/data`.
+4. **Stage 3 — Final `is_relative_to()` check**: confirms the fully resolved path is still under `/data`.
+All file operations are scoped to the container's `/data` volume.
+
+### Skill Self-Authoring
+
+Agents can write and register new tools (`skill_tool`). All submitted code is validated through AST analysis before execution:
+- Forbidden imports (23 modules including `os`, `subprocess`, `socket`, `importlib`, etc.)
+- Forbidden calls (16 functions including `eval`, `exec`, `open`, `compile`, etc.)
+- Forbidden attribute accesses (11 attributes including `__dict__`, `__subclasses__`, `__globals__`, etc.)
+- Skills are capped at 10,000 characters.
 
 ### Bounded Execution
 
@@ -152,14 +163,24 @@ Per-agent rate limits on mesh endpoints prevent abuse and resource exhaustion:
 
 | Endpoint | Limit | Window |
 |----------|-------|--------|
+| `api_proxy` | 30 requests | 60 seconds |
 | `vault_resolve` | 5 requests | 60 seconds |
+| `vault_store` | 10 requests | 3600 seconds |
 | `blackboard_read` | 200 requests | 60 seconds |
 | `blackboard_write` | 100 requests | 60 seconds |
 | `publish` | 200 requests | 60 seconds |
+| `notify` | 10 requests | 60 seconds |
 | `cron_create` | 10 requests | 3600 seconds |
+| `spawn` | 5 requests | 3600 seconds |
 | `wallet_read` | 120 requests | 60 seconds |
 | `wallet_transfer` | 10 requests | 3600 seconds |
 | `wallet_execute` | 10 requests | 3600 seconds |
+| `image_gen` | 10 requests | 60 seconds |
+| `agent_profile` | 30 requests | 60 seconds |
+| `ext_credentials` | 30 requests | 60 seconds |
+| `ext_status` | 60 requests | 60 seconds |
+
+All other endpoints default to 100 requests per 60 seconds.
 
 Exceeding a rate limit returns HTTP 429. Rate-limit buckets are automatically cleaned up when agents are deregistered.
 
@@ -167,7 +188,7 @@ Exceeding a rate limit returns HTTP 429. Rate-limit buckets are automatically cl
 
 Agents process untrusted text from user messages, web pages, HTTP responses, tool outputs, blackboard data, and MCP servers. Attackers can embed invisible instructions using tag characters (U+E0001-E007F), RTL overrides (U+202A-202E), zero-width spaces, variation selectors, and other invisible codepoints that LLM tokenizers decode while being invisible to humans.
 
-`sanitize_for_prompt()` in `src/shared/utils.py` strips these at multiple choke points (the primary three plus additional call sites in `workspace.py`, `mesh_tool.py`, and `dashboard/server.py`):
+`sanitize_for_prompt()` in `src/shared/utils.py` is called at 88+ sites across 16 source files. Key choke points:
 
 | Choke Point | File | What It Covers |
 |-------------|------|----------------|
@@ -188,6 +209,13 @@ Normal text in all scripts (Arabic, Hebrew, CJK, Devanagari, etc.), emoji with Z
 ### Adding New Paths to LLM Context
 
 If you add a new path where untrusted text reaches LLM context (new tool, new system prompt section, new message source), wrap it with `sanitize_for_prompt()`. See `tests/test_sanitize.py` for the full test suite.
+
+## Webhooks
+
+Named webhook endpoints support inbound HTTP payloads from external services. Security controls:
+
+- **Body size limit** — 1 MB (1,048,576 bytes). Enforced in two stages: a Content-Length pre-check rejects oversized requests immediately, followed by an authoritative check on the fully read body.
+- **Optional HMAC-SHA256 signature verification** — If a webhook is configured with a secret, every request must include an `X-Webhook-Signature` header. The signature is verified with `hmac.compare_digest` (constant-time comparison) against `HMAC-SHA256(secret, body)`. Requests with invalid or missing signatures are rejected with HTTP 401.
 
 ## System Introspection
 
