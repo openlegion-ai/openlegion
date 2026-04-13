@@ -24,7 +24,7 @@ All file operations are scoped to `/data` inside the container. Path traversal i
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `http_request` | `url`, `method`, `headers`, `body`, `timeout` | Make HTTP requests (GET/POST/PUT/DELETE/PATCH). Supports `$CRED{name}` handles in URL, headers, and body for credential-blind API calls. Resolved credentials are redacted from responses. Timeout default: 30s. SSRF protection blocks requests to private/internal addresses (loopback, link-local, reserved ranges) including redirect targets. |
+| `http_request` | `url`, `method` (default "GET"), `headers` (default {}), `body` (default "", string), `timeout` (default 30) | Make HTTP requests (GET/POST/PUT/DELETE/PATCH). Supports `$CRED{name}` handles in URL, headers, and body for credential-blind API calls. Resolved credentials are redacted from responses. SSRF protection blocks requests to private/internal addresses (loopback, link-local, reserved ranges) including redirect targets. **Note:** `body` must be a string — serialize JSON manually before passing it (e.g. `json.dumps(data)`). |
 
 ### Browser Automation
 
@@ -32,26 +32,29 @@ All agents share a single **browser service container** running Camoufox (a stea
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `browser_navigate` | `url`, `wait_ms`, `wait_until` | Open URL, wait, extract page text. `wait_until`: `domcontentloaded` (default), `load`, `networkidle`, `commit`. |
+| `browser_navigate` | `url`, `wait_ms`, `wait_until`, `snapshot_after` (default false) | Open URL, wait, extract page text. `wait_until`: `domcontentloaded` (default), `load`, `networkidle`, `commit`. Set `snapshot_after=true` to return the accessibility tree immediately after navigation. |
 | `browser_get_elements` | -- | Accessibility tree snapshot with element refs (e1, e2, ...). Returns structured text, not a visual image. |
 | `browser_screenshot` | `full_page` | Take screenshot, return visual PNG image. |
-| `browser_click` | `ref` or `selector`, `force` | Click element by accessibility ref or CSS selector. `force` bypasses actionability checks. |
-| `browser_type` | `ref` or `selector`, `text` | Type into input field |
+| `browser_click` | `ref` or `selector`, `force`, `snapshot_after` (default false) | Click element by accessibility ref or CSS selector. `force` bypasses actionability checks. Set `snapshot_after=true` to return an accessibility tree snapshot after the click. |
+| `browser_type` | `ref` or `selector`, `text`, `fast` (default false), `snapshot_after` (default false) | Type into input field (clears field first). `fast=true` sets the value directly without keystrokes. `snapshot_after=true` returns an accessibility tree snapshot after typing. |
 | `browser_hover` | `ref` or `selector` | Hover over an element to trigger dropdowns/tooltips. |
-| `browser_scroll` | `direction`, `amount`, `ref` | Scroll page up/down or scroll element into view. Default direction: `down`, default amount: one viewport height. |
+| `browser_scroll` | `direction`, `amount` (default 0), `ref` | Scroll page up/down or scroll element into view. Default direction: `down`. `amount` is in pixels; `0` (default) is treated as one viewport height. |
 | `browser_wait_for` | `selector`, `state`, `timeout_ms` | Wait for a CSS selector to appear/disappear. `state`: `visible` (default), `attached`, `hidden`, `detached`. |
 | `browser_press_key` | `key` | Press a keyboard key or shortcut (e.g. `Escape`, `Enter`, `Control+a`). |
 | `browser_go_back` | -- | Navigate back in browser history. |
 | `browser_go_forward` | -- | Navigate forward in browser history. |
-| `browser_switch_tab` | `tab_index` | List open tabs or switch to a specific tab. Omit `tab_index` to list only. |
+| `browser_switch_tab` | `tab_index` (default -1) | List open tabs or switch to a specific tab. Default `-1` lists tabs without switching. |
 | `browser_reset` | -- | Reset browser session (profile preserved) |
 | `browser_detect_captcha` | -- | CAPTCHA detection (reCAPTCHA, hCaptcha, Cloudflare Turnstile). Usually not needed — `browser_navigate` auto-detects CAPTCHAs. |
+| `request_browser_login` | `url`, `service`, `description` | Navigate the browser to a login page and emit a VNC login card to the user, prompting them to log in manually. Useful when a service requires human authentication before automation can continue. |
+
+**Note:** All browser tools are `parallel_safe=False` — only one browser tool may execute at a time per agent. Subagents sharing the same parent agent should not attempt concurrent browser operations.
 
 ### Memory
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `memory_search` | `query`, `category`, `max_results` | Hybrid search across workspace files and structured DB. Provide `category` to search only the fact database filtered to that category. |
+| `memory_search` | `query`, `category` (default ""), `max_results` (default 5) | Hybrid search across workspace files and the structured memory DB. Uses vector similarity (sqlite-vec) with FTS5 full-text fallback when the embedding model is unavailable. Provide `category` to restrict the search to the fact database filtered to that category. Returns `{results: [{key, value, category, confidence, access_count, source}], count}`. |
 | `memory_save` | `content` | Save a fact to workspace daily log and structured memory |
 
 ### Mesh / Fleet
@@ -59,30 +62,33 @@ All agents share a single **browser service container** running Camoufox (a stea
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `list_agents` | -- | Discover agents in your project (standalone agents see only themselves) |
-| `read_shared_state` | `key` | Read from the project-scoped blackboard. Keys are auto-namespaced under `projects/{name}/` — agents use natural keys like `tasks/abc` |
-| `write_shared_state` | `key`, `value` | Write to the project-scoped blackboard |
-| `list_shared_state` | `prefix` | Browse project blackboard entries by prefix |
+| `read_blackboard` | `key` | Read from the project-scoped blackboard. Keys are auto-namespaced under `projects/{name}/` — agents use natural keys like `tasks/abc` |
+| `write_blackboard` | `key`, `value` | Write a JSON value to the project-scoped blackboard |
+| `list_blackboard` | `prefix` (default "") | Browse project blackboard entries by prefix. Returns key names, authors, timestamps, and 200-char value previews. |
 | `publish_event` | `topic`, `data` | Publish event to mesh pub/sub |
 | `subscribe_event` | `topic` | Subscribe to a pub/sub topic at runtime. Events arrive as steer messages between tool rounds. |
 | `watch_blackboard` | `pattern` | Watch blackboard keys matching a glob pattern. Notifications arrive when matching keys are written. |
 | `claim_task` | `key`, `claim_value` | Atomically claim a task from the blackboard (compare-and-swap). Prevents duplicate work. |
-| `save_artifact` | `name`, `content` | Save deliverable to workspace and register on project blackboard |
+| `save_artifact` | `name`, `content`, `description` (default "") | Save deliverable to workspace and register on project blackboard at `artifacts/{agent_id}/{name}` |
 | `notify_user` | `message` | Send a notification to the user across all connected channels (CLI, Telegram, Discord, Slack, etc.) |
 | `read_agent_history` | `agent_id` | Read another agent's conversation logs (permission-checked) |
+| `get_agent_profile` | `agent_id` | Read an agent's collaboration interface, inputs, outputs, and current status |
 
-**Project isolation:** Blackboard tools (`read_shared_state`, `write_shared_state`, `list_shared_state`, `save_artifact`) are only available to agents assigned to a project. Standalone agents cannot access the blackboard — calls return an error explaining they must be added to a project first.
+**Project isolation:** Blackboard tools (`read_blackboard`, `write_blackboard`, `list_blackboard`, `save_artifact`) are only available to agents assigned to a project. Standalone agents cannot access the blackboard — calls return an error explaining they must be added to a project first.
+
+**Project context:** Agents assigned to a project automatically receive a `PROJECT.md` file mounted read-only in their workspace. This file contains the project description and shared context, visible to the agent from its first turn without any tool call.
 
 ### Workspace
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `update_workspace` | `filename`, `content` | Update a writable workspace file (SOUL.md, INSTRUCTIONS.md, USER.md, or HEARTBEAT.md) to persist learnings across sessions |
+| `update_workspace` | `filename`, `content` | Update a writable workspace file (`SOUL.md`, `INSTRUCTIONS.md`, `USER.md`, `HEARTBEAT.md`, or `INTERFACE.md`) to persist learnings across sessions |
 
 ### Scheduling & Automation
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `set_cron` | `schedule`, `message`, `heartbeat` | Schedule a recurring job (cron expression or interval). Set `heartbeat=true` to update your autonomous wakeup schedule. |
+| `set_cron` | `schedule`, `tool_name` (default ""), `tool_params` (default "{}"), `message` (default ""), `heartbeat` (default false) | Schedule a recurring job (cron expression or interval). Three modes: **tool-mode** — set `tool_name` (and optionally `tool_params` as a JSON string) to invoke a tool directly on each tick without any LLM involved; **message-mode** — set `message` to dispatch the text to the LLM on each tick; **heartbeat-mode** — set `heartbeat=true` to update your autonomous wakeup schedule. `tool_name` and `message` are mutually exclusive. |
 | `list_cron` | -- | List scheduled jobs |
 | `remove_cron` | `job_id` | Remove a scheduled job |
 
@@ -118,8 +124,9 @@ Agents never see credential values. All operations return opaque `$CRED{name}` h
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `vault_generate_secret` | `name`, `length`, `charset` | Generate a random secret and store it (returns handle only) |
+| `vault_generate_secret` | `name`, `length` (default 32), `charset` (default "urlsafe"; values: `urlsafe` / `hex` / `alphanumeric`) | Generate a random secret and store it (returns opaque `$CRED{name}` handle only — the actual value is never returned) |
 | `vault_list` | -- | List credential names the agent can access (names only, filtered by permissions) |
+| `request_credential` | `name`, `description`, `service` (default "") | Ask the user to supply a credential via the dashboard. The value is stored in the vault and the agent receives a `$CRED{name}` handle. Use this when a service requires a key the user must provide manually. |
 
 ### Wallet
 
@@ -137,7 +144,7 @@ Agents can interact with EVM and Solana blockchains through the wallet signing s
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `get_system_status` | `section` | Query live runtime state: permissions, budget, fleet, cron, health, or all |
+| `get_system_status` | `section` (default "all"; values: `permissions` / `budget` / `fleet` / `cron` / `health` / `all`) | Query live runtime state |
 
 Agents receive system awareness through three layers:
 
@@ -147,11 +154,53 @@ Agents receive system awareness through three layers:
 
 The `section` parameter accepts: `permissions`, `budget`, `fleet`, `cron`, `health`, or `all` (default). Fleet data is filtered by `can_message` permissions — agents only see teammates they can interact with.
 
-### Agent History
+### Multi-Agent Coordination
+
+Higher-level tools from `coordination_tool.py` that implement a structured work-handoff protocol over the blackboard. Prefer these over raw blackboard writes for inter-agent task management.
+
+Protocol layout: `tasks/{agent_id}/{id}` for inboxes, `output/{agent_id}/{id}` for output data, `status/{agent_id}` for state. Handoff TTL is 24 hours.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `read_agent_history` | `agent_id` | Read another agent's conversation logs (permission-checked) |
+| `hand_off` | `to`, `summary`, `data` (default "", JSON string) | Send work to another agent. Validates the target agent ID, writes a task entry to the target's inbox, and wakes the target agent. |
+| `check_inbox` | -- | Read your own task inbox. Returns `{tasks: [{key, from, summary, status, output_key?, ts?}], count}`. Completed (`status == "done"`) tasks are omitted. |
+| `update_status` | `state` (enum: `idle` / `working` / `blocked` / `done`), `summary` (default "") | Broadcast your current state to the `status/{agent_id}` blackboard key so teammates can see what you're doing. |
+| `complete_task` | `task_key` | Mark a task done and remove it from the blackboard. Ownership check enforced — you can only complete tasks in your own inbox (`tasks/{own_id}/...`). |
+
+### Image Generation
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `generate_image` | `prompt`, `size` (default "square"; values: `square` / `landscape` / `portrait`), `filename` (default ""), `provider` (default "", values: `gemini` / `openai`) | Generate an image from a text prompt. Routes through the mesh credential proxy — agents never hold API keys. Saves the PNG to `/data/workspace/artifacts/` and registers it on the project blackboard at `artifacts/{filename}` if in a project. Returns a multimodal `_image` block for inline display. Default provider is Gemini (falls back to OpenAI DALL-E 3 if `provider="openai"` is specified). |
+
+### Operator-Only Tools
+
+The following tools are only available to the **operator agent** (when `ALLOWED_TOOLS` is set in the agent's environment). They are not accessible to user-created agents.
+
+#### Fleet Templates (`fleet_tool.py`)
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `list_templates` | -- | List available fleet templates |
+| `apply_template` | `template`, `model` (default "") | Apply a fleet template to deploy a predefined set of agents. Requires user-origin provenance check. |
+
+#### Fleet & Project Management (`operator_tools.py`)
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `propose_edit` | `agent_id`, `field` (enum: `instructions` / `soul` / `model` / `role` / `heartbeat` / `thinking` / `budget` / `permissions`), `value` | Propose a config change for an agent. Returns a `change_id` that must be confirmed. |
+| `confirm_edit` | `change_id` | Apply a previously proposed edit. |
+| `save_observations` | `fleet_summary`, `agents_attention` (default []), `cost_trend`, `notes` (default "") | Persist fleet health observations for human review. |
+| `read_agent_history` | `agent_id`, `period` (default "today"; values: `today` / `yesterday` / `week`) | Read an agent's conversation history with period filtering (operator version). |
+| `create_agent` | `name`, `role`, `model` (default ""), `instructions`, `soul` (default "") | Create a new agent. |
+| `list_projects` | -- | List all projects. |
+| `get_project` | `project_name` | Get details for a project. |
+| `create_project` | `name`, `description`, `agent_ids` (default []) | Create a new project and optionally add agents. |
+| `add_agents_to_project` | `project_name`, `agent_ids` | Add one or more agents to a project. |
+| `remove_agents_from_project` | `project_name`, `agent_ids` | Remove one or more agents from a project. |
+| `update_project_context` | `project_name`, `context` | Update the shared context text (`PROJECT.md`) for a project. |
+
+**Permission ceiling:** The operator cannot grant `can_spawn=true` or `can_use_wallet=true` to agents. Budget limits: daily $0.01–$1000, monthly $0.10–$30000.
 
 ## MCP Tools
 

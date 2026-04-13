@@ -75,7 +75,13 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 openlegion start
 ```
 
+> **Windows note:** Docker Desktop (not Docker Engine) is required on Windows. WSL2 must be enabled. See Docker's [WSL2 backend guide](https://docs.docker.com/desktop/wsl/) if containers fail to start.
+
 > First install downloads ~70 packages and takes 2-3 minutes. Subsequent installs are fast.
+>
+> **First run:** On the very first `openlegion start`, Docker builds the `openlegion-agent:latest` and `openlegion-browser:latest` images from the `Dockerfile.agent` and `Dockerfile.browser` in the repo root. This can take several minutes with no progress output — this is normal. Subsequent starts are fast.
+>
+> **Background mode:** `openlegion start -d` polls for startup for up to 90 seconds. If a Docker image build is needed on first run, this timeout may be exceeded — wait for the build to finish and re-run `openlegion start -d`.
 >
 > **Need help?** See the **[full setup guide](QUICKSTART.md)** for platform-specific instructions and troubleshooting.
 
@@ -164,7 +170,7 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 OpenLegion's architecture separates concerns across three trust zones:
 untrusted external input, sandboxed agent containers, and a trusted mesh host
 that holds credentials and coordinates the fleet. All inter-agent communication
-flows through the mesh — no agent has direct network access or peer-to-peer
+flows through the mesh. Agents do not contact each other directly — no direct peer-to-peer
 connections.
 
 ```
@@ -219,7 +225,7 @@ connections.
 | Level | Zone | Description |
 |-------|------|-------------|
 | 0 | Untrusted | External input (webhooks, user prompts). Sanitized before reaching agents. |
-| 1 | Sandboxed | Agent containers. Isolated filesystem, no external network, no credentials. |
+| 1 | Sandboxed | Agent containers. Isolated filesystem, no credentials. External network access gated through SSRF-protected mesh proxy — restricted Docker bridge with NAT egress; private/CGNAT/IPv4-mapped/6to4/Teredo ranges blocked by `http_tool.py`. |
 | 2 | Trusted | Mesh host. Holds credentials, manages containers, routes messages. |
 
 ---
@@ -256,8 +262,8 @@ and token usage is recorded after each response.
 
 Configurable failover chains cascade across LLM providers transparently.
 `ModelHealthTracker` applies exponential cooldown per model (transient errors:
-60s → 300s → 1500s, billing/auth errors: 1h). Streaming failover is supported — if a connection fails mid-stream,
-the next model in the chain picks up.
+60s → 300s → 1500s, billing/auth errors: 1h). Streaming failover is supported — if streaming fails mid-response (including empty/zero-length responses that indicate upstream provider failure),
+the next model in the chain retries the full request from the start.
 
 ### Permission Matrix
 
@@ -295,7 +301,7 @@ Agent containers are slim — no browser. Browsing is handled by a shared browse
 
 **Browser service container** (shared across all agents):
 - **Image**: `openlegion-browser:latest` (Camoufox stealth browser + KasmVNC)
-- **Resources**: 2–8GB RAM (scaled by fleet size), 1 CPU, 512MB shared memory
+- **Resources**: 2–8GB RAM (scaled by fleet size), 1–2 CPU (scaled by fleet size), 512MB–2GB shared memory (scaled by fleet size)
 - **Ports**: 8500 (browser API), 6080 (KasmVNC web client)
 - **Capacity**: 1–10 concurrent browser sessions (scaled by fleet size)
 
@@ -387,16 +393,22 @@ canonicalized parameters and results over a 15-call sliding window.
 | `browser_switch_tab` | List open tabs or switch to a specific tab |
 | `browser_reset` | Reset browser session (profile preserved) |
 | `browser_detect_captcha` | CAPTCHA detection (usually not needed — `browser_navigate` auto-detects) |
+| `request_browser_login` | Navigate browser to a URL and send a VNC login card to the user for manual credential entry |
+| `generate_image` | Generate an image via Gemini or DALL-E 3 and save as an artifact |
 | `memory_search` | Hybrid search across workspace files and structured DB |
 | `memory_save` | Save fact to workspace and structured memory DB |
 | `web_search` | Search the web via DuckDuckGo (no API key) |
 | `notify_user` | Send notification to user across all connected channels |
 | `list_agents` | Discover agents in your project (standalone agents see only themselves) |
-| `read_shared_state` | Read from the shared blackboard |
-| `write_shared_state` | Write to the shared blackboard |
-| `list_shared_state` | Browse blackboard entries by prefix |
+| `read_blackboard` | Read from the shared blackboard |
+| `write_blackboard` | Write to the shared blackboard |
+| `list_blackboard` | Browse blackboard entries by prefix |
 | `publish_event` | Publish event to mesh pub/sub |
 | `subscribe_event` | Subscribe to a pub/sub topic at runtime |
+| `hand_off` | Hand a work item to another agent via structured coordination protocol |
+| `check_inbox` | Check for pending work items handed off by other agents |
+| `update_status` | Update the status of an in-progress work item visible to coordinators |
+| `complete_task` | Mark a coordination work item as complete with a result |
 | `watch_blackboard` | Watch blackboard keys matching a glob pattern |
 | `claim_task` | Atomically claim a task from the shared blackboard |
 | `save_artifact` | Save deliverable file and register on blackboard |
@@ -411,6 +423,11 @@ canonicalized parameters and results over a 15-call sliding window.
 | `wait_for_subagent` | Wait for a subagent to complete and return its result |
 | `vault_generate_secret` | Generate and store a random secret (returns opaque handle) |
 | `vault_list` | List credential names (names only, never values) |
+| `wallet_get_address` | Get Ethereum/Solana wallet address for an agent |
+| `wallet_get_balance` | Get wallet balance (ETH or SOL) |
+| `wallet_read_contract` | Read data from an Ethereum smart contract |
+| `wallet_transfer` | Transfer ETH or SOL to an address |
+| `wallet_execute` | Execute an Ethereum smart contract function |
 | `get_system_status` | Query own runtime state: permissions, budget, fleet, cron, health |
 | `read_agent_history` | Read another agent's conversation logs |
 
@@ -467,7 +484,7 @@ Before the context manager discards messages, it:
 1. Asks the LLM to extract important facts from the conversation
 2. Stores facts in both `MEMORY.md` and the structured memory DB
 3. Summarizes the conversation
-4. Replaces message history with: summary + last 4 messages
+4. Replaces message history with: summary + last 3–4 messages (role-aware, preserving message alternation invariant)
 
 Nothing is permanently lost during compaction.
 
@@ -563,12 +580,12 @@ Defense-in-depth with six layers:
 
 | Layer | Mechanism | What It Prevents |
 |-------|-----------|-----------------|
-| Runtime isolation | **Docker Sandbox microVMs** when available; falls back to Docker containers | Agent escape, kernel exploits |
+| Runtime isolation | Docker containers (default); Docker Sandbox microVMs with `--sandbox` (Docker Desktop 4.58+ required) | Agent escape, kernel exploits |
 | Container hardening | Non-root user, no-new-privileges, memory/CPU limits | Privilege escalation, resource abuse |
 | Credential separation | Vault holds keys, agents call via proxy | Key leakage, unauthorized API use |
 | Permission enforcement | Per-agent ACLs for messaging, blackboard, pub/sub, APIs | Unauthorized data access |
 | Input validation | Path traversal prevention, SSRF blocking, safe condition eval (no `eval()`), token budgets, iteration limits, rate limiting | Injection, runaway loops, network abuse |
-| Unicode sanitization | Invisible character stripping at five choke points (user input, tool results, workspace, mesh tools, dashboard) | Prompt injection via hidden Unicode |
+| Unicode sanitization | Invisible character stripping at ~90 call sites across 16 source files, covering all external input boundaries | Prompt injection via hidden Unicode |
 
 ### Dual Runtime Backend
 
@@ -614,7 +631,7 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 
 > Agent management, credentials, blackboard, cron, projects, and channels
 > are managed via **REPL commands** (below) inside a running session, or via the
-> **web dashboard** at `http://localhost:8420`.
+> **web dashboard** at `http://localhost:8420` (default port; change with `--port` flag or `mesh.port` in `config/mesh.yaml`).
 
 ### Interactive REPL Commands
 
@@ -637,14 +654,14 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 /cron [list|del|pause|resume|run]    Manage cron jobs
 /project [list|use|info]              Manage multi-project namespaces
 /credential [add|list|remove]        Manage API credentials
-/debug [trace]                       Show recent request traces
+/traces [id]                         Show recent request traces
 /logs [--level LEVEL]                Show recent runtime logs
 /addkey <svc> [key]                  Add an API credential to the vault
 /removekey [name]                    Remove a credential from the vault
 /reset                               Clear conversation with active agent
 /quit                                Exit and stop runtime
 
-Aliases: /exit = /quit, /agents = /status, /traces = /debug
+Aliases: /exit = /quit, /agents = /status, /debug = /traces
 ```
 
 ### Team Templates
@@ -657,13 +674,15 @@ Templates are offered during first-run setup (via `openlegion start`):
 | `sales` | researcher, qualifier, outreach | Sales pipeline team |
 | `devteam` | pm, engineer, reviewer | Software development team |
 | `content` | researcher, writer, editor | Content creation team |
-| `deep-research` | researcher, analyst | Deep research and analysis team |
-| `monitor` | monitor | Autonomous monitoring agent |
-| `competitive-intel` | researcher, analyst, reporter | Market and competitor analysis |
-| `lead-enrichment` | enricher | Lead data enrichment |
-| `price-intelligence` | monitor, analyst | Price monitoring and analysis |
+| `deep-research` | scout, analyst, writer | Deep research and analysis team |
+| `monitor` | watcher, analyst | Autonomous monitoring agent |
+| `competitive-intel` | scout | Market and competitor analysis |
+| `lead-enrichment` | enricher, formatter | Lead data enrichment |
+| `price-intelligence` | crawler, analyst | Price monitoring and analysis |
 | `review-ops` | monitor, responder | Review and feedback management |
-| `social-listening` | listener | Social media monitoring |
+| `social-listening` | monitor, writer | Social media monitoring |
+| `opportunity-finder` | gap-scout, evaluator, modeler | Market opportunity discovery |
+| `research` | researcher | General-purpose research agent |
 
 ---
 
@@ -711,7 +730,7 @@ Created automatically by `openlegion start` (inline setup) or the `/add` REPL co
 agents:
   researcher:
     role: "research"
-    model: "openai/gpt-4.1-mini"
+    model: "openai/gpt-4o-mini"
     skills_dir: "./skills/researcher"
     initial_instructions: "You are a research specialist..."
     thinking: "medium"                   # off (default), low, medium, or high
@@ -782,6 +801,8 @@ the emerging standard for LLM tool interoperability. Any MCP-compatible tool ser
 can be plugged into an agent via config, with tools automatically discovered and
 exposed to the LLM alongside built-in skills.
 
+> **Note:** MCP support is an optional dependency. Install it with `pip install openlegion[mcp]` (or add `mcp` to your requirements). Without it, agents with `mcp_servers` configured will log an import error and skip MCP tool loading at startup.
+
 ### Configuration
 
 Add `mcp_servers` to any agent in `config/agents.yaml`:
@@ -790,7 +811,7 @@ Add `mcp_servers` to any agent in `config/agents.yaml`:
 agents:
   researcher:
     role: "research"
-    model: "openai/gpt-4.1-mini"
+    model: "openai/gpt-4o-mini"
     mcp_servers:
       - name: filesystem
         command: mcp-server-filesystem
@@ -857,7 +878,7 @@ pytest tests/
 | Mesh | 65 | Blackboard, PubSub, MessageRouter, permissions |
 | Channels (base) | 62 | Abstract channel, commands, per-user routing, chunking, steer, debug, addkey normalization, parallel broadcast |
 | Cron | 58 | Cron expressions, intervals, dispatch, persistence, enriched heartbeat, skip-LLM, concurrent mutations |
-| Templates | 54 | Template loading, agent creation, model interpolation, all 11 templates |
+| Templates | 54 | Template loading, agent creation, model interpolation, all 13 templates |
 | Runtime Backend | 54 | DockerBackend, SandboxBackend, extra_env, name sanitization, detection, VNC allocation |
 | Projects | 42 | Multi-project CRUD, config, agent membership, blackboard key scoping, cross-project permission isolation |
 | Context Manager | 41 | Token estimation (tiktoken + model-aware), compaction, flushing, flush reset |
@@ -960,7 +981,10 @@ src/
 │       ├── vault_tool.py               # Credential vault operations
 │       ├── skill_tool.py               # Runtime skill creation + hot-reload
 │       ├── introspect_tool.py          # Live runtime state queries
-│       └── subagent_tool.py            # Spawn in-process subagents
+│       ├── subagent_tool.py            # Spawn in-process subagents
+│       ├── coordination_tool.py        # Structured inter-agent coordination (hand_off, check_inbox, update_status, complete_task)
+│       ├── image_gen_tool.py           # Image generation via Gemini or DALL-E 3
+│       └── wallet_tool.py              # Wallet operations (Ethereum + Solana)
 ├── host/
 │   ├── server.py                       # Mesh FastAPI server
 │   ├── mesh.py                         # Blackboard, PubSub, MessageRouter
@@ -1011,7 +1035,9 @@ src/
     ├── lead-enrichment.yaml            # Lead data enrichment
     ├── price-intelligence.yaml         # Price monitoring and analysis
     ├── review-ops.yaml                 # Review and feedback management
-    └── social-listening.yaml           # Social media monitoring
+    ├── social-listening.yaml           # Social media monitoring
+    ├── opportunity-finder.yaml         # Market opportunity discovery
+    └── research.yaml                   # General-purpose researcher
 
 config/
 ├── mesh.yaml                           # Framework settings

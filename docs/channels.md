@@ -63,6 +63,27 @@ openlegion chat <agent>   # Connect to running agent (detached mode)
 
 The CLI REPL supports all channel commands above plus the REPL-only commands listed in the table. It also provides token-level streaming responses with tool-use progress indicators and tab completion for agent names and subcommands.
 
+## Env Var Lookup
+
+All channel tokens are resolved via a three-tier lookup in this order:
+
+1. `OPENLEGION_SYSTEM_<NAME>` — host-level (recommended for operators; system-tier credentials are never exposed to agents)
+2. `OPENLEGION_CRED_<NAME>` — agent-accessible credential tier
+3. Bare env var (e.g. `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`) — convenience for quick local setup
+
+For production deployments, prefer the `OPENLEGION_SYSTEM_*` form so that token values never enter the agent credential vault.
+
+Examples for Telegram:
+```bash
+# Preferred (host-level):
+OPENLEGION_SYSTEM_TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+# Also accepted:
+OPENLEGION_CRED_TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+```
+
+The same pattern applies to Discord (`DISCORD_BOT_TOKEN`), Slack (`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`), and WhatsApp (`WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`).
+
 ## Telegram
 
 ### Setup
@@ -116,7 +137,7 @@ Pairing state is stored in `config/telegram_paired.json`.
 
 ### Setup
 
-Set your bot token in `.env`:
+Set your bot token in `.env` (see [Env Var Lookup](#env-var-lookup) for all accepted forms):
 
 ```bash
 OPENLEGION_CRED_DISCORD_BOT_TOKEN=MTIz...
@@ -178,7 +199,7 @@ Pairing state is stored in `config/discord_paired.json`.
 
 ### Setup
 
-Set your tokens in `.env`:
+Set your tokens in `.env` (see [Env Var Lookup](#env-var-lookup) for all accepted forms):
 
 ```bash
 OPENLEGION_CRED_SLACK_BOT_TOKEN=xoxb-...
@@ -228,11 +249,17 @@ After pairing, the bot sends a help summary with all available commands. Unautho
 
 ### Setup
 
-Set your tokens in `.env`:
+Set your tokens in `.env`. All channel tokens support a three-tier lookup (see [Env Var Lookup](#env-var-lookup)):
 
 ```bash
 OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN=EAAx...
 OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
+```
+
+In production you must also set the app secret for webhook signature verification (see [Security](#security) below):
+
+```bash
+WHATSAPP_APP_SECRET=<your-app-secret-from-meta-dashboard>
 ```
 
 Enable in `config/mesh.yaml`:
@@ -253,6 +280,30 @@ WhatsApp uses the **Cloud API** with webhook-based message delivery. In the [Met
 3. Configure the webhook URL: `https://your-server:8420/channels/whatsapp/webhook`
 4. Subscribe to `messages` webhook field
 
+### Security
+
+**Production deployments must set `WHATSAPP_APP_SECRET`.** Without it, `X-Hub-Signature-256` webhook signature verification is disabled — any HTTP client can inject arbitrary messages. When `MESH_AUTH_TOKEN` is set (i.e., production mode) and `WHATSAPP_APP_SECRET` is absent, startup raises a `RuntimeError`.
+
+Set the app secret to the value shown in the Meta dashboard under your WhatsApp app → App Settings → App Secret:
+
+```bash
+WHATSAPP_APP_SECRET=abc123...
+```
+
+The secret is read directly from the `WHATSAPP_APP_SECRET` environment variable (not via the `OPENLEGION_*` credential prefix).
+
+### Verify Token
+
+The webhook verification token is auto-generated as a random `secrets.token_hex(16)` value if none is configured. To use a deterministic, replay-safe token instead (recommended for reproducible deployments), set it explicitly:
+
+```bash
+OPENLEGION_SYSTEM_WHATSAPP_VERIFY_TOKEN=my-stable-verify-token
+# or
+OPENLEGION_CRED_WHATSAPP_VERIFY_TOKEN=my-stable-verify-token
+```
+
+The token configured here must match what you enter in the Meta Developer Portal webhook settings.
+
 ### Pairing
 
 WhatsApp uses the same pairing pattern:
@@ -268,7 +319,7 @@ After pairing, the bot sends a help summary with all available commands. Unautho
 
 ### Features
 
-- Text messages only (non-text messages get a reply explaining this to allowed users)
+- Text messages only. Non-text messages (images, audio, documents, etc.) receive a reply only when pairing is already complete **and** the sender is an allowed user. Before pairing is complete (no owner set yet), non-text messages are silently dropped.
 - Messages chunked at 4096 characters
 - Per-user agent tracking by phone number
 - Webhook verification challenge handled automatically

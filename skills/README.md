@@ -52,7 +52,7 @@ Every agent automatically has access to built-in tools defined in
 - `memory_search`, `memory_save` — Persistent memory
 - `web_search` — Web search via DuckDuckGo
 - `list_agents`, `spawn_fleet_agent`, `notify_user`, `publish_event`, `subscribe_event` — Fleet coordination
-- `read_shared_state`, `write_shared_state`, `list_shared_state`, `watch_blackboard`, `claim_task`, `save_artifact` — Shared blackboard
+- `read_blackboard`, `write_blackboard`, `list_blackboard`, `watch_blackboard`, `claim_task`, `save_artifact` — Shared blackboard
 - `update_workspace` — Persist learnings to workspace files
 - `spawn_subagent`, `list_subagents`, `wait_for_subagent` — In-process subagents
 - `set_cron`, `list_cron`, `remove_cron` — Scheduled jobs

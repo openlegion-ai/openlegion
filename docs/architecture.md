@@ -6,8 +6,9 @@ OpenLegion is a container-isolated multi-agent runtime. LLM-powered agents run i
 
 ```
 User (CLI REPL / Telegram / Discord / Slack / WhatsApp / Webhook)
-  -> Mesh Host (FastAPI :8420) -- routes messages, enforces permissions, proxies APIs
+  -> Mesh Host (FastAPI :8420) -- routes messages, enforces permissions, proxies APIs, VNC proxy
     -> Agent Containers (FastAPI :8400 each) -- isolated execution with private memory
+    -> Browser Service Container (FastAPI :8500 + KasmVNC :6080) -- shared Camoufox browser, per-agent VNC sessions
 ```
 
 ## Trust Zones
@@ -17,7 +18,7 @@ Three trust zones govern all inter-component communication:
 | Level | Zone | Description |
 |-------|------|-------------|
 | 0 | **Untrusted** | External input (webhooks, user prompts). Sanitized before reaching agents. |
-| 1 | **Sandboxed** | Agent containers. Isolated filesystem, no external network, no credentials. |
+| 1 | **Sandboxed** | Agent containers. Isolated filesystem, restricted network (bridge NAT; SSRF protection blocks private IPs), no LLM API keys (all provider calls proxy through the mesh). |
 | 2 | **Trusted** | Mesh host. Holds credentials, manages containers, routes messages. |
 
 Everything between zones is HTTP + JSON with Pydantic contracts defined in `src/shared/types.py`.
@@ -54,6 +55,7 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 | `traces.py` | Request tracing and diagnostics |
 | `transcript.py` | Provider-specific transcript sanitization |
 | `wallet.py` | Wallet signing service for EVM and Solana transactions |
+| `api_keys.py` | Named API key management — salted SHA-256 hashes stored in `config/api_keys.json`, `X-API-Key` header auth |
 
 ### Agent (`src/agent/`)
 
@@ -66,7 +68,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `skills.py` | Skill discovery and registry; `@skill` decorator system |
 | `mcp_client.py` | MCP server lifecycle management and tool routing |
 | `memory.py` | SQLite + sqlite-vec + FTS5 hierarchical memory store |
-| `workspace.py` | Persistent markdown workspace (INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md, SYSTEM.md, HEARTBEAT.md, daily logs, learnings) |
+| `workspace.py` | Persistent markdown workspace (INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md, SYSTEM.md, HEARTBEAT.md, INTERFACE.md, daily logs, learnings) |
 | `context.py` | Context window management with write-then-compact pattern |
 | `llm.py` | LLM client with streaming (`chat_stream()`) and non-streaming (`chat()`) — routes through mesh proxy |
 | `mesh_client.py` | HTTP client for agent-to-mesh communication |
@@ -90,6 +92,8 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `subagent_tool.py` | In-container subagent spawning and management |
 | `wallet_tool.py` | Blockchain wallet operations (address, balance, transfer, contract calls) |
 | `web_search_tool.py` | DuckDuckGo web search (no API key) |
+| `image_gen_tool.py` | Image generation via Gemini or DALL-E 3, saves output as artifacts |
+| `coordination_tool.py` | Structured multi-agent coordination — `hand_off`, `check_inbox`, `update_status` |
 
 ### Browser Service (`src/browser/`)
 
@@ -102,13 +106,13 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 
 ### Browser Container Resources
 
-Resources scale by plan to fit server constraints:
+Resources scale with the `OPENLEGION_MAX_AGENTS` environment variable:
 
-| Plan | Server | RAM | SHM | CPU | Max Browsers |
-|------|--------|-----|-----|-----|-------------|
-| Basic | cax11 4GB 2c | 2GB | 512MB | 1.0 core | 1 |
-| Growth | cax21 8GB 4c | 4GB | 1GB | 1.5 cores | 5 |
-| Pro | cax31 16GB 8c | 8GB | 2GB | 2.0 cores | 10 |
+| Tier | `OPENLEGION_MAX_AGENTS` | RAM | SHM | CPU | Max Browsers |
+|------|------------------------|-----|-----|-----|-------------|
+| Basic | ≤ 1 | 2GB | 512MB | 1.0 core | 1 |
+| Growth | 2–5 | 4GB | 1GB | 1.5 cores | `max_agents` |
+| Pro | > 5 | 8GB | 2GB | 2.0 cores | `min(max_agents, 10)` |
 
 SHM (shared memory) is critical for Firefox compositor IPC — too small causes VNC rendering freezes.
 
@@ -164,7 +168,7 @@ Agents can be organized into **projects** — isolated namespaces that scope bla
 
 ### Project Data
 
-Project configuration is stored in `config/projects/{name}/` with a `project.md` file for shared context and membership tracked in the project metadata.
+Project configuration is stored in `config/projects/{name}/`. Each project directory contains `metadata.yaml` (name, description, created_at, members list) and `project.md` (shared context mounted read-only into member containers).
 
 ## Data Flow
 

@@ -44,11 +44,10 @@ Manages the LLM's context window to prevent overflow while preserving important 
 
 - **Model-aware token estimation**: tiktoken for OpenAI models (accurate), 3.5 chars/token for Anthropic, 4 chars/token fallback for unknown providers
 - **Model-aware context windows**: auto-detects max context from model name (12 models supported), with explicit `max_tokens` override
-- Four compaction thresholds:
+- Three compaction thresholds:
   - **60%** -- proactive flush (extract facts to MEMORY.md)
-  - **70%** -- auto-compact (summarize + trim to last 4 messages)
+  - **70%** -- auto-compact (summarize + trim to last 3–4 messages, preserving tool-call group boundaries). Hard-prune is used as a fallback within this path if the LLM is unavailable or summarization fails — it is not a separately triggered threshold.
   - **80%** -- warning injected into system prompt telling agents to wrap up or save important facts
-  - **90%** -- emergency hard-prune (keep first message group + last 4 message groups, where groups respect tool-call boundaries)
 
 ### Write-Then-Compact Pattern
 
@@ -57,7 +56,7 @@ Before discarding any conversation context:
 1. **Extract** -- Asks the LLM to identify important facts from the conversation
 2. **Store** -- Saves facts to both `MEMORY.md` and the structured memory DB
 3. **Summarize** -- Creates a concise summary of the conversation so far
-4. **Replace** -- Swaps full history with: summary + last 4 messages
+4. **Replace** -- Swaps full history with: summary + last 3 or 4 messages (4 normally; 3 + a bridge assistant message when the role invariant would be violated by consecutive user messages)
 
 Nothing is permanently lost during compaction.
 
@@ -78,15 +77,16 @@ Persistent markdown files stored on the agent's `/data/workspace` volume.
 
 | File | Purpose | Cap | When Loaded |
 |------|---------|-----|-------------|
-| `INSTRUCTIONS.md` | Operating procedures, workflow rules, domain knowledge | 8K chars | System prompt |
+| `INSTRUCTIONS.md` | Operating procedures, workflow rules, domain knowledge | 12K chars | System prompt |
 | `SOUL.md` | Agent personality and behavioral guidelines | 4K chars | System prompt |
 | `USER.md` | User preferences and working style | 4K chars | System prompt |
 | `MEMORY.md` | Curated long-term facts | 16K chars | System prompt |
 | `PROJECT.md` | Project-wide context (optional, mounted read-only from host) | -- | System prompt |
 | `SYSTEM.md` | System architecture guide + runtime snapshot (auto-generated, read-only) | 6K chars | System prompt |
 | `HEARTBEAT.md` | Autonomous monitoring rules | -- | Heartbeat dispatch (auto-loaded) |
+| `INTERFACE.md` | Public collaboration contract (inputs, outputs, subscriptions) | 4K chars | Not auto-loaded into system prompt — read by other agents via `get_agent_profile` |
 
-Total bootstrap injection into the system prompt is capped at 40K characters across all files.
+Total bootstrap injection into the system prompt is capped at 48K characters across all files.
 
 ### System File (`SYSTEM.md`)
 
@@ -122,10 +122,16 @@ Daily logs are auto-loaded into heartbeat messages (last 2 days, capped at 4000 
 
 The workspace supports keyword search across all markdown files using a built-in BM25 implementation:
 - Tokenization with stop-word removal
-- TF-IDF scoring
+- BM25 scoring (k1=1.5, b=0.75)
 - Returns ranked snippets with file paths
+- Files already injected into the system prompt (e.g. MEMORY.md, SOUL.md) are excluded from search results to avoid duplicate context
 
 ## Structured Memory (`src/agent/memory.py`)
+
+The per-agent SQLite database (`data/{agent_id}.db`) stores three types of data:
+- **Facts** with embeddings for semantic search (described below)
+- **Task checkpoints** — iteration state, message history, token usage, and budget state, used to resume interrupted tasks after a container restart
+- **Chat checkpoints** — conversation state for crash recovery across chat sessions
 
 SQLite database with three search capabilities:
 
@@ -137,8 +143,8 @@ SQLite database with three search capabilities:
 
 ### Full-Text Search (FTS5)
 
-- SQLite FTS5 index for keyword matching
-- Trigram tokenizer for partial matching
+- SQLite FTS5 index with the default `unicode61` tokenizer for keyword matching
+- Queries are sanitized to alphanumeric terms (special characters stripped, words 2+ chars, limit 20 terms)
 - Combined with vector search for hybrid retrieval
 
 ### Hierarchical Retrieval

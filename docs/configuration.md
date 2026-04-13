@@ -11,6 +11,8 @@ OpenLegion uses YAML and JSON files in the `config/` directory. Config files are
 | `config/permissions.json` | JSON | Per-agent ACL matrix |
 | `config/cron.json` | JSON | Scheduled job state (auto-managed) |
 | `config/projects/` | Directory | Per-project data (project.md, members) |
+| `config/settings.json` | JSON | Dashboard-managed runtime settings: browser speed/delay/timeout, execution limits (`max_iterations`, `chat_max_tool_rounds`, etc.), and default budgets. Written by the dashboard and injected as env vars into agent containers at startup. |
+| `config/network.yaml` | YAML | Network settings (`no_proxy` exclusion list for proxy mode). |
 | `.env` | dotenv | API keys and credentials |
 
 ## `config/agents.yaml`
@@ -44,7 +46,7 @@ agents:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `role` | string | Yes | Short description of the agent's purpose |
-| `model` | string | No | LLM model in `provider/model` format. Falls back to `llm.default_model` in mesh.yaml |
+| `model` | string | No | LLM model in `provider/model` format. Falls back to `llm.default_model` in mesh.yaml, then `openai/gpt-4o-mini` if neither is set. |
 | `skills_dir` | string | No | Path to custom skills directory |
 | `system_prompt` | string | No | Custom system prompt. Auto-generated if omitted. Also accepted as `instructions` |
 | `resources.memory_limit` | string | No | Reserved for future use. Currently hardcoded to `384m` by the runtime for security. |
@@ -55,6 +57,7 @@ agents:
 | `initial_instructions` | string | No | Seeds `INSTRUCTIONS.md` on first boot. Distinct from `system_prompt` — this sets the agent's operating instructions file |
 | `thinking` | string | No | Extended thinking/reasoning mode: `off` (default), `low`, `medium`, or `high`. Anthropic models use thinking budgets (5K/10K/25K tokens). OpenAI o-series models use `reasoning_effort`. Ignored for unsupported models |
 | `mcp_servers` | list | No | External MCP tool servers. See [MCP Integration](mcp.md) |
+| `initial_interface` | string | No | Seeds `INTERFACE.md` on first boot. Defines the agent's public collaboration contract — what inputs it accepts, what outputs it produces, and what topics it subscribes to. Readable by other agents via `get_agent_profile`. |
 
 ### Model Format
 
@@ -228,7 +231,7 @@ OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
 
 All credentials are loaded by the credential vault (`src/host/credentials.py`). Agents never see values directly -- they make API calls through the mesh proxy, which injects credentials server-side.
 
-**Channel credential fallback:** Channel bot tokens (Telegram, Discord, Slack, WhatsApp) are resolved with a three-tier fallback chain: `OPENLEGION_SYSTEM_<NAME>` → `OPENLEGION_CRED_<NAME>` → legacy unprefixed `<NAME>` (e.g., `TELEGRAM_BOT_TOKEN`). The `OPENLEGION_CRED_` prefix is recommended for channel tokens.
+**Channel credential fallback:** Channel bot tokens (Telegram, Discord, Slack, WhatsApp) are resolved with a four-tier fallback chain: `mesh.yaml` channel config field (e.g. `channels.telegram.bot_token`) → `OPENLEGION_SYSTEM_<NAME>` → `OPENLEGION_CRED_<NAME>` → legacy unprefixed `<NAME>` (e.g., `TELEGRAM_BOT_TOKEN`). The `OPENLEGION_CRED_` prefix is recommended for channel tokens.
 
 **Important:** LLM provider keys **must** use the `OPENLEGION_SYSTEM_` prefix. The mesh proxy only looks for provider keys in the system tier. A provider key stored with `OPENLEGION_CRED_` will be treated as an agent-tier credential and will not be used for LLM calls.
 
@@ -274,8 +277,8 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `PROJECT_NAME` | -- | Project this agent belongs to (set automatically for project members) |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for memory vector search (set automatically from `llm.embedding_model` in mesh.yaml). Set to `"none"` to disable vector search |
 | `OPENLEGION_MAX_AGENTS` | `0` | Plan limit: maximum agents to start. `0` means unlimited. If set to N > 0, only the first N agents are started. |
-| `OPENLEGION_MAX_PROJECTS` | `0` | Plan limit: maximum projects allowed. `0` means unlimited. |
-| `OPENLEGION_HOST_NETWORK` | `0` | Use Docker host networking for agent containers instead of bridge network. Set to `1` to enable. Not recommended — disables network isolation. |
+| `OPENLEGION_MAX_PROJECTS` | -- | Plan limit: maximum projects allowed. If unset, projects are unlimited. If set to `0`, projects are disabled entirely. If set to N > 0, only N projects are allowed. |
+| `OPENLEGION_HOST_NETWORK` | `0` | Use Docker host networking for agent containers instead of bridge network. Set to `1`, `true`, or `yes` (case-insensitive) to enable. Not recommended — disables network isolation. |
 | `OPENLEGION_SYSTEM_WALLET_MASTER_SEED` | -- | BIP-39 mnemonic (24 words) for HD wallet key derivation. Required to enable wallet features. Generate with `openlegion wallet init`. |
 | `BROWSER_OS` | `windows` | OS fingerprint for Camoufox browser: `windows`, `macos`, or `linux`. Windows is recommended (≈70% desktop market share; Linux is a datacenter signal). |
 | `BROWSER_LOCALE` | `en-US` | BCP-47 locale tag for browser fingerprint (e.g. `en-US`, `de-DE`). |
@@ -283,5 +286,11 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `BROWSER_PROXY_URL` | -- | Proxy URL for browser traffic (HTTP/HTTPS only, e.g. `http://proxy:8080`). SOCKS5 is not supported. Residential proxies recommended. |
 | `BROWSER_PROXY_USER` | -- | Proxy authentication username. |
 | `BROWSER_PROXY_PASS` | -- | Proxy authentication password. |
+| `OPENLEGION_SYSTEM_PROXY` | -- | System-wide outbound HTTP proxy URL for all agent traffic. Managed via the dashboard proxy settings page. |
+| `HTTP_PROXY` / `HTTPS_PROXY` | -- | Per-agent proxy URLs. Auto-injected into agent containers by the runtime when a per-agent proxy is configured. Read by the agent-side `http_request` tool. |
+| `OPENLEGION_TOOL_TIMEOUT` | `300` | Per-tool execution timeout in seconds (hard ceiling). |
+| `OPENLEGION_MAX_ITERATIONS` | `20` | Maximum agent loop iterations per task (clamped 1–100). Overrides the default at the agent level. |
+| `OPENLEGION_CHAT_MAX_TOOL_ROUNDS` | `30` | Maximum tool rounds per chat turn (clamped 1–200). |
+| `OPENLEGION_CHAT_MAX_TOTAL_ROUNDS` | `200` | Maximum total chat rounds before session auto-continuation (clamped 1–1000). |
 
 The mesh port is configured in `config/mesh.yaml` (`mesh.port`), not via environment variable.
