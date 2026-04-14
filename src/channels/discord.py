@@ -31,6 +31,8 @@ MAX_DC_LEN = 1900
 class DiscordChannel(Channel):
     """Discord bot adapter for OpenLegion with pairing code security."""
 
+    CHANNEL_TYPE = "discord"
+
     def __init__(
         self,
         token: str,
@@ -529,3 +531,19 @@ class DiscordChannel(Channel):
                         await channel.send(c)
             except Exception as e:
                 logger.warning(f"Failed to notify channel {ch_id}: {e}")
+
+    async def send_to_user(self, user_id: str, text: str) -> None:
+        """Send a DM to a specific Discord user."""
+        if not self._client:
+            return
+        try:
+            uid = int(user_id)
+        except (TypeError, ValueError):
+            logger.warning("Discord send_to_user: invalid user_id %r", user_id)
+            return
+        try:
+            user = await self._client.fetch_user(uid)
+            for chunk in chunk_text(text, MAX_DC_LEN):
+                await user.send(chunk)
+        except Exception as e:
+            logger.warning("Discord send_to_user(%s) failed: %s", user_id, e)

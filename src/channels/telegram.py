@@ -57,6 +57,8 @@ def _md_to_html(text: str) -> str:
 class TelegramChannel(Channel):
     """Telegram bot adapter for OpenLegion with pairing code security."""
 
+    CHANNEL_TYPE = "telegram"
+
     def __init__(
         self,
         token: str,
@@ -246,6 +248,27 @@ class TelegramChannel(Channel):
                     await self._app.bot.send_message(chat_id=chat_id, text=chunk)
             except Exception as e:
                 logger.warning(f"Failed to notify chat {chat_id}: {e}")
+
+    async def send_to_user(self, user_id: str, text: str) -> None:
+        """Send a message to a specific Telegram user.
+
+        Note: user_id is the numeric Telegram user ID. For private chats,
+        user_id == chat_id, so we can send directly.  For group chats the
+        user's chat_id and user_id differ; this path targets the DM channel.
+        """
+        if not self._app:
+            return
+        try:
+            chat_id = int(user_id)
+        except (TypeError, ValueError):
+            logger.warning("Telegram send_to_user: invalid user_id %r", user_id)
+            return
+        for chunk in chunk_text(text, MAX_TG_LEN):
+            try:
+                await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+            except Exception as e:
+                logger.warning("Telegram send_to_user(%s) failed: %s", user_id, e)
+                return
 
     def _is_allowed(self, user_id: int) -> bool:
         if self._explicit_allowed is not None:

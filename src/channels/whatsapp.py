@@ -38,6 +38,8 @@ _GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
 class WhatsAppChannel(Channel):
     """WhatsApp Cloud API adapter for OpenLegion with webhook-based messaging."""
 
+    CHANNEL_TYPE = "whatsapp"
+
     def __init__(
         self,
         access_token: str,
@@ -91,19 +93,39 @@ class WhatsAppChannel(Channel):
             except Exception as e:
                 logger.warning(f"Failed to notify {phone}: {e}")
 
+    async def send_to_user(self, user_id: str, text: str) -> None:
+        """Send a message to a specific WhatsApp user (phone number)."""
+        if not self._http:
+            return
+        for part in chunk_text(text, MAX_WA_LEN):
+            await self._send_text(user_id, part)
+
     async def _send_text(self, to: str, text: str) -> None:
         """Send a text message via the WhatsApp Cloud API."""
         if not self._http:
             return
-        await self._http.post(
-            f"/{self.phone_number_id}/messages",
-            json={
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "text",
-                "text": {"body": text},
-            },
-        )
+        try:
+            resp = await self._http.post(
+                f"/{self.phone_number_id}/messages",
+                json={
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": "text",
+                    "text": {"body": text},
+                },
+            )
+        except httpx.HTTPError as e:
+            logger.warning("WhatsApp send to %s failed (network): %s", to, e)
+            return
+        if resp.status_code >= 400:
+            try:
+                body = resp.json()
+            except Exception:
+                body = resp.text
+            logger.warning(
+                "WhatsApp send to %s failed (HTTP %d): %s",
+                to, resp.status_code, body,
+            )
 
     def _is_allowed(self, phone: str) -> bool:
         return self._pairing.is_allowed(phone)

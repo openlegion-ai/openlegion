@@ -382,10 +382,17 @@ def create_mesh_app(
             wake_msg = sanitize_for_prompt(message)
         else:
             wake_msg = f"You have a new task from {caller}. Call check_inbox() to see it."
+
+        from src.shared.trace import parse_origin_header
+        origin = parse_origin_header(request.headers.get("x-origin"))
+
         if lane_manager is not None and dispatch_loop is not None:
             try:
                 asyncio.run_coroutine_threadsafe(
-                    lane_manager.enqueue(target, wake_msg, mode="followup"),
+                    lane_manager.enqueue(
+                        target, wake_msg, mode="followup",
+                        origin=origin, auto_notify=origin is not None,
+                    ),
                     dispatch_loop,
                 )
             except Exception as e:

@@ -110,6 +110,11 @@ async def hand_off(
     summary = sanitize_for_prompt(summary)
     output_key = None
 
+    # Propagate origin so the target agent's lane can auto-notify the
+    # originating channel user when the handed-off task completes.
+    from src.shared.trace import current_origin as _current_origin
+    origin = _current_origin.get()
+
     # Write output data if provided
     if data and data.strip():
         try:
@@ -134,6 +139,8 @@ async def hand_off(
     }
     if output_key:
         task_record["output_key"] = output_key
+    if origin:
+        task_record["origin"] = origin
 
     task_key = f"tasks/{to}/{handoff_id}"
     try:
@@ -148,10 +155,12 @@ async def hand_off(
         return {"error": f"Failed to create task: {e}"}
 
     # Wake the target agent so it processes the task immediately
-    # instead of waiting for its next heartbeat.
+    # instead of waiting for its next heartbeat.  Pass origin so
+    # the mesh lane worker can auto-notify the originating user.
     try:
         await mesh_client.wake_agent(
             to, f"New task from {from_agent}: {summary[:200]}",
+            origin=origin,
         )
     except Exception as e:
         logger.debug("Wake for %s failed (task still queued): %s", to, e)

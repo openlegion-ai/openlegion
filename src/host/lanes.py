@@ -35,6 +35,8 @@ class QueuedTask:
     message: str
     mode: str = "followup"
     trace_id: str | None = None
+    origin: dict[str, str] | None = None
+    auto_notify: bool = False
     future: asyncio.Future = field(default_factory=asyncio.Future)
 
 
@@ -46,10 +48,12 @@ class LaneManager:
         dispatch_fn: Callable[..., Coroutine[Any, Any, str]],
         steer_fn: Callable[..., Coroutine[Any, Any, Any]] | None = None,
         trace_store: Any = None,
+        notify_fn: Callable[..., Coroutine[Any, Any, Any]] | None = None,
     ):
         self._dispatch_fn = dispatch_fn
         self._steer_fn = steer_fn
         self._trace_store = trace_store
+        self._notify_fn = notify_fn
         self._queues: dict[str, asyncio.Queue[QueuedTask]] = {}
         self._workers: dict[str, asyncio.Task] = {}
         self._pending: dict[str, list[QueuedTask]] = {}
@@ -69,7 +73,10 @@ class LaneManager:
             self._workers[agent] = asyncio.create_task(self._worker(agent))
 
     async def enqueue(
-        self, agent: str, message: str, *, mode: str = "followup", trace_id: str | None = None,
+        self, agent: str, message: str, *, mode: str = "followup",
+        trace_id: str | None = None,
+        origin: dict[str, str] | None = None,
+        auto_notify: bool = False,
     ) -> str:
         """Queue a message for an agent with the specified mode.
 
@@ -77,6 +84,10 @@ class LaneManager:
           followup — default FIFO, process after current task.
           steer    — inject into active conversation between tool rounds.
           collect  — batch when busy, dispatch combined when agent becomes free.
+
+        When ``origin`` and ``auto_notify=True`` are set, the lane worker will
+        forward the completed task result back to the originating channel+user
+        via the configured ``notify_fn``.
         """
         self._ensure_lane(agent)
 
@@ -85,10 +96,15 @@ class LaneManager:
         elif mode == "collect":
             return await self._handle_collect(agent, message)
         else:
-            return await self._handle_followup(agent, message, trace_id=trace_id)
+            return await self._handle_followup(
+                agent, message, trace_id=trace_id,
+                origin=origin, auto_notify=auto_notify,
+            )
 
     async def _handle_followup(
         self, agent: str, message: str, *, trace_id: str | None = None,
+        origin: dict[str, str] | None = None,
+        auto_notify: bool = False,
     ) -> str:
         """Standard FIFO enqueue."""
         task = QueuedTask(
@@ -97,6 +113,8 @@ class LaneManager:
             message=message,
             mode="followup",
             trace_id=trace_id,
+            origin=origin,
+            auto_notify=auto_notify,
         )
         self._pending[agent].append(task)
         await self._queues[agent].put(task)
@@ -216,8 +234,36 @@ class LaneManager:
                     meta={"mode": task.mode, "queue_depth": queue.qsize()},
                 )
             try:
-                result = await self._dispatch_fn(agent, task.message)
+                if task.origin is not None:
+                    result = await self._dispatch_fn(
+                        agent, task.message, origin=task.origin,
+                    )
+                else:
+                    result = await self._dispatch_fn(agent, task.message)
                 task.future.set_result(result)
+                # Auto-forward result to origin channel+user when requested
+                if (
+                    task.auto_notify
+                    and task.origin
+                    and self._notify_fn
+                    and isinstance(result, str)
+                    and result.strip()
+                    and result != SILENT_REPLY_TOKEN
+                ):
+                    fn = self._notify_fn
+                    origin_copy = dict(task.origin)
+                    task_result = result
+
+                    async def _forward():
+                        try:
+                            await fn(origin_copy, task_result)
+                        except Exception as fwd_e:
+                            logger.warning(
+                                "Lane auto-notify to origin %s failed: %s",
+                                origin_copy, fwd_e,
+                            )
+
+                    asyncio.create_task(_forward())
             except Exception as e:
                 if not task.future.done():
                     task.future.set_exception(e)

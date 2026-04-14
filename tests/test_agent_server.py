@@ -531,3 +531,64 @@ class TestInvokeTool:
             resp = await client.post("/invoke", json={"tool": "broken_tool", "params": {}})
         assert resp.status_code == 200
         assert "error" in resp.json()
+
+
+# ── Fix 4f: X-Origin header propagation ────────────────────────
+
+class TestChatOriginHeader:
+    @pytest.mark.asyncio
+    async def test_chat_passes_origin_to_loop(self):
+        """POST /chat with X-Origin header calls loop.chat with parsed origin."""
+        import json
+
+        app, mock_loop = _make_app()
+        mock_loop.chat = AsyncMock(return_value={
+            "response": "hi", "tool_outputs": [], "tokens_used": 0,
+        })
+        mock_loop.current_task = None
+
+        origin = {"channel": "whatsapp", "user": "+1234"}
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat",
+                json={"message": "hello"},
+                headers={"x-origin": json.dumps(origin)},
+            )
+        assert resp.status_code == 200
+        mock_loop.chat.assert_awaited_once()
+        call_kwargs = mock_loop.chat.call_args.kwargs
+        assert call_kwargs.get("origin") == origin
+
+    @pytest.mark.asyncio
+    async def test_chat_no_origin_header_passes_none(self):
+        """POST /chat without X-Origin passes origin=None to loop.chat."""
+        app, mock_loop = _make_app()
+        mock_loop.chat = AsyncMock(return_value={
+            "response": "hi", "tool_outputs": [], "tokens_used": 0,
+        })
+        mock_loop.current_task = None
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/chat", json={"message": "hello"})
+        assert resp.status_code == 200
+        call_kwargs = mock_loop.chat.call_args.kwargs
+        assert call_kwargs.get("origin") is None
+
+    @pytest.mark.asyncio
+    async def test_chat_invalid_origin_header_passes_none(self):
+        """Malformed X-Origin silently becomes origin=None."""
+        app, mock_loop = _make_app()
+        mock_loop.chat = AsyncMock(return_value={
+            "response": "hi", "tool_outputs": [], "tokens_used": 0,
+        })
+        mock_loop.current_task = None
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat",
+                json={"message": "hello"},
+                headers={"x-origin": "not-valid-json"},
+            )
+        assert resp.status_code == 200
+        call_kwargs = mock_loop.chat.call_args.kwargs
+        assert call_kwargs.get("origin") is None

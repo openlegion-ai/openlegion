@@ -534,3 +534,74 @@ class TestCompleteTask:
         # Should still succeed — output cleanup is best-effort
         assert result["completed"] is True
         assert mc.delete_blackboard.call_count == 2
+
+
+# ── Fix 4: origin propagation in hand_off ───────────────────────
+
+
+class TestHandOffOriginPropagation:
+    @pytest.mark.asyncio
+    async def test_hand_off_reads_and_propagates_current_origin(self):
+        """hand_off reads current_origin contextvar and passes it to wake_agent."""
+        from src.agent.builtins.coordination_tool import hand_off
+        from src.shared.trace import current_origin
+
+        mc = _make_mesh_client(agent_id="operator")
+        mc.list_agents.return_value = {"chef": {"role": "chef"}}
+
+        origin = {"channel": "whatsapp", "user": "+1234"}
+        token = current_origin.set(origin)
+        try:
+            result = await hand_off(
+                to="chef",
+                summary="make dinner",
+                mesh_client=mc,
+            )
+        finally:
+            current_origin.reset(token)
+
+        assert result["handed_off"] is True
+        # wake_agent should have been called with origin kwarg
+        mc.wake_agent.assert_awaited_once()
+        call_kwargs = mc.wake_agent.call_args
+        assert call_kwargs.kwargs.get("origin") == origin
+
+    @pytest.mark.asyncio
+    async def test_hand_off_stores_origin_in_task_record(self):
+        """Origin is stored in the task_record written to the blackboard."""
+        from src.agent.builtins.coordination_tool import hand_off
+        from src.shared.trace import current_origin
+
+        mc = _make_mesh_client(agent_id="operator")
+        mc.list_agents.return_value = {"chef": {"role": "chef"}}
+
+        origin = {"channel": "telegram", "user": "99"}
+        token = current_origin.set(origin)
+        try:
+            await hand_off(to="chef", summary="do work", mesh_client=mc)
+        finally:
+            current_origin.reset(token)
+
+        # The task_record write is the last write_blackboard call
+        last_call = mc.write_blackboard.call_args_list[-1]
+        task_record = last_call.args[1]
+        assert task_record.get("origin") == origin
+
+    @pytest.mark.asyncio
+    async def test_hand_off_no_origin_no_origin_in_task_record(self):
+        """When current_origin is None, task_record has no 'origin' key."""
+        from src.agent.builtins.coordination_tool import hand_off
+        from src.shared.trace import current_origin
+
+        mc = _make_mesh_client(agent_id="operator")
+        mc.list_agents.return_value = {"chef": {"role": "chef"}}
+
+        token = current_origin.set(None)
+        try:
+            await hand_off(to="chef", summary="do work", mesh_client=mc)
+        finally:
+            current_origin.reset(token)
+
+        last_call = mc.write_blackboard.call_args_list[-1]
+        task_record = last_call.args[1]
+        assert "origin" not in task_record

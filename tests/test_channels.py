@@ -812,3 +812,55 @@ class TestTelegramStop:
         with caplog.at_level(logging.INFO):
             await ch.stop()
         assert "stopped" not in caplog.text.lower()
+
+
+# ── Fix 4d/4e: CHANNEL_TYPE and origin propagation ──────────────
+
+class TestChannelTypeAndOriginPropagation:
+    @pytest.mark.asyncio
+    async def test_channel_type_included_in_origin(self):
+        """When CHANNEL_TYPE is set, dispatch receives origin with channel+user."""
+        received_origins = []
+
+        async def recording_dispatch(agent, message, **kwargs):
+            received_origins.append(kwargs.get("origin"))
+            return "ok"
+
+        class TypedChannel(StubChannel):
+            CHANNEL_TYPE = "testchannel"
+
+        ch = TypedChannel(
+            dispatch_fn=recording_dispatch,
+            default_agent="alpha",
+        )
+
+        await ch.handle_message("user42", "hello")
+        assert received_origins == [{"channel": "testchannel", "user": "user42"}]
+
+    @pytest.mark.asyncio
+    async def test_no_channel_type_origin_is_none(self):
+        """When CHANNEL_TYPE is empty, origin passed to dispatch is None."""
+        received_origins = []
+
+        async def recording_dispatch(agent, message, **kwargs):
+            received_origins.append(kwargs.get("origin"))
+            return "ok"
+
+        ch = _make_channel()  # StubChannel has empty CHANNEL_TYPE
+        ch.dispatch_fn = recording_dispatch
+
+        await ch.handle_message("user42", "hello")
+        assert received_origins == [None]
+
+    @pytest.mark.asyncio
+    async def test_send_to_user_base_logs_warning(self, caplog):
+        """Base Channel.send_to_user logs a warning instead of crashing."""
+        import logging
+
+        ch = _make_channel()
+
+        with caplog.at_level(logging.WARNING):
+            await ch.send_to_user("some_user", "hi")
+
+        assert any("send_to_user" in r.message for r in caplog.records)
+        assert any("not implemented" in r.message for r in caplog.records)
