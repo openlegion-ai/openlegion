@@ -46,7 +46,7 @@ class StubChannel(Channel):
 def _make_channel(agents: list[str] | None = None, **overrides):
     agents = agents or ["alpha", "beta"]
 
-    async def dispatch_fn(agent: str, message: str) -> str:
+    async def dispatch_fn(agent: str, message: str, **_kwargs) -> str:
         return f"reply from {agent}"
 
     def list_agents_fn():
@@ -206,7 +206,7 @@ class TestCommands:
 
         call_times = []
 
-        async def slow_dispatch(agent: str, message: str) -> str:
+        async def slow_dispatch(agent: str, message: str, **_kwargs) -> str:
             call_times.append(time.monotonic())
             await asyncio.sleep(0.1)
             return f"reply from {agent}"
@@ -279,7 +279,7 @@ class TestAddKeyCommand:
         """The /addkey command must be consumed at channel layer, never dispatched."""
         dispatch_called = []
 
-        async def dispatch_fn(agent: str, message: str) -> str:
+        async def dispatch_fn(agent: str, message: str, **_kwargs) -> str:
             dispatch_called.append(message)
             return "reply"
 
@@ -350,7 +350,7 @@ class TestSilentResponseSuppression:
     @pytest.mark.asyncio
     async def test_empty_response_suppressed(self):
         """When dispatch returns empty string, handle_message returns empty."""
-        async def silent_dispatch(agent: str, message: str) -> str:
+        async def silent_dispatch(agent: str, message: str, **_kwargs) -> str:
             return ""
 
         ch = _make_channel(dispatch_fn=silent_dispatch)
@@ -360,7 +360,7 @@ class TestSilentResponseSuppression:
     @pytest.mark.asyncio
     async def test_whitespace_only_response_suppressed(self):
         """Whitespace-only responses are suppressed."""
-        async def whitespace_dispatch(agent: str, message: str) -> str:
+        async def whitespace_dispatch(agent: str, message: str, **_kwargs) -> str:
             return "   \n  "
 
         ch = _make_channel(dispatch_fn=whitespace_dispatch)
@@ -370,7 +370,7 @@ class TestSilentResponseSuppression:
     @pytest.mark.asyncio
     async def test_none_response_suppressed(self):
         """None responses are suppressed."""
-        async def none_dispatch(agent: str, message: str) -> str:
+        async def none_dispatch(agent: str, message: str, **_kwargs) -> str:
             return None
 
         ch = _make_channel(dispatch_fn=none_dispatch)
@@ -562,7 +562,7 @@ class TestResetNotAvailable:
 
 def _make_tg_channel(tmp_path: Path | None = None, **overrides) -> TelegramChannel:
     """Create a TelegramChannel with stubbed callbacks for unit testing."""
-    async def dispatch_fn(agent: str, message: str) -> str:
+    async def dispatch_fn(agent: str, message: str, **_kwargs) -> str:
         return f"reply from {agent}"
 
     def list_agents_fn():

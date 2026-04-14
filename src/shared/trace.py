@@ -42,12 +42,15 @@ def trace_headers() -> dict[str, str]:
     return {TRACE_HEADER: tid} if tid else {}
 
 
-def origin_headers() -> dict[str, str]:
-    """Return an X-Origin header dict if origin is set on the current context."""
-    o = current_origin.get()
-    if not o:
+def origin_header(origin: dict[str, str] | None) -> dict[str, str]:
+    """Serialize an origin dict to an ``X-Origin`` header dict.
+
+    Returns ``{}`` when origin is empty so it can be spread into a headers
+    dict unconditionally.
+    """
+    if not origin:
         return {}
-    return {ORIGIN_HEADER: json.dumps(o, separators=(",", ":"))}
+    return {ORIGIN_HEADER: json.dumps(origin, separators=(",", ":"))}
 
 
 def parse_origin_header(raw: str | None) -> dict[str, str] | None:

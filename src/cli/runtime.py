@@ -464,10 +464,9 @@ class RuntimeContext:
 
         async def _direct_dispatch(
             agent_name: str, message: str, origin: dict | None = None,
+            **_kwargs,
         ) -> str:
-            import json as _json
-
-            from src.shared.trace import ORIGIN_HEADER, current_trace_id
+            from src.shared.trace import current_trace_id, origin_header
 
             tid = current_trace_id.get()
             if tid and self.trace_store:
@@ -481,10 +480,7 @@ class RuntimeContext:
             extra_headers: dict[str, str] = {}
             if tid:
                 extra_headers["x-trace-id"] = tid
-            if origin:
-                extra_headers[ORIGIN_HEADER] = _json.dumps(
-                    origin, separators=(",", ":"),
-                )
+            extra_headers.update(origin_header(origin))
             try:
                 result = await self.transport.request(
                     agent_name, "POST", "/chat", json={"message": message},
@@ -549,12 +545,24 @@ class RuntimeContext:
                 for ch in self._active_channels
             ), return_exceptions=True)
 
-    async def _handle_notify_origin(self, origin: dict, message: str) -> None:
+    async def _handle_notify_origin(
+        self, origin: dict, message: str, agent_name: str = "",
+    ) -> None:
         """Route a completed task result back to the originating channel+user.
 
         Called by the lane worker after a hand-off task completes with
         auto_notify=True.  Delivers the result to the specific user on the
         specific channel that originally dispatched the work.
+
+        Prefixes the message with ``[agent_name]`` for parity with the direct
+        dispatch path (``Channel.handle_message`` labels responses the same
+        way), so users can see which agent produced the reply.
+
+        Telegram/Discord/Slack adapters each run on their own event loop in a
+        daemon thread.  The lane worker calling this is on the dispatch loop,
+        so we hop onto the channel's own loop via ``run_coroutine_threadsafe``
+        to avoid cross-loop client reuse.  WhatsApp has no dedicated loop
+        (it's webhook-driven), so we call directly.
         """
         if not origin or not self.channel_manager:
             return
@@ -569,8 +577,18 @@ class RuntimeContext:
                 channel_type, user,
             )
             return
+
+        labelled = f"[{agent_name}] {message}" if agent_name else message
+
+        channel_loop = getattr(ch, "_channel_loop", None)
         try:
-            await ch.send_to_user(user, message)
+            if channel_loop is not None and channel_loop.is_running():
+                concurrent_fut = asyncio.run_coroutine_threadsafe(
+                    ch.send_to_user(user, labelled), channel_loop,
+                )
+                await asyncio.wrap_future(concurrent_fut)
+            else:
+                await ch.send_to_user(user, labelled)
         except Exception as e:
             logger.warning(
                 "send_to_user(%s, %s) failed: %s", channel_type, user, e,

@@ -237,11 +237,11 @@ class MeshClient:
         origin: dict | None = None,
     ) -> dict:
         """Wake a target agent so it processes work immediately."""
+        from src.shared.trace import origin_header
+
         client = await self._get_client()
         headers = self._trace_headers()
-        if origin:
-            import json as _json
-            headers["X-Origin"] = _json.dumps(origin, separators=(",", ":"))
+        headers.update(origin_header(origin))
         response = await client.post(
             f"{self.mesh_url}/mesh/wake",
             params={"target": target, "message": message},

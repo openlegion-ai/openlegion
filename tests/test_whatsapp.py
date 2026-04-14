@@ -25,7 +25,7 @@ def _make_channel(
 ) -> WhatsAppChannel:
     agents = agents or ["alpha", "beta"]
 
-    async def dispatch_fn(agent: str, message: str) -> str:
+    async def dispatch_fn(agent: str, message: str, **_kwargs) -> str:
         return f"reply from {agent}"
 
     def list_agents_fn():

@@ -144,8 +144,10 @@ class ChannelManager:
                 default_agent=wa_cfg.get("default_agent", first_agent),
                 **common,
             )
-            # CLI boot — no running loop; use asyncio.run here (start_channel
-        # awaits directly for the dashboard path, which runs inside uvicorn).
+            # CLI boot runs on the main thread with no event loop yet, so
+            # asyncio.run() is correct here.  The dashboard path
+            # (start_channel) is async and awaits ch.start() directly because
+            # it runs inside uvicorn's loop.
             asyncio.run(wa.start())
             webhook_routers.append(wa.create_router())
             self.active.append(wa)

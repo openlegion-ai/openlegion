@@ -26,6 +26,7 @@ logger = setup_logging("host.lanes")
 
 _STEER_WAKEUP_MAX = 10  # max wakeups per window
 _STEER_WAKEUP_WINDOW = 3600  # 1 hour window
+_NOTIFY_FORWARD_TIMEOUT = 30  # seconds — cap on auto-notify send
 
 
 @dataclass
@@ -241,7 +242,9 @@ class LaneManager:
                 else:
                     result = await self._dispatch_fn(agent, task.message)
                 task.future.set_result(result)
-                # Auto-forward result to origin channel+user when requested
+                # Auto-forward result to origin channel+user when requested.
+                # Runs as a background task with a timeout so a hung channel
+                # send does not leak a coroutine or stall the worker.
                 if (
                     task.auto_notify
                     and task.origin
@@ -252,11 +255,20 @@ class LaneManager:
                 ):
                     fn = self._notify_fn
                     origin_copy = dict(task.origin)
+                    task_agent = task.agent
                     task_result = result
 
                     async def _forward():
                         try:
-                            await fn(origin_copy, task_result)
+                            await asyncio.wait_for(
+                                fn(origin_copy, task_result, task_agent),
+                                timeout=_NOTIFY_FORWARD_TIMEOUT,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "Lane auto-notify to origin %s timed out after %ds",
+                                origin_copy, _NOTIFY_FORWARD_TIMEOUT,
+                            )
                         except Exception as fwd_e:
                             logger.warning(
                                 "Lane auto-notify to origin %s failed: %s",

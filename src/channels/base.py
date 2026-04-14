@@ -98,7 +98,7 @@ class PairingManager:
     def allowed_list(self) -> list:
         return list(self._data.get("allowed", []))
 
-DispatchFn = Callable[[str, str], Coroutine[Any, Any, str]]
+DispatchFn = Callable[..., Coroutine[Any, Any, str]]
 StreamDispatchFn = Callable[[str, str], AsyncIterator[dict]]
 ListAgentsFn = Callable[[], dict]
 StatusFn = Callable[[str], dict | None]
@@ -190,7 +190,13 @@ class Channel(abc.ABC):
         self, agent: str, message: str,
         origin: dict[str, str] | None = None,
     ) -> str:
-        """Route a message to an agent and return the response."""
+        """Route a message to an agent and return the response.
+
+        ``dispatch_fn`` must accept ``origin`` as a keyword argument (defaulting
+        to None). Production dispatch_fns (``RuntimeContext.async_dispatch``)
+        already do; test stubs should use ``**kwargs`` or an explicit
+        ``origin=None`` kwarg.
+        """
         from src.shared.trace import current_trace_id, new_trace_id
 
         target = agent or self.default_agent
@@ -199,13 +205,6 @@ class Channel(abc.ABC):
         current_trace_id.set(new_trace_id())
         try:
             return await self.dispatch_fn(target, message, origin=origin)
-        except TypeError:
-            # Back-compat: dispatch_fn doesn't accept origin keyword
-            try:
-                return await self.dispatch_fn(target, message)
-            except Exception as e:
-                logger.error(f"Dispatch to '{target}' failed: {e}")
-                return f"Error: {e}"
         except Exception as e:
             logger.error(f"Dispatch to '{target}' failed: {e}")
             return f"Error: {e}"

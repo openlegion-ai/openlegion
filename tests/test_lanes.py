@@ -387,7 +387,7 @@ async def test_stop_cancels_workers():
 
 @pytest.mark.asyncio
 async def test_auto_notify_triggers_notify_fn():
-    """notify_fn called with origin+result when auto_notify=True and result is non-empty."""
+    """notify_fn called with origin+result+agent when auto_notify=True and result is non-empty."""
     dispatch = AsyncMock(return_value="task done!")
     notify = AsyncMock()
     lm = LaneManager(dispatch_fn=dispatch, notify_fn=notify)
@@ -400,7 +400,7 @@ async def test_auto_notify_triggers_notify_fn():
     assert result == "task done!"
     # Give the background task a chance to run
     await asyncio.sleep(0.05)
-    notify.assert_awaited_once_with(origin, "task done!")
+    notify.assert_awaited_once_with(origin, "task done!", "agent1")
 
 
 @pytest.mark.asyncio

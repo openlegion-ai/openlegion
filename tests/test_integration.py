@@ -2074,3 +2074,141 @@ def test_agent_profile_permission_denied(mesh_components):
     # Try to read "research" profile from "qualify" — should be denied.
     resp = client.get("/mesh/agents/research/profile", params={"requesting_agent": "qualify"})
     assert resp.status_code == 403
+
+
+# ── Fix 4: /mesh/wake origin header propagation ───────────────────
+
+
+def _wake_test_app(tmp_path):
+    """Build a minimal mesh app wired with a real dispatch loop + mock lane.
+
+    Returns ``(client, captured_enqueue_kwargs)`` where captured_enqueue_kwargs
+    is a list the test can inspect after POSTing to /mesh/wake.
+    """
+    import asyncio
+    import threading
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "operator": AgentPermissions(
+            agent_id="operator", can_message=["*"],
+            blackboard_read=["*"], blackboard_write=["*"],
+            allowed_apis=[],
+        ),
+    }
+    router = MessageRouter(permissions=perms, agent_registry={})
+    router.register_agent("chef", "http://fake", role="chef")
+
+    captured: list[dict] = []
+
+    class _FakeLane:
+        async def enqueue(self, agent, message, **kwargs):
+            captured.append({"agent": agent, "message": message, **kwargs})
+            return ""
+
+    lane_manager = _FakeLane()
+
+    # Real loop running in a daemon thread so run_coroutine_threadsafe works.
+    loop = asyncio.new_event_loop()
+    ready = threading.Event()
+
+    def _run():
+        asyncio.set_event_loop(loop)
+        loop.call_soon(ready.set)
+        loop.run_forever()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    ready.wait()
+
+    app = create_mesh_app(
+        bb, pubsub, router, perms,
+        lane_manager=lane_manager,
+        dispatch_loop=loop,
+    )
+    # Mesh endpoint resolves the caller agent from auth tokens; bypass that
+    # by pinning a request-scoped agent_id via _extract_verified_agent_id's
+    # fallback behaviour — no auth_tokens on the app means no verification,
+    # so the endpoint falls back to "mesh" as caller. That's fine for this test.
+    client = TestClient(app)
+    return client, captured, loop, bb
+
+
+def test_mesh_wake_propagates_origin_header(tmp_path):
+    """POST /mesh/wake with X-Origin passes parsed origin + auto_notify=True to enqueue."""
+    import json
+    import time
+
+    client, captured, loop, bb = _wake_test_app(tmp_path)
+    try:
+        resp = client.post(
+            "/mesh/wake",
+            params={"target": "chef", "message": "check inbox"},
+            headers={
+                "x-origin": json.dumps({"channel": "whatsapp", "user": "+1234"}),
+                "X-Agent-ID": "operator",
+            },
+        )
+        assert resp.status_code == 200
+        # Give the dispatch loop a moment to run the enqueue coroutine
+        deadline = time.monotonic() + 2.0
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert captured, "lane_manager.enqueue was never called"
+        call = captured[0]
+        assert call["agent"] == "chef"
+        assert call["mode"] == "followup"
+        assert call["origin"] == {"channel": "whatsapp", "user": "+1234"}
+        assert call["auto_notify"] is True
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        bb.close()
+
+
+def test_mesh_wake_no_origin_header_disables_auto_notify(tmp_path):
+    """POST /mesh/wake without X-Origin enqueues with origin=None, auto_notify=False."""
+    import time
+
+    client, captured, loop, bb = _wake_test_app(tmp_path)
+    try:
+        resp = client.post(
+            "/mesh/wake",
+            params={"target": "chef", "message": "check inbox"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert resp.status_code == 200
+        deadline = time.monotonic() + 2.0
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert captured
+        call = captured[0]
+        assert call["origin"] is None
+        assert call["auto_notify"] is False
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        bb.close()
+
+
+def test_mesh_wake_invalid_origin_header_ignored(tmp_path):
+    """POST /mesh/wake with malformed X-Origin is treated as no origin."""
+    import time
+
+    client, captured, loop, bb = _wake_test_app(tmp_path)
+    try:
+        resp = client.post(
+            "/mesh/wake",
+            params={"target": "chef", "message": "check inbox"},
+            headers={"x-origin": "not-json", "X-Agent-ID": "operator"},
+        )
+        assert resp.status_code == 200
+        deadline = time.monotonic() + 2.0
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert captured
+        assert captured[0]["origin"] is None
+        assert captured[0]["auto_notify"] is False
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        bb.close()
