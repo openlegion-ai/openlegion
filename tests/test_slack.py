@@ -306,3 +306,41 @@ class TestSendNotification:
         ch = _make_channel(paired={"owner": "U1", "allowed": []})
         ch._bolt_app = None
         await ch.send_notification("test")
+
+
+# ── Fix 4: send_to_user handles composite thread keys ─────────────
+
+class TestSendToUser:
+    def _mock_bolt(self, ch):
+        mock_client = MagicMock()
+        mock_client.chat_postMessage = AsyncMock()
+        ch._bolt_app = MagicMock()
+        ch._bolt_app.client = mock_client
+        return mock_client
+
+    @pytest.mark.asyncio
+    async def test_send_to_bare_user_id(self):
+        ch = _make_channel(paired={"owner": "U1", "allowed": []})
+        client = self._mock_bolt(ch)
+        await ch.send_to_user("U999", "hello")
+        client.chat_postMessage.assert_awaited_once_with(
+            channel="U999", text="hello",
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_to_composite_thread_key(self):
+        """Composite ``user:thread_ts`` keys must split — channel is the bare
+        user ID, thread_ts is a separate kwarg.  Calling chat_postMessage with
+        ``channel="U999:1700000000.123"`` would otherwise fail silently."""
+        ch = _make_channel(paired={"owner": "U1", "allowed": []})
+        client = self._mock_bolt(ch)
+        await ch.send_to_user("U999:1700000000.123", "hello")
+        client.chat_postMessage.assert_awaited_once_with(
+            channel="U999", thread_ts="1700000000.123", text="hello",
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_to_user_no_app_is_noop(self):
+        ch = _make_channel(paired={"owner": "U1", "allowed": []})
+        ch._bolt_app = None
+        await ch.send_to_user("U999", "hello")  # must not raise

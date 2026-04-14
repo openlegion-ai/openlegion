@@ -53,13 +53,18 @@ def origin_header(origin: dict[str, str] | None) -> dict[str, str]:
     return {ORIGIN_HEADER: json.dumps(origin, separators=(",", ":"))}
 
 
+_MAX_ORIGIN_CHANNEL_LEN = 32
+_MAX_ORIGIN_USER_LEN = 128
+
+
 def parse_origin_header(raw: str | None) -> dict[str, str] | None:
     """Parse an X-Origin header. Returns None on any error or invalid shape.
 
     Only ``channel`` and ``user`` fields propagate — all other keys are dropped.
-    Both must be non-empty strings.
+    Both must be non-empty strings within reasonable length bounds so a
+    malicious or malformed header cannot inflate downstream payloads.
     """
-    if not raw:
+    if not raw or len(raw) > 512:
         return None
     try:
         parsed = json.loads(raw)
@@ -72,6 +77,8 @@ def parse_origin_header(raw: str | None) -> dict[str, str] | None:
     if not isinstance(ch, str) or not isinstance(us, str):
         return None
     if not ch or not us:
+        return None
+    if len(ch) > _MAX_ORIGIN_CHANNEL_LEN or len(us) > _MAX_ORIGIN_USER_LEN:
         return None
     # Whitelist: only `channel` and `user` fields propagate.
     return {"channel": ch, "user": us}

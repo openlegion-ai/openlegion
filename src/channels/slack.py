@@ -151,13 +151,24 @@ class SlackChannel(Channel):
                 logger.warning(f"Failed to notify channel {ch_id}: {e}")
 
     async def send_to_user(self, user_id: str, text: str) -> None:
-        """Send a DM to a specific Slack user via their user ID."""
+        """Send a message to a Slack user or thread.
+
+        ``user_id`` may be a raw user ID (``U123…``) or a composite
+        ``U123…:thread_ts`` key produced by ``_get_user_key`` for threaded
+        conversations.  Split the composite before calling the Slack API —
+        ``chat_postMessage`` expects a real channel/user ID as ``channel``
+        and routes to a thread via the separate ``thread_ts`` kwarg.
+        """
         if not self._bolt_app:
             return
+        channel_id, _, thread_ts = user_id.partition(":")
+        post_kwargs: dict[str, str] = {"channel": channel_id}
+        if thread_ts:
+            post_kwargs["thread_ts"] = thread_ts
         try:
             for part in chunk_text(text, MAX_SLACK_LEN):
                 await self._bolt_app.client.chat_postMessage(
-                    channel=user_id, text=part,
+                    text=part, **post_kwargs,
                 )
         except Exception as e:
             logger.warning("Slack send_to_user(%s) failed: %s", user_id, e)
