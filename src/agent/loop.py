@@ -1645,7 +1645,10 @@ class AgentLoop:
         except Exception as e:
             logger.warning("Failed to save chat checkpoint: %s", e)
 
-    async def chat(self, user_message: str, *, trace_id: str | None = None) -> dict:
+    async def chat(
+        self, user_message: str, *, trace_id: str | None = None,
+        origin: dict[str, str] | None = None,
+    ) -> dict:
         """Handle a single chat turn with persistent conversation history.
 
         On first message of a session, loads workspace context (INSTRUCTIONS.md,
@@ -1672,14 +1675,18 @@ class AgentLoop:
                 "tokens_used": 0,
             }
 
-        from src.shared.trace import current_trace_id
+        from src.shared.trace import current_origin, current_trace_id
         current_trace_id.set(trace_id)
-        async with self._chat_lock:
-            await self._maybe_restore_session()
-            try:
-                return await self._chat_inner(user_message)
-            finally:
-                await self._checkpoint_chat_session()
+        origin_token = current_origin.set(origin)
+        try:
+            async with self._chat_lock:
+                await self._maybe_restore_session()
+                try:
+                    return await self._chat_inner(user_message)
+                finally:
+                    await self._checkpoint_chat_session()
+        finally:
+            current_origin.reset(origin_token)
 
     # ── Chat helpers (shared by streaming and non-streaming) ────
 
@@ -2461,7 +2468,10 @@ class AgentLoop:
 
     # ── Streaming chat ────────────────────────────────────────
 
-    async def chat_stream(self, user_message: str, *, trace_id: str | None = None):
+    async def chat_stream(
+        self, user_message: str, *, trace_id: str | None = None,
+        origin: dict[str, str] | None = None,
+    ):
         """Streaming chat that yields SSE events as they happen.
 
         Events yielded (as dicts, caller serialises to SSE):
@@ -2488,15 +2498,19 @@ class AgentLoop:
             }
             return
 
-        from src.shared.trace import current_trace_id
+        from src.shared.trace import current_origin, current_trace_id
         current_trace_id.set(trace_id)
-        async with self._chat_lock:
-            await self._maybe_restore_session()
-            try:
-                async for event in self._chat_stream_inner(user_message):
-                    yield event
-            finally:
-                await self._checkpoint_chat_session()
+        origin_token = current_origin.set(origin)
+        try:
+            async with self._chat_lock:
+                await self._maybe_restore_session()
+                try:
+                    async for event in self._chat_stream_inner(user_message):
+                        yield event
+                finally:
+                    await self._checkpoint_chat_session()
+        finally:
+            current_origin.reset(origin_token)
 
     async def _chat_stream_inner(self, user_message: str):
         self.state = "working"

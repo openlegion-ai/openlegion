@@ -232,13 +232,20 @@ class MeshClient:
         )
         response.raise_for_status()
 
-    async def wake_agent(self, target: str, message: str = "") -> dict:
+    async def wake_agent(
+        self, target: str, message: str = "",
+        origin: dict | None = None,
+    ) -> dict:
         """Wake a target agent so it processes work immediately."""
+        from src.shared.trace import origin_header
+
         client = await self._get_client()
+        headers = self._trace_headers()
+        headers.update(origin_header(origin))
         response = await client.post(
             f"{self.mesh_url}/mesh/wake",
             params={"target": target, "message": message},
-            headers=self._trace_headers(),
+            headers=headers,
         )
         response.raise_for_status()
         return response.json()

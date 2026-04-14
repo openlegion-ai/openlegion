@@ -2074,3 +2074,315 @@ def test_agent_profile_permission_denied(mesh_components):
     # Try to read "research" profile from "qualify" — should be denied.
     resp = client.get("/mesh/agents/research/profile", params={"requesting_agent": "qualify"})
     assert resp.status_code == 403
+
+
+# ── Fix 4: parse_origin_header input validation ─────────────────
+
+
+class TestParseOriginHeader:
+    def test_valid_header(self):
+        from src.shared.trace import parse_origin_header
+        assert parse_origin_header('{"channel":"whatsapp","user":"+1234"}') == {
+            "channel": "whatsapp", "user": "+1234",
+        }
+
+    def test_none_returns_none(self):
+        from src.shared.trace import parse_origin_header
+        assert parse_origin_header(None) is None
+        assert parse_origin_header("") is None
+
+    def test_invalid_json_returns_none(self):
+        from src.shared.trace import parse_origin_header
+        assert parse_origin_header("not-json") is None
+        assert parse_origin_header("{") is None
+
+    def test_non_dict_returns_none(self):
+        from src.shared.trace import parse_origin_header
+        assert parse_origin_header('"just a string"') is None
+        assert parse_origin_header("[1, 2, 3]") is None
+
+    def test_missing_fields_returns_none(self):
+        from src.shared.trace import parse_origin_header
+        assert parse_origin_header('{"channel":"whatsapp"}') is None
+        assert parse_origin_header('{"user":"+1"}') is None
+
+    def test_empty_fields_returns_none(self):
+        from src.shared.trace import parse_origin_header
+        assert parse_origin_header('{"channel":"","user":"+1"}') is None
+        assert parse_origin_header('{"channel":"whatsapp","user":""}') is None
+
+    def test_non_string_fields_returns_none(self):
+        from src.shared.trace import parse_origin_header
+        assert parse_origin_header('{"channel":1,"user":"+1"}') is None
+        assert parse_origin_header('{"channel":"whatsapp","user":123}') is None
+
+    def test_extra_fields_stripped(self):
+        from src.shared.trace import parse_origin_header
+        result = parse_origin_header(
+            '{"channel":"whatsapp","user":"+1","extra":"dropped","nested":{}}'
+        )
+        assert result == {"channel": "whatsapp", "user": "+1"}
+
+    def test_oversized_raw_header_returns_none(self):
+        from src.shared.trace import parse_origin_header
+        # Raw header >512 bytes is rejected before JSON parsing
+        big = '{"channel":"whatsapp","user":"' + ("x" * 600) + '"}'
+        assert parse_origin_header(big) is None
+
+    def test_oversized_user_field_returns_none(self):
+        from src.shared.trace import parse_origin_header
+        # Even if the raw blob fits under 512, a >128 char user is dropped
+        raw = '{"channel":"whatsapp","user":"' + ("x" * 200) + '"}'
+        # Raw is ~230 chars, under the 512 cap, so length-per-field check kicks in
+        assert parse_origin_header(raw) is None
+
+    def test_oversized_channel_field_returns_none(self):
+        from src.shared.trace import parse_origin_header
+        raw = '{"channel":"' + ("c" * 50) + '","user":"+1"}'
+        assert parse_origin_header(raw) is None
+
+
+# ── Fix 4: /mesh/wake origin header propagation ───────────────────
+
+
+def _wake_test_app(tmp_path):
+    """Build a minimal mesh app wired with a real dispatch loop + mock lane.
+
+    Returns ``(client, captured_enqueue_kwargs)`` where captured_enqueue_kwargs
+    is a list the test can inspect after POSTing to /mesh/wake.
+    """
+    import asyncio
+    import threading
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "operator": AgentPermissions(
+            agent_id="operator", can_message=["*"],
+            blackboard_read=["*"], blackboard_write=["*"],
+            allowed_apis=[],
+        ),
+    }
+    router = MessageRouter(permissions=perms, agent_registry={})
+    router.register_agent("chef", "http://fake", role="chef")
+
+    captured: list[dict] = []
+
+    class _FakeLane:
+        async def enqueue(self, agent, message, **kwargs):
+            captured.append({"agent": agent, "message": message, **kwargs})
+            return ""
+
+    lane_manager = _FakeLane()
+
+    # Real loop running in a daemon thread so run_coroutine_threadsafe works.
+    loop = asyncio.new_event_loop()
+    ready = threading.Event()
+
+    def _run():
+        asyncio.set_event_loop(loop)
+        loop.call_soon(ready.set)
+        loop.run_forever()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    ready.wait()
+
+    app = create_mesh_app(
+        bb, pubsub, router, perms,
+        lane_manager=lane_manager,
+        dispatch_loop=loop,
+    )
+    # Mesh endpoint resolves the caller agent from auth tokens; bypass that
+    # by pinning a request-scoped agent_id via _extract_verified_agent_id's
+    # fallback behaviour — no auth_tokens on the app means no verification,
+    # so the endpoint falls back to "mesh" as caller. That's fine for this test.
+    client = TestClient(app)
+    return client, captured, loop, bb
+
+
+def test_mesh_wake_propagates_origin_header(tmp_path):
+    """POST /mesh/wake with X-Origin passes parsed origin + auto_notify=True to enqueue."""
+    import json
+    import time
+
+    client, captured, loop, bb = _wake_test_app(tmp_path)
+    try:
+        resp = client.post(
+            "/mesh/wake",
+            params={"target": "chef", "message": "check inbox"},
+            headers={
+                "x-origin": json.dumps({"channel": "whatsapp", "user": "+1234"}),
+                "X-Agent-ID": "operator",
+            },
+        )
+        assert resp.status_code == 200
+        # Give the dispatch loop a moment to run the enqueue coroutine
+        deadline = time.monotonic() + 2.0
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert captured, "lane_manager.enqueue was never called"
+        call = captured[0]
+        assert call["agent"] == "chef"
+        assert call["mode"] == "followup"
+        assert call["origin"] == {"channel": "whatsapp", "user": "+1234"}
+        assert call["auto_notify"] is True
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        bb.close()
+
+
+def test_mesh_wake_no_origin_header_disables_auto_notify(tmp_path):
+    """POST /mesh/wake without X-Origin enqueues with origin=None, auto_notify=False."""
+    import time
+
+    client, captured, loop, bb = _wake_test_app(tmp_path)
+    try:
+        resp = client.post(
+            "/mesh/wake",
+            params={"target": "chef", "message": "check inbox"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert resp.status_code == 200
+        deadline = time.monotonic() + 2.0
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert captured
+        call = captured[0]
+        assert call["origin"] is None
+        assert call["auto_notify"] is False
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        bb.close()
+
+
+def test_mesh_wake_invalid_origin_header_ignored(tmp_path):
+    """POST /mesh/wake with malformed X-Origin is treated as no origin."""
+    import time
+
+    client, captured, loop, bb = _wake_test_app(tmp_path)
+    try:
+        resp = client.post(
+            "/mesh/wake",
+            params={"target": "chef", "message": "check inbox"},
+            headers={"x-origin": "not-json", "X-Agent-ID": "operator"},
+        )
+        assert resp.status_code == 200
+        deadline = time.monotonic() + 2.0
+        while not captured and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert captured
+        assert captured[0]["origin"] is None
+        assert captured[0]["auto_notify"] is False
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        bb.close()
+
+
+# ── Fix 4: RuntimeContext._handle_notify_origin routing ───────────
+
+
+def _stub_runtime_with_channel(channel_type: str, channel_obj):
+    """Build a minimal RuntimeContext with a mocked channel_manager."""
+    from unittest.mock import MagicMock
+
+    from src.cli.runtime import RuntimeContext
+
+    rt = RuntimeContext.__new__(RuntimeContext)
+    rt.channel_manager = MagicMock()
+    rt.channel_manager._channel_map = {channel_type: channel_obj}
+    return rt
+
+
+class _FakeChannel:
+    def __init__(self, has_loop: bool = False):
+        from unittest.mock import AsyncMock
+
+        self.sent: list[tuple[str, str]] = []
+        self._channel_loop = None
+        if has_loop:
+            import asyncio as _aio
+            self._channel_loop = _aio.get_event_loop()
+
+        async def _send(user_id: str, text: str) -> None:
+            self.sent.append((user_id, text))
+
+        self.send_to_user = AsyncMock(side_effect=_send)
+
+
+class TestHandleNotifyOrigin:
+    @pytest.mark.asyncio
+    async def test_routes_to_channel_with_agent_label(self):
+        ch = _FakeChannel()
+        rt = _stub_runtime_with_channel("whatsapp", ch)
+        await rt._handle_notify_origin(
+            {"channel": "whatsapp", "user": "+1234"},
+            "dinner is ready",
+            "chef",
+        )
+        assert ch.sent == [("+1234", "[chef] dinner is ready")]
+
+    @pytest.mark.asyncio
+    async def test_no_agent_label_when_agent_name_empty(self):
+        ch = _FakeChannel()
+        rt = _stub_runtime_with_channel("whatsapp", ch)
+        await rt._handle_notify_origin(
+            {"channel": "whatsapp", "user": "+1234"},
+            "raw message",
+            "",
+        )
+        assert ch.sent == [("+1234", "raw message")]
+
+    @pytest.mark.asyncio
+    async def test_drops_when_channel_not_connected(self):
+        from unittest.mock import MagicMock
+
+        from src.cli.runtime import RuntimeContext
+        rt = RuntimeContext.__new__(RuntimeContext)
+        rt.channel_manager = MagicMock()
+        rt.channel_manager._channel_map = {}  # empty
+        # No exception raised, no call made
+        await rt._handle_notify_origin(
+            {"channel": "discord", "user": "99"},
+            "hi",
+            "chef",
+        )
+
+    @pytest.mark.asyncio
+    async def test_drops_when_channel_manager_missing(self):
+        from src.cli.runtime import RuntimeContext
+        rt = RuntimeContext.__new__(RuntimeContext)
+        rt.channel_manager = None
+        # Must be a no-op, not raise
+        await rt._handle_notify_origin(
+            {"channel": "whatsapp", "user": "+1"},
+            "hi",
+            "chef",
+        )
+
+    @pytest.mark.asyncio
+    async def test_drops_on_invalid_origin(self):
+        ch = _FakeChannel()
+        rt = _stub_runtime_with_channel("whatsapp", ch)
+        # Missing user
+        await rt._handle_notify_origin({"channel": "whatsapp"}, "hi", "chef")
+        # Missing channel
+        await rt._handle_notify_origin({"user": "+1"}, "hi", "chef")
+        # Empty dict
+        await rt._handle_notify_origin({}, "hi", "chef")
+        assert ch.sent == []
+
+    @pytest.mark.asyncio
+    async def test_send_failure_is_caught_not_raised(self):
+        from unittest.mock import AsyncMock
+
+        ch = _FakeChannel()
+        ch.send_to_user = AsyncMock(side_effect=RuntimeError("boom"))
+        rt = _stub_runtime_with_channel("whatsapp", ch)
+        # Must not raise — the warning is logged and swallowed
+        await rt._handle_notify_origin(
+            {"channel": "whatsapp", "user": "+1"},
+            "hi",
+            "chef",
+        )

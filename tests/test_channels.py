@@ -46,7 +46,7 @@ class StubChannel(Channel):
 def _make_channel(agents: list[str] | None = None, **overrides):
     agents = agents or ["alpha", "beta"]
 
-    async def dispatch_fn(agent: str, message: str) -> str:
+    async def dispatch_fn(agent: str, message: str, **_kwargs) -> str:
         return f"reply from {agent}"
 
     def list_agents_fn():
@@ -206,7 +206,7 @@ class TestCommands:
 
         call_times = []
 
-        async def slow_dispatch(agent: str, message: str) -> str:
+        async def slow_dispatch(agent: str, message: str, **_kwargs) -> str:
             call_times.append(time.monotonic())
             await asyncio.sleep(0.1)
             return f"reply from {agent}"
@@ -279,7 +279,7 @@ class TestAddKeyCommand:
         """The /addkey command must be consumed at channel layer, never dispatched."""
         dispatch_called = []
 
-        async def dispatch_fn(agent: str, message: str) -> str:
+        async def dispatch_fn(agent: str, message: str, **_kwargs) -> str:
             dispatch_called.append(message)
             return "reply"
 
@@ -350,7 +350,7 @@ class TestSilentResponseSuppression:
     @pytest.mark.asyncio
     async def test_empty_response_suppressed(self):
         """When dispatch returns empty string, handle_message returns empty."""
-        async def silent_dispatch(agent: str, message: str) -> str:
+        async def silent_dispatch(agent: str, message: str, **_kwargs) -> str:
             return ""
 
         ch = _make_channel(dispatch_fn=silent_dispatch)
@@ -360,7 +360,7 @@ class TestSilentResponseSuppression:
     @pytest.mark.asyncio
     async def test_whitespace_only_response_suppressed(self):
         """Whitespace-only responses are suppressed."""
-        async def whitespace_dispatch(agent: str, message: str) -> str:
+        async def whitespace_dispatch(agent: str, message: str, **_kwargs) -> str:
             return "   \n  "
 
         ch = _make_channel(dispatch_fn=whitespace_dispatch)
@@ -370,7 +370,7 @@ class TestSilentResponseSuppression:
     @pytest.mark.asyncio
     async def test_none_response_suppressed(self):
         """None responses are suppressed."""
-        async def none_dispatch(agent: str, message: str) -> str:
+        async def none_dispatch(agent: str, message: str, **_kwargs) -> str:
             return None
 
         ch = _make_channel(dispatch_fn=none_dispatch)
@@ -562,7 +562,7 @@ class TestResetNotAvailable:
 
 def _make_tg_channel(tmp_path: Path | None = None, **overrides) -> TelegramChannel:
     """Create a TelegramChannel with stubbed callbacks for unit testing."""
-    async def dispatch_fn(agent: str, message: str) -> str:
+    async def dispatch_fn(agent: str, message: str, **_kwargs) -> str:
         return f"reply from {agent}"
 
     def list_agents_fn():
@@ -812,3 +812,55 @@ class TestTelegramStop:
         with caplog.at_level(logging.INFO):
             await ch.stop()
         assert "stopped" not in caplog.text.lower()
+
+
+# ── Fix 4d/4e: CHANNEL_TYPE and origin propagation ──────────────
+
+class TestChannelTypeAndOriginPropagation:
+    @pytest.mark.asyncio
+    async def test_channel_type_included_in_origin(self):
+        """When CHANNEL_TYPE is set, dispatch receives origin with channel+user."""
+        received_origins = []
+
+        async def recording_dispatch(agent, message, **kwargs):
+            received_origins.append(kwargs.get("origin"))
+            return "ok"
+
+        class TypedChannel(StubChannel):
+            CHANNEL_TYPE = "testchannel"
+
+        ch = TypedChannel(
+            dispatch_fn=recording_dispatch,
+            default_agent="alpha",
+        )
+
+        await ch.handle_message("user42", "hello")
+        assert received_origins == [{"channel": "testchannel", "user": "user42"}]
+
+    @pytest.mark.asyncio
+    async def test_no_channel_type_origin_is_none(self):
+        """When CHANNEL_TYPE is empty, origin passed to dispatch is None."""
+        received_origins = []
+
+        async def recording_dispatch(agent, message, **kwargs):
+            received_origins.append(kwargs.get("origin"))
+            return "ok"
+
+        ch = _make_channel()  # StubChannel has empty CHANNEL_TYPE
+        ch.dispatch_fn = recording_dispatch
+
+        await ch.handle_message("user42", "hello")
+        assert received_origins == [None]
+
+    @pytest.mark.asyncio
+    async def test_send_to_user_base_logs_warning(self, caplog):
+        """Base Channel.send_to_user logs a warning instead of crashing."""
+        import logging
+
+        ch = _make_channel()
+
+        with caplog.at_level(logging.WARNING):
+            await ch.send_to_user("some_user", "hi")
+
+        assert any("send_to_user" in r.message for r in caplog.records)
+        assert any("not implemented" in r.message for r in caplog.records)

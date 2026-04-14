@@ -144,6 +144,10 @@ class ChannelManager:
                 default_agent=wa_cfg.get("default_agent", first_agent),
                 **common,
             )
+            # CLI boot runs on the main thread with no event loop yet, so
+            # asyncio.run() is correct here.  The dashboard path
+            # (start_channel) is async and awaits ch.start() directly because
+            # it runs inside uvicorn's loop.
             asyncio.run(wa.start())
             webhook_routers.append(wa.create_router())
             self.active.append(wa)
@@ -246,8 +250,14 @@ class ChannelManager:
             result.append(entry)
         return result
 
-    def start_channel(self, channel_type: str, tokens: dict) -> list:
-        """Start a single channel dynamically. Returns webhook routers (for WhatsApp)."""
+    async def start_channel(self, channel_type: str, tokens: dict) -> list:
+        """Start a single channel dynamically. Returns webhook routers (for WhatsApp).
+
+        Async so it can be awaited from the dashboard endpoint running inside uvicorn.
+        For Telegram/Discord/Slack, _start_async_channel spawns a daemon thread
+        (sync thread creation is fine from async context).  For WhatsApp, we await
+        ch.start() directly — it's short setup code, not a long-running loop.
+        """
         if channel_type not in self.CHANNEL_TYPES:
             raise ValueError(f"Unknown channel type: {channel_type}")
         if channel_type in self._channel_map:
@@ -309,7 +319,7 @@ class ChannelManager:
                 access_token=access_token, phone_number_id=phone_number_id,
                 verify_token=verify_token, default_agent=first_agent, **common,
             )
-            asyncio.run(ch.start())
+            await ch.start()
             webhook_routers.append(ch.create_router())
             self.active.append(ch)
             self._channel_map["whatsapp"] = ch

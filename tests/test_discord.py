@@ -19,7 +19,7 @@ from src.channels.discord import MAX_DC_LEN, DiscordChannel
 
 def _make_discord_channel(tmp_path: Path | None = None, **overrides) -> DiscordChannel:
     """Create a DiscordChannel with stubbed callbacks for unit testing."""
-    async def dispatch_fn(agent: str, message: str) -> str:
+    async def dispatch_fn(agent: str, message: str, **_kwargs) -> str:
         return f"reply from {agent}"
 
     def list_agents_fn():
@@ -280,7 +280,7 @@ class TestHandleReplSlash:
         """Long responses are split into multiple followup messages."""
         long_reply = "x" * (MAX_DC_LEN + 500)
 
-        async def dispatch_fn(agent, msg):
+        async def dispatch_fn(agent, msg, **_kwargs):
             return long_reply
 
         ch = _make_discord_channel(dispatch_fn=dispatch_fn)

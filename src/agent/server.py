@@ -193,9 +193,12 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     @app.post("/chat", response_model=ChatResponse)
     async def chat(msg: ChatMessage, request: Request) -> ChatResponse:
         """Interactive chat with the agent. Supports tool use."""
+        from src.shared.trace import parse_origin_header
+        origin = parse_origin_header(request.headers.get("x-origin"))
         result = await loop.chat(
             sanitize_for_prompt(msg.message),
             trace_id=request.headers.get("x-trace-id"),
+            origin=origin,
         )
         return ChatResponse(**result)
 
@@ -208,10 +211,13 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     @app.post("/chat/stream")
     async def chat_stream(msg: ChatMessage, request: Request) -> StreamingResponse:
         """Streaming chat. Returns SSE events for tool use and text deltas."""
+        from src.shared.trace import parse_origin_header
         _trace_id = request.headers.get("x-trace-id")
+        _origin = parse_origin_header(request.headers.get("x-origin"))
         async def event_generator():
             stream = loop.chat_stream(
                 sanitize_for_prompt(msg.message), trace_id=_trace_id,
+                origin=_origin,
             )
             stream_iter = stream.__aiter__()
             # Use asyncio.wait (not wait_for) so the pending __anext__

@@ -380,3 +380,91 @@ async def test_stop_cancels_workers():
 
     await lm.stop()
     assert len(lm._workers) == 0
+
+
+# ── Fix 4: origin / auto_notify / notify_fn ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_auto_notify_triggers_notify_fn():
+    """notify_fn called with origin+result+agent when auto_notify=True and result is non-empty."""
+    dispatch = AsyncMock(return_value="task done!")
+    notify = AsyncMock()
+    lm = LaneManager(dispatch_fn=dispatch, notify_fn=notify)
+
+    origin = {"channel": "whatsapp", "user": "+1234"}
+    result = await lm.enqueue(
+        "agent1", "do work", origin=origin, auto_notify=True,
+    )
+
+    assert result == "task done!"
+    # Give the background task a chance to run
+    await asyncio.sleep(0.05)
+    notify.assert_awaited_once_with(origin, "task done!", "agent1")
+
+
+@pytest.mark.asyncio
+async def test_auto_notify_false_does_not_trigger():
+    """notify_fn not called when auto_notify=False."""
+    dispatch = AsyncMock(return_value="done")
+    notify = AsyncMock()
+    lm = LaneManager(dispatch_fn=dispatch, notify_fn=notify)
+
+    origin = {"channel": "whatsapp", "user": "+1234"}
+    await lm.enqueue("agent1", "msg", origin=origin, auto_notify=False)
+    await asyncio.sleep(0.05)
+    notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_notify_no_origin_does_not_trigger():
+    """notify_fn not called when origin=None even if auto_notify=True."""
+    dispatch = AsyncMock(return_value="done")
+    notify = AsyncMock()
+    lm = LaneManager(dispatch_fn=dispatch, notify_fn=notify)
+
+    await lm.enqueue("agent1", "msg", origin=None, auto_notify=True)
+    await asyncio.sleep(0.05)
+    notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_notify_silent_reply_does_not_trigger():
+    """notify_fn not called when result is SILENT_REPLY_TOKEN."""
+    dispatch = AsyncMock(return_value=SILENT_REPLY_TOKEN)
+    notify = AsyncMock()
+    lm = LaneManager(dispatch_fn=dispatch, notify_fn=notify)
+
+    origin = {"channel": "whatsapp", "user": "+1234"}
+    await lm.enqueue("agent1", "msg", origin=origin, auto_notify=True)
+    await asyncio.sleep(0.05)
+    notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_notify_empty_result_does_not_trigger():
+    """notify_fn not called when result is empty."""
+    dispatch = AsyncMock(return_value="   ")
+    notify = AsyncMock()
+    lm = LaneManager(dispatch_fn=dispatch, notify_fn=notify)
+
+    origin = {"channel": "whatsapp", "user": "+1234"}
+    await lm.enqueue("agent1", "msg", origin=origin, auto_notify=True)
+    await asyncio.sleep(0.05)
+    notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_origin_passed_to_dispatch_fn():
+    """When origin is set, dispatch_fn receives it as a kwarg."""
+    received_kwargs = {}
+
+    async def recording_dispatch(agent, message, **kwargs):
+        received_kwargs.update(kwargs)
+        return "ok"
+
+    lm = LaneManager(dispatch_fn=recording_dispatch)
+    origin = {"channel": "telegram", "user": "42"}
+    await lm.enqueue("agent1", "hello", origin=origin)
+
+    assert received_kwargs.get("origin") == origin

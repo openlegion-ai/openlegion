@@ -3680,7 +3680,7 @@ def create_dashboard_router(
                     credential_vault.remove_credential(env_name)
 
         try:
-            routers = channel_manager.start_channel(channel_type, tokens)
+            routers = await channel_manager.start_channel(channel_type, tokens)
             if routers:
                 for ch_router in routers:
                     request.app.include_router(ch_router)
@@ -3985,7 +3985,7 @@ def create_spa_catchall_router() -> APIRouter:
 
     @catchall.get("/{path:path}", response_class=HTMLResponse)
     async def spa_catchall(path: str) -> HTMLResponse:
-        if path.startswith(("mesh/", "dashboard/", "ws/")):
+        if path.startswith(("mesh/", "dashboard/", "ws/", "channels/")):
             raise HTTPException(status_code=404, detail="Not found")
         from src.shared.models import KEYLESS_PROVIDERS, get_all_providers
         all_providers = get_all_providers()

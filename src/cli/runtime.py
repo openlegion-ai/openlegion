@@ -156,7 +156,10 @@ class RuntimeContext:
         click.echo(" done.")
 
     def dispatch(
-        self, agent: str, message: str, mode: str = "followup", trace_id: str | None = None,
+        self, agent: str, message: str, mode: str = "followup",
+        trace_id: str | None = None,
+        origin: dict[str, str] | None = None,
+        auto_notify: bool = False,
     ) -> str:
         """Thread-safe synchronous message dispatch.
 
@@ -164,17 +167,26 @@ class RuntimeContext:
         until the result is ready.  For async callers, use async_dispatch().
         """
         future = asyncio.run_coroutine_threadsafe(
-            self.lane_manager.enqueue(agent, message, mode=mode, trace_id=trace_id),
+            self.lane_manager.enqueue(
+                agent, message, mode=mode, trace_id=trace_id,
+                origin=origin, auto_notify=auto_notify,
+            ),
             self._dispatch_loop,
         )
         return future.result()
 
     async def async_dispatch(
-        self, agent: str, message: str, mode: str = "followup", trace_id: str | None = None,
+        self, agent: str, message: str, mode: str = "followup",
+        trace_id: str | None = None,
+        origin: dict[str, str] | None = None,
+        auto_notify: bool = False,
     ) -> str:
         """Async dispatch: schedules onto the dedicated dispatch loop."""
         future = asyncio.run_coroutine_threadsafe(
-            self.lane_manager.enqueue(agent, message, mode=mode, trace_id=trace_id),
+            self.lane_manager.enqueue(
+                agent, message, mode=mode, trace_id=trace_id,
+                origin=origin, auto_notify=auto_notify,
+            ),
             self._dispatch_loop,
         )
         try:
@@ -450,8 +462,11 @@ class RuntimeContext:
     def _setup_dispatch(self) -> None:
         from src.host.lanes import LaneManager
 
-        async def _direct_dispatch(agent_name: str, message: str) -> str:
-            from src.shared.trace import current_trace_id
+        async def _direct_dispatch(
+            agent_name: str, message: str, origin: dict | None = None,
+            **_kwargs,
+        ) -> str:
+            from src.shared.trace import current_trace_id, origin_header
 
             tid = current_trace_id.get()
             if tid and self.trace_store:
@@ -462,9 +477,14 @@ class RuntimeContext:
                 )
             import time as _time
             t0 = _time.time()
+            extra_headers: dict[str, str] = {}
+            if tid:
+                extra_headers["x-trace-id"] = tid
+            extra_headers.update(origin_header(origin))
             try:
                 result = await self.transport.request(
                     agent_name, "POST", "/chat", json={"message": message},
+                    headers=extra_headers or None,
                 )
                 response = result.get("response", "(no response)")
                 duration_ms = int((_time.time() - t0) * 1000)
@@ -502,6 +522,7 @@ class RuntimeContext:
         self.lane_manager = LaneManager(
             dispatch_fn=_direct_dispatch, steer_fn=_direct_steer,
             trace_store=self.trace_store,
+            notify_fn=self._handle_notify_origin,
         )
 
         self._dispatch_loop = asyncio.new_event_loop()
@@ -523,6 +544,55 @@ class RuntimeContext:
                 ch.send_notification(notification)
                 for ch in self._active_channels
             ), return_exceptions=True)
+
+    async def _handle_notify_origin(
+        self, origin: dict, message: str, agent_name: str = "",
+    ) -> None:
+        """Route a completed task result back to the originating channel+user.
+
+        Called by the lane worker after a hand-off task completes with
+        auto_notify=True.  Delivers the result to the specific user on the
+        specific channel that originally dispatched the work.
+
+        Prefixes the message with ``[agent_name]`` for parity with the direct
+        dispatch path (``Channel.handle_message`` labels responses the same
+        way), so users can see which agent produced the reply.
+
+        Telegram/Discord/Slack adapters each run on their own event loop in a
+        daemon thread.  The lane worker calling this is on the dispatch loop,
+        so we hop onto the channel's own loop via ``run_coroutine_threadsafe``
+        to avoid cross-loop client reuse.  WhatsApp has no dedicated loop
+        (it's webhook-driven), so we call directly.
+        """
+        if not origin or not self.channel_manager:
+            return
+        channel_type = origin.get("channel")
+        user = origin.get("user")
+        if not channel_type or not user:
+            return
+        ch = self.channel_manager._channel_map.get(channel_type)
+        if ch is None:
+            logger.debug(
+                "Origin channel %s not connected — dropping notification to %s",
+                channel_type, user,
+            )
+            return
+
+        labelled = f"[{agent_name}] {message}" if agent_name else message
+
+        channel_loop = getattr(ch, "_channel_loop", None)
+        try:
+            if channel_loop is not None and channel_loop.is_running():
+                concurrent_fut = asyncio.run_coroutine_threadsafe(
+                    ch.send_to_user(user, labelled), channel_loop,
+                )
+                await asyncio.wrap_future(concurrent_fut)
+            else:
+                await ch.send_to_user(user, labelled)
+        except Exception as e:
+            logger.warning(
+                "send_to_user(%s, %s) failed: %s", channel_type, user, e,
+            )
 
     def _start_mesh_server(self) -> None:
         import uvicorn

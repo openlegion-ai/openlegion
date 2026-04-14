@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import hmac
 import os
+import weakref
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -38,6 +39,8 @@ _GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
 class WhatsAppChannel(Channel):
     """WhatsApp Cloud API adapter for OpenLegion with webhook-based messaging."""
 
+    CHANNEL_TYPE = "whatsapp"
+
     def __init__(
         self,
         access_token: str,
@@ -50,10 +53,51 @@ class WhatsAppChannel(Channel):
         self.access_token = access_token
         self.phone_number_id = phone_number_id
         self.verify_token = verify_token
+        # ``_http`` exists for test injection and readiness checks:
+        #   - tests replace it with an AsyncMock and assert on ``_http.post``
+        #   - production code checks ``if not self._http`` as a "started" flag
+        # Real production sends go through ``_client_for_loop()`` which keeps
+        # one httpx.AsyncClient per event loop.  httpx pins its connection
+        # pool to the first loop that uses it, so reusing one client across
+        # loops (uvicorn webhook loop + dispatch loop for hand-off auto-notify)
+        # raises "Event loop is closed" on the second loop.
+        #
+        # Keyed by the loop object itself via WeakKeyDictionary so entries
+        # vanish automatically when a loop is garbage-collected — using id()
+        # is unsafe because CPython reuses loop memory addresses across
+        # successive ``asyncio.run()`` calls.
         self._http: httpx.AsyncClient | None = None
+        self._http_by_loop: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, httpx.AsyncClient
+        ] = weakref.WeakKeyDictionary()
         self._phone_numbers: set[str] = set()
         self._denied_notified: set[str] = set()
         self._pairing = PairingManager("config/whatsapp_paired.json")
+
+    def _client_for_loop(self) -> httpx.AsyncClient | None:
+        """Return a per-loop httpx client, creating it lazily on first use.
+
+        Tests inject a mock via ``ch._http = AsyncMock()``; in that case we
+        return the mock directly so assertions like
+        ``ch._http.post.assert_called_once()`` keep working regardless of
+        which loop ``_send_text`` runs on.
+        """
+        # Test injection path: a unittest.mock client was assigned directly.
+        if self._http is not None and not isinstance(self._http, httpx.AsyncClient):
+            return self._http
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        client = self._http_by_loop.get(loop)
+        if client is None:
+            client = httpx.AsyncClient(
+                base_url=_GRAPH_API_BASE,
+                headers={"Authorization": f"Bearer {self.access_token}"},
+                timeout=30,
+            )
+            self._http_by_loop[loop] = client
+        return client
 
     async def start(self) -> None:
         if os.environ.get("MESH_AUTH_TOKEN") and not os.environ.get("WHATSAPP_APP_SECRET"):
@@ -61,11 +105,22 @@ class WhatsAppChannel(Channel):
                 "WHATSAPP_APP_SECRET is required in production (MESH_AUTH_TOKEN is set). "
                 "Without it, webhook signature verification is disabled."
             )
-        self._http = httpx.AsyncClient(
-            base_url=_GRAPH_API_BASE,
-            headers={"Authorization": f"Bearer {self.access_token}"},
-            timeout=30,
-        )
+        # Warm the cache for the current loop and mirror the client onto
+        # ``_http`` so existing readiness checks (``if not self._http``)
+        # continue to work.  Cross-loop sends create their own client via
+        # ``_client_for_loop``.
+        try:
+            loop = asyncio.get_running_loop()
+            client = httpx.AsyncClient(
+                base_url=_GRAPH_API_BASE,
+                headers={"Authorization": f"Bearer {self.access_token}"},
+                timeout=30,
+            )
+            self._http_by_loop[loop] = client
+            self._http = client
+        except RuntimeError:
+            logger.warning("WhatsApp start() called outside an event loop")
+
         owner = self._pairing.owner
         if owner:
             logger.info(f"WhatsApp channel started (owner: {owner})")
@@ -75,9 +130,15 @@ class WhatsAppChannel(Channel):
             logger.info("WhatsApp channel started (no pairing code -- run setup again)")
 
     async def stop(self) -> None:
-        if self._http:
-            await self._http.aclose()
-            self._http = None
+        clients = list(self._http_by_loop.values())
+        self._http_by_loop.clear()
+        self._http = None
+        for client in clients:
+            try:
+                await client.aclose()
+            except Exception as e:
+                logger.debug("WhatsApp client aclose failed: %s", e)
+        if clients:
             logger.info("WhatsApp channel stopped")
 
     async def send_notification(self, text: str) -> None:
@@ -91,19 +152,40 @@ class WhatsAppChannel(Channel):
             except Exception as e:
                 logger.warning(f"Failed to notify {phone}: {e}")
 
-    async def _send_text(self, to: str, text: str) -> None:
-        """Send a text message via the WhatsApp Cloud API."""
+    async def send_to_user(self, user_id: str, text: str) -> None:
+        """Send a message to a specific WhatsApp user (phone number)."""
         if not self._http:
             return
-        await self._http.post(
-            f"/{self.phone_number_id}/messages",
-            json={
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "text",
-                "text": {"body": text},
-            },
-        )
+        for part in chunk_text(text, MAX_WA_LEN):
+            await self._send_text(user_id, part)
+
+    async def _send_text(self, to: str, text: str) -> None:
+        """Send a text message via the WhatsApp Cloud API."""
+        client = self._client_for_loop()
+        if client is None:
+            return
+        try:
+            resp = await client.post(
+                f"/{self.phone_number_id}/messages",
+                json={
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": "text",
+                    "text": {"body": text},
+                },
+            )
+        except httpx.HTTPError as e:
+            logger.warning("WhatsApp send to %s failed (network): %s", to, e)
+            return
+        if resp.status_code >= 400:
+            try:
+                body = resp.json()
+            except Exception:
+                body = resp.text
+            logger.warning(
+                "WhatsApp send to %s failed (HTTP %d): %s",
+                to, resp.status_code, body,
+            )
 
     def _is_allowed(self, phone: str) -> bool:
         return self._pairing.is_allowed(phone)

@@ -98,7 +98,7 @@ class PairingManager:
     def allowed_list(self) -> list:
         return list(self._data.get("allowed", []))
 
-DispatchFn = Callable[[str, str], Coroutine[Any, Any, str]]
+DispatchFn = Callable[..., Coroutine[Any, Any, str]]
 StreamDispatchFn = Callable[[str, str], AsyncIterator[dict]]
 ListAgentsFn = Callable[[], dict]
 StatusFn = Callable[[str], dict | None]
@@ -118,7 +118,12 @@ class Channel(abc.ABC):
     - /use, /agents, /status, /broadcast, /costs, /reset, /help commands
     - Agent name labels on every response
     - Async notification push for cron/heartbeat results
+
+    Subclasses should set ``CHANNEL_TYPE`` to the platform identifier string
+    (e.g. ``"whatsapp"``) used for origin-based response routing.
     """
+
+    CHANNEL_TYPE: str = ""
 
     def __init__(
         self,
@@ -158,6 +163,18 @@ class Channel(abc.ABC):
     async def send_notification(self, text: str) -> None:
         """Push a notification (e.g. cron result) to all registered users."""
 
+    async def send_to_user(self, user_id: str, text: str) -> None:
+        """Send a message to a specific user on this channel.
+
+        Subclasses should override to deliver via the platform's API.
+        Base implementation logs and drops — prevents crashes when a
+        channel that hasn't implemented it receives an auto-notify.
+        """
+        logger.warning(
+            "%s.send_to_user not implemented; dropping message to %s",
+            type(self).__name__, user_id,
+        )
+
     def _get_active_agent(self, user_id: str) -> str:
         return self._active_agent.get(user_id, self.default_agent)
 
@@ -169,8 +186,17 @@ class Channel(abc.ABC):
             return list(self.list_agents_fn().keys())
         return []
 
-    async def dispatch(self, agent: str, message: str) -> str:
-        """Route a message to an agent and return the response."""
+    async def dispatch(
+        self, agent: str, message: str,
+        origin: dict[str, str] | None = None,
+    ) -> str:
+        """Route a message to an agent and return the response.
+
+        ``dispatch_fn`` must accept ``origin`` as a keyword argument (defaulting
+        to None). Production dispatch_fns (``RuntimeContext.async_dispatch``)
+        already do; test stubs should use ``**kwargs`` or an explicit
+        ``origin=None`` kwarg.
+        """
         from src.shared.trace import current_trace_id, new_trace_id
 
         target = agent or self.default_agent
@@ -178,7 +204,7 @@ class Channel(abc.ABC):
             return "No agent specified and no default agent configured."
         current_trace_id.set(new_trace_id())
         try:
-            return await self.dispatch_fn(target, message)
+            return await self.dispatch_fn(target, message, origin=origin)
         except Exception as e:
             logger.error(f"Dispatch to '{target}' failed: {e}")
             return f"Error: {e}"
@@ -213,8 +239,11 @@ class Channel(abc.ABC):
         if message.startswith("/"):
             return await self._handle_command(user_id, message, current, agents)
 
-        # Normal message: dispatch to agent
-        response = await self.dispatch(target, message)
+        # Normal message: build origin and dispatch to agent
+        origin: dict[str, str] | None = None
+        if self.CHANNEL_TYPE and user_id:
+            origin = {"channel": self.CHANNEL_TYPE, "user": str(user_id)}
+        response = await self.dispatch(target, message, origin=origin)
         if not response or not response.strip():
             return ""  # Suppress silent/empty responses
         return f"[{target}] {response}"

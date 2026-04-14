@@ -85,7 +85,7 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
             {"type": t, "connected": False, "paired": False, "pairing_code": None}
             for t in ("telegram", "discord", "slack", "whatsapp")
         ]
-        channel_manager.start_channel.return_value = []
+        channel_manager.start_channel = AsyncMock(return_value=[])
 
         result.update({
             "lane_manager": lane_manager,
@@ -3960,3 +3960,32 @@ class TestDashboardDatabaseDetails:
         data = resp.json()
         assert data["purged"] is True
         assert data["deleted_records"] == 3
+
+
+# ── Fix 2: SPA catch-all excludes /channels/ ────────────────────
+
+class TestSpaCatchallChannelsExclusion:
+    def setup_method(self):
+        from fastapi import FastAPI
+
+        from src.dashboard.server import create_spa_catchall_router
+        self._tmpdir = tempfile.mkdtemp()
+        app = FastAPI()
+        router = create_spa_catchall_router()
+        app.include_router(router)
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_channels_path_returns_404(self):
+        resp = self.client.get("/channels/whatsapp/webhook")
+        assert resp.status_code == 404
+
+    def test_channels_subpath_returns_404(self):
+        resp = self.client.get("/channels/foo")
+        assert resp.status_code == 404
+
+    def test_mesh_path_still_returns_404(self):
+        resp = self.client.get("/mesh/agents")
+        assert resp.status_code == 404
