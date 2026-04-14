@@ -62,6 +62,11 @@ class LaneManager:
         self._busy: dict[str, bool] = {}
         self._state_locks: dict[str, asyncio.Lock] = {}
         self._steer_wakeup_ts: dict[str, list[float]] = {}
+        # Strong references to in-flight auto-notify forward tasks.  The
+        # asyncio event loop only holds weak references, so a bare
+        # ``create_task(_forward())`` can be garbage-collected mid-flight
+        # per the Python docs warning.
+        self._forward_tasks: set[asyncio.Task] = set()
 
     def _ensure_lane(self, agent: str) -> None:
         """Lazily create queue, worker, and tracking structures for an agent."""
@@ -275,7 +280,9 @@ class LaneManager:
                                 origin_copy, fwd_e,
                             )
 
-                    asyncio.create_task(_forward())
+                    forward_task = asyncio.create_task(_forward())
+                    self._forward_tasks.add(forward_task)
+                    forward_task.add_done_callback(self._forward_tasks.discard)
             except Exception as e:
                 if not task.future.done():
                     task.future.set_exception(e)
@@ -322,7 +329,10 @@ class LaneManager:
         self._steer_wakeup_ts.pop(agent, None)
 
     async def stop(self) -> None:
-        """Cancel all worker tasks."""
+        """Cancel all worker tasks and any in-flight auto-notify forwards."""
         for task in self._workers.values():
             task.cancel()
         self._workers.clear()
+        for fwd in list(self._forward_tasks):
+            fwd.cancel()
+        self._forward_tasks.clear()
