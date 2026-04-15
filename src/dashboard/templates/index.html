@@ -389,6 +389,46 @@
                         </div>
                       </div>
                     </template>
+                    <!-- Reset request card -->
+                    <template x-if="msg.role === 'reset_request'">
+                      <div class="flex justify-start gap-2.5">
+                        <div class="shrink-0 mt-1">
+                          <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
+                        </div>
+                        <div class="max-w-[80%] min-w-0">
+                          <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-red-600/30">
+                            <div class="flex items-center gap-2 mb-2">
+                              <svg class="w-4 h-4 text-red-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/>
+                              </svg>
+                              <span class="text-xs font-medium text-red-300" x-text="'Reset requested by ' + (msg._from_agent || msg.agent_id || 'agent')"></span>
+                            </div>
+                            <p class="text-xs text-gray-300 mb-3" x-text="msg.content"></p>
+                            <template x-if="!msg.dismissed && !msg.resetDone">
+                              <div class="flex gap-2">
+                                <button @click="resetSystem()" x-data="{ resetting: false }"
+                                  class="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-600/30 transition-colors">
+                                  Reset System
+                                </button>
+                                <button @click="msg.dismissed = true"
+                                  class="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+                                  Dismiss
+                                </button>
+                              </div>
+                            </template>
+                            <div x-show="msg.dismissed && !msg.resetDone" class="text-xs text-gray-500">
+                              Reset request dismissed.
+                            </div>
+                            <div x-show="msg.resetDone" class="flex items-center gap-1.5 text-xs text-emerald-400">
+                              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+                              </svg>
+                              <span>System has been reset.</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
                     <!-- Browser login request card -->
                     <template x-if="msg.role === 'browser_login_request'">
                       <div class="flex justify-start gap-2.5">
@@ -5115,6 +5155,22 @@
             </button>
           </div>
 
+          <!-- ── Danger Zone ── -->
+          <div class="bg-gray-900 border border-red-900/50 rounded-lg p-5 mt-6">
+            <h3 class="text-sm font-medium text-red-400 mb-1">Danger Zone</h3>
+            <p class="text-[10px] text-gray-500 mb-4">Irreversible actions that affect the entire system.</p>
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-xs text-gray-300 font-medium">Reset System</p>
+                <p class="text-[10px] text-gray-500 mt-0.5">Stop all agents and permanently delete all configs, projects, skills, memory, and data. Your .env file is preserved.</p>
+              </div>
+              <button @click="resetSystem()"
+                class="px-4 py-2 text-xs font-medium rounded-lg transition-colors bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-600/30">
+                Reset System
+              </button>
+            </div>
+          </div>
+
         </div><!-- /settings sub-tab -->
 
       </div>
@@ -5604,6 +5660,43 @@
                   </div>
                 </div>
               </template>
+              <!-- Reset request card -->
+              <template x-if="msg.role === 'reset_request'">
+                <div class="flex justify-start">
+                  <div class="max-w-[80%] min-w-0">
+                    <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-red-600/30">
+                      <div class="flex items-center gap-2 mb-2">
+                        <svg class="w-4 h-4 text-red-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/>
+                        </svg>
+                        <span class="text-xs font-medium text-red-300" x-text="'Reset requested by ' + (msg._from_agent || msg.agent_id || 'agent')"></span>
+                      </div>
+                      <p class="text-xs text-gray-300 mb-3" x-text="msg.content"></p>
+                      <template x-if="!msg.dismissed && !msg.resetDone">
+                        <div class="flex gap-2">
+                          <button @click="resetSystem()"
+                            class="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-600/30 transition-colors">
+                            Reset System
+                          </button>
+                          <button @click="msg.dismissed = true"
+                            class="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+                            Dismiss
+                          </button>
+                        </div>
+                      </template>
+                      <div x-show="msg.dismissed && !msg.resetDone" class="text-xs text-gray-500">
+                        Reset request dismissed.
+                      </div>
+                      <div x-show="msg.resetDone" class="flex items-center gap-1.5 text-xs text-emerald-400">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+                        </svg>
+                        <span>System has been reset.</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </template>
               <!-- Browser login request card -->
               <template x-if="msg.role === 'browser_login_request'">
                 <div class="flex justify-start">
@@ -5697,7 +5790,7 @@
                 </div>
               </template>
               <!-- Chat bubble -->
-              <template x-if="msg.role !== 'system' && msg.role !== 'credential_request' && msg.role !== 'credit_exhausted' && msg.role !== 'browser_login_request'">
+              <template x-if="msg.role !== 'system' && msg.role !== 'credential_request' && msg.role !== 'credit_exhausted' && msg.role !== 'browser_login_request' && msg.role !== 'reset_request'">
               <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
               <div class="max-w-[80%] px-3 py-2 rounded-2xl text-xs"
                 :class="{

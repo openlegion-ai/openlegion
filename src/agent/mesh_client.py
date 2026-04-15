@@ -442,6 +442,17 @@ class MeshClient:
         response.raise_for_status()
         return response.json()
 
+    async def request_reset_from_user(self, reason: str) -> dict:
+        """Emit a system reset request event to the dashboard."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/reset-request",
+            json={"agent_id": self.agent_id, "reason": reason},
+            headers=self._trace_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def request_browser_login(
         self, url: str, service: str, description: str,
         target_agent_id: str | None = None,
