@@ -1518,6 +1518,92 @@ class TestScroll:
         assert "page closed" in result["error"]
 
 
+class TestX11Scroll:
+    """Tests for X11-based scroll via xdotool button 4/5."""
+
+    @pytest.mark.asyncio
+    async def test_x11_scroll_uses_xdotool(self):
+        """When x11_wid is set, scroll uses xdotool button 5 for down."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = await mgr.scroll("a1", direction="down", amount=200)
+
+        assert result["success"] is True
+        # Should have called xdotool, not mouse.wheel
+        assert mock_run.call_count >= 1
+        # All calls should use button 5 (scroll down)
+        for call in mock_run.call_args_list:
+            args = call[0][0]
+            if "click" in args:
+                assert "5" in args
+
+    @pytest.mark.asyncio
+    async def test_x11_scroll_up_uses_button_4(self):
+        """Scroll up uses xdotool button 4."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = await mgr.scroll("a1", direction="up", amount=100)
+
+        assert result["success"] is True
+        for call in mock_run.call_args_list:
+            args = call[0][0]
+            if "click" in args:
+                assert "4" in args
+
+    @pytest.mark.asyncio
+    async def test_x11_scroll_fallback_on_failure(self):
+        """When xdotool fails mid-scroll, remaining distance uses CDP."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.mouse.wheel = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+        mgr._instances["a1"] = inst
+
+        call_count = 0
+
+        def fail_on_second(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            result = MagicMock(returncode=0 if call_count == 1 else 1)
+            return result
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run", side_effect=fail_on_second):
+            result = await mgr.scroll("a1", direction="down", amount=200)
+
+        assert result["success"] is True
+        # CDP fallback should have been called for remaining distance
+        mock_page.mouse.wheel.assert_called_once()
+        _, kwargs = mock_page.mouse.wheel.call_args
+        # Remaining should be amount - scrolled (200 - 53 = 147)
+        delta = mock_page.mouse.wheel.call_args[0][1]
+        assert 100 <= delta <= 200  # remaining px, positive for down
+
+
 class TestClickRandomDelay:
     """Verify click delay is not a fixed 0.3s."""
 
@@ -1855,6 +1941,20 @@ class TestExtractTextFromA11y:
             "children": [
                 {"role": "generic", "name": ""},
                 {"role": "button", "name": "OK"},
+            ],
+        }
+        assert _extract_text_from_a11y(tree) == "OK"
+
+    def test_malformed_children_handled(self):
+        """Non-dict children should be skipped without crashing."""
+        from src.browser.service import _extract_text_from_a11y
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                None,
+                "stray string",
+                {"role": "button", "name": "OK"},
+                42,
             ],
         }
         assert _extract_text_from_a11y(tree) == "OK"
@@ -3733,6 +3833,38 @@ class TestJsA11yTreeFallback:
         assert refs["e0"]["name"] == "Submit"
         assert refs["e1"]["name"] == "Home"
         assert inst._js_snapshot_mode is True
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_retries_then_falls_back(self):
+        """Non-AttributeError failures retry once, then fall back to JS."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(
+            side_effect=RuntimeError("accessibility service unavailable")
+        )
+        js_tree = {
+            "role": "WebArea", "name": "Fallback",
+            "children": [{"role": "button", "name": "OK"}],
+        }
+        mock_page.evaluate = AsyncMock(return_value=js_tree)
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.snapshot("a1")
+
+        assert result["success"] is True
+        # Should have retried accessibility.snapshot twice (attempt 0 + 1)
+        assert mock_page.accessibility.snapshot.await_count == 2
+        # JS fallback should have been used
+        mock_page.evaluate.assert_called()
+        # Transient failure should NOT permanently set _js_snapshot_mode
+        assert inst._js_snapshot_mode is False
 
     @pytest.mark.asyncio
     async def test_js_mode_persists(self):

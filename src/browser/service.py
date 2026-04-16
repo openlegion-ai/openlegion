@@ -260,8 +260,8 @@ def _extract_text_from_a11y(tree: dict | None, max_chars: int = 5000) -> str:
 
     def _collect(node: dict) -> bool:
         nonlocal total
-        if total >= max_chars:
-            return False
+        if not isinstance(node, dict) or total >= max_chars:
+            return total < max_chars
         children = node.get("children")
         if children:
             for child in children:
@@ -749,6 +749,8 @@ class BrowserManager:
                     try:
                         _a11y = await inst.page.accessibility.snapshot()
                         body_text = _extract_text_from_a11y(_a11y)
+                    except AttributeError:
+                        inst._js_snapshot_mode = True
                     except Exception:
                         pass
                 result = {
@@ -1854,8 +1856,8 @@ class BrowserManager:
                                 "X11 scroll failed for '%s', falling back to CDP: %s",
                                 agent_id, e,
                             )
-                            # Fall back to CDP for remaining scroll
-                            remaining_px = (total_notches - i) * _PX_PER_NOTCH
+                            # Fall back to CDP for actual remaining distance
+                            remaining_px = max(0, amount - scrolled)
                             await inst.page.mouse.wheel(0, remaining_px * sign)
                             scrolled += remaining_px
                             break
