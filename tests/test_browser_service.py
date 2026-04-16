@@ -1604,6 +1604,229 @@ class TestX11Scroll:
         assert 100 <= delta <= 200  # remaining px, positive for down
 
 
+class TestX11EnsureInViewport:
+    """Tests for _x11_ensure_in_viewport element scroll behavior."""
+
+    @pytest.mark.asyncio
+    async def test_element_in_viewport_no_scroll(self):
+        """Element already visible — no scroll or fallback needed."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1920, "height": 1080}
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+
+        mock_locator = AsyncMock()
+        mock_locator.bounding_box = AsyncMock(return_value={
+            "x": 100, "y": 400, "width": 200, "height": 40,
+        })
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        with patch("src.browser.service.asyncio.sleep"):
+            await mgr._x11_ensure_in_viewport(inst, mock_locator)
+
+        # Element at y=400 is in viewport — no protocol scroll fallback
+        mock_locator.scroll_into_view_if_needed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_element_below_viewport_scrolls_x11(self):
+        """Element below viewport — X11 scroll down until visible."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1920, "height": 1080}
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+
+        # First call: element below viewport; second call: element now visible
+        mock_locator = AsyncMock()
+        mock_locator.bounding_box = AsyncMock(side_effect=[
+            {"x": 100, "y": 1200, "width": 200, "height": 40},  # below
+            {"x": 100, "y": 900, "width": 200, "height": 40},   # moved after scroll
+            {"x": 100, "y": 500, "width": 200, "height": 40},   # now visible
+        ])
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            await mgr._x11_ensure_in_viewport(inst, mock_locator)
+
+        # Should have called xdotool for scroll (button 5 = down)
+        scroll_calls = [c for c in mock_run.call_args_list
+                        if "click" in c[0][0] and "5" in c[0][0]]
+        assert len(scroll_calls) >= 1
+        # Protocol fallback should NOT have been called (X11 succeeded)
+        mock_locator.scroll_into_view_if_needed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_x11_wid_uses_protocol_scroll(self):
+        """Without x11_wid, should use protocol scroll immediately."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1920, "height": 1080}
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = None  # No X11
+
+        mock_locator = AsyncMock()
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        await mgr._x11_ensure_in_viewport(inst, mock_locator)
+
+        mock_locator.scroll_into_view_if_needed.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_inner_container_falls_back(self):
+        """When X11 scroll doesn't move element, fall back to protocol."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1920, "height": 1080}
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+
+        # Element position never changes (inner container)
+        mock_locator = AsyncMock()
+        mock_locator.bounding_box = AsyncMock(return_value={
+            "x": 100, "y": 1200, "width": 200, "height": 40,
+        })
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            await mgr._x11_ensure_in_viewport(inst, mock_locator)
+
+        # Should have fallen back to protocol scroll
+        mock_locator.scroll_into_view_if_needed.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_small_movement_continues_scrolling(self):
+        """Small but real movement (>= 2px) should NOT trigger stall detection."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1920, "height": 1080}
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+
+        # Element moves 5px per batch (small but real progress), then enters viewport
+        call_count = [0]
+
+        async def moving_bbox():
+            call_count[0] += 1
+            y = max(500, 1200 - call_count[0] * 100)  # gradually enters viewport
+            return {"x": 100, "y": y, "width": 200, "height": 40}
+
+        mock_locator = AsyncMock()
+        mock_locator.bounding_box = AsyncMock(side_effect=moving_bbox)
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            await mgr._x11_ensure_in_viewport(inst, mock_locator)
+
+        # Should NOT have used protocol fallback — X11 scroll succeeded
+        mock_locator.scroll_into_view_if_needed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_viewport_uses_protocol(self):
+        """When viewport_size is None, fall back to protocol scroll."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = None
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+
+        mock_locator = AsyncMock()
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        await mgr._x11_ensure_in_viewport(inst, mock_locator)
+
+        mock_locator.scroll_into_view_if_needed.assert_called_once()
+
+
+class TestTypoInjection:
+    """Tests for typo injection in _x11_type."""
+
+    @pytest.mark.asyncio
+    async def test_short_text_no_typos(self):
+        """Text shorter than 15 alpha chars should never get typos."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
+        inst.x11_wid = 12345
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            await mgr._x11_type(inst, "Hello")
+
+        # No BackSpace should appear — text too short for typos
+        backspace_calls = [c for c in mock_run.call_args_list
+                           if "BackSpace" in str(c)]
+        assert len(backspace_calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_typos_disabled_no_backspace(self):
+        """typos=False should produce zero typo corrections."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
+        inst.x11_wid = 12345
+
+        long_text = "The quick brown fox jumps over the lazy dog and keeps running"
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            await mgr._x11_type(inst, long_text, typos=False)
+
+        backspace_calls = [c for c in mock_run.call_args_list
+                           if "BackSpace" in str(c)]
+        assert len(backspace_calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_long_text_injects_typos(self):
+        """Long text with typos=True should inject BackSpace corrections.
+
+        Patches random.gauss to guarantee a budget of 2 typos.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
+        inst.x11_wid = 12345
+
+        long_text = (
+            "The quick brown fox jumps over the lazy dog "
+            "and keeps running through the enchanted forest"
+        )
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run") as mock_run, \
+             patch("src.browser.service.random.gauss", return_value=2.0), \
+             patch("src.browser.service.random.random", return_value=0.5):
+            mock_run.return_value = MagicMock(returncode=0)
+            await mgr._x11_type(inst, long_text, typos=True)
+
+        backspace_calls = [c for c in mock_run.call_args_list
+                           if "BackSpace" in str(c)]
+        assert len(backspace_calls) == 2, f"Expected 2 typo corrections, got {len(backspace_calls)}"
+
+
 class TestClickRandomDelay:
     """Verify click delay is not a fixed 0.3s."""
 
@@ -4222,7 +4445,9 @@ class TestX11Input:
             return BrowserManager(profiles_dir="/tmp/test_profiles")
 
     def _make_instance(self, agent_id="agent-1", x11_wid=12345):
-        inst = CamoufoxInstance(agent_id, MagicMock(), MagicMock(), MagicMock())
+        mock_page = MagicMock()
+        mock_page.viewport_size = {"width": 1920, "height": 1080}
+        inst = CamoufoxInstance(agent_id, MagicMock(), MagicMock(), mock_page)
         inst.x11_wid = x11_wid
         return inst
 
@@ -4247,8 +4472,10 @@ class TestX11Input:
                 with patch("src.browser.service.random.randint", return_value=4):
                     await mgr._x11_click(inst, mock_locator)
 
-        mock_locator.scroll_into_view_if_needed.assert_called_once()
-        mock_locator.bounding_box.assert_called_once()
+        # Element at y=200 is in viewport (1080px) — no scroll needed
+        mock_locator.scroll_into_view_if_needed.assert_not_called()
+        # bounding_box called by _x11_ensure_in_viewport + _x11_click
+        assert mock_locator.bounding_box.await_count >= 1
         # At least: 1 getmouselocation + 3 mousemove + 1 mousedown + 1 mouseup = 6
         assert sub_run.call_count >= 6
         calls = sub_run.call_args_list
@@ -4451,7 +4678,7 @@ class TestX11Input:
         )
         assert result["success"]
         mgr._x11_click.assert_called_once()
-        mgr._x11_type.assert_called_once_with(inst, "Hello world")
+        mgr._x11_type.assert_called_once_with(inst, "Hello world", typos=True)
 
     @pytest.mark.asyncio
     async def test_type_text_uses_x11_on_all_sites(self):
@@ -4544,7 +4771,7 @@ class TestX11Input:
         result = await mgr.type_text("agent-1", ref="T1", text="Hello X")
         assert result["success"]
         mgr._x11_click.assert_called_once_with(inst, mock_locator)
-        mgr._x11_type.assert_called_once_with(inst, "Hello X")
+        mgr._x11_type.assert_called_once_with(inst, "Hello X", typos=True)
 
     @pytest.mark.asyncio
     async def test_type_text_ref_uses_x11_on_all_sites(self):
