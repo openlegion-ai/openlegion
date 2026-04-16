@@ -293,6 +293,7 @@ class CamoufoxInstance:
         self.lock = asyncio.Lock()  # serialize page operations per instance
         self.x11_wid: int | None = None  # X11 window ID for targeted focus
         self._js_snapshot_mode: bool = False  # True after page.accessibility permanently fails
+        self._user_control: bool = False  # True when user has VNC control
 
     def touch(self):
         self.last_activity = time.time()
@@ -694,6 +695,23 @@ class BrowserManager:
                 logger.debug("xdotool raise skipped for '%s': %s", agent_id, e)
             return True
 
+    async def set_user_control(self, agent_id: str, enabled: bool) -> dict:
+        """Toggle user browser control.
+
+        When enabled, pauses agent X11 input (mouse jitter, click, type,
+        scroll) so the user can interact via VNC without cursor fighting.
+        Browser read operations (snapshot, screenshot) remain available.
+        """
+        inst = self._instances.get(agent_id)
+        if not inst:
+            return {"success": False, "error": "No browser instance"}
+        inst._user_control = enabled
+        logger.info(
+            "User %s browser control for %s",
+            "took" if enabled else "released", agent_id,
+        )
+        return {"success": True, "user_control": enabled}
+
     # ── Browser operations ──────────────────────────────────
 
     async def navigate(
@@ -725,6 +743,11 @@ class BrowserManager:
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
+            if inst._user_control:
+                return {
+                    "success": False,
+                    "error": "User has browser control — action paused until control is released.",
+                }
             # Single retry on timeout — transient network issues get a second chance.
             for attempt in range(2):
                 try:
@@ -1269,7 +1292,7 @@ class BrowserManager:
         """
         while True:
             await asyncio.sleep(random.uniform(2.0, 7.0))
-            if not inst.x11_wid or inst.lock.locked():
+            if not inst.x11_wid or inst.lock.locked() or inst._user_control:
                 continue
             try:
                 dx = random.randint(-3, 3)
@@ -1424,6 +1447,11 @@ class BrowserManager:
         inst.touch()
         async with inst.lock:
             try:
+                if inst._user_control:
+                    return {
+                        "success": False,
+                        "error": "User has browser control — action paused until control is released.",
+                    }
                 use_force = force
                 if ref and ref in inst.refs:
                     ref_info = inst.refs[ref]
@@ -1621,6 +1649,11 @@ class BrowserManager:
         inst.touch()
         async with inst.lock:
             try:
+                if inst._user_control:
+                    return {
+                        "success": False,
+                        "error": "User has browser control — action paused until control is released.",
+                    }
                 # Click to focus, then optionally select-all to clear.
                 # Never use fill() — it atomically sets the DOM value and bypasses
                 # the keyboard event chain, so React/Vue apps (e.g. X's tweet
@@ -1819,6 +1852,11 @@ class BrowserManager:
         inst.touch()
         async with inst.lock:
             try:
+                if inst._user_control:
+                    return {
+                        "success": False,
+                        "error": "User has browser control — action paused until control is released.",
+                    }
                 # Scroll element into view
                 if ref:
                     if ref not in inst.refs:
@@ -1974,6 +2012,11 @@ class BrowserManager:
         inst.touch()
         async with inst.lock:
             try:
+                if inst._user_control:
+                    return {
+                        "success": False,
+                        "error": "User has browser control — action paused until control is released.",
+                    }
                 if inst.x11_wid and self._is_x11_site(inst):
                     xkey = self._playwright_key_to_xdotool(key)
                     try:

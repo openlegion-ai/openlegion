@@ -427,6 +427,28 @@ def create_dashboard_router(
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @api_router.post("/api/browser/{agent_id}/control")
+    async def api_browser_control(agent_id: str, request: Request) -> dict:
+        """Toggle user browser control — pauses agent X11 input."""
+        if not runtime or not hasattr(runtime, 'browser_service_url') or not runtime.browser_service_url:
+            raise HTTPException(503, "Browser service not available")
+        body = await request.json()
+        try:
+            browser_auth = getattr(runtime, 'browser_auth_token', '')
+            headers: dict[str, str] = {}
+            if browser_auth:
+                headers["Authorization"] = f"Bearer {browser_auth}"
+            resp = await _dashboard_browser_client.post(
+                f"{runtime.browser_service_url}/browser/{agent_id}/control",
+                json=body,
+                headers=headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     @api_router.post("/api/browser/{agent_id}/reset")
     async def api_browser_reset(agent_id: str) -> dict:
         """Reset an agent's browser session (close and relaunch with current config)."""
