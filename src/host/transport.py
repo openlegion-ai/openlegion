@@ -18,7 +18,7 @@ import re
 import httpx
 
 from src.shared.types import AGENT_ID_RE_PATTERN
-from src.shared.utils import setup_logging
+from src.shared.utils import friendly_streaming_error, setup_logging
 
 logger = setup_logging("host.transport")
 
@@ -188,7 +188,7 @@ class HttpTransport(Transport):
             yield {"type": "error", "message": f"HTTP {e.response.status_code}"}
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
             logger.warning("Stream connection failed for agent '%s' %s: %s", agent_id, path, e)
-            yield {"type": "error", "message": str(e)}
+            yield {"type": "error", "message": friendly_streaming_error(e)}
 
     def request_sync(
         self,
