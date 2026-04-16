@@ -4380,6 +4380,7 @@ function dashboard() {
               entry.content = errContent;
               entry.role = isCreditErr ? 'credit_exhausted' : 'error';
               if (isCreditErr) entry._creditExhausted = true;
+              else entry._recoverable = true;
               entry.streaming = false;
               entry.phase = 'error';
               this._pushChatTimelinePhase(entry, 'error');
@@ -4412,6 +4413,7 @@ function dashboard() {
               ? 'Response timed out — please try again.'
               : 'Connection interrupted — please try again.';
             entry.role = 'error';
+            entry._recoverable = true;
             entry.streaming = false;
             entry.phase = 'error';
             this._pushChatTimelinePhase(entry, 'error');
@@ -4428,6 +4430,26 @@ function dashboard() {
         this.$nextTick(() => this._scrollChat(agentId));
         this._saveChatToSession();
         this.fetchQueues();
+        // Auto-recover from stream interruptions: the agent may still be
+        // processing via non-streaming fallback or may have already finished.
+        const _lastMsg = (this.chatHistories[agentId] || []).slice(-1)[0];
+        if (_lastMsg && _lastMsg._recoverable) {
+          setTimeout(async () => {
+            if (!this.openChats.includes(agentId)) return;
+            try {
+              const qr = await fetch(`${window.__config.apiBase}/queues`);
+              if (qr.ok) this.queueStatus = (await qr.json()).queues;
+            } catch (_) { /* ignore */ }
+            if (this.queueStatus?.[agentId]?.busy) {
+              this._chatWasStreaming = this._chatWasStreaming || {};
+              this._chatWasStreaming[agentId] = true;
+              this._recoverDeadStreams();
+            } else {
+              delete this._chatFetchedAt[agentId];
+              this._loadChatHistory(agentId);
+            }
+          }, 4000);
+        }
       }
     },
 
