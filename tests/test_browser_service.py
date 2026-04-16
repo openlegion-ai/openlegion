@@ -1708,7 +1708,6 @@ class TestSnapshotAfter:
         from src.browser.service import BrowserManager, CamoufoxInstance
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True
 
         mock_page = AsyncMock()
         mock_page.click = AsyncMock()
@@ -1718,6 +1717,7 @@ class TestSnapshotAfter:
             "children": [{"role": "button", "name": "OK", "refId": "e0"}],
         })
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
         mgr._instances["a1"] = inst
 
         with patch("src.browser.service.asyncio.sleep"):
@@ -1760,7 +1760,9 @@ class TestNavigateRetry:
         )
         mock_page.title = AsyncMock(return_value="OK")
         mock_page.url = "https://example.com"
-        mock_page.evaluate = AsyncMock(return_value="body text")
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "OK", "children": [],
+        })
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
@@ -1795,7 +1797,6 @@ class TestLandmarkAnnotations:
         from src.browser.service import BrowserManager, CamoufoxInstance
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True
 
         tree = {
             "role": "WebArea", "name": "Test Page",
@@ -1808,6 +1809,7 @@ class TestLandmarkAnnotations:
         mock_page.query_selector_all = AsyncMock(return_value=[])
         mock_page.evaluate = AsyncMock(return_value=tree)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
@@ -1823,7 +1825,6 @@ class TestLandmarkAnnotations:
         from src.browser.service import BrowserManager, CamoufoxInstance
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True
 
         tree = {
             "role": "WebArea", "name": "Test",
@@ -1833,6 +1834,7 @@ class TestLandmarkAnnotations:
         mock_page.query_selector_all = AsyncMock(return_value=[])
         mock_page.evaluate = AsyncMock(return_value=tree)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
@@ -2429,6 +2431,7 @@ class TestSnapshotDisabledField:
         inst.refs = {}
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
+        inst._js_snapshot_mode = False
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
             result = await mgr.snapshot("agent1")
@@ -2459,6 +2462,7 @@ class TestSnapshotDisabledField:
         inst.refs = {}
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
+        inst._js_snapshot_mode = False
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
             result = await mgr.snapshot("agent1")
@@ -3598,7 +3602,7 @@ class TestJsA11yTreeFallback:
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
-        assert mgr._js_snapshot_mode is False
+        assert inst._js_snapshot_mode is False
 
         result = await mgr.snapshot("a1")
         assert result["success"] is True
@@ -3606,14 +3610,13 @@ class TestJsA11yTreeFallback:
         assert len(refs) == 2
         assert refs["e0"]["name"] == "Submit"
         assert refs["e1"]["name"] == "Home"
-        assert mgr._js_snapshot_mode is True
+        assert inst._js_snapshot_mode is True
 
     @pytest.mark.asyncio
     async def test_js_mode_persists(self):
         """Once JS mode is enabled, subsequent snapshots skip Playwright API."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True  # Already switched
 
         mock_page = AsyncMock()
         js_tree = {
@@ -3624,6 +3627,7 @@ class TestJsA11yTreeFallback:
         mock_page.query_selector_all = AsyncMock(return_value=[])
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True  # Already switched
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
@@ -3638,7 +3642,6 @@ class TestJsA11yTreeFallback:
         """In JS mode, scoped snapshots use element.evaluate()."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True
 
         full_tree = {
             "role": "WebArea", "name": "",
@@ -3664,6 +3667,7 @@ class TestJsA11yTreeFallback:
         mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
@@ -3684,12 +3688,12 @@ class TestJsA11yTreeFallback:
         """When JS fallback returns None, snapshot returns empty page."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True
 
         mock_page = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=None)
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
@@ -3702,7 +3706,6 @@ class TestJsA11yTreeFallback:
         """Nodes with role='none' (non-role containers) are walked for children."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True
 
         # JS tree has 'none' role wrapper (non-role div containing buttons)
         js_tree = {
@@ -3720,6 +3723,7 @@ class TestJsA11yTreeFallback:
         mock_page.query_selector_all = AsyncMock(return_value=[])
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
