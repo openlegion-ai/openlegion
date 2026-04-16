@@ -920,13 +920,11 @@ class BrowserManager:
             # so agents don't see/click elements behind the overlay
             # (e.g. X's sidebar "Post" button behind the compose modal).
             modal_els = await inst.page.query_selector_all(_MODAL_SELECTOR)
+            vp = inst.page.viewport_size
             visible_modals = []
             for el in modal_els:
-                try:
-                    if await el.is_visible():
-                        visible_modals.append(el)
-                except Exception:
-                    pass
+                if await self._is_visible_modal(el, vp):
+                    visible_modals.append(el)
 
             # Deduplicate nested modals: if modal A contains modal B,
             # snapshot(root=A) already includes B's elements.
@@ -978,11 +976,8 @@ class BrowserManager:
                     # like X/Twitter re-render the modal during the wait.
                     fresh_modals = []
                     for el in (await inst.page.query_selector_all(_MODAL_SELECTOR)):
-                        try:
-                            if await el.is_visible():
-                                fresh_modals.append(el)
-                        except Exception:
-                            pass
+                        if await self._is_visible_modal(el, vp):
+                            fresh_modals.append(el)
                     if fresh_modals:
                         visible_modals = fresh_modals
                     for el in visible_modals:
@@ -1026,6 +1021,28 @@ class BrowserManager:
             return {"success": True, "data": {"snapshot": snapshot_text, "refs": refs}}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    @staticmethod
+    async def _is_visible_modal(el, vp_size: dict | None) -> bool:
+        """Check if a modal element is genuinely visible with real area.
+
+        Filters zero-area or off-screen modals (e.g. LinkedIn's background
+        messaging panels) that pass Playwright's ``is_visible()`` but are
+        not true dialog overlays.
+        """
+        try:
+            if not await el.is_visible():
+                return False
+            bb = await el.bounding_box()
+            if not bb or bb["width"] < 10 or bb["height"] < 10:
+                return False
+            if vp_size:
+                if (bb["x"] + bb["width"] <= 0 or bb["x"] >= vp_size["width"]
+                        or bb["y"] + bb["height"] <= 0 or bb["y"] >= vp_size["height"]):
+                    return False
+            return True
+        except Exception:
+            return False
 
     def _locator_from_ref(self, inst: CamoufoxInstance, ref: str):
         """Build a Playwright locator from a stored ref's role, name, and index.
@@ -1220,7 +1237,8 @@ class BrowserManager:
             await asyncio.sleep(x11_step_delay())
 
     async def _x11_ensure_in_viewport(
-        self, inst: CamoufoxInstance, locator,
+        self, inst: CamoufoxInstance, locator, *,
+        timeout: int = _CLICK_TIMEOUT_MS,
     ) -> None:
         """Scroll element into viewport using X11 wheel events.
 
@@ -1236,12 +1254,12 @@ class BrowserManager:
         scrollable inner containers, elements not yet in the DOM).
         """
         if not inst.x11_wid:
-            await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
+            await locator.scroll_into_view_if_needed(timeout=timeout)
             return
 
         vp = inst.page.viewport_size
         if not vp:
-            await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
+            await locator.scroll_into_view_if_needed(timeout=timeout)
             return
 
         vp_h = vp["height"]
@@ -1279,9 +1297,10 @@ class BrowserManager:
                 break  # Scroll didn't move element — inner container
 
         # Fallback for edge cases
-        await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
+        await locator.scroll_into_view_if_needed(timeout=timeout)
 
-    async def _x11_click(self, inst: CamoufoxInstance, locator) -> None:
+    async def _x11_click(self, inst: CamoufoxInstance, locator, *,
+                         timeout: int = _CLICK_TIMEOUT_MS) -> None:
         """Click via xdotool for isTrusted=true events.
 
         Bot-detection systems (ArkoseLabs on X/Twitter) hook addEventListener
@@ -1299,7 +1318,7 @@ class BrowserManager:
         4. mousedown + human dwell + mouseup (not instant click)
         """
         # 1. Scroll into view — prefer X11 wheel events over protocol scroll
-        await self._x11_ensure_in_viewport(inst, locator)
+        await self._x11_ensure_in_viewport(inst, locator, timeout=timeout)
         await asyncio.sleep(x11_settle_delay())
 
         # 2. Get element position — jitter within inner area, not dead center
@@ -1554,6 +1573,7 @@ class BrowserManager:
         self, agent_id: str, ref: str | None = None,
         selector: str | None = None, force: bool = False,
         snapshot_after: bool = False,
+        timeout_ms: int | None = None,
     ) -> dict:
         """Click element by ref or CSS selector.
 
@@ -1576,6 +1596,8 @@ class BrowserManager:
                         "success": False,
                         "error": "User has browser control — action paused until control is released.",
                     }
+                raw_timeout = _CLICK_TIMEOUT_MS if timeout_ms is None else timeout_ms
+                _timeout = max(1000, min(raw_timeout, 30000))
                 use_force = force
                 if ref and ref in inst.refs:
                     ref_info = inst.refs[ref]
@@ -1600,30 +1622,30 @@ class BrowserManager:
                     if locator:
                         if inst.x11_wid and self._is_x11_site(inst):
                             try:
-                                await self._x11_click(inst, locator)
+                                await self._x11_click(inst, locator, timeout=_timeout)
                             except Exception as e:
                                 logger.warning(
                                     "X11 click failed for '%s', falling back to CDP: %s",
                                     agent_id, e,
                                 )
-                                await self._human_click(inst.page, locator, force=use_force)
+                                await self._human_click(inst.page, locator, force=use_force, timeout=_timeout)
                         else:
-                            await self._human_click(inst.page, locator, force=use_force)
+                            await self._human_click(inst.page, locator, force=use_force, timeout=_timeout)
                     else:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
                 elif selector:
                     if inst.x11_wid and self._is_x11_site(inst):
                         loc = inst.page.locator(selector).first
                         try:
-                            await self._x11_click(inst, loc)
+                            await self._x11_click(inst, loc, timeout=_timeout)
                         except Exception as e:
                             logger.warning(
                                 "X11 click failed for '%s' (selector), falling back to CDP: %s",
                                 agent_id, e,
                             )
-                            await self._human_click_selector(inst.page, selector, force=force)
+                            await self._human_click_selector(inst.page, selector, force=force, timeout=_timeout)
                     else:
-                        await self._human_click_selector(inst.page, selector, force=force)
+                        await self._human_click_selector(inst.page, selector, force=force, timeout=_timeout)
                 else:
                     return {"success": False, "error": "Must provide ref or selector"}
                 await asyncio.sleep(action_delay())
@@ -1642,17 +1664,15 @@ class BrowserManager:
                     if is_close:
                         await asyncio.sleep(0.3)
                         still_open = False
+                        vp = inst.page.viewport_size
                         try:
                             modal_els = await inst.page.query_selector_all(
                                 _MODAL_SELECTOR,
                             )
                             for el in modal_els:
-                                try:
-                                    if await el.is_visible():
-                                        still_open = True
-                                        break
-                                except Exception:
-                                    pass
+                                if await self._is_visible_modal(el, vp):
+                                    still_open = True
+                                    break
                         except Exception:
                             pass
                         if still_open:

@@ -265,28 +265,38 @@ async def browser_screenshot(full_page: bool = False, *, mesh_client=None) -> di
             "description": "Include element snapshot in the response (default false)",
             "default": False,
         },
+        "timeout_ms": {
+            "type": "integer",
+            "description": (
+                "Click timeout in milliseconds. Increase for heavy SPAs with "
+                "animations or link card previews (e.g. 20000 for X thread "
+                "'Post all'). Default 10000, max 30000."
+            ),
+        },
     },
     parallel_safe=False,
 )
 async def browser_click(
     selector: str = "", ref: str = "", force: bool = False,
-    snapshot_after: bool = False, *, mesh_client=None,
+    snapshot_after: bool = False, timeout_ms: int | None = None,
+    *, mesh_client=None,
 ) -> dict:
     """Click an element by ref or CSS selector."""
     if not selector and not ref:
         return {"error": "Provide either 'ref' (from browser_get_elements) or 'selector' (CSS)"}
-    return await _browser_command(
-        mesh_client, "click",
-        {"ref": ref, "selector": selector, "force": force,
-         "snapshot_after": snapshot_after},
-    )
+    cmd = {"ref": ref, "selector": selector, "force": force,
+           "snapshot_after": snapshot_after}
+    if timeout_ms is not None:
+        cmd["timeout_ms"] = timeout_ms
+    return await _browser_command(mesh_client, "click", cmd)
 
 
 @skill(
     name="browser_type",
     description=(
-        "Type text into a form field on the current page. Clears the field first, "
-        "then enters the new text. Preferred: use ref from browser_get_elements "
+        "Type text into a form field on the current page. Optionally clears the "
+        "field first (default); set clear=false to append. "
+        "Preferred: use ref from browser_get_elements "
         "(e.g. ref='e5'). Fallback: use a CSS selector. "
         "Set fast=true for search queries, URLs, and non-sensitive fields to "
         "type quickly. Set snapshot_after=true to include updated element refs."
@@ -309,6 +319,16 @@ async def browser_click(
             ),
             "default": "",
         },
+        "clear": {
+            "type": "boolean",
+            "description": (
+                "Clear the field before typing (default true). Set false to "
+                "append at the cursor position. Note: in rich-text editors "
+                "the cursor lands where the focus click hits, which may not "
+                "be at the end of existing text."
+            ),
+            "default": True,
+        },
         "fast": {
             "type": "boolean",
             "description": (
@@ -327,8 +347,8 @@ async def browser_click(
     parallel_safe=False,
 )
 async def browser_type(
-    text: str, selector: str = "", ref: str = "", fast: bool = False,
-    snapshot_after: bool = False, *, mesh_client=None,
+    text: str, selector: str = "", ref: str = "", clear: bool = True,
+    fast: bool = False, snapshot_after: bool = False, *, mesh_client=None,
 ) -> dict:
     """Type text into an element."""
     if not text:
@@ -338,7 +358,7 @@ async def browser_type(
 
     return await _browser_command(
         mesh_client, "type",
-        {"ref": ref, "selector": selector, "text": text, "clear": True,
+        {"ref": ref, "selector": selector, "text": text, "clear": clear,
          "fast": fast, "snapshot_after": snapshot_after},
     )
 

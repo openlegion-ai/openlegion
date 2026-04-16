@@ -101,6 +101,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             selector=body.get("selector"),
             force=body.get("force", False),
             snapshot_after=body.get("snapshot_after", False),
+            timeout_ms=body.get("timeout_ms"),
         )
         await _apply_delay()
         return result
