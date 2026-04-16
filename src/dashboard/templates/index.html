@@ -1789,17 +1789,30 @@
               <div class="flex items-center justify-between px-4 py-2 border-b border-gray-800">
                 <span class="text-xs text-gray-400 uppercase tracking-wider">Live Browser</span>
                 <div class="flex items-center gap-2">
+                  <button @click="toggleBrowserControl()"
+                    class="text-xs px-2 py-0.5 rounded transition-colors"
+                    :class="_browserViewOnly
+                      ? 'bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-gray-200'
+                      : 'bg-amber-600/20 text-amber-300 ring-1 ring-amber-500/40 hover:bg-amber-600/30'"
+                    x-text="_browserViewOnly ? 'Take Control' : 'Release Control'">
+                  </button>
                   <a :href="agentDetail?.vnc_url"
                     target="_blank" rel="noopener"
                     @click="focusBrowser(selectedAgent)"
                     class="text-xs text-gray-500 hover:text-gray-300 transition-colors"
                     title="Open in new tab">&#x2197; Pop out</a>
-                  <button @click="showBrowserViewer = false; _browserFocusDone = false; _browserToggling = false"
+                  <button @click="closeBrowserViewer()"
                     class="text-gray-500 hover:text-gray-300 transition-colors text-sm"
                     title="Close" aria-label="Close">&times;</button>
                 </div>
               </div>
               <div class="relative" style="max-width: 1280px; aspect-ratio: 16/9;">
+                <!-- View-only overlay — blocks user mouse/keyboard to prevent
+                     input collision with agent's xdotool events.  Removed when
+                     user explicitly takes control via the toggle button. -->
+                <div x-show="_browserViewOnly"
+                  class="absolute inset-0 z-20"
+                  style="cursor: default;"></div>
                 <!-- Loading overlay -->
                 <div x-ref="vncLoading"
                   class="absolute inset-0 flex flex-col items-center justify-center bg-gray-900 z-10 transition-opacity duration-500"
@@ -1813,6 +1826,7 @@
                 <iframe
                   :src="(showBrowserViewer && _browserFocusDone) ? agentDetail?.vnc_url : ''"
                   class="w-full h-full border-0"
+                  :tabindex="_browserViewOnly ? -1 : 0"
                   allow="clipboard-read; clipboard-write"
                   @load="_browserFocusDone && $refs.vncLoading && ($refs.vncLoading.style.opacity = '0')"
                 ></iframe>

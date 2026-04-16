@@ -2691,6 +2691,9 @@ class TestAutoForceClick:
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
         inst.x11_wid = None  # No X11 WID — use CDP click path
+        inst._user_control = False  # Not in user-control mode
+        inst.dialog_detected = False
+        inst.dialog_active = False
         return inst
 
     @pytest.mark.asyncio
@@ -2934,6 +2937,7 @@ class TestTypeTextSettleDelays:
         inst.refs = {"e1": {"role": "textbox", "name": "Tweet", "index": 0, "disabled": False}}
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
+        inst._user_control = False
 
         sleep_calls: list[float] = []
 
@@ -2973,6 +2977,7 @@ class TestTypeTextSettleDelays:
         inst.refs = {"e1": {"role": "textbox", "name": "Tweet", "index": 0, "disabled": False}}
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
+        inst._user_control = False
 
         sleep_calls: list[float] = []
 
@@ -3018,6 +3023,7 @@ class TestPressKey:
         inst.page.keyboard.press = AsyncMock()
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
+        inst._user_control = False
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
             with patch("src.browser.service.action_delay", return_value=0.01):
@@ -3039,6 +3045,7 @@ class TestPressKey:
         inst.page.keyboard.press = AsyncMock()
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
+        inst._user_control = False
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
             with patch("src.browser.service.action_delay", return_value=0.01):

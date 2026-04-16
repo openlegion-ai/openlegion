@@ -198,6 +198,14 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         ok = await manager.focus(agent_id)
         return {"success": ok, "data": {"focused": ok}}
 
+    @app.post("/browser/{agent_id}/control")
+    async def browser_control(agent_id: str, request: Request):
+        """Toggle user browser control — pauses agent X11 input."""
+        _verify_auth(request)
+        body = await request.json()
+        enabled = bool(body.get("user_control", False))
+        return await manager.set_user_control(agent_id, enabled)
+
     @app.post("/browser/{agent_id}/scroll")
     async def scroll(agent_id: str, request: Request):
         _verify_auth(request)

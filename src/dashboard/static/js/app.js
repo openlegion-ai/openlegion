@@ -89,6 +89,7 @@ function dashboard() {
     agentDetail: null,
     showBrowserViewer: false,
     _browserFocusDone: false,
+    _browserViewOnly: true,
     _browserPendingAgent: null,
 
     // Agent config
@@ -2887,6 +2888,7 @@ function dashboard() {
           this.showBrowserViewer = false;
           this._browserFocusDone = false;
           this._browserToggling = false;
+          this._browserViewOnly = true;
         }
         this.showToast(`Resetting browser for ${agentId}...`);
         try {
@@ -4760,9 +4762,7 @@ function dashboard() {
 
     async toggleBrowser() {
       if (this.showBrowserViewer) {
-        this.showBrowserViewer = false;
-        this._browserFocusDone = false;
-        this._browserToggling = false;
+        await this.closeBrowserViewer();
         return;
       }
       if (this._browserToggling) return;
@@ -4797,6 +4797,44 @@ function dashboard() {
         this._browserFocusDone = true;
       } finally {
         this._browserToggling = false;
+      }
+    },
+
+    async toggleBrowserControl() {
+      const taking = this._browserViewOnly;  // currently view-only → taking control
+      this._browserViewOnly = !taking;
+
+      const agentId = this.selectedAgent;
+      if (!agentId) return;
+      try {
+        await fetch(`${window.__config.apiBase}/browser/${agentId}/control`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ user_control: taking }),
+        });
+      } catch (e) {
+        console.warn('toggleBrowserControl failed:', e);
+      }
+    },
+
+    async closeBrowserViewer() {
+      const wasControlling = !this._browserViewOnly;
+      this.showBrowserViewer = false;
+      this._browserFocusDone = false;
+      this._browserToggling = false;
+      this._browserViewOnly = true;
+
+      // Release agent X11 pause if user had control
+      if (wasControlling && this.selectedAgent) {
+        try {
+          await fetch(`${window.__config.apiBase}/browser/${this.selectedAgent}/control`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ user_control: false }),
+          });
+        } catch (e) {
+          console.warn('closeBrowserViewer release failed:', e);
+        }
       }
     },
 
