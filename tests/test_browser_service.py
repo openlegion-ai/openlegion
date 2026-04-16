@@ -4222,7 +4222,9 @@ class TestX11Input:
             return BrowserManager(profiles_dir="/tmp/test_profiles")
 
     def _make_instance(self, agent_id="agent-1", x11_wid=12345):
-        inst = CamoufoxInstance(agent_id, MagicMock(), MagicMock(), MagicMock())
+        mock_page = MagicMock()
+        mock_page.viewport_size = {"width": 1920, "height": 1080}
+        inst = CamoufoxInstance(agent_id, MagicMock(), MagicMock(), mock_page)
         inst.x11_wid = x11_wid
         return inst
 
@@ -4247,8 +4249,10 @@ class TestX11Input:
                 with patch("src.browser.service.random.randint", return_value=4):
                     await mgr._x11_click(inst, mock_locator)
 
-        mock_locator.scroll_into_view_if_needed.assert_called_once()
-        mock_locator.bounding_box.assert_called_once()
+        # Element at y=200 is in viewport (1080px) — no scroll needed
+        mock_locator.scroll_into_view_if_needed.assert_not_called()
+        # bounding_box called by _x11_ensure_in_viewport + _x11_click
+        assert mock_locator.bounding_box.await_count >= 1
         # At least: 1 getmouselocation + 3 mousemove + 1 mousedown + 1 mouseup = 6
         assert sub_run.call_count >= 6
         calls = sub_run.call_args_list
@@ -4451,7 +4455,7 @@ class TestX11Input:
         )
         assert result["success"]
         mgr._x11_click.assert_called_once()
-        mgr._x11_type.assert_called_once_with(inst, "Hello world")
+        mgr._x11_type.assert_called_once_with(inst, "Hello world", typos=True)
 
     @pytest.mark.asyncio
     async def test_type_text_uses_x11_on_all_sites(self):
@@ -4544,7 +4548,7 @@ class TestX11Input:
         result = await mgr.type_text("agent-1", ref="T1", text="Hello X")
         assert result["success"]
         mgr._x11_click.assert_called_once_with(inst, mock_locator)
-        mgr._x11_type.assert_called_once_with(inst, "Hello X")
+        mgr._x11_type.assert_called_once_with(inst, "Hello X", typos=True)
 
     @pytest.mark.asyncio
     async def test_type_text_ref_uses_x11_on_all_sites(self):
