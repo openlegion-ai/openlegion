@@ -1212,6 +1212,10 @@ class BrowserManager:
         Falls back to protocol scroll for edge cases (elements inside
         scrollable inner containers, elements not yet in the DOM).
         """
+        if not inst.x11_wid:
+            await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
+            return
+
         vp = inst.page.viewport_size
         if not vp:
             await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
