@@ -244,6 +244,40 @@ _JS_A11Y_TREE = r"""(rootEl) => {
 }"""
 
 
+def _extract_text_from_a11y(tree: dict | None, max_chars: int = 5000) -> str:
+    """Extract readable text from an accessibility snapshot tree.
+
+    Walks leaf nodes to avoid duplicating text that parent containers
+    aggregate from their children.  Used by ``navigate()`` as a
+    stealth-safe alternative to ``page.evaluate("document.body.innerText")``
+    — the a11y API reads from Firefox's internal accessibility service
+    with zero JavaScript execution in the page context.
+    """
+    if not tree:
+        return ""
+    parts: list[str] = []
+    total = 0
+
+    def _collect(node: dict) -> bool:
+        nonlocal total
+        if not isinstance(node, dict) or total >= max_chars:
+            return total < max_chars
+        children = node.get("children")
+        if children:
+            for child in children:
+                if not _collect(child):
+                    return False
+        else:
+            name = (node.get("name") or "").strip()
+            if name:
+                parts.append(name)
+                total += len(name) + 1
+        return total < max_chars
+
+    _collect(tree)
+    return " ".join(parts)[:max_chars]
+
+
 class CamoufoxInstance:
     """Wrapper around a single Camoufox browser for one agent."""
 
@@ -258,6 +292,7 @@ class CamoufoxInstance:
         self.dialog_detected: bool = False  # True when a modal was found (even if scoping failed)
         self.lock = asyncio.Lock()  # serialize page operations per instance
         self.x11_wid: int | None = None  # X11 window ID for targeted focus
+        self._js_snapshot_mode: bool = False  # True after page.accessibility permanently fails
 
     def touch(self):
         self.last_activity = time.time()
@@ -284,7 +319,6 @@ class BrowserManager:
         self._lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task | None = None
         self._playwright = None
-        self._js_snapshot_mode: bool = False  # True after page.accessibility fails
         self._user_focused_agent: str | None = None  # set by explicit focus() call
         self.redactor = CredentialRedactor()
         self._proxy_configs: dict[str, dict | None] = {}
@@ -710,7 +744,15 @@ class BrowserManager:
             try:
                 title = await inst.page.title()
                 current_url = inst.page.url
-                body_text = await inst.page.evaluate("() => document.body?.innerText?.slice(0, 5000) || ''")
+                body_text = ""
+                if not inst._js_snapshot_mode:
+                    try:
+                        _a11y = await inst.page.accessibility.snapshot()
+                        body_text = _extract_text_from_a11y(_a11y)
+                    except AttributeError:
+                        inst._js_snapshot_mode = True
+                    except Exception:
+                        pass
                 result = {
                     "success": True,
                     "data": {
@@ -733,26 +775,39 @@ class BrowserManager:
     async def _build_a11y_tree(self, inst: CamoufoxInstance, root=None):
         """Get accessibility tree, falling back to JS-based DOM walk.
 
-        Playwright's ``page.accessibility.snapshot()`` may not exist in
-        Camoufox (modified Firefox bundles its own Playwright build).
-        On first ``AttributeError``, switches permanently to a JS-based
-        tree builder that uses standard DOM APIs (``getAttribute``,
-        ``getComputedStyle``) to produce the same ``{role, name, children}``
-        tree structure the rest of the snapshot pipeline expects.
+        Playwright's ``page.accessibility.snapshot()`` uses Firefox's native
+        ``nsIAccessibilityService`` — a browser-internal API with zero
+        JavaScript execution in the page context.  This makes it invisible
+        to anti-bot systems that hook DOM APIs via Proxy.
+
+        If the API is absent (``AttributeError``), permanently switches to
+        a JS-based tree builder per-instance.  Transient failures get one
+        retry before falling through to JS.
         """
-        if not getattr(self, "_js_snapshot_mode", False):
-            try:
-                if root:
-                    return await inst.page.accessibility.snapshot(root=root)
-                return await inst.page.accessibility.snapshot()
-            except AttributeError:
-                logger.warning(
-                    "page.accessibility not available — "
-                    "switching to JS-based accessibility tree"
-                )
-                self._js_snapshot_mode = True
-            except Exception:
-                pass  # Other snapshot failures — fall through to JS
+        if not inst._js_snapshot_mode:
+            for attempt in range(2):
+                try:
+                    if root:
+                        return await inst.page.accessibility.snapshot(root=root)
+                    return await inst.page.accessibility.snapshot()
+                except AttributeError:
+                    logger.warning(
+                        "page.accessibility not available for %s — "
+                        "switching to JS-based accessibility tree",
+                        inst.agent_id,
+                    )
+                    inst._js_snapshot_mode = True
+                    break
+                except Exception:
+                    if attempt == 0:
+                        await asyncio.sleep(0.15)
+                        continue
+                    logger.warning(
+                        "page.accessibility.snapshot() failed after retry "
+                        "for %s — falling back to JS tree",
+                        inst.agent_id,
+                    )
+                    break
 
         # JS fallback: walk DOM to build equivalent tree
         try:
@@ -1305,6 +1360,29 @@ class BrowserManager:
         if result.returncode != 0:
             raise RuntimeError(f"xdotool key {key!r} failed (rc={result.returncode})")
 
+    async def _x11_scroll_notch(self, inst: CamoufoxInstance, button: str) -> None:
+        """Send a single scroll notch via xdotool button 4 (up) or 5 (down).
+
+        X11 button 4/5 events are processed by Firefox identically to
+        physical mouse wheel input, producing ``WheelEvent`` with
+        ``deltaMode=DOM_DELTA_LINE`` — matching real hardware.  Playwright's
+        ``page.mouse.wheel()`` instead uses ``nsIDOMWindowUtils.sendWheelEvent``
+        with ``deltaMode=DOM_DELTA_PIXEL``, which is a detectable fingerprint.
+        """
+        wid = inst.x11_wid
+        if not wid:
+            raise RuntimeError("No X11 window ID — cannot use xdotool scroll")
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["xdotool", "click", "--clearmodifiers", "--window", str(wid), button],
+                capture_output=True, timeout=3,
+            ),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"xdotool scroll button {button} failed (rc={result.returncode})")
+
     @staticmethod
     def _playwright_key_to_xdotool(key: str) -> str:
         """Convert a Playwright key name to xdotool key name."""
@@ -1758,27 +1836,49 @@ class BrowserManager:
                 amount = min(amount, _MAX_SCROLL_PX)
 
                 sign = -1 if direction == "up" else 1
-                scrolled = 0
-                while scrolled < amount:
-                    remaining = amount - scrolled
-                    # Momentum ramp using actual scroll progress — smaller
-                    # steps at start/end, full in middle.  Tracks real
-                    # position rather than estimated step count so the ramp
-                    # adapts to variable-size increments.
-                    progress = scrolled / amount
-                    ramp = scroll_ramp(progress)
-                    step = max(40, int(scroll_increment() * ramp))
-                    step = min(step, remaining)
-                    delta = step * sign
-                    # Use mouse.wheel() to dispatch real WheelEvent
-                    # (isTrusted=true). JS window.scrollBy() only fires
-                    # scroll events without wheel events — antibot systems
-                    # check for the presence of wheel events in the stream.
-                    await inst.page.mouse.wheel(0, delta)
-                    scrolled += step
-                    if scrolled < amount:
-                        # Pause varies with momentum — shorter during fast cruise
-                        await asyncio.sleep(scroll_pause() / max(0.5, ramp))
+                _use_x11 = bool(inst.x11_wid) and self._is_x11_site(inst)
+
+                if _use_x11:
+                    # X11 scroll: each button 4/5 click ≈ 3 lines ≈ 53 px.
+                    # Produces real WheelEvent with deltaMode=DOM_DELTA_LINE,
+                    # matching physical mouse hardware.
+                    _PX_PER_NOTCH = 53
+                    button = "4" if direction == "up" else "5"
+                    total_notches = max(1, round(amount / _PX_PER_NOTCH))
+                    scrolled = 0
+                    for i in range(total_notches):
+                        progress = i / max(1, total_notches)
+                        ramp = scroll_ramp(progress)
+                        try:
+                            await self._x11_scroll_notch(inst, button)
+                        except Exception as e:
+                            logger.warning(
+                                "X11 scroll failed for '%s', falling back to CDP: %s",
+                                agent_id, e,
+                            )
+                            # Fall back to CDP for actual remaining distance
+                            remaining_px = max(0, amount - scrolled)
+                            await inst.page.mouse.wheel(0, remaining_px * sign)
+                            scrolled += remaining_px
+                            break
+                        scrolled += _PX_PER_NOTCH
+                        if i < total_notches - 1:
+                            await asyncio.sleep(scroll_pause() / max(0.5, ramp))
+                    scrolled = min(scrolled, amount)
+                else:
+                    # CDP fallback when X11 unavailable
+                    scrolled = 0
+                    while scrolled < amount:
+                        remaining = amount - scrolled
+                        progress = scrolled / amount if amount > 0 else 1.0
+                        ramp = scroll_ramp(progress)
+                        step = max(40, int(scroll_increment() * ramp))
+                        step = min(step, remaining)
+                        delta = step * sign
+                        await inst.page.mouse.wheel(0, delta)
+                        scrolled += step
+                        if scrolled < amount:
+                            await asyncio.sleep(scroll_pause() / max(0.5, ramp))
 
                 return {
                     "success": True,

@@ -1518,6 +1518,92 @@ class TestScroll:
         assert "page closed" in result["error"]
 
 
+class TestX11Scroll:
+    """Tests for X11-based scroll via xdotool button 4/5."""
+
+    @pytest.mark.asyncio
+    async def test_x11_scroll_uses_xdotool(self):
+        """When x11_wid is set, scroll uses xdotool button 5 for down."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = await mgr.scroll("a1", direction="down", amount=200)
+
+        assert result["success"] is True
+        # Should have called xdotool, not mouse.wheel
+        assert mock_run.call_count >= 1
+        # All calls should use button 5 (scroll down)
+        for call in mock_run.call_args_list:
+            args = call[0][0]
+            if "click" in args:
+                assert "5" in args
+
+    @pytest.mark.asyncio
+    async def test_x11_scroll_up_uses_button_4(self):
+        """Scroll up uses xdotool button 4."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = await mgr.scroll("a1", direction="up", amount=100)
+
+        assert result["success"] is True
+        for call in mock_run.call_args_list:
+            args = call[0][0]
+            if "click" in args:
+                assert "4" in args
+
+    @pytest.mark.asyncio
+    async def test_x11_scroll_fallback_on_failure(self):
+        """When xdotool fails mid-scroll, remaining distance uses CDP."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.mouse.wheel = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+        mgr._instances["a1"] = inst
+
+        call_count = 0
+
+        def fail_on_second(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            result = MagicMock(returncode=0 if call_count == 1 else 1)
+            return result
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run", side_effect=fail_on_second):
+            result = await mgr.scroll("a1", direction="down", amount=200)
+
+        assert result["success"] is True
+        # CDP fallback should have been called for remaining distance
+        mock_page.mouse.wheel.assert_called_once()
+        _, kwargs = mock_page.mouse.wheel.call_args
+        # Remaining should be amount - scrolled (200 - 53 = 147)
+        delta = mock_page.mouse.wheel.call_args[0][1]
+        assert 100 <= delta <= 200  # remaining px, positive for down
+
+
 class TestClickRandomDelay:
     """Verify click delay is not a fixed 0.3s."""
 
@@ -1708,7 +1794,6 @@ class TestSnapshotAfter:
         from src.browser.service import BrowserManager, CamoufoxInstance
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True
 
         mock_page = AsyncMock()
         mock_page.click = AsyncMock()
@@ -1718,6 +1803,7 @@ class TestSnapshotAfter:
             "children": [{"role": "button", "name": "OK", "refId": "e0"}],
         })
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
         mgr._instances["a1"] = inst
 
         with patch("src.browser.service.asyncio.sleep"):
@@ -1760,7 +1846,9 @@ class TestNavigateRetry:
         )
         mock_page.title = AsyncMock(return_value="OK")
         mock_page.url = "https://example.com"
-        mock_page.evaluate = AsyncMock(return_value="body text")
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "OK", "children": [],
+        })
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
 
@@ -1787,6 +1875,142 @@ class TestNavigateRetry:
         assert mock_page.goto.await_count == 1
 
 
+class TestExtractTextFromA11y:
+    """Tests for _extract_text_from_a11y helper used by navigate()."""
+
+    def test_none_returns_empty(self):
+        from src.browser.service import _extract_text_from_a11y
+        assert _extract_text_from_a11y(None) == ""
+
+    def test_empty_dict_returns_empty(self):
+        from src.browser.service import _extract_text_from_a11y
+        assert _extract_text_from_a11y({}) == ""
+
+    def test_leaf_node_extracts_name(self):
+        from src.browser.service import _extract_text_from_a11y
+        tree = {"role": "text", "name": "Hello world"}
+        assert _extract_text_from_a11y(tree) == "Hello world"
+
+    def test_nested_children_collects_leaves(self):
+        from src.browser.service import _extract_text_from_a11y
+        tree = {
+            "role": "WebArea", "name": "Page Title",
+            "children": [
+                {"role": "heading", "name": "Welcome", "children": [
+                    {"role": "text", "name": "Welcome"},
+                ]},
+                {"role": "paragraph", "name": "Some text", "children": [
+                    {"role": "text", "name": "Some text"},
+                ]},
+                {"role": "button", "name": "Click me"},
+            ],
+        }
+        result = _extract_text_from_a11y(tree)
+        assert "Welcome" in result
+        assert "Some text" in result
+        assert "Click me" in result
+
+    def test_no_duplicate_from_parent_and_child(self):
+        from src.browser.service import _extract_text_from_a11y
+        tree = {
+            "role": "WebArea", "name": "Page",
+            "children": [
+                {"role": "heading", "name": "Title", "children": [
+                    {"role": "text", "name": "Title"},
+                ]},
+            ],
+        }
+        result = _extract_text_from_a11y(tree)
+        # Should contain "Title" once, not twice
+        assert result.count("Title") == 1
+
+    def test_truncation_at_max_chars(self):
+        from src.browser.service import _extract_text_from_a11y
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [{"role": "text", "name": "x" * 100}
+                         for _ in range(100)],
+        }
+        result = _extract_text_from_a11y(tree, max_chars=500)
+        assert len(result) <= 500
+
+    def test_empty_name_nodes_skipped(self):
+        from src.browser.service import _extract_text_from_a11y
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                {"role": "generic", "name": ""},
+                {"role": "button", "name": "OK"},
+            ],
+        }
+        assert _extract_text_from_a11y(tree) == "OK"
+
+    def test_malformed_children_handled(self):
+        """Non-dict children should be skipped without crashing."""
+        from src.browser.service import _extract_text_from_a11y
+        tree = {
+            "role": "WebArea", "name": "",
+            "children": [
+                None,
+                "stray string",
+                {"role": "button", "name": "OK"},
+                42,
+            ],
+        }
+        assert _extract_text_from_a11y(tree) == "OK"
+
+    @pytest.mark.asyncio
+    async def test_navigate_body_text_from_a11y(self):
+        """navigate() should extract body text via a11y snapshot, not page.evaluate."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.title = AsyncMock(return_value="Example")
+        mock_page.url = "https://example.com"
+        mock_page.accessibility.snapshot = AsyncMock(return_value={
+            "role": "WebArea", "name": "Example",
+            "children": [
+                {"role": "heading", "name": "Hello"},
+                {"role": "text", "name": "World"},
+            ],
+        })
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.navigate("a1", "https://example.com", wait_ms=0)
+
+        assert result["success"] is True
+        assert "Hello" in result["data"]["body"]
+        assert "World" in result["data"]["body"]
+        # page.evaluate should NOT have been called for body text
+        mock_page.evaluate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_navigate_skips_a11y_in_js_mode(self):
+        """When _js_snapshot_mode is True, navigate skips a11y call."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.title = AsyncMock(return_value="Example")
+        mock_page.url = "https://example.com"
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.navigate("a1", "https://example.com", wait_ms=0)
+
+        assert result["success"] is True
+        assert result["data"]["body"] == ""
+        # a11y snapshot should NOT have been called
+        mock_page.accessibility.snapshot.assert_not_called()
+
+
 class TestLandmarkAnnotations:
     """Tests for structural landmark context in snapshot output."""
 
@@ -1795,7 +2019,6 @@ class TestLandmarkAnnotations:
         from src.browser.service import BrowserManager, CamoufoxInstance
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True
 
         tree = {
             "role": "WebArea", "name": "Test Page",
@@ -1808,6 +2031,7 @@ class TestLandmarkAnnotations:
         mock_page.query_selector_all = AsyncMock(return_value=[])
         mock_page.evaluate = AsyncMock(return_value=tree)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
@@ -1823,7 +2047,6 @@ class TestLandmarkAnnotations:
         from src.browser.service import BrowserManager, CamoufoxInstance
 
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True
 
         tree = {
             "role": "WebArea", "name": "Test",
@@ -1833,6 +2056,7 @@ class TestLandmarkAnnotations:
         mock_page.query_selector_all = AsyncMock(return_value=[])
         mock_page.evaluate = AsyncMock(return_value=tree)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
@@ -2429,6 +2653,7 @@ class TestSnapshotDisabledField:
         inst.refs = {}
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
+        inst._js_snapshot_mode = False
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
             result = await mgr.snapshot("agent1")
@@ -2459,6 +2684,7 @@ class TestSnapshotDisabledField:
         inst.refs = {}
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
+        inst._js_snapshot_mode = False
 
         with patch.object(BrowserManager, "get_or_start", return_value=inst):
             result = await mgr.snapshot("agent1")
@@ -3598,7 +3824,7 @@ class TestJsA11yTreeFallback:
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         mgr._instances["a1"] = inst
-        assert mgr._js_snapshot_mode is False
+        assert inst._js_snapshot_mode is False
 
         result = await mgr.snapshot("a1")
         assert result["success"] is True
@@ -3606,14 +3832,45 @@ class TestJsA11yTreeFallback:
         assert len(refs) == 2
         assert refs["e0"]["name"] == "Submit"
         assert refs["e1"]["name"] == "Home"
-        assert mgr._js_snapshot_mode is True
+        assert inst._js_snapshot_mode is True
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_retries_then_falls_back(self):
+        """Non-AttributeError failures retry once, then fall back to JS."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.accessibility = MagicMock()
+        mock_page.accessibility.snapshot = AsyncMock(
+            side_effect=RuntimeError("accessibility service unavailable")
+        )
+        js_tree = {
+            "role": "WebArea", "name": "Fallback",
+            "children": [{"role": "button", "name": "OK"}],
+        }
+        mock_page.evaluate = AsyncMock(return_value=js_tree)
+        mock_page.query_selector_all = AsyncMock(return_value=[])
+
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        with patch("src.browser.service.asyncio.sleep"):
+            result = await mgr.snapshot("a1")
+
+        assert result["success"] is True
+        # Should have retried accessibility.snapshot twice (attempt 0 + 1)
+        assert mock_page.accessibility.snapshot.await_count == 2
+        # JS fallback should have been used
+        mock_page.evaluate.assert_called()
+        # Transient failure should NOT permanently set _js_snapshot_mode
+        assert inst._js_snapshot_mode is False
 
     @pytest.mark.asyncio
     async def test_js_mode_persists(self):
         """Once JS mode is enabled, subsequent snapshots skip Playwright API."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True  # Already switched
 
         mock_page = AsyncMock()
         js_tree = {
@@ -3624,6 +3881,7 @@ class TestJsA11yTreeFallback:
         mock_page.query_selector_all = AsyncMock(return_value=[])
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True  # Already switched
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
@@ -3638,7 +3896,6 @@ class TestJsA11yTreeFallback:
         """In JS mode, scoped snapshots use element.evaluate()."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True
 
         full_tree = {
             "role": "WebArea", "name": "",
@@ -3664,6 +3921,7 @@ class TestJsA11yTreeFallback:
         mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
@@ -3684,12 +3942,12 @@ class TestJsA11yTreeFallback:
         """When JS fallback returns None, snapshot returns empty page."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True
 
         mock_page = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=None)
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
@@ -3702,7 +3960,6 @@ class TestJsA11yTreeFallback:
         """Nodes with role='none' (non-role containers) are walked for children."""
         from src.browser.service import BrowserManager, CamoufoxInstance
         mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
-        mgr._js_snapshot_mode = True
 
         # JS tree has 'none' role wrapper (non-role div containing buttons)
         js_tree = {
@@ -3720,6 +3977,7 @@ class TestJsA11yTreeFallback:
         mock_page.query_selector_all = AsyncMock(return_value=[])
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst._js_snapshot_mode = True
         mgr._instances["a1"] = inst
 
         result = await mgr.snapshot("a1")
