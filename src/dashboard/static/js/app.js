@@ -1473,8 +1473,9 @@ function dashboard() {
       }
 
       // Surface agent notifications as toasts + inject into chat history.
-      // Skip toast/unread for replayed events (sent before this page loaded) —
-      // _loadChatHistory already has them from the server transcript.
+      // Skip toast/unread/insertion for replayed events (sent before this
+      // page loaded) — _loadChatHistory handles restoring them from the
+      // server transcript and localStorage.
       if (evt.type === 'notification' && agent && evt.data && evt.data.message) {
         const msg = evt.data.message;
         const evtTs = this._normalizeEventTs(evt);
@@ -1490,7 +1491,7 @@ function dashboard() {
         const isDup = this.chatHistories[agent].some(m =>
           m.role === 'notification' && m.content === msg && Math.abs((m.ts || 0) - evtTs) < 2000
         );
-        if (!isDup) {
+        if (!isDup && !isReplay) {
           this.chatHistories[agent].push({
             role: 'notification',
             content: msg,
@@ -1498,7 +1499,7 @@ function dashboard() {
           });
           if (this.activeChatId === agent) {
             this.$nextTick(() => this._scrollChat(agent));
-          } else if (!isReplay) {
+          } else {
             this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
           }
         }
@@ -3921,6 +3922,7 @@ function dashboard() {
         // 3. Notifications injected via WebSocket not yet in the server transcript
         const trailing = localMsgs.filter(m => {
           if (m.role === 'notification') {
+            if ((m.ts || 0) <= lastServerTs) return false;
             return !serverMsgs.some(s =>
               s.role === 'notification' && s.content === m.content && Math.abs((s.ts || 0) - (m.ts || 0)) < 2000
             );
