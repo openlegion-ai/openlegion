@@ -69,6 +69,17 @@ _VALID_WAIT_UNTIL = frozenset({"domcontentloaded", "load", "networkidle", "commi
 # After one of these, the next character gets a higher think-pause probability
 # to model the hesitation a human feels when starting the next word or sentence.
 _WORD_BOUNDARY_CHARS = frozenset(" ,.:;!?\n\t")
+# Adjacent keys on QWERTY layout for natural typo injection.
+# Includes same-row neighbors and diagonal keys above/below.
+_TYPO_NEIGHBORS: dict[str, str] = {
+    'q': 'wa', 'w': 'qeas', 'e': 'wrds', 'r': 'etf', 't': 'ryg',
+    'y': 'tuh', 'u': 'yij', 'i': 'uok', 'o': 'ipl', 'p': 'o',
+    'a': 'qwsz', 's': 'weadxz', 'd': 'ersfxc', 'f': 'rtdgcv',
+    'g': 'tyfhvb', 'h': 'yugjbn', 'j': 'uihknm', 'k': 'iojlm',
+    'l': 'opk',
+    'z': 'asx', 'x': 'zsdc', 'c': 'xdfv', 'v': 'cfgb',
+    'b': 'vghn', 'n': 'bhjm', 'm': 'njk',
+}
 # Roles where aria-disabled="true" should NOT block click attempts.
 # SPA frameworks (X/Twitter, Gmail) keep aria-disabled on buttons/links while
 # handling clicks via JS — the visual state and handler are the source of truth,
@@ -1185,6 +1196,64 @@ class BrowserManager:
             )
             await asyncio.sleep(x11_step_delay())
 
+    async def _x11_ensure_in_viewport(
+        self, inst: CamoufoxInstance, locator,
+    ) -> None:
+        """Scroll element into viewport using X11 wheel events.
+
+        Replaces ``locator.scroll_into_view_if_needed()`` for the X11
+        input path.  Protocol-level ``scrollIntoView`` produces scroll
+        events WITHOUT ``WheelEvent`` — a detectable automation signal.
+        X11 button 4/5 produces real ``WheelEvent`` with
+        ``deltaMode=DOM_DELTA_LINE``, matching physical hardware.
+
+        Scrolls in small increments (2–3 notches per batch), re-measures
+        the element position after each batch to prevent overshoot.
+        Falls back to protocol scroll for edge cases (elements inside
+        scrollable inner containers, elements not yet in the DOM).
+        """
+        vp = inst.page.viewport_size
+        if not vp:
+            await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
+            return
+
+        vp_h = vp["height"]
+        margin = 60
+
+        for _ in range(10):
+            box = await locator.bounding_box()
+            if box is None:
+                break  # Not in DOM — protocol scroll only option
+
+            center_y = box["y"] + box["height"] / 2
+            if margin <= center_y <= vp_h - margin:
+                return  # Element is visible
+
+            button = "4" if center_y < margin else "5"
+            prev_center = center_y
+
+            batch = random.randint(2, 3)
+            for _ in range(batch):
+                try:
+                    await self._x11_scroll_notch(inst, button)
+                except Exception:
+                    break
+                await asyncio.sleep(scroll_pause() * 0.4)
+
+            # Wait for smooth scrolling to settle
+            await asyncio.sleep(0.10)
+
+            # Check if element position actually changed
+            new_box = await locator.bounding_box()
+            if new_box is None:
+                break
+            new_center = new_box["y"] + new_box["height"] / 2
+            if abs(new_center - prev_center) < 10:
+                break  # Scroll didn't move element — inner container
+
+        # Fallback for edge cases
+        await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
+
     async def _x11_click(self, inst: CamoufoxInstance, locator) -> None:
         """Click via xdotool for isTrusted=true events.
 
@@ -1195,15 +1264,15 @@ class BrowserManager:
         which the browser marks isTrusted=true.
 
         Steps:
-        1. scroll_into_view_if_needed — ensures element is visible without
-           generating any mouse events (CDP hover produces isTrusted=false
-           mousemove events that create a detectable mixed-trust pattern)
+        1. _x11_ensure_in_viewport — scrolls element into viewport using
+           X11 wheel events (real WheelEvent with DOM_DELTA_LINE) instead
+           of protocol-level scrollIntoView (no WheelEvents, detectable)
         2. Get element bounding box (viewport coords)
         3. Bezier mouse trajectory via _x11_move_to
         4. mousedown + human dwell + mouseup (not instant click)
         """
-        # 1. Scroll into view — no mouse events, just DOM scroll
-        await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
+        # 1. Scroll into view — prefer X11 wheel events over protocol scroll
+        await self._x11_ensure_in_viewport(inst, locator)
         await asyncio.sleep(x11_settle_delay())
 
         # 2. Get element position — jitter within inner area, not dead center
@@ -1245,7 +1314,7 @@ class BrowserManager:
 
     async def _x11_hover(self, inst: CamoufoxInstance, locator) -> None:
         """Move mouse to element via xdotool for isTrusted=true mousemove events."""
-        await locator.scroll_into_view_if_needed(timeout=_CLICK_TIMEOUT_MS)
+        await self._x11_ensure_in_viewport(inst, locator)
         await asyncio.sleep(x11_settle_delay())
 
         box = await locator.bounding_box()
@@ -1290,15 +1359,19 @@ class BrowserManager:
             except Exception:
                 pass
 
-    async def _x11_type(self, inst: CamoufoxInstance, text: str) -> None:
+    async def _x11_type(self, inst: CamoufoxInstance, text: str,
+                        *, typos: bool = True) -> None:
         """Type text via xdotool for isTrusted=true key events.
 
         Same rationale as _x11_click — bot-detection checks isTrusted on
         keydown/keyup in tweet composer textareas.  xdotool key/type
         generates real X11 KeyPress/KeyRelease events.
 
-        Uses xdotool type with --clearmodifiers for the text, with a
-        per-character delay matching our human-like timing.
+        When *typos* is True (default), injects occasional typo +
+        backspace corrections to simulate natural human error patterns.
+        Zero-typo typing at consistent speed is one of the strongest
+        bot signals.  Typos are placed mid-word only (avoiding handles,
+        hashtags, URLs) and capped at a per-text budget.
         """
         wid = inst.x11_wid
         if not wid:
@@ -1307,14 +1380,62 @@ class BrowserManager:
         loop = asyncio.get_running_loop()
         wid_s = str(wid)
 
-        # Type character by character with human-like delays
+        # ── Typo budget ──────────────────────────────────────────
+        # Pre-select positions for typo injection.  Only mid-word
+        # alphabetic characters qualify (skips handles, hashtags,
+        # URLs).  Budget scales with text length.
+        typo_positions: set[int] = set()
+        if typos:
+            candidates = [
+                i for i, c in enumerate(text)
+                if c.isalpha() and c.lower() in _TYPO_NEIGHBORS
+                and i > 0 and text[i - 1].isalpha()
+            ]
+            alpha_count = len(candidates)
+            if alpha_count >= 15:
+                expected = max(1.0, alpha_count / 120)
+                budget = max(0, int(random.gauss(expected, expected * 0.5)))
+                budget = min(budget, 4)
+                if budget > 0 and len(candidates) >= budget:
+                    typo_positions = set(random.sample(candidates, budget))
+
+        # ── Character loop ───────────────────────────────────────
         prev_char = ""
-        for char in text:
+        for i, char in enumerate(text):
             # Word-boundary think pauses
             pause_prob = 0.08 if prev_char in _WORD_BOUNDARY_CHARS else 0.015
             if random.random() < pause_prob:
                 await asyncio.sleep(think_pause())
 
+            # Typo injection — wrong adjacent key → pause → backspace → correct
+            if i in typo_positions:
+                wrong = random.choice(_TYPO_NEIGHBORS[char.lower()])
+                if char.isupper():
+                    wrong = wrong.upper()
+                # Type wrong character
+                await loop.run_in_executor(
+                    None,
+                    lambda c=wrong: subprocess.run(
+                        ["xdotool", "type", "--clearmodifiers", "--window", wid_s,
+                         "--delay", "0", "--", c],
+                        capture_output=True, timeout=3,
+                    ),
+                )
+                await asyncio.sleep(keystroke_delay(wrong))
+                # Pause — noticing the error
+                await asyncio.sleep(random.uniform(0.15, 0.4))
+                # Backspace to correct
+                await loop.run_in_executor(
+                    None,
+                    lambda: subprocess.run(
+                        ["xdotool", "key", "--clearmodifiers", "--window", wid_s,
+                         "BackSpace"],
+                        capture_output=True, timeout=3,
+                    ),
+                )
+                await asyncio.sleep(random.uniform(0.03, 0.08))
+
+            # Type the correct character
             if char == "\n":
                 await loop.run_in_executor(
                     None,
@@ -1332,7 +1453,6 @@ class BrowserManager:
                     ),
                 )
             else:
-                # xdotool type handles special characters and Unicode
                 await loop.run_in_executor(
                     None,
                     lambda c=char: subprocess.run(
@@ -1682,7 +1802,7 @@ class BrowserManager:
                     await asyncio.sleep(0.05)
 
                 if _use_x11:
-                    await self._x11_type(inst, text)
+                    await self._x11_type(inst, text, typos=not fast)
                 elif fast:
                     await self._type_fast(inst.page, text)
                 else:
