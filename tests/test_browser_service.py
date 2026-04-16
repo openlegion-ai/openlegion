@@ -3381,7 +3381,11 @@ class TestDialogScoping:
         mock_page = AsyncMock()
         mock_modal_el = AsyncMock()
         mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_modal_el.bounding_box = AsyncMock(return_value={
+            "x": 100, "y": 100, "width": 400, "height": 300,
+        })
         mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
+        mock_page.viewport_size = {"width": 1280, "height": 720}
 
         async def _snapshot(root=None):
             if root is not None:
@@ -3396,6 +3400,7 @@ class TestDialogScoping:
         """Create a mock page where DOM has no visible modal elements."""
         mock_page = AsyncMock()
         mock_page.query_selector_all = AsyncMock(return_value=[])
+        mock_page.viewport_size = {"width": 1280, "height": 720}
         mock_page.accessibility = MagicMock()
         mock_page.accessibility.snapshot = AsyncMock(return_value=full_tree)
         return mock_page
@@ -3685,7 +3690,11 @@ class TestDialogScoping:
         mock_page = AsyncMock()
         mock_modal_el = AsyncMock()
         mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_modal_el.bounding_box = AsyncMock(return_value={
+            "x": 100, "y": 100, "width": 400, "height": 300,
+        })
         mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
+        mock_page.viewport_size = {"width": 1280, "height": 720}
 
         async def _snapshot(root=None):
             if root is not None:
@@ -3734,7 +3743,11 @@ class TestDialogScoping:
         mock_page = AsyncMock()
         mock_modal_el = AsyncMock()
         mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_modal_el.bounding_box = AsyncMock(return_value={
+            "x": 100, "y": 100, "width": 400, "height": 300,
+        })
         mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
+        mock_page.viewport_size = {"width": 1280, "height": 720}
 
         async def _snapshot(root=None):
             if root is not None:
@@ -3867,8 +3880,12 @@ class TestDialogScoping:
         mock_page = AsyncMock()
         mock_modal_el = AsyncMock()
         mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_modal_el.bounding_box = AsyncMock(return_value={
+            "x": 100, "y": 100, "width": 400, "height": 300,
+        })
         mock_modal_el.evaluate = AsyncMock(return_value=None)
         mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
+        mock_page.viewport_size = {"width": 1280, "height": 720}
 
         async def _snapshot(root=None):
             if root is not None:
@@ -3908,11 +3925,15 @@ class TestDialogScoping:
         mock_page = AsyncMock()
         mock_modal_el = AsyncMock()
         mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_modal_el.bounding_box = AsyncMock(return_value={
+            "x": 100, "y": 100, "width": 400, "height": 300,
+        })
         # JS fallback for scoped snapshot also fails
         mock_modal_el.evaluate = AsyncMock(
             side_effect=RuntimeError("evaluate failed")
         )
         mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
+        mock_page.viewport_size = {"width": 1280, "height": 720}
 
         async def _snapshot(root=None):
             if root is not None:
@@ -3984,7 +4005,13 @@ class TestDialogScoping:
         mock_parent = AsyncMock()
         mock_child = AsyncMock()
         mock_parent.is_visible = AsyncMock(return_value=True)
+        mock_parent.bounding_box = AsyncMock(return_value={
+            "x": 100, "y": 100, "width": 400, "height": 300,
+        })
         mock_child.is_visible = AsyncMock(return_value=True)
+        mock_child.bounding_box = AsyncMock(return_value={
+            "x": 150, "y": 150, "width": 200, "height": 100,
+        })
         # parent.contains(child) = True, child.contains(parent) = False
         mock_parent.evaluate = AsyncMock(
             side_effect=lambda js, arg: arg is mock_child
@@ -3993,6 +4020,7 @@ class TestDialogScoping:
         mock_page.query_selector_all = AsyncMock(
             return_value=[mock_parent, mock_child]
         )
+        mock_page.viewport_size = {"width": 1280, "height": 720}
 
         child_subtree = {
             "role": "dialog", "name": "Confirm",
@@ -4144,9 +4172,13 @@ class TestJsA11yTreeFallback:
 
         mock_page = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=full_tree)
+        mock_page.viewport_size = {"width": 1280, "height": 720}
 
         mock_modal_el = AsyncMock()
         mock_modal_el.is_visible = AsyncMock(return_value=True)
+        mock_modal_el.bounding_box = AsyncMock(return_value={
+            "x": 100, "y": 100, "width": 400, "height": 300,
+        })
         mock_modal_el.evaluate = AsyncMock(return_value=dialog_tree)
         mock_page.query_selector_all = AsyncMock(return_value=[mock_modal_el])
 
@@ -5030,7 +5062,7 @@ class TestX11Input:
 
         result = await mgr.click("agent-1", ref="B1")
         assert result["success"]
-        mgr._x11_click.assert_called_once_with(inst, mock_locator)
+        mgr._x11_click.assert_called_once_with(inst, mock_locator, timeout=10000)
 
     @pytest.mark.asyncio
     async def test_type_text_clear_false_skips_x11_key(self):
@@ -5402,10 +5434,13 @@ class TestModalRetryRequery:
             ],
         }
 
+        _bb = {"x": 100, "y": 100, "width": 400, "height": 300}
         stale_el = AsyncMock()
         stale_el.is_visible = AsyncMock(return_value=True)
+        stale_el.bounding_box = AsyncMock(return_value=_bb)
         fresh_el = AsyncMock()
         fresh_el.is_visible = AsyncMock(return_value=True)
+        fresh_el.bounding_box = AsyncMock(return_value=_bb)
 
         query_call_count = [0]
 
@@ -5417,6 +5452,7 @@ class TestModalRetryRequery:
 
         mock_page = AsyncMock()
         mock_page.query_selector_all = mock_query_selector_all
+        mock_page.viewport_size = {"width": 1280, "height": 720}
 
         async def _snapshot(root=None):
             if root is stale_el:
@@ -5462,10 +5498,14 @@ class TestModalRetryRequery:
         # Modal is visible but a11y tree always returns None (scoping always fails)
         modal_el = AsyncMock()
         modal_el.is_visible = AsyncMock(return_value=True)
+        modal_el.bounding_box = AsyncMock(return_value={
+            "x": 100, "y": 100, "width": 400, "height": 300,
+        })
         modal_el.evaluate = AsyncMock(return_value=None)
 
         mock_page = AsyncMock()
         mock_page.query_selector_all = AsyncMock(return_value=[modal_el])
+        mock_page.viewport_size = {"width": 1280, "height": 720}
 
         async def _snapshot(root=None):
             if root is not None:
