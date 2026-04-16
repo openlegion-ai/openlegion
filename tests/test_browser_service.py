@@ -1706,6 +1706,55 @@ class TestX11EnsureInViewport:
         # Should have fallen back to protocol scroll
         mock_locator.scroll_into_view_if_needed.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_small_movement_continues_scrolling(self):
+        """Small but real movement (>= 2px) should NOT trigger stall detection."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = {"width": 1920, "height": 1080}
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+
+        # Element moves 5px per batch (small but real progress), then enters viewport
+        call_count = [0]
+
+        async def moving_bbox():
+            call_count[0] += 1
+            y = max(500, 1200 - call_count[0] * 100)  # gradually enters viewport
+            return {"x": 100, "y": y, "width": 200, "height": 40}
+
+        mock_locator = AsyncMock()
+        mock_locator.bounding_box = AsyncMock(side_effect=moving_bbox)
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        with patch("src.browser.service.asyncio.sleep"), \
+             patch("src.browser.service.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            await mgr._x11_ensure_in_viewport(inst, mock_locator)
+
+        # Should NOT have used protocol fallback — X11 scroll succeeded
+        mock_locator.scroll_into_view_if_needed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_viewport_uses_protocol(self):
+        """When viewport_size is None, fall back to protocol scroll."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.viewport_size = None
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        inst.x11_wid = 12345
+
+        mock_locator = AsyncMock()
+        mock_locator.scroll_into_view_if_needed = AsyncMock()
+
+        await mgr._x11_ensure_in_viewport(inst, mock_locator)
+
+        mock_locator.scroll_into_view_if_needed.assert_called_once()
+
 
 class TestTypoInjection:
     """Tests for typo injection in _x11_type."""

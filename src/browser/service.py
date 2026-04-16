@@ -72,8 +72,8 @@ _WORD_BOUNDARY_CHARS = frozenset(" ,.:;!?\n\t")
 # Adjacent keys on QWERTY layout for natural typo injection.
 # Includes same-row neighbors and diagonal keys above/below.
 _TYPO_NEIGHBORS: dict[str, str] = {
-    'q': 'wa', 'w': 'qeas', 'e': 'wrds', 'r': 'etf', 't': 'ryg',
-    'y': 'tuh', 'u': 'yij', 'i': 'uok', 'o': 'ipl', 'p': 'o',
+    'q': 'wa', 'w': 'qeas', 'e': 'wrds', 'r': 'etdf', 't': 'ryfg',
+    'y': 'tugh', 'u': 'yihj', 'i': 'uojk', 'o': 'ipkl', 'p': 'ol',
     'a': 'qwsz', 's': 'weadxz', 'd': 'ersfxc', 'f': 'rtdgcv',
     'g': 'tyfhvb', 'h': 'yugjbn', 'j': 'uihknm', 'k': 'iojlm',
     'l': 'opk',
@@ -1252,7 +1252,7 @@ class BrowserManager:
             if new_box is None:
                 break
             new_center = new_box["y"] + new_box["height"] / 2
-            if abs(new_center - prev_center) < 10:
+            if abs(new_center - prev_center) < 2:
                 break  # Scroll didn't move element — inner container
 
         # Fallback for edge cases
