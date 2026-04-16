@@ -744,11 +744,13 @@ class BrowserManager:
             try:
                 title = await inst.page.title()
                 current_url = inst.page.url
-                try:
-                    _a11y = await inst.page.accessibility.snapshot()
-                    body_text = _extract_text_from_a11y(_a11y)
-                except Exception:
-                    body_text = ""
+                body_text = ""
+                if not inst._js_snapshot_mode:
+                    try:
+                        _a11y = await inst.page.accessibility.snapshot()
+                        body_text = _extract_text_from_a11y(_a11y)
+                    except Exception:
+                        pass
                 result = {
                     "success": True,
                     "data": {
