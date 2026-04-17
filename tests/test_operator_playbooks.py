@@ -138,7 +138,7 @@ class TestPlaybookConstants:
             "add_agents_to_project", "remove_agents_from_project",
             "update_project_context", "propose_edit", "confirm_edit",
             "read_agent_history", "save_observations",
-            "request_credential", "vault_list",
+            "request_credential", "vault_list", "request_browser_login",
         }
         assert set(_TOOL_PLAYBOOK_MAP.keys()) == expected_tools
 
@@ -156,6 +156,7 @@ class TestPlaybookConstants:
         assert "update_project_context" in _PLAYBOOK_TEAM_BUILD
         assert "vault_list" in _PLAYBOOK_TEAM_BUILD
         assert "request_credential" in _PLAYBOOK_TEAM_BUILD
+        assert "request_browser_login" in _PLAYBOOK_TEAM_BUILD
 
         assert "propose_edit" in _PLAYBOOK_EDIT
         assert "confirm_edit" in _PLAYBOOK_EDIT
@@ -166,6 +167,7 @@ class TestPlaybookConstants:
 
         assert "vault_list" in _PLAYBOOK_CREDENTIALS
         assert "request_credential" in _PLAYBOOK_CREDENTIALS
+        assert "request_browser_login" in _PLAYBOOK_CREDENTIALS
 
     def test_core_has_key_sections(self):
         """Core instructions contain all expected section headers."""
