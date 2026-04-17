@@ -4,6 +4,7 @@ Commands:
   start                    Start runtime + interactive REPL
   start -d                 Start in background (detached)
   stop                     Stop all containers
+  reset                    Stop everything and wipe all state (keeps .env)
   status                   Show agent status
   chat <name>              Connect to a running agent
   version [-v]             Show version info
@@ -628,6 +629,69 @@ def stop():
             click.echo("If agents are running in Docker, ensure Docker is available.")
         else:
             logger.debug("Docker cleanup skipped: %s", e)
+
+
+# ── reset ────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def reset(yes: bool):
+    """Stop everything and wipe all agents, projects, and state. Keeps .env."""
+    import shutil
+
+    if not yes:
+        click.echo("This will stop all containers and delete:")
+        click.echo("  - All agent configs and permissions")
+        click.echo("  - All projects")
+        click.echo("  - All skills (except _marketplace)")
+        click.echo("  - All runtime data (memory, blackboard, costs, etc.)")
+        click.echo("  - All channel pairings, webhooks, cron jobs, API keys")
+        click.echo("")
+        click.echo("Your .env file will be preserved.")
+        if not click.confirm("Continue?"):
+            click.echo("Aborted.")
+            return
+
+    # Stop running containers and host process first
+    ctx = click.get_current_context()
+    ctx.invoke(stop)
+
+    root = cli_config.PROJECT_ROOT
+
+    # Remove config files (keep .env and config/ dir itself)
+    config_dir = root / "config"
+    if config_dir.is_dir():
+        shutil.rmtree(config_dir)
+        click.echo("Removed config/")
+
+    # Remove runtime data
+    data_dir = root / "data"
+    if data_dir.is_dir():
+        shutil.rmtree(data_dir)
+        click.echo("Removed data/")
+
+    # Remove agent skills (keep _marketplace and skills/ dir)
+    skills_dir = root / "skills"
+    if skills_dir.is_dir():
+        for entry in skills_dir.iterdir():
+            if entry.name.startswith("_") or entry.is_file():
+                continue
+            shutil.rmtree(entry)
+        click.echo("Removed agent skills/")
+
+    # Remove Docker volumes for agents
+    try:
+        import docker
+        client = docker.from_env()
+        volumes = client.volumes.list(filters={"name": "openlegion_"})
+        for vol in volumes:
+            vol.remove(force=True)
+        if volumes:
+            click.echo(f"Removed {len(volumes)} Docker volume(s).")
+    except Exception:
+        pass  # Docker not available or no volumes
+
+    click.echo("\nReset complete. Run 'openlegion start' for a fresh setup.")
 
 
 # ── version ──────────────────────────────────────────────────
