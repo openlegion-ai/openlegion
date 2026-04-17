@@ -3237,6 +3237,78 @@ def create_dashboard_router(
 
         return {"restarted": results}
 
+    # ── System reset ─────────────────────────────────────────────
+
+    @api_router.post("/api/system/reset")
+    async def api_system_reset() -> dict:
+        """Wipe all state: config, data, agent skills, Docker volumes.
+
+        Mirrors the CLI ``openlegion reset`` command.  Stops all agents
+        first, then removes config/, data/, non-underscore skill dirs,
+        and Docker volumes named ``openlegion_*``.
+        """
+        import asyncio as _asyncio
+        from src.host.runtime import DockerBackend
+
+        root = Path.cwd()
+
+        # 1. Stop all agents
+        if runtime is not None and isinstance(runtime, DockerBackend):
+            loop = _asyncio.get_running_loop()
+            for agent_id in list(agent_registry.keys()):
+                try:
+                    await loop.run_in_executor(None, runtime.stop_agent, agent_id)
+                except Exception as e:
+                    logger.warning("Failed to stop agent '%s': %s", agent_id, e)
+            # Stop browser service
+            try:
+                await loop.run_in_executor(None, runtime.stop_browser_service)
+            except Exception as e:
+                logger.debug("Browser stop: %s", e)
+
+        removed = []
+
+        # 2. Remove config/
+        config_dir = root / "config"
+        if config_dir.is_dir():
+            shutil.rmtree(config_dir)
+            removed.append("config/")
+
+        # 3. Remove data/
+        data_dir = root / "data"
+        if data_dir.is_dir():
+            shutil.rmtree(data_dir)
+            removed.append("data/")
+
+        # 4. Remove agent skills (keep _marketplace, _* prefixed dirs, and files)
+        skills_dir = root / "skills"
+        if skills_dir.is_dir():
+            for entry in skills_dir.iterdir():
+                if entry.name.startswith("_") or entry.is_file():
+                    continue
+                shutil.rmtree(entry)
+            removed.append("skills/")
+
+        # 5. Remove Docker volumes
+        volumes_removed = 0
+        try:
+            import docker as _docker
+            dclient = _docker.from_env()
+            volumes = dclient.volumes.list(filters={"name": "openlegion_"})
+            for vol in volumes:
+                vol.remove(force=True)
+                volumes_removed += 1
+        except Exception:
+            pass
+
+        if volumes_removed:
+            removed.append(f"{volumes_removed} Docker volume(s)")
+
+        # Clear in-memory registries
+        agent_registry.clear()
+
+        return {"status": "reset_complete", "removed": removed}
+
     # ── Storage ────────────────────────────────────────────────
 
     _STORAGE_SKIP_DIRS = {"src", ".git", ".venv", "venv", "node_modules", ".claude"}

@@ -81,6 +81,7 @@ function dashboard() {
       'blackboard_write', 'health_change', 'notification', 'workspace_updated',
       'heartbeat_complete', 'cron_change', 'credit_exhausted', 'credential_request',
       'browser_login_request', 'browser_login_completed', 'browser_login_cancelled',
+      'reset_request',
     ],
 
     // Agent detail
@@ -1536,6 +1537,45 @@ function dashboard() {
           );
           if (!opDup) {
             this.chatHistories['operator'].push({ ...credCard, _from_agent: agent });
+            if (this.activeTab === 'chat') {
+              this.$nextTick(() => this._scrollChat('operator'));
+            }
+          }
+        }
+      }
+
+      // Surface reset requests as confirmation cards in chat.
+      if (evt.type === 'reset_request' && agent && evt.data && evt.data.reason) {
+        const evtTs = this._normalizeEventTs(evt);
+        const resetCard = {
+          role: 'reset_request',
+          content: evt.data.reason || '',
+          agent_id: evt.data.agent_id || agent,
+          dismissed: false,
+          resetDone: false,
+          ts: evtTs,
+        };
+        // Show in the requesting agent's chat
+        if (!this.chatHistories[agent]) this.chatHistories[agent] = [];
+        const isDup = this.chatHistories[agent].some(m =>
+          m.role === 'reset_request' && Math.abs((m.ts || 0) - evtTs) < 5000
+        );
+        if (!isDup) {
+          this.chatHistories[agent].push(resetCard);
+          if (this.activeChatId === agent) {
+            this.$nextTick(() => this._scrollChat(agent));
+          } else {
+            this.chatUnread = { ...this.chatUnread, [agent]: (this.chatUnread[agent] || 0) + 1 };
+          }
+        }
+        // Also surface in operator chat
+        if (agent !== 'operator') {
+          if (!this.chatHistories['operator']) this.chatHistories['operator'] = [];
+          const opDup = this.chatHistories['operator'].some(m =>
+            m.role === 'reset_request' && Math.abs((m.ts || 0) - evtTs) < 5000
+          );
+          if (!opDup) {
+            this.chatHistories['operator'].push({ ...resetCard, _from_agent: agent });
             if (this.activeTab === 'chat') {
               this.$nextTick(() => this._scrollChat('operator'));
             }
@@ -3811,6 +3851,28 @@ function dashboard() {
           }
         } catch (e) { this.showToast(`Error: ${e.message}`); }
         this._restartingAll = false;
+      }, true);
+    },
+
+    resetSystem() {
+      this.showConfirm('Reset System', 'This will stop all agents and permanently delete all configs, projects, skills, memory, and runtime data. Your .env file will be preserved. This cannot be undone.', async () => {
+        this.showToast('Resetting system...');
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/system/reset`, {
+            method: 'POST',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+          });
+          if (resp.ok) {
+            this.showToast('System reset complete. Reload the page to start fresh.');
+            // Clear local state
+            this.agents = [];
+            this.chatHistories = {};
+            this.events = [];
+          } else {
+            const err = await resp.json().catch(() => ({}));
+            this.showToast(`Error: ${err.detail || 'Reset failed'}`);
+          }
+        } catch (e) { this.showToast(`Error: ${e.message}`); }
       }, true);
     },
 

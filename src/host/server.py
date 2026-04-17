@@ -1109,6 +1109,30 @@ def create_mesh_app(
 
         return {"requested": True, "name": name}
 
+    @app.post("/mesh/reset-request")
+    async def reset_request(data: dict, request: Request) -> dict:
+        """Agent requests a full system reset from the user via dashboard UI.
+
+        Emits a ``reset_request`` event so the dashboard renders a
+        confirmation card.  The actual reset is triggered by the user
+        through the dashboard, not by the agent directly.
+        """
+        agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
+        await _check_rate_limit("notify", agent_id)
+
+        reason = (data.get("reason") or "").strip()
+        if not reason:
+            raise HTTPException(400, "Reason is required")
+
+        if event_bus:
+            event_bus.emit(
+                "reset_request",
+                agent=agent_id,
+                data={"reason": reason[:500], "agent_id": agent_id},
+            )
+
+        return {"requested": True}
+
     @app.post("/mesh/browser-login-request")
     async def browser_login_request(data: dict, request: Request) -> dict:
         """Agent requests user login via browser VNC viewer in chat.
