@@ -131,7 +131,8 @@ who it serves, and what the team should accomplish. Skip for Basic plans.
 business before creating. Use apply_template() if a matching fleet template \
 exists (call list_templates() to check). Use create_agent() for custom \
 agents. Frame each agent in terms of what it does for the business, not \
-technical capabilities.
+technical capabilities. New agents get browser and cron permissions by \
+default — do not disable these unless the user explicitly requests it.
 
 3. **Assign to project and set context**: Call add_agents_to_project() then \
 update_project_context() with detailed business context that all agents \
@@ -149,18 +150,38 @@ Call propose_edit() for each agent, then show all proposed changes together. \
 After one user confirmation, call confirm_edit() for each change_id.
 
 5. **Set up credentials**: Call vault_list() to check existing credentials. \
-For each external service the agents need, call request_credential() with a \
-plain-language explanation: what service it connects, why the team needs it, \
-and where to find the key. Distinguish required credentials (blocks the \
-agent) from optional ones (agent works but with reduced capability). \
-Request all at once. Tell the user: "Fill in the cards above and let me \
-know when you're done. If you don't have a key yet, that's fine — the \
-agent will ask again when it needs it."
+Triage what each agent needs:
+   - **Secrets** (API keys, tokens, passwords) → request_credential()
+   - **Simple values** (email addresses, usernames, URLs, brand names) → \
+     put directly in agent instructions via propose_edit(). Do NOT vault \
+     values that aren't secret.
+   - **Cookie-based logins** (email inbox, social media, web apps, \
+     directories) → request_browser_login(agent_id=target_agent)
+For vaulted credentials, explain what service it connects, why the team \
+needs it, and where to find the key. Distinguish required credentials \
+(blocks the agent) from optional ones (agent works but with reduced \
+capability). Request all at once. Tell the user: "Fill in the cards above \
+and let me know when you're done. If you don't have a key yet, that's \
+fine — the agent will ask again when it needs it."
 
-6. **Confirm ready**: State what each agent does and how they work together. \
+6. **Set up browser logins**: If any agent needs to log in to a website \
+(email inbox, social media, directories, dashboards), call \
+request_browser_login(url, service, description, agent_id=target_agent) \
+for each. Do NOT tell the user to "go to the dashboard" or log in \
+manually — always use the tool so they get a live browser view right in \
+this chat. Example: request_browser_login(url="https://mail.google.com", \
+service="Email", description="Log in to listings@example.com", \
+agent_id="content-writer").
+
+7. **Verify setup**: Call get_agent_profile() for each new agent. Confirm \
+it is healthy, has the expected capabilities (browser tools, etc.), and \
+has a heartbeat schedule if one was configured. If an agent is unhealthy \
+or missing expected capabilities, investigate before confirming ready.
+
+8. **Confirm ready**: State what each agent does and how they work together. \
 Tell the user who to talk to first and what to try: "Start by asking \
 @researcher to look into [topic] — that'll give @writer material to work \
-with." Mention any blockers from missing credentials.
+with." Mention any blockers from missing credentials or pending logins.
 
 If any step fails, retry once. Don't block the entire setup on one failure — \
 continue and report issues at the end."""
@@ -220,29 +241,61 @@ Surface issues briefly when the user engages. Mention once, don't repeat."""
 _PLAYBOOK_CREDENTIALS = """\
 ## Active Playbook: Credential Setup
 
+When this playbook appears alongside Team Setup, use it as detailed \
+guidance for Team Setup steps 5–6 (credentials and browser logins). \
+Do not restart a separate workflow from step 1.
+
 Complete the credential setup for the team.
+
+## What goes where
+
+Not everything belongs in the vault. Triage each external service:
+
+- **Secrets** (API keys, tokens, passwords) → request_credential() to \
+  store in the vault. Agent uses opaque $CRED{name} handles.
+- **Simple values** (email addresses, usernames, URLs, brand names) → \
+  put directly in agent instructions via propose_edit(). These aren't \
+  secret — don't vault them.
+- **Cookie-based logins** (email inbox, social media, web apps, \
+  directories) → request_browser_login(url, service, description, \
+  agent_id=target_agent). Do NOT tell the user to "go to the dashboard" \
+  or log in manually — always use the tool so they get a live browser \
+  view right in this chat.
+
+## Steps
 
 1. Call vault_list() to check what credentials already exist.
 
-2. Review the agents — what external services will they use? Match each \
-agent's role to the services it needs.
+2. Review the agents — what external services will they use? For each, \
+decide: vault, instructions, or browser login (see above).
 
-3. For each missing credential, call request_credential() with a \
-plain-language explanation: what service it connects to, why the agent \
-needs it, and where to find the key. For example: "This connects to \
-Twitter so your content agent can post directly. You can find your API \
-key at developer.twitter.com under your app settings."
+3. For secrets, call request_credential() with a plain-language \
+explanation: what service it connects to, why the agent needs it, and \
+where to find the key. For example: "This connects to Twitter so your \
+content agent can post directly. You can find your API key at \
+developer.twitter.com under your app settings."
 
-4. Distinguish required credentials (agent cannot function without them) \
+4. For simple values, use propose_edit() to embed them in the agent's \
+instructions. For example, an email address goes in the instructions, \
+not the vault.
+
+5. For cookie-based logins, call request_browser_login() with the target \
+agent's ID. For example: request_browser_login(url="https://mail.google.com", \
+service="Email", description="Log in to listings@example.com", \
+agent_id="content-writer").
+
+6. Distinguish required credentials (agent cannot function without them) \
 from optional ones (agent works but with reduced capability). Tell the \
 user what can run today without any credentials.
 
-5. Request all needed credentials at once. Tell the user: "Fill in the \
+7. Request all vaulted credentials at once. Tell the user: "Fill in the \
 cards above and let me know when you're done. If you don't have a key \
 yet, that's fine — the agent will ask again when it needs it."
 
-6. When the user confirms, call vault_list() to verify. Report what's \
-connected and what's still pending."""
+8. When the user confirms, call vault_list() to verify vaulted \
+credentials. For browser logins, check whether the user completed each \
+login before marking the agent as ready. Report what's connected, what's \
+logged in, and what's still pending."""
 
 # ── Tool-to-playbook mapping ─────────────────────────────────
 
@@ -259,6 +312,7 @@ _TOOL_PLAYBOOK_MAP: dict[str, str] = {
     "save_observations": "monitor",
     "request_credential": "credentials",
     "vault_list": "credentials",
+    "request_browser_login": "credentials",
 }
 
 # ── Playbook content map ─────────────────────────────────────
