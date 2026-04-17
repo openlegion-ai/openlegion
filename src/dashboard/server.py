@@ -1353,6 +1353,7 @@ def create_dashboard_router(
                                           if k != "type"} | {"session": chat_session})
                             if etype == "done":
                                 final_response = event.get("response", "")
+                                break
             except Exception as e:
                 yield f"data: {json.dumps({'type': 'error', 'message': friendly_streaming_error(e)})}\n\n"
             # Notify other sessions that the response is complete
@@ -1448,6 +1449,8 @@ def create_dashboard_router(
                     if isinstance(event, dict):
                         tagged = {**event, "agent": aid}
                         await queue.put(tagged)
+                        if event.get("type") == "done":
+                            break
                         if event_bus:
                             etype = event.get("type", "")
                             if etype in ("tool_start", "tool_result"):
