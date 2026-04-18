@@ -852,6 +852,36 @@ def test_introspect_operator_fleet_includes_models(tmp_path):
     bb.close()
 
 
+def test_introspect_operator_fleet_model_falls_back_to_runtime_default(tmp_path):
+    """When YAML has no llm.default_model, fleet entries show the agent
+    runtime default (matches src/agent/__main__.py), not empty string."""
+    from unittest.mock import patch
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+    router.register_agent("writer", "http://localhost:8401")
+
+    app = create_mesh_app(bb, pubsub, router, perms)
+    client = TestClient(app)
+
+    # Config has agents but no llm.default_model set
+    fake_cfg = {"agents": {"writer": {}}}
+    with patch("src.cli.config._load_config", return_value=fake_cfg):
+        response = client.get(
+            "/mesh/introspect",
+            params={"section": "fleet"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert response.status_code == 200
+    fleet = {a["id"]: a for a in response.json()["fleet"]}
+    assert fleet["writer"]["model"] == "openai/gpt-4o-mini"
+
+    bb.close()
+
+
 def test_introspect_non_operator_fleet_omits_model(tmp_path):
     """Non-operator agents don't see peer models — keeps their context lean."""
     from unittest.mock import patch

@@ -1238,15 +1238,17 @@ def create_mesh_app(
             # Operator also needs per-agent model so dashboard-initiated
             # model changes don't leave its mental state stale. Load the
             # YAML once; other agents don't see models (noise for peers).
+            include_models = agent_id == "operator"
             agent_models: dict[str, str] = {}
-            if agent_id == "operator":
+            if include_models:
                 from src.cli.config import _load_config
-                _fleet_cfg = _load_config().get("agents", {})
-                _default_model = _load_config().get("llm", {}).get(
-                    "default_model", "",
+                _cfg = _load_config()
+                _agents_cfg = _cfg.get("agents", {})
+                _default_model = _cfg.get("llm", {}).get(
+                    "default_model", "openai/gpt-4o-mini",
                 )
                 agent_models = {
-                    aid: _fleet_cfg.get(aid, {}).get("model", _default_model)
+                    aid: _agents_cfg.get(aid, {}).get("model", _default_model)
                     for aid in router.agent_registry
                 }
 
@@ -1254,8 +1256,8 @@ def create_mesh_app(
                 entry: dict = {
                     "id": aid, "role": router.agent_roles.get(aid, ""),
                 }
-                if aid in agent_models:
-                    entry["model"] = agent_models[aid]
+                if include_models:
+                    entry["model"] = agent_models.get(aid, "")
                 return entry
 
             if agent_id == "operator":
