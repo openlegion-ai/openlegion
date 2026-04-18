@@ -867,6 +867,30 @@ def create_dashboard_router(
             cfg_result["vnc_url"] = vnc_url
         return cfg_result
 
+    async def _hot_reload_runtime_config(agent_id: str, payload: dict) -> bool:
+        """Push model/thinking changes to a running agent's /config endpoint.
+
+        Returns True on success, False if the agent is unreachable or the
+        update returns an error. Callers use the return value to decide
+        whether restart_required should remain True.
+        """
+        if transport is None or agent_id not in agent_registry:
+            return False
+        try:
+            result = await transport.request(
+                agent_id, "POST", "/config", json=payload, timeout=10,
+            )
+        except Exception as e:
+            logger.warning("Hot-reload runtime config for '%s' failed: %s", agent_id, e)
+            return False
+        if isinstance(result, dict) and "error" in result:
+            logger.warning(
+                "Hot-reload runtime config for '%s' returned error: %s",
+                agent_id, result["error"],
+            )
+            return False
+        return True
+
     @api_router.put("/api/agents/{agent_id}/config")
     async def api_update_agent_config(agent_id: str, request: Request) -> dict:
         if agent_id not in agent_registry:
@@ -879,6 +903,7 @@ def create_dashboard_router(
 
         updated = []
         restart_required = False
+        runtime_payload: dict[str, str] = {}
 
         if "model" in body:
             new_model = body["model"]
@@ -888,7 +913,7 @@ def create_dashboard_router(
             if new_model != old_model:
                 _update_agent_field(agent_id, "model", new_model)
                 updated.append("model")
-                restart_required = True
+                runtime_payload["model"] = new_model
 
         if "role" in body:
             _update_agent_field(agent_id, "role", body["role"])
@@ -934,14 +959,18 @@ def create_dashboard_router(
 
         if "thinking" in body:
             thinking_val = body["thinking"]
-            if thinking_val not in ("off", "low", "medium", "high"):
+            from src.agent.llm import LLMClient
+            if thinking_val not in LLMClient.VALID_THINKING_LEVELS:
                 raise HTTPException(
                     status_code=400,
-                    detail="thinking must be one of: off, low, medium, high",
+                    detail=(
+                        "thinking must be one of: "
+                        f"{sorted(LLMClient.VALID_THINKING_LEVELS)}"
+                    ),
                 )
             _update_agent_field(agent_id, "thinking", thinking_val)
             updated.append("thinking")
-            restart_required = True
+            runtime_payload["thinking"] = thinking_val
 
         if "mcp_servers" in body:
             mcp_val = body["mcp_servers"]
@@ -956,6 +985,14 @@ def create_dashboard_router(
             _update_agent_field(agent_id, "mcp_servers", mcp_val if mcp_val else None)
             updated.append("mcp_servers")
             restart_required = True
+
+        # Hot-reload model/thinking into the running agent so dashboard
+        # display matches actual runtime state. If the push fails, fall back
+        # to restart_required so the UI can prompt the user.
+        if runtime_payload:
+            hot_reloaded = await _hot_reload_runtime_config(agent_id, runtime_payload)
+            if not hot_reloaded:
+                restart_required = True
 
         return {"updated": updated, "restart_required": restart_required}
 

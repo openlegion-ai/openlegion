@@ -819,6 +819,56 @@ class TestDashboardAgentConfig:
             )
             assert resp.status_code == 400
 
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_model_hot_reload_clears_restart_required(
+        self, mock_load, mock_update,
+    ):
+        """When hot-reload succeeds, restart_required is False."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+        }
+        # Swap in a transport that returns a successful hot-reload result
+        self.components["transport"].request = AsyncMock(
+            return_value={"updated": {"model": "openai/gpt-4.1"}},
+        )
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"model": "openai/gpt-4.1"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "model" in data["updated"]
+        assert data["restart_required"] is False
+        # Verify the hot-reload call was made to /config
+        call = self.components["transport"].request.await_args
+        assert call.args[0] == "alpha"
+        assert call.args[1] == "POST"
+        assert call.args[2] == "/config"
+        assert call.kwargs["json"] == {"model": "openai/gpt-4.1"}
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_model_hot_reload_failure_requires_restart(
+        self, mock_load, mock_update,
+    ):
+        """When the agent returns an error dict, restart_required falls back to True."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+        }
+        self.components["transport"].request = AsyncMock(
+            return_value={"error": "Connection refused"},
+        )
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"model": "openai/gpt-4.1"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["restart_required"] is True
+
     def test_put_budget_quick(self):
         resp = self.client.put(
             "/dashboard/api/agents/alpha/budget",
