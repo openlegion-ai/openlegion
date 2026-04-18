@@ -207,7 +207,7 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 - `fastapi` + `uvicorn` — HTTP servers
 - `httpx` — async HTTP client
 - `pydantic` — data validation and cross-component contracts
-- `litellm` (pinned `< 1.82.7`) — model routing (100+ LLM providers)
+- `litellm` (pinned `>=1.83.0,<1.84.0`) — model routing (100+ LLM providers). The `<1.82.7` bound was added when 1.82.7/1.82.8 were flagged malicious; those versions are now yanked from PyPI so the safe floor moved to 1.83.0.
 - `sqlite-vec` — vector similarity search for agent memory
 - `docker` — container management
 - `pyyaml` — template/config parsing
