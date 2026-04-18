@@ -346,6 +346,111 @@ class TestRuntimeConfig:
             )
             assert resp.status_code == 400
 
+    @pytest.mark.asyncio
+    async def test_update_model_and_thinking_together(self, tmp_workspace):
+        """POST /config updates both fields in a single request."""
+        app, loop = _make_app(tmp_workspace)
+        loop.llm = MagicMock()
+        loop.llm.default_model = "openai/gpt-4o-mini"
+        loop.llm.thinking = "off"
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/config",
+                json={"model": "openai/gpt-4o", "thinking": "medium"},
+                headers={"x-mesh-internal": "1"},
+            )
+            assert resp.status_code == 200
+            assert loop.llm.default_model == "openai/gpt-4o"
+            assert loop.llm.thinking == "medium"
+            assert resp.json()["updated"] == {
+                "model": "openai/gpt-4o", "thinking": "medium",
+            }
+
+    @pytest.mark.asyncio
+    async def test_update_config_atomic_on_invalid_thinking(self, tmp_workspace):
+        """Invalid thinking rejects the whole request; model not partially applied."""
+        app, loop = _make_app(tmp_workspace)
+        loop.llm = MagicMock()
+        loop.llm.default_model = "openai/gpt-4o-mini"
+        loop.llm.thinking = "off"
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/config",
+                json={"model": "openai/gpt-4o", "thinking": "bogus"},
+                headers={"x-mesh-internal": "1"},
+            )
+            assert resp.status_code == 400
+            # Neither field was applied
+            assert loop.llm.default_model == "openai/gpt-4o-mini"
+            assert loop.llm.thinking == "off"
+
+    @pytest.mark.asyncio
+    async def test_update_config_empty_body_is_noop(self, tmp_workspace):
+        """POST /config with empty body returns empty updated dict, doesn't error."""
+        app, loop = _make_app(tmp_workspace)
+        loop.llm = MagicMock()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/config", json={}, headers={"x-mesh-internal": "1"},
+            )
+            assert resp.status_code == 200
+            assert resp.json() == {"updated": {}}
+
+    @pytest.mark.asyncio
+    async def test_update_config_ignores_unknown_fields(self, tmp_workspace):
+        """Unknown fields in body are silently ignored (not 400)."""
+        app, loop = _make_app(tmp_workspace)
+        loop.llm = MagicMock()
+        loop.llm.default_model = "openai/gpt-4o-mini"
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/config",
+                json={"foo": "bar", "model": "openai/gpt-4o"},
+                headers={"x-mesh-internal": "1"},
+            )
+            assert resp.status_code == 200
+            assert loop.llm.default_model == "openai/gpt-4o"
+            assert "foo" not in resp.json()["updated"]
+
+    @pytest.mark.asyncio
+    async def test_update_config_rejects_non_string_model(self, tmp_workspace):
+        """POST /config rejects non-string model value."""
+        app, loop = _make_app(tmp_workspace)
+        loop.llm = MagicMock()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/config",
+                json={"model": 123},
+                headers={"x-mesh-internal": "1"},
+            )
+            assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_update_config_returns_503_without_llm(self, tmp_workspace):
+        """POST /config returns 503 if loop.llm is missing."""
+        app, loop = _make_app(tmp_workspace)
+        loop.llm = None
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/config",
+                json={"model": "openai/gpt-4o"},
+                headers={"x-mesh-internal": "1"},
+            )
+            assert resp.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_update_config_rejects_non_object_body(self, tmp_workspace):
+        """POST /config rejects a JSON array/string body."""
+        app, loop = _make_app(tmp_workspace)
+        loop.llm = MagicMock()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/config",
+                json=["model", "openai/gpt-4o"],
+                headers={"x-mesh-internal": "1"},
+            )
+            assert resp.status_code == 400
+
 
 class TestWorkspaceLogs:
     @pytest.mark.asyncio

@@ -427,18 +427,29 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
                 403,
                 "Runtime config updates require X-Mesh-Internal header.",
             )
+        if not loop.llm:
+            raise HTTPException(503, "LLM client not available")
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Body must be a JSON object")
+
+        # Validate all fields before applying any (atomicity).
+        from src.agent.llm import LLMClient
+        model = body.get("model") if "model" in body else None
+        thinking = body.get("thinking") if "thinking" in body else None
+        if "model" in body and (not isinstance(model, str) or not model):
+            raise HTTPException(400, "model must be a non-empty string")
+        if "thinking" in body and thinking not in LLMClient.VALID_THINKING_LEVELS:
+            raise HTTPException(
+                400,
+                f"thinking must be one of: {sorted(LLMClient.VALID_THINKING_LEVELS)}",
+            )
+
         updated: dict[str, str] = {}
         if "model" in body:
-            model = body["model"]
-            if not isinstance(model, str) or not model:
-                raise HTTPException(400, "model must be a non-empty string")
             loop.llm.default_model = model
             updated["model"] = model
         if "thinking" in body:
-            thinking = body["thinking"]
-            if thinking not in ("off", "low", "medium", "high"):
-                raise HTTPException(400, "thinking must be one of: off, low, medium, high")
             loop.llm.thinking = thinking
             updated["thinking"] = thinking
         return {"updated": updated}
