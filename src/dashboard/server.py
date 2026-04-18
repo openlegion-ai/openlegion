@@ -872,9 +872,12 @@ def create_dashboard_router(
 
         Returns True on success, False if the agent is unreachable or the
         update returns an error. Callers use the return value to decide
-        whether restart_required should remain True.
+        whether restart_required should remain True. Transport already
+        returns an error dict for unknown agent_ids and network failures,
+        so no pre-check against agent_registry is needed.
         """
-        if transport is None or agent_id not in agent_registry:
+        if transport is None:
+            logger.debug("Hot-reload skipped for '%s': transport unavailable", agent_id)
             return False
         try:
             result = await transport.request(
@@ -896,14 +899,21 @@ def create_dashboard_router(
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Body must be a JSON object")
         from src.cli.config import _load_config, _update_agent_field
         cfg = _load_config()
         agent_cfg = cfg.get("agents", {}).get(agent_id, {})
         default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
 
-        updated = []
-        restart_required = False
+        # Phase 1: validate everything into locals before any YAML write.
+        # Raising after a partial _update_agent_field() call would leave
+        # agents.yaml in a half-applied state that disagrees with the 4xx
+        # response the caller sees.
+        pending_writes: list[tuple[str, object]] = []
+        budget_apply: dict[str, float] | None = None
         runtime_payload: dict[str, str] = {}
+        mcp_touched = False
 
         if "model" in body:
             new_model = body["model"]
@@ -911,38 +921,36 @@ def create_dashboard_router(
                 raise HTTPException(status_code=400, detail=f"Invalid model: {new_model}")
             old_model = agent_cfg.get("model", default_model)
             if new_model != old_model:
-                _update_agent_field(agent_id, "model", new_model)
-                updated.append("model")
+                pending_writes.append(("model", new_model))
                 runtime_payload["model"] = new_model
 
         if "role" in body:
-            _update_agent_field(agent_id, "role", body["role"])
-            updated.append("role")
+            role_val = body["role"]
+            if not isinstance(role_val, str):
+                raise HTTPException(status_code=400, detail="role must be a string")
+            pending_writes.append(("role", role_val))
 
         if "avatar" in body:
             try:
                 av = int(body["avatar"])
-                if av < 1 or av > 50:
-                    raise HTTPException(status_code=400, detail="Avatar must be between 1 and 50")
-                _update_agent_field(agent_id, "avatar", av)
-                updated.append("avatar")
             except (ValueError, TypeError):
                 raise HTTPException(status_code=400, detail="Avatar must be an integer between 1 and 50")
+            if av < 1 or av > 50:
+                raise HTTPException(status_code=400, detail="Avatar must be between 1 and 50")
+            pending_writes.append(("avatar", av))
 
         if "color" in body:
             raw_color = body["color"]
             if raw_color is None:
-                _update_agent_field(agent_id, "color", None)
-                updated.append("color")
+                pending_writes.append(("color", None))
             else:
                 try:
                     cv = int(raw_color)
-                    if cv < 0 or cv > 15:
-                        raise HTTPException(status_code=400, detail="Color must be between 0 and 15")
-                    _update_agent_field(agent_id, "color", cv)
-                    updated.append("color")
                 except (ValueError, TypeError):
                     raise HTTPException(status_code=400, detail="Color must be an integer between 0 and 15")
+                if cv < 0 or cv > 15:
+                    raise HTTPException(status_code=400, detail="Color must be between 0 and 15")
+                pending_writes.append(("color", cv))
 
         if "budget" in body:
             budget_val = body["budget"]
@@ -953,9 +961,7 @@ def create_dashboard_router(
                     current = cost_tracker.check_budget(agent_id)
                     daily = _parse_positive_float(raw_daily, "daily_usd", current.get("daily_limit", 10.0))
                     monthly = _parse_positive_float(raw_monthly, "monthly_usd", current.get("monthly_limit", 200.0))
-                    _update_agent_field(agent_id, "budget", {"daily_usd": daily, "monthly_usd": monthly})
-                    cost_tracker.set_budget(agent_id, daily_usd=daily, monthly_usd=monthly)
-                    updated.append("budget")
+                    budget_apply = {"daily_usd": daily, "monthly_usd": monthly}
 
         if "thinking" in body:
             thinking_val = body["thinking"]
@@ -968,8 +974,7 @@ def create_dashboard_router(
                         f"{sorted(LLMClient.VALID_THINKING_LEVELS)}"
                     ),
                 )
-            _update_agent_field(agent_id, "thinking", thinking_val)
-            updated.append("thinking")
+            pending_writes.append(("thinking", thinking_val))
             runtime_payload["thinking"] = thinking_val
 
         if "mcp_servers" in body:
@@ -982,13 +987,26 @@ def create_dashboard_router(
                         status_code=400,
                         detail="Each MCP server must have 'name' and 'command' keys",
                     )
-            _update_agent_field(agent_id, "mcp_servers", mcp_val if mcp_val else None)
-            updated.append("mcp_servers")
-            restart_required = True
+            pending_writes.append(("mcp_servers", mcp_val if mcp_val else None))
+            mcp_touched = True
 
-        # Hot-reload model/thinking into the running agent so dashboard
-        # display matches actual runtime state. If the push fails, fall back
-        # to restart_required so the UI can prompt the user.
+        # Phase 2: apply writes now that every field validated.
+        updated: list[str] = []
+        for field, value in pending_writes:
+            _update_agent_field(agent_id, field, value)
+            updated.append(field)
+        if budget_apply is not None:
+            _update_agent_field(agent_id, "budget", budget_apply)
+            cost_tracker.set_budget(
+                agent_id,
+                daily_usd=budget_apply["daily_usd"],
+                monthly_usd=budget_apply["monthly_usd"],
+            )
+            updated.append("budget")
+
+        # Phase 3: hot-reload runtime state. mcp_servers needs a container
+        # restart regardless of hot-reload result.
+        restart_required = mcp_touched
         if runtime_payload:
             hot_reloaded = await _hot_reload_runtime_config(agent_id, runtime_payload)
             if not hot_reloaded:
