@@ -413,6 +413,36 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         path.write_text(content)
         return {"updated": True, "size": path.stat().st_size}
 
+    @app.post("/config")
+    async def update_runtime_config(request: Request) -> dict:
+        """Hot-reload runtime config (model, thinking) without container restart.
+
+        Mesh pushes here after the operator confirms a model/thinking edit
+        so the next LLM call uses the new setting. Fields read from env vars
+        at startup (LLM_MODEL, THINKING) don't get picked up by YAML edits
+        on their own — this endpoint closes that gap.
+        """
+        if not request.headers.get("x-mesh-internal"):
+            raise HTTPException(
+                403,
+                "Runtime config updates require X-Mesh-Internal header.",
+            )
+        body = await request.json()
+        updated: dict[str, str] = {}
+        if "model" in body:
+            model = body["model"]
+            if not isinstance(model, str) or not model:
+                raise HTTPException(400, "model must be a non-empty string")
+            loop.llm.default_model = model
+            updated["model"] = model
+        if "thinking" in body:
+            thinking = body["thinking"]
+            if thinking not in ("off", "low", "medium", "high"):
+                raise HTTPException(400, "thinking must be one of: off, low, medium, high")
+            loop.llm.thinking = thinking
+            updated["thinking"] = thinking
+        return {"updated": updated}
+
     @app.get("/workspace-logs")
     async def workspace_logs(days: int = 3) -> dict:
         """Return daily logs for the dashboard (read-only)."""

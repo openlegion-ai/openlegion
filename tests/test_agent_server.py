@@ -278,6 +278,75 @@ class TestProjectEndpoint:
             assert resp.status_code == 400
 
 
+class TestRuntimeConfig:
+    @pytest.mark.asyncio
+    async def test_update_model_hot_reloads_llm(self, tmp_workspace):
+        """POST /config updates llm.default_model immediately."""
+        app, loop = _make_app(tmp_workspace)
+        loop.llm = MagicMock()
+        loop.llm.default_model = "openai/gpt-4o-mini"
+        loop.llm.thinking = "off"
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/config",
+                json={"model": "openai/gpt-4o"},
+                headers={"x-mesh-internal": "1"},
+            )
+            assert resp.status_code == 200
+            assert resp.json() == {"updated": {"model": "openai/gpt-4o"}}
+            assert loop.llm.default_model == "openai/gpt-4o"
+
+    @pytest.mark.asyncio
+    async def test_update_thinking_hot_reloads_llm(self, tmp_workspace):
+        """POST /config updates llm.thinking immediately."""
+        app, loop = _make_app(tmp_workspace)
+        loop.llm = MagicMock()
+        loop.llm.default_model = "openai/gpt-4o-mini"
+        loop.llm.thinking = "off"
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/config",
+                json={"thinking": "high"},
+                headers={"x-mesh-internal": "1"},
+            )
+            assert resp.status_code == 200
+            assert loop.llm.thinking == "high"
+
+    @pytest.mark.asyncio
+    async def test_update_config_requires_mesh_header(self, tmp_workspace):
+        """POST /config rejects requests without X-Mesh-Internal header."""
+        app, _ = _make_app(tmp_workspace)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/config", json={"model": "openai/gpt-4o"})
+            assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_update_config_rejects_invalid_thinking(self, tmp_workspace):
+        """POST /config rejects invalid thinking values."""
+        app, loop = _make_app(tmp_workspace)
+        loop.llm = MagicMock()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/config",
+                json={"thinking": "extreme"},
+                headers={"x-mesh-internal": "1"},
+            )
+            assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_update_config_rejects_empty_model(self, tmp_workspace):
+        """POST /config rejects empty model string."""
+        app, loop = _make_app(tmp_workspace)
+        loop.llm = MagicMock()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/config",
+                json={"model": ""},
+                headers={"x-mesh-internal": "1"},
+            )
+            assert resp.status_code == 400
+
+
 class TestWorkspaceLogs:
     @pytest.mark.asyncio
     async def test_workspace_logs_returns_content(self, tmp_workspace):
