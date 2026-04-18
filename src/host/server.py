@@ -1234,10 +1234,33 @@ def create_mesh_app(
             # Scope fleet list by project: project agents see only peers,
             # standalone agents see only themselves.
             # Exception: operator sees all agents (it manages the entire fleet).
+
+            # Operator also needs per-agent model so dashboard-initiated
+            # model changes don't leave its mental state stale. Load the
+            # YAML once; other agents don't see models (noise for peers).
+            agent_models: dict[str, str] = {}
+            if agent_id == "operator":
+                from src.cli.config import _load_config
+                _fleet_cfg = _load_config().get("agents", {})
+                _default_model = _load_config().get("llm", {}).get(
+                    "default_model", "",
+                )
+                agent_models = {
+                    aid: _fleet_cfg.get(aid, {}).get("model", _default_model)
+                    for aid in router.agent_registry
+                }
+
+            def _fleet_entry(aid: str) -> dict:
+                entry: dict = {
+                    "id": aid, "role": router.agent_roles.get(aid, ""),
+                }
+                if aid in agent_models:
+                    entry["model"] = agent_models[aid]
+                return entry
+
             if agent_id == "operator":
                 result["fleet"] = [
-                    {"id": aid, "role": router.agent_roles.get(aid, "")}
-                    for aid in router.agent_registry
+                    _fleet_entry(aid) for aid in router.agent_registry
                 ]
             else:
                 from src.cli.config import _load_projects
@@ -1250,14 +1273,12 @@ def create_mesh_app(
 
                 if _agent_project_members is not None:
                     result["fleet"] = [
-                        {"id": aid, "role": router.agent_roles.get(aid, "")}
+                        _fleet_entry(aid)
                         for aid in router.agent_registry
                         if aid in _agent_project_members
                     ]
                 else:
-                    result["fleet"] = [
-                        {"id": agent_id, "role": router.agent_roles.get(agent_id, "")}
-                    ]
+                    result["fleet"] = [_fleet_entry(agent_id)]
 
         if section in ("cron", "all") and cron_scheduler:
             result["cron"] = [
