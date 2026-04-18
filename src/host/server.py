@@ -2435,6 +2435,25 @@ def create_mesh_app(
                 except Exception:
                     pass  # Agent might not be running
 
+        # Hot-reload: runtime config (model, thinking) — env-var fields that
+        # won't get picked up by the YAML write alone.
+        if (
+            transport
+            and agent_id in router.agent_registry
+            and field in ("model", "thinking")
+            and isinstance(new_value, str)
+        ):
+            try:
+                await transport.request(
+                    agent_id, "POST", "/config",
+                    json={field: new_value}, timeout=10,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to hot-reload %s for '%s': %s",
+                    field, agent_id, e,
+                )
+
         # Heartbeat schedule sync: if the value looks like a cron schedule
         # (5-field expression or "every Xm/h/d"), update the cron job too.
         # This handles the common case where the operator edits heartbeat
