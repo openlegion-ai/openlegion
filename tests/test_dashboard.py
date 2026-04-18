@@ -1050,10 +1050,63 @@ class TestDashboardAgentConfig:
         assert any(
             e["action"] == "edit_agent"
             and e["field"] == "model"
+            and e["before_value"] == "openai/gpt-4.1-mini"
             and e["after_value"] == "openai/gpt-4.1"
             and e["actor"] == "dashboard"
             for e in entries
         )
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_audit_failure_does_not_block_request(
+        self, mock_load, mock_update,
+    ):
+        """A broken audit sink must not fail the config change."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+        }
+        self.components["transport"].request = AsyncMock(
+            return_value={"updated": {"model": "openai/gpt-4.1"}},
+        )
+        # Make audit logging raise unconditionally
+        self.components["blackboard"].log_audit = MagicMock(
+            side_effect=RuntimeError("audit db locked"),
+        )
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"model": "openai/gpt-4.1"},
+        )
+        assert resp.status_code == 200
+        assert "model" in resp.json()["updated"]
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_budget_audit_captures_before_value(
+        self, mock_load, mock_update,
+    ):
+        """Budget audit entries include the prior budget, not just the new one."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {
+                "alpha": {
+                    "model": "openai/gpt-4.1-mini",
+                    "budget": {"daily_usd": 5.0, "monthly_usd": 100.0},
+                },
+            },
+        }
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"budget": {"daily_usd": 7.5, "monthly_usd": 150.0}},
+        )
+        assert resp.status_code == 200
+        entries = self.components["blackboard"].get_audit_log(agent_id="alpha")["entries"]
+        budget_entry = next(
+            e for e in entries
+            if e["field"] == "budget" and e["actor"] == "dashboard"
+        )
+        assert "5.0" in budget_entry["before_value"]
+        assert "7.5" in budget_entry["after_value"]
 
     def test_put_budget_quick(self):
         resp = self.client.put(

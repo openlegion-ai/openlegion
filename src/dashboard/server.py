@@ -992,26 +992,36 @@ def create_dashboard_router(
 
         # Phase 2: apply writes now that every field validated.
         updated: list[str] = []
-        for field, value in pending_writes:
-            old = agent_cfg.get(field, "")
-            _update_agent_field(agent_id, field, value)
-            updated.append(field)
-            # Audit so the operator and audit consumers can see
-            # dashboard-initiated edits; the mesh propose/confirm path
-            # already audits via _apply_pending_change.
+        def _audit(field: str, old_value: object, new_value: object) -> None:
+            """Log a dashboard-initiated edit. Never raises — a broken audit
+            sink must not block the caller's config change, but silent
+            failure is worth a warning so it doesn't rot unnoticed."""
             try:
                 blackboard.log_audit(
                     action="edit_agent",
                     target=agent_id,
                     field=field,
-                    before_value=json.dumps(old) if not isinstance(old, str) else old,
-                    after_value=json.dumps(value) if not isinstance(value, str) else value,
+                    before_value=(
+                        old_value if isinstance(old_value, str)
+                        else json.dumps(old_value)
+                    ),
+                    after_value=(
+                        new_value if isinstance(new_value, str)
+                        else json.dumps(new_value)
+                    ),
                     actor="dashboard",
                     provenance="user",
                 )
             except Exception as e:
-                logger.debug("Audit log failed for %s/%s: %s", agent_id, field, e)
+                logger.warning("Audit log failed for %s/%s: %s", agent_id, field, e)
+
+        for field, value in pending_writes:
+            old = agent_cfg.get(field, "")
+            _update_agent_field(agent_id, field, value)
+            updated.append(field)
+            _audit(field, old, value)
         if budget_apply is not None:
+            old_budget = agent_cfg.get("budget", "")
             _update_agent_field(agent_id, "budget", budget_apply)
             cost_tracker.set_budget(
                 agent_id,
@@ -1019,17 +1029,7 @@ def create_dashboard_router(
                 monthly_usd=budget_apply["monthly_usd"],
             )
             updated.append("budget")
-            try:
-                blackboard.log_audit(
-                    action="edit_agent",
-                    target=agent_id,
-                    field="budget",
-                    after_value=json.dumps(budget_apply),
-                    actor="dashboard",
-                    provenance="user",
-                )
-            except Exception as e:
-                logger.debug("Audit log failed for %s/budget: %s", agent_id, e)
+            _audit("budget", old_budget, budget_apply)
 
         # Phase 3: hot-reload runtime state. mcp_servers needs a container
         # restart regardless of hot-reload result.
