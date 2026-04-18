@@ -29,7 +29,7 @@ class LLMClient:
     """LLM interface that routes all calls through the mesh API proxy."""
 
     _THINKING_BUDGETS = {"low": 5_000, "medium": 10_000, "high": 25_000}
-    _VALID_THINKING_LEVELS = {"off", "low", "medium", "high"}
+    VALID_THINKING_LEVELS = {"off", "low", "medium", "high"}
 
     def __init__(
         self,
@@ -39,10 +39,10 @@ class LLMClient:
         embedding_model: str = "",
         thinking: str = "off",
     ):
-        if thinking and thinking not in self._VALID_THINKING_LEVELS:
+        if thinking and thinking not in self.VALID_THINKING_LEVELS:
             logger.warning(
                 "Invalid thinking level '%s', falling back to 'off'. "
-                "Valid: %s", thinking, ", ".join(sorted(self._VALID_THINKING_LEVELS)),
+                "Valid: %s", thinking, ", ".join(sorted(self.VALID_THINKING_LEVELS)),
             )
             thinking = "off"
         self.mesh_url = mesh_url

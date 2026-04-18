@@ -2336,6 +2336,21 @@ def create_mesh_app(
         if field not in _VALID_CONFIG_FIELDS:
             raise HTTPException(400, f"Invalid field: {field}. Must be one of: {_VALID_CONFIG_FIELDS}")
 
+        # Validate runtime-critical values before they can be persisted to
+        # YAML. The agent-side hot-reload endpoint also rejects these, but
+        # catching them here prevents a bad value from being stored as a
+        # pending change, confirmed, and surviving across restarts.
+        if field == "model":
+            if not isinstance(new_value, str) or not new_value:
+                raise HTTPException(400, "model must be a non-empty string")
+        elif field == "thinking":
+            from src.agent.llm import LLMClient
+            if new_value not in LLMClient.VALID_THINKING_LEVELS:
+                raise HTTPException(
+                    400,
+                    f"thinking must be one of: {sorted(LLMClient.VALID_THINKING_LEVELS)}",
+                )
+
         # Get current value
         from src.cli.config import _load_config
         agent_cfg = _load_config()
@@ -2444,10 +2459,20 @@ def create_mesh_app(
             and isinstance(new_value, str)
         ):
             try:
-                await transport.request(
+                result = await transport.request(
                     agent_id, "POST", "/config",
                     json={field: new_value}, timeout=10,
                 )
+                # transport.request returns {"error": ...} dicts for HTTP /
+                # timeout / connect failures rather than raising. Surface
+                # those so a silent agent-side failure isn't mistaken for
+                # success — the YAML write is durable, but runtime state
+                # only catches up on restart.
+                if isinstance(result, dict) and "error" in result:
+                    logger.warning(
+                        "Hot-reload %s for '%s' returned error: %s",
+                        field, agent_id, result["error"],
+                    )
             except Exception as e:
                 logger.warning(
                     "Failed to hot-reload %s for '%s': %s",
@@ -2527,7 +2552,9 @@ def create_mesh_app(
         change = _get_pending_change(change_id)
         if not change:
             raise HTTPException(404, "Change not found or expired")
-        # Consume only after validation — if apply fails, the change survives for retry
+        # Consume before apply to prevent double-apply on retry. If
+        # _apply_pending_change raises, the change is already gone — the
+        # caller must propose a new change rather than retry this one.
         _consume_pending_change(change_id)
 
         return await _apply_pending_change(change_id, change)
