@@ -808,6 +808,77 @@ def test_introspect_returns_fleet_project_scoped(tmp_path):
     bb.close()
 
 
+def test_introspect_operator_fleet_includes_models(tmp_path):
+    """Operator's introspect fleet entries include the current model per agent.
+
+    This is how the operator learns about dashboard-initiated model changes
+    without restarting — its SYSTEM.md refresh cycle picks up the fresh YAML.
+    """
+    from unittest.mock import patch
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+    router.register_agent("operator", "http://localhost:8400")
+    router.register_agent("sales", "http://localhost:8401")
+    router.register_agent("writer", "http://localhost:8402")
+
+    app = create_mesh_app(bb, pubsub, router, perms)
+    client = TestClient(app)
+
+    fake_cfg = {
+        "llm": {"default_model": "openai/gpt-4o-mini"},
+        "agents": {
+            "operator": {"model": "openai/gpt-4o"},
+            "sales": {"model": "anthropic/claude-sonnet-4-5"},
+            # writer omits model → falls back to default_model
+            "writer": {},
+        },
+    }
+    with patch("src.cli.config._load_config", return_value=fake_cfg):
+        response = client.get(
+            "/mesh/introspect",
+            params={"section": "fleet"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert response.status_code == 200
+    fleet = {a["id"]: a for a in response.json()["fleet"]}
+    assert fleet["operator"]["model"] == "openai/gpt-4o"
+    assert fleet["sales"]["model"] == "anthropic/claude-sonnet-4-5"
+    assert fleet["writer"]["model"] == "openai/gpt-4o-mini"
+
+    bb.close()
+
+
+def test_introspect_non_operator_fleet_omits_model(tmp_path):
+    """Non-operator agents don't see peer models — keeps their context lean."""
+    from unittest.mock import patch
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    router = MessageRouter(permissions=perms, agent_registry={})
+    router.register_agent("sales", "http://localhost:8401")
+
+    app = create_mesh_app(bb, pubsub, router, perms)
+    client = TestClient(app)
+
+    with patch("src.cli.config._load_projects", return_value={}):
+        response = client.get(
+            "/mesh/introspect",
+            params={"section": "fleet"},
+            headers={"X-Agent-ID": "sales"},
+        )
+    assert response.status_code == 200
+    for entry in response.json()["fleet"]:
+        assert "model" not in entry
+
+    bb.close()
+
+
 def test_introspect_returns_budget_when_cost_tracker_present(tmp_path):
     """GET /mesh/introspect section=budget returns budget info."""
     from src.host.costs import CostTracker

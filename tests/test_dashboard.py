@@ -1030,6 +1030,31 @@ class TestDashboardAgentConfig:
         assert resp.status_code == 200
         assert resp.json()["restart_required"] is True
 
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_writes_audit_entry(self, mock_load, mock_update):
+        """Dashboard config changes land in the audit log so the operator can see them."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+        }
+        self.components["transport"].request = AsyncMock(
+            return_value={"updated": {"model": "openai/gpt-4.1"}},
+        )
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"model": "openai/gpt-4.1"},
+        )
+        assert resp.status_code == 200
+        entries = self.components["blackboard"].get_audit_log(agent_id="alpha")["entries"]
+        assert any(
+            e["action"] == "edit_agent"
+            and e["field"] == "model"
+            and e["after_value"] == "openai/gpt-4.1"
+            and e["actor"] == "dashboard"
+            for e in entries
+        )
+
     def test_put_budget_quick(self):
         resp = self.client.put(
             "/dashboard/api/agents/alpha/budget",
