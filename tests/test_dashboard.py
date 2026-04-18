@@ -869,6 +869,167 @@ class TestDashboardAgentConfig:
         data = resp.json()
         assert data["restart_required"] is True
 
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_thinking_hot_reloads(self, mock_load, mock_update):
+        """Changing thinking hot-reloads into the running agent."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+        }
+        self.components["transport"].request = AsyncMock(
+            return_value={"updated": {"thinking": "high"}},
+        )
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"thinking": "high"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "thinking" in data["updated"]
+        assert data["restart_required"] is False
+        call = self.components["transport"].request.await_args
+        assert call.kwargs["json"] == {"thinking": "high"}
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_model_and_thinking_sent_in_one_call(
+        self, mock_load, mock_update,
+    ):
+        """Changing both fields sends a single hot-reload with both keys."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+        }
+        self.components["transport"].request = AsyncMock(
+            return_value={"updated": {"model": "openai/gpt-4.1", "thinking": "medium"}},
+        )
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"model": "openai/gpt-4.1", "thinking": "medium"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["restart_required"] is False
+        # One call, both fields in the payload
+        assert self.components["transport"].request.await_count == 1
+        call = self.components["transport"].request.await_args
+        assert call.kwargs["json"] == {
+            "model": "openai/gpt-4.1", "thinking": "medium",
+        }
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_mcp_plus_model_keeps_restart_required(
+        self, mock_load, mock_update,
+    ):
+        """mcp_servers needs a restart even when model hot-reload succeeds."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+        }
+        self.components["transport"].request = AsyncMock(
+            return_value={"updated": {"model": "openai/gpt-4.1"}},
+        )
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={
+                "model": "openai/gpt-4.1",
+                "mcp_servers": [{"name": "fs", "command": "npx mcp-fs"}],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Both applied, but mcp_servers still needs a restart
+        assert "model" in data["updated"]
+        assert "mcp_servers" in data["updated"]
+        assert data["restart_required"] is True
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_non_runtime_fields_skip_hot_reload(
+        self, mock_load, mock_update,
+    ):
+        """Updating only role/avatar/color/budget does not call /config."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+        }
+        self.components["transport"].request = AsyncMock()
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"role": "new role", "avatar": 5},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["restart_required"] is False
+        assert self.components["transport"].request.await_count == 0
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_atomic_no_partial_persist_on_invalid_thinking(
+        self, mock_load, mock_update,
+    ):
+        """Invalid thinking rejects the whole request; model is NOT persisted."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+        }
+        self.components["transport"].request = AsyncMock()
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"model": "openai/gpt-4.1", "thinking": "extreme"},
+        )
+        assert resp.status_code == 400
+        # No field was written because validation of thinking failed
+        mock_update.assert_not_called()
+        # No hot-reload was pushed
+        assert self.components["transport"].request.await_count == 0
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_atomic_no_partial_persist_on_invalid_mcp(
+        self, mock_load, mock_update,
+    ):
+        """Invalid mcp_servers rejects the whole request; model is NOT persisted."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+        }
+        self.components["transport"].request = AsyncMock()
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"model": "openai/gpt-4.1", "mcp_servers": "not-a-list"},
+        )
+        assert resp.status_code == 400
+        mock_update.assert_not_called()
+        assert self.components["transport"].request.await_count == 0
+
+    def test_put_config_rejects_non_object_body(self):
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json=["model", "openai/gpt-4.1"],
+        )
+        assert resp.status_code == 400
+
+    @patch("src.cli.config._update_agent_field")
+    @patch("src.cli.config._load_config")
+    def test_put_config_transport_raises_marks_restart_required(
+        self, mock_load, mock_update,
+    ):
+        """If transport.request raises, restart_required falls back to True."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4.1-mini"},
+            "agents": {"alpha": {"model": "openai/gpt-4.1-mini"}},
+        }
+        self.components["transport"].request = AsyncMock(
+            side_effect=RuntimeError("boom"),
+        )
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/config",
+            json={"model": "openai/gpt-4.1"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["restart_required"] is True
+
     def test_put_budget_quick(self):
         resp = self.client.put(
             "/dashboard/api/agents/alpha/budget",
