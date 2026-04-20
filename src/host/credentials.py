@@ -257,6 +257,34 @@ def _load_oauth_config(env_var: str, label: str) -> dict | None:
 class CredentialVault:
     """Stores API credentials and executes proxied API calls."""
 
+    def _get_credential(self, env_key: str) -> str:
+        """Read a single env var by full name (helper for _get_anthropic_credentials)."""
+        return os.getenv(env_key, "")
+
+    def _get_anthropic_credentials(self) -> dict:
+        """Resolve Anthropic credentials, supporting Claude Code OAuth tokens.
+
+        Resolution order:
+          1. CLAUDE_CODE_OAUTH_TOKEN (Claude Code subscription OAuth)
+          2. OPENLEGION_SYSTEM_ANTHROPIC_API_KEY (standard API key)
+          3. OPENLEGION_SYSTEM_ANTHROPIC_OAUTH JSON blob (structured OAuth)
+        """
+        # Claude Code subscription token (highest priority)
+        if token := os.getenv("CLAUDE_CODE_OAUTH_TOKEN"):
+            return {"auth_token": token}
+        # Direct API key
+        if key := self._get_credential("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY"):
+            return {"api_key": key}
+        # OpenLegion structured OAuth
+        if oauth_json := os.getenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH"):
+            try:
+                oauth = json.loads(oauth_json)
+                if isinstance(oauth, dict) and oauth.get("access_token"):
+                    return {"auth_token": oauth.get("access_token", "")}
+            except (json.JSONDecodeError, KeyError):
+                pass
+        return {}
+
     def __init__(
         self,
         cost_tracker: object | None = None,
@@ -493,6 +521,8 @@ class CredentialVault:
             # Structured OAuth takes priority (matches routing in _handle_llm)
             if _provider == "anthropic" and self._has_anthropic_oauth():
                 _is_oauth = True
+            elif _provider == "anthropic" and os.getenv("CLAUDE_CODE_OAUTH_TOKEN"):
+                _is_oauth = True
             elif _provider == "openai" and self._has_openai_oauth():
                 _is_oauth = True
             else:
@@ -683,6 +713,9 @@ class CredentialVault:
             providers.add("openai")
         # Anthropic structured OAuth counts as having Anthropic credentials
         if self._has_anthropic_oauth():
+            providers.add("anthropic")
+        # CLAUDE_CODE_OAUTH_TOKEN counts as Anthropic credentials
+        if os.getenv("CLAUDE_CODE_OAUTH_TOKEN"):
             providers.add("anthropic")
         return providers
 
@@ -2215,6 +2248,11 @@ class CredentialVault:
                 access_token = await self._ensure_anthropic_oauth_token()
                 return await self._oauth_chat(request, access_token, requested_model)
 
+            # CLAUDE_CODE_OAUTH_TOKEN — Claude Code subscription env var
+            _claude_code_token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+            if _claude_code_token and provider == "anthropic":
+                return await self._oauth_chat(request, _claude_code_token, requested_model)
+
             api_key = self._get_api_key_for_model(requested_model)
             if api_key and is_oauth_token(api_key):
                 return await self._oauth_chat(request, api_key, requested_model)
@@ -2323,6 +2361,13 @@ class CredentialVault:
         if self._has_anthropic_oauth() and provider == "anthropic":
             access_token = await self._ensure_anthropic_oauth_token()
             async for chunk in self._oauth_chat_stream(request, access_token, requested_model):
+                yield chunk
+            return
+
+        # CLAUDE_CODE_OAUTH_TOKEN — Claude Code subscription env var
+        _claude_code_token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+        if _claude_code_token and provider == "anthropic":
+            async for chunk in self._oauth_chat_stream(request, _claude_code_token, requested_model):
                 yield chunk
             return
 
