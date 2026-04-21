@@ -1,4 +1,4 @@
-# OpenLegion Installer for Windows (PowerShell)
+﻿# OpenLegion Installer for Windows (PowerShell)
 # Run: powershell -ExecutionPolicy Bypass -File install.ps1
 
 $ErrorActionPreference = "Stop"
@@ -51,13 +51,12 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Download Docker Desktop: https://docker.com/products/docker-desktop"
 }
 
-try {
-    docker info 2>$null | Out-Null
-    Write-OK "Docker is running"
-} catch {
+cmd /c "docker info >nul 2>&1"
+if ($LASTEXITCODE -ne 0) {
     Write-Fail "Docker is installed but not running.
     Open Docker Desktop and wait for 'Docker Desktop is running'."
 }
+Write-OK "Docker is running"
 
 # ── Check Git ─────────────────────────────────────────────────
 
