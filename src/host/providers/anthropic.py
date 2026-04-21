@@ -1,21 +1,20 @@
-"""Anthropic SDK provider.
+"""Anthropic SDK provider — Claude Code subscription OAuth tokens only.
 
-Supports both standard API keys (sk-ant-...) and Claude Code subscription
-OAuth tokens (sk-ant-oat01-...) via CLAUDE_CODE_OAUTH_TOKEN.
+Standard Anthropic API key calls (sk-ant-...) are handled by LiteLLMProvider,
+which already supports them natively. This provider only activates when a
+Claude Code subscription OAuth token (sk-ant-oat01-...) is available, because
+those tokens require special headers that LiteLLM does not send:
+  - anthropic-beta: oauth-2025-04-20
+  - x-app: cli
+  - anthropic-dangerous-direct-browser-access: true
 
-When OneCLI is configured (ONECLI_URL / HTTPS_PROXY set in the environment),
-no explicit credential is required. OneCLI injects the real Authorization
-header at the proxy layer; httpx picks up HTTPS_PROXY automatically via its
-default trust_env=True behaviour. The Anthropic SDK uses httpx internally, so
-this works transparently without any special client configuration here.
+Token resolution order:
+  1. ``auth_token`` kwarg
+  2. ``CLAUDE_CODE_OAUTH_TOKEN`` env var
+  3. ``OPENLEGION_SYSTEM_ANTHROPIC_OAUTH`` env var (JSON with access_token field)
 
-Credential resolution order (when OneCLI is not present):
-  1. ``auth_token`` kwarg (explicit OAuth token)
-  2. ``api_key`` kwarg (explicit API key)
-  3. ``CLAUDE_CODE_OAUTH_TOKEN`` env var (Claude Code subscription)
-  4. ``ANTHROPIC_API_KEY`` env var (standard API key)
-  5. ``OPENLEGION_SYSTEM_ANTHROPIC_OAUTH`` env var (JSON with access_token)
-  6. ``OPENLEGION_SYSTEM_ANTHROPIC_API_KEY`` env var
+When none of these yield an OAuth token, ``supports_model()`` returns False and
+the factory falls through to LiteLLMProvider.
 """
 
 from __future__ import annotations
@@ -294,114 +293,70 @@ def _make_sdk_kwargs(body: dict) -> dict:
 
 
 class AnthropicProvider(LLMProvider):
-    """LLM provider backed by the Anthropic Python SDK.
+    """LLM provider for Claude Code subscription OAuth tokens.
 
-    Supports both API key auth and Claude Code subscription OAuth tokens.
+    Only activates when an OAuth token (sk-ant-oat01-...) is present.
+    Standard API key calls fall through to LiteLLMProvider.
     """
 
-    def __init__(self, api_key: str = "", auth_token: str = "", **_kwargs) -> None:
-        self._api_key = api_key
-        self._auth_token = auth_token
+    def __init__(self, auth_token: str = "", **_kwargs) -> None:
+        self._auth_token = auth_token or self._resolve_oauth_token()
 
-    @property
-    def name(self) -> str:
-        return "anthropic"
-
-    def supports_model(self, model: str) -> bool:
-        """Return True for anthropic/* and bare claude-* model strings."""
-        return model.startswith("anthropic/") or model.startswith("claude-")
-
-    def _resolve_credentials(self) -> tuple[str | None, str | None]:
-        """Resolve auth credentials.
-
-        Returns ``(api_key, auth_token)``.  Exactly one will be set.
-        Resolution order:
-          1. auth_token kwarg
-          2. api_key kwarg
-          3. CLAUDE_CODE_OAUTH_TOKEN env var
-          4. ANTHROPIC_API_KEY env var
-          5. OPENLEGION_SYSTEM_ANTHROPIC_OAUTH (JSON with access_token)
-          6. OPENLEGION_SYSTEM_ANTHROPIC_API_KEY env var
-
-        When OneCLI is configured (ONECLI_URL / HTTPS_PROXY set), no explicit
-        credential is needed here — httpx respects HTTPS_PROXY automatically
-        (trust_env=True is the default) and OneCLI injects the real Authorization
-        header at the proxy layer before the request leaves the machine.
-        """
-        if self._auth_token:
-            return None, self._auth_token
-        if self._api_key:
-            if _is_oauth_token(self._api_key):
-                return None, self._api_key
-            return self._api_key, None
-
-        # Environment variables
+    @staticmethod
+    def _resolve_oauth_token() -> str:
+        """Return the first available Claude Code OAuth token, or empty string."""
         if token := os.getenv("CLAUDE_CODE_OAUTH_TOKEN", ""):
-            return None, token
-        if key := os.getenv("ANTHROPIC_API_KEY", ""):
-            if _is_oauth_token(key):
-                return None, key
-            return key, None
+            if _is_oauth_token(token):
+                return token
         if oauth_json := os.getenv("OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", ""):
             try:
                 oauth = json.loads(oauth_json)
-                if isinstance(oauth, dict) and oauth.get("access_token"):
-                    return None, oauth["access_token"]
+                if isinstance(oauth, dict):
+                    token = oauth.get("access_token", "")
+                    if _is_oauth_token(token):
+                        return token
             except (json.JSONDecodeError, KeyError):
                 pass
-        if key := os.getenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", ""):
-            if _is_oauth_token(key):
-                return None, key
-            return key, None
+        return ""
 
-        return None, None
+    @property
+    def name(self) -> str:
+        return "anthropic-oauth"
 
-    def _make_client(self, api_key: str | None, auth_token: str | None):
-        """Create an AsyncAnthropic client with appropriate auth.
+    def supports_model(self, model: str) -> bool:
+        """Only claim anthropic/* and claude-* models when an OAuth token is available."""
+        if not self._auth_token:
+            return False
+        return model.startswith("anthropic/") or model.startswith("claude-")
 
-        When OneCLI is active (HTTPS_PROXY set in the environment), no special
-        client configuration is needed — httpx's default trust_env=True means it
-        picks up HTTPS_PROXY automatically, and OneCLI injects the real
-        Authorization header at the proxy layer before the request leaves the
-        machine.
-        """
+    def _make_client(self):
+        """Create an AsyncAnthropic client configured for OAuth bearer auth."""
         import anthropic
-
-        if auth_token:
-            return anthropic.AsyncAnthropic(
-                api_key=None,
-                auth_token=auth_token,
-                default_headers={
-                    "accept": "application/json",
-                    "anthropic-dangerous-direct-browser-access": "true",
-                    "anthropic-beta": (
-                        "claude-code-20250219,"
-                        "oauth-2025-04-20,"
-                        "fine-grained-tool-streaming-2025-05-14"
-                    ),
-                    "User-Agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
-                    "x-app": "cli",
-                },
-                max_retries=0,
-                timeout=120.0,
-            )
         return anthropic.AsyncAnthropic(
-            api_key=api_key,
+            api_key=None,
+            auth_token=self._auth_token,
+            default_headers={
+                "accept": "application/json",
+                "anthropic-dangerous-direct-browser-access": "true",
+                "anthropic-beta": (
+                    "claude-code-20250219,"
+                    "oauth-2025-04-20,"
+                    "fine-grained-tool-streaming-2025-05-14"
+                ),
+                "User-Agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
+                "x-app": "cli",
+            },
             max_retries=0,
             timeout=120.0,
         )
 
     async def complete(self, params: dict[str, Any]) -> LLMResponse:
         """Non-streaming completion via Anthropic SDK."""
-        api_key, auth_token = self._resolve_credentials()
         body = _build_anthropic_body(params)
-        if auth_token:
-            _patch_oauth_body(body)
-
+        _patch_oauth_body(body)
         sdk_kwargs = _make_sdk_kwargs(body)
         model_str = f"anthropic/{body['model']}"
-
-        client = self._make_client(api_key, auth_token)
+        client = self._make_client()
         try:
             response = await client.messages.create(**sdk_kwargs)
             content = ""
@@ -433,11 +388,8 @@ class AnthropicProvider(LLMProvider):
 
     async def stream(self, params: dict[str, Any]) -> AsyncIterator[StreamChunk]:
         """Streaming completion via Anthropic SDK. Yields StreamChunk objects."""
-        api_key, auth_token = self._resolve_credentials()
         body = _build_anthropic_body(params)
-        if auth_token:
-            _patch_oauth_body(body)
-
+        _patch_oauth_body(body)
         sdk_kwargs = _make_sdk_kwargs(body)
         model_str = f"anthropic/{body['model']}"
 
@@ -446,7 +398,7 @@ class AnthropicProvider(LLMProvider):
         input_tokens = 0
         output_tokens = 0
 
-        client = self._make_client(api_key, auth_token)
+        client = self._make_client()
         try:
             stream = await client.messages.create(**sdk_kwargs, stream=True)
 
