@@ -330,25 +330,33 @@ class AnthropicProvider(LLMProvider):
         return model.startswith("anthropic/") or model.startswith("claude-")
 
     def _make_client(self):
-        """Create an AsyncAnthropic client configured for OAuth bearer auth."""
+        """Create an AsyncAnthropic client.
+
+        Uses OAuth bearer auth (with Claude Code headers) when an OAuth token
+        is present. Falls back to a standard API key client when forced via
+        OPENLEGION_SYSTEM_LLMPROVIDER=ANTHROPIC_SDK without an OAuth token.
+        """
         import anthropic
-        return anthropic.AsyncAnthropic(
-            api_key=None,
-            auth_token=self._auth_token,
-            default_headers={
-                "accept": "application/json",
-                "anthropic-dangerous-direct-browser-access": "true",
-                "anthropic-beta": (
-                    "claude-code-20250219,"
-                    "oauth-2025-04-20,"
-                    "fine-grained-tool-streaming-2025-05-14"
-                ),
-                "User-Agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
-                "x-app": "cli",
-            },
-            max_retries=0,
-            timeout=120.0,
-        )
+        if self._auth_token:
+            return anthropic.AsyncAnthropic(
+                api_key=None,
+                auth_token=self._auth_token,
+                default_headers={
+                    "accept": "application/json",
+                    "anthropic-dangerous-direct-browser-access": "true",
+                    "anthropic-beta": (
+                        "claude-code-20250219,"
+                        "oauth-2025-04-20,"
+                        "fine-grained-tool-streaming-2025-05-14"
+                    ),
+                    "User-Agent": f"claude-cli/{_CLAUDE_CLI_VERSION}",
+                    "x-app": "cli",
+                },
+                max_retries=0,
+                timeout=120.0,
+            )
+        # No OAuth token — plain API key (ANTHROPIC_API_KEY picked up by SDK)
+        return anthropic.AsyncAnthropic(max_retries=0, timeout=120.0)
 
     async def complete(self, params: dict[str, Any]) -> LLMResponse:
         """Non-streaming completion via Anthropic SDK."""
