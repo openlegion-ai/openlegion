@@ -4,6 +4,8 @@ Supports both standard API keys (sk-ant-...) and Claude Code subscription
 OAuth tokens (sk-ant-oat01-...) via CLAUDE_CODE_OAUTH_TOKEN.
 
 Credential resolution order:
+  0. ``ONECLI_URL`` / ``HTTPS_PROXY`` env var (OneCLI gateway — credentials
+     injected transparently by the proxy; no key needed here)
   1. ``auth_token`` kwarg (explicit OAuth token)
   2. ``api_key`` kwarg (explicit API key)
   3. ``CLAUDE_CODE_OAUTH_TOKEN`` env var (Claude Code subscription)
@@ -310,6 +312,11 @@ class AnthropicProvider(LLMProvider):
 
         Returns ``(api_key, auth_token)``.  Exactly one will be set.
         Resolution order:
+          0. ONECLI_URL / HTTPS_PROXY env var — OneCLI gateway injects the
+             real credentials at the proxy layer; a placeholder key is used
+             and the http_client is configured to route through the proxy.
+             This path is handled in ``_make_client()`` — returning here
+             signals that proxy-based auth should be used.
           1. auth_token kwarg
           2. api_key kwarg
           3. CLAUDE_CODE_OAUTH_TOKEN env var
@@ -317,6 +324,12 @@ class AnthropicProvider(LLMProvider):
           5. OPENLEGION_SYSTEM_ANTHROPIC_OAUTH (JSON with access_token)
           6. OPENLEGION_SYSTEM_ANTHROPIC_API_KEY env var
         """
+        # OneCLI gateway — credentials injected transparently by the proxy.
+        # Return a sentinel that _make_client() will detect to configure the
+        # proxy-aware httpx client.
+        if os.getenv("ONECLI_URL") or os.getenv("HTTPS_PROXY") or os.getenv("https_proxy"):
+            return "onecli-managed", None
+
         if self._auth_token:
             return None, self._auth_token
         if self._api_key:
@@ -346,8 +359,38 @@ class AnthropicProvider(LLMProvider):
         return None, None
 
     def _make_client(self, api_key: str | None, auth_token: str | None):
-        """Create an AsyncAnthropic client with appropriate auth."""
+        """Create an AsyncAnthropic client with appropriate auth.
+
+        When ``api_key`` is the OneCLI sentinel (``"onecli-managed"``), the
+        client is configured to route traffic through the OneCLI proxy gateway.
+        OneCLI intercepts HTTPS traffic and injects the real API credentials at
+        the proxy layer — the container never holds the actual secret.
+        """
         import anthropic
+        import httpx
+
+        # OneCLI gateway path — proxy handles credential injection.
+        if api_key == "onecli-managed":
+            onecli_url = os.getenv("ONECLI_URL", "")
+            https_proxy = (
+                os.getenv("HTTPS_PROXY")
+                or os.getenv("https_proxy")
+                or onecli_url
+            )
+            # Honour a custom CA cert provided by the OneCLI gateway so TLS
+            # interception can work end-to-end.
+            ssl_cert_file = os.getenv("SSL_CERT_FILE", None)
+            http_client = httpx.AsyncClient(
+                proxy=https_proxy,
+                verify=ssl_cert_file if ssl_cert_file else True,
+                timeout=120.0,
+            )
+            return anthropic.AsyncAnthropic(
+                api_key="onecli-managed",  # placeholder — OneCLI replaces Authorization
+                http_client=http_client,
+                max_retries=0,
+                timeout=120.0,
+            )
 
         if auth_token:
             return anthropic.AsyncAnthropic(

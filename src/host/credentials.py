@@ -265,11 +265,17 @@ class CredentialVault:
         """Resolve Anthropic credentials, supporting Claude Code OAuth tokens.
 
         Resolution order:
+          0. ONECLI_URL / HTTPS_PROXY — OneCLI gateway injects real credentials
+             at the proxy layer; returns a sentinel so callers configure proxy
+             routing instead of passing an actual key.
           1. CLAUDE_CODE_OAUTH_TOKEN (Claude Code subscription OAuth)
           2. OPENLEGION_SYSTEM_ANTHROPIC_API_KEY (standard API key)
           3. OPENLEGION_SYSTEM_ANTHROPIC_OAUTH JSON blob (structured OAuth)
         """
-        # Claude Code subscription token (highest priority)
+        # OneCLI proxy — credentials injected by the gateway, not here.
+        if os.getenv("ONECLI_URL") or os.getenv("HTTPS_PROXY") or os.getenv("https_proxy"):
+            return {"via_proxy": True}
+        # Claude Code subscription token (highest priority among direct creds)
         if token := os.getenv("CLAUDE_CODE_OAUTH_TOKEN"):
             return {"auth_token": token}
         # Direct API key
@@ -716,6 +722,10 @@ class CredentialVault:
             providers.add("anthropic")
         # CLAUDE_CODE_OAUTH_TOKEN counts as Anthropic credentials
         if os.getenv("CLAUDE_CODE_OAUTH_TOKEN"):
+            providers.add("anthropic")
+        # OneCLI gateway counts as having credentials for all providers
+        # (the gateway injects the real key at the proxy layer)
+        if os.getenv("ONECLI_URL") or os.getenv("HTTPS_PROXY") or os.getenv("https_proxy"):
             providers.add("anthropic")
         return providers
 

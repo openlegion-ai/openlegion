@@ -32,6 +32,70 @@ logger = setup_logging("host.runtime")
 _DOCKER_NAME_RE = re.compile(r"[^a-zA-Z0-9_.-]")
 
 
+def _get_onecli_env_sync() -> dict[str, str]:
+    """Synchronous wrapper around ``_get_onecli_env`` for use in sync contexts.
+
+    Runs the async helper in the current event loop if one is running
+    (via a thread executor), or starts a temporary loop otherwise.
+    """
+    onecli_url = os.getenv("ONECLI_URL", "").rstrip("/")
+    if not onecli_url:
+        return {}
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We're inside an async context — run the coroutine in a thread.
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, _get_onecli_env())
+                return future.result(timeout=5)
+        else:
+            return loop.run_until_complete(_get_onecli_env())
+    except Exception as exc:
+        logger.debug("Could not fetch OneCLI env (%s), using fallback", exc)
+        return {
+            "ONECLI_URL": onecli_url,
+            "HTTPS_PROXY": onecli_url,
+            "HTTP_PROXY": onecli_url,
+            "NO_PROXY": "localhost,127.0.0.1,host.docker.internal",
+        }
+
+
+async def _get_onecli_env() -> dict[str, str]:
+    """Fetch OneCLI proxy env vars to inject into agent containers.
+
+    OneCLI gateway handles credential injection — containers never see real
+    secrets.  The gateway intercepts HTTPS traffic and injects API keys or
+    OAuth tokens transparently.
+
+    Tries ``GET {ONECLI_URL}/proxy-env`` first (returns a JSON dict of env
+    vars to set).  Falls back to constructing proxy env vars from ONECLI_URL
+    directly when the endpoint is unavailable.
+    """
+    import httpx as _httpx
+
+    onecli_url = os.getenv("ONECLI_URL", "").rstrip("/")
+    if not onecli_url:
+        return {}
+    try:
+        async with _httpx.AsyncClient(timeout=3.0) as _client:
+            resp = await _client.get(f"{onecli_url}/proxy-env")
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict):
+                    return {k: str(v) for k, v in data.items() if isinstance(v, (str, int))}
+    except Exception as exc:
+        logger.debug("OneCLI /proxy-env unavailable (%s), using fallback env vars", exc)
+    # Fallback: set proxy env vars pointing directly at the OneCLI URL so the
+    # container routes HTTPS traffic through the gateway.
+    return {
+        "ONECLI_URL": onecli_url,
+        "HTTPS_PROXY": onecli_url,
+        "HTTP_PROXY": onecli_url,
+        "NO_PROXY": "localhost,127.0.0.1,host.docker.internal",
+    }
+
+
 def _docker_safe_name(agent_id: str) -> str:
     """Sanitize an agent ID for use in Docker container/volume names."""
     return _DOCKER_NAME_RE.sub("_", agent_id)
@@ -254,6 +318,15 @@ class DockerBackend(RuntimeBackend):
             environment["MCP_SERVERS"] = json.dumps(mcp_servers)
         if thinking:
             environment["THINKING"] = thinking
+        # OneCLI gateway — inject proxy env vars so the container routes HTTPS
+        # through the OneCLI gateway for transparent credential injection.
+        # These are merged before extra_env / env_overrides so operators can
+        # still override them explicitly if needed.
+        onecli_env = _get_onecli_env_sync()
+        if onecli_env:
+            environment.update(onecli_env)
+            logger.debug("OneCLI proxy env injected into agent '%s'", agent_id)
+
         environment.update(self.extra_env)
         if env_overrides:
             environment.update(env_overrides)
@@ -828,6 +901,13 @@ class SandboxBackend(RuntimeBackend):
             env_cfg["MCP_SERVERS"] = json.dumps(mcp_servers)
         if thinking:
             env_cfg["THINKING"] = thinking
+        # OneCLI gateway — inject proxy env vars so the sandbox routes HTTPS
+        # through the OneCLI gateway for transparent credential injection.
+        onecli_env = _get_onecli_env_sync()
+        if onecli_env:
+            env_cfg.update(onecli_env)
+            logger.debug("OneCLI proxy env injected into sandbox '%s'", agent_id)
+
         env_cfg.update(self.extra_env)
         if env_overrides:
             env_cfg.update(env_overrides)

@@ -6,6 +6,65 @@ automatically based on the model string you configure.
 
 ---
 
+## Credential Injection via OneCLI (recommended)
+
+[OneCLI](https://onecli.sh) is a transparent HTTPS proxy gateway that
+manages LLM credentials centrally. Instead of storing API keys or OAuth
+tokens in `.env` files or container env vars, OneCLI intercepts outbound
+HTTPS traffic and injects the real credentials at the proxy layer.
+
+**Why OneCLI:**
+
+- Credentials are never stored in code, env files, or container environments
+- Agent containers never see the actual API key — they route through the proxy
+- A single gateway manages credentials for all agent containers
+- Compatible with both API keys and OAuth tokens (including Claude Code subscriptions)
+
+### Setup
+
+1. Install OneCLI: https://onecli.sh
+2. Configure your Anthropic credentials in OneCLI (see its docs)
+3. Start the gateway:
+
+```bash
+onecli start
+```
+
+4. Add the printed URL to your `.env`:
+
+```bash
+ONECLI_URL=http://localhost:9099
+```
+
+That's it. No `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` needed.
+
+### How it works
+
+When `ONECLI_URL` is set:
+
+- The **mesh host** (`AnthropicProvider`) configures its `httpx.AsyncClient` to
+  route through the OneCLI proxy. A placeholder key `"onecli-managed"` is used
+  so the Anthropic SDK is satisfied; OneCLI replaces the `Authorization` header
+  with the real credential before the request reaches Anthropic's API.
+- **Agent containers** receive `HTTPS_PROXY`, `HTTP_PROXY`, `ONECLI_URL`, and
+  `NO_PROXY` env vars automatically at spawn time (via `_get_onecli_env`).
+  The gateway's CA certificate is also propagated via `SSL_CERT_FILE` when
+  OneCLI's `/proxy-env` endpoint provides it.
+- `NO_PROXY=localhost,127.0.0.1,host.docker.internal` ensures local mesh
+  communication bypasses the proxy.
+
+### Credential resolution order (with OneCLI)
+
+When `ONECLI_URL` or `HTTPS_PROXY` is set, it takes precedence over all other
+credential sources. The full resolution order for Anthropic is:
+
+0. `ONECLI_URL` / `HTTPS_PROXY` — proxy-based injection (highest priority)
+1. `CLAUDE_CODE_OAUTH_TOKEN` — Claude Code subscription OAuth token
+2. `OPENLEGION_SYSTEM_ANTHROPIC_API_KEY` — standard API key
+3. `OPENLEGION_SYSTEM_ANTHROPIC_OAUTH` — structured OAuth JSON blob
+
+---
+
 ## Supported Providers
 
 | Provider | Model prefix | Auth |
@@ -56,6 +115,7 @@ llm:
 
 When an Anthropic model is used, credentials are resolved in this order:
 
+0. `ONECLI_URL` / `HTTPS_PROXY` env var (OneCLI gateway — proxy-based injection)
 1. `CLAUDE_CODE_OAUTH_TOKEN` env var (Claude Code subscription)
 2. `OPENLEGION_SYSTEM_ANTHROPIC_API_KEY` env var (standard API key)
 3. `OPENLEGION_SYSTEM_ANTHROPIC_OAUTH` env var (JSON blob with `access_token`)
