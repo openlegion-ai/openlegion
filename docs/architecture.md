@@ -92,6 +92,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server.
 | `subagent_tool.py` | In-container subagent spawning and management |
 | `wallet_tool.py` | Blockchain wallet operations (address, balance, transfer, contract calls) |
 | `web_search_tool.py` | DuckDuckGo web search (no API key) |
+| `exa_search_tool.py` | AI-powered web search via Exa (requires `OPENLEGION_CRED_EXA_API_KEY` or `EXA_API_KEY`) |
 | `image_gen_tool.py` | Image generation via Gemini or DALL-E 3, saves output as artifacts |
 | `coordination_tool.py` | Structured multi-agent coordination — `hand_off`, `check_inbox`, `update_status` |
 

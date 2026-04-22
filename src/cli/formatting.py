@@ -33,7 +33,7 @@ def _format_tool_summary(name: str, inp: dict, out: dict) -> str:
         return f'{sel} \u2190 "{text}"'
     elif name == "browser_screenshot":
         return inp.get("filename", "screenshot.png")
-    elif name == "web_search":
+    elif name == "web_search" or name == "exa_search":
         query = inp.get("query", "")
         max_results = inp.get("max_results")
         if max_results is not None:
@@ -70,7 +70,7 @@ def _format_tool_result_hint(name: str, out: dict) -> str:
         return ""
     elif name == "browser_screenshot":
         return out.get("path", "")
-    elif name == "web_search":
+    elif name == "web_search" or name == "exa_search":
         results = out.get("results", [])
         if not results:
             return ""
