@@ -15,6 +15,7 @@ import re
 import subprocess
 import time
 import uuid
+import weakref
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -318,8 +319,16 @@ class CamoufoxInstance:
         # replacement page that happens to reuse the same id string (UUIDs
         # prevent that, but weak refs preserve the "was alive" semantic).
         self._page_id_counter: int = 0
-        self.page_ids: dict = {}              # Page (by identity) -> str
-        self.page_ids_inv: dict[str, object] = {}  # str -> Page
+        self.page_ids: dict = {}              # id(Page) -> str
+        # WeakValueDictionary so closed Pages (GC'd by Playwright on tab
+        # close) drop out of the reverse lookup automatically.  Using a
+        # plain dict here would pin every Page ever opened in memory for
+        # the lifetime of the CamoufoxInstance — a slow leak on agents
+        # that churn tabs.  Refs pointing at a dropped Page resolve to
+        # None in ``page_ids_inv.get(page_id)`` and raise RefStale cleanly.
+        self.page_ids_inv: weakref.WeakValueDictionary = (
+            weakref.WeakValueDictionary()
+        )
         # Register the initial page so refs captured on it resolve correctly.
         self._register_page(page)
 
