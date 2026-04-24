@@ -1,0 +1,215 @@
+[
+  {
+    "name": "oauth_google_redirect_with_code_and_state",
+    "input": "https://app.example.com/auth/callback?code=4/0AY0e-g7xbQgF3g&state=xyz123&scope=email",
+    "expect_redacted": ["4/0AY0e-g7xbQgF3g", "xyz123"],
+    "expect_preserved": ["app.example.com", "auth/callback", "scope"]
+  },
+  {
+    "name": "oauth_google_redirect_keeps_scope_value_visible",
+    "input": "https://example.com/cb?code=abcdef&scope=openid+email+profile",
+    "expect_redacted": ["abcdef"],
+    "expect_preserved": ["openid+email+profile", "scope"]
+  },
+  {
+    "name": "github_oauth_code",
+    "input": "https://app.com/callback?code=gho_aFakeGhotokenThatIs40chars1234567890AB&state=csrfval",
+    "expect_redacted": ["gho_aFakeGhotokenThatIs40chars1234567890AB", "csrfval"],
+    "expect_preserved": ["app.com"]
+  },
+  {
+    "name": "supabase_magic_link",
+    "input": "https://app.example.com/auth/confirm?token_hash=pkce_abc123def456xyz&type=magiclink",
+    "expect_redacted": ["pkce_abc123def456xyz"],
+    "expect_preserved": ["magiclink"]
+  },
+  {
+    "name": "password_reset_token",
+    "input": "https://site.com/reset?reset_token=xyz789abcdef0123&email=u@e.com",
+    "expect_redacted": ["xyz789abcdef0123"],
+    "expect_preserved": ["site.com", "email=u%40e.com"],
+    "note": "email @ gets url-encoded by quote_plus — substring check uses the encoded form"
+  },
+  {
+    "name": "aws_s3_presigned_url",
+    "input": "https://bucket.s3.amazonaws.com/path/file.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20260101%2Fus-east-1&X-Amz-Date=20260101T000000Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=deadbeefcafebabe1234567890abcdef12345678",
+    "expect_redacted": [
+      "AKIAIOSFODNN7EXAMPLE",
+      "deadbeefcafebabe1234567890abcdef12345678"
+    ],
+    "expect_preserved": ["bucket.s3.amazonaws.com", "file.pdf"]
+  },
+  {
+    "name": "gcs_signed_url",
+    "input": "https://storage.googleapis.com/mybucket/object?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=svc%40proj.iam.gserviceaccount.com&X-Goog-Date=20260101T000000Z&X-Goog-Expires=300&X-Goog-Signature=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&X-Goog-SignedHeaders=host",
+    "expect_redacted": [
+      "svc%40proj.iam.gserviceaccount.com",
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    ],
+    "expect_preserved": ["storage.googleapis.com", "mybucket"]
+  },
+  {
+    "name": "azure_sas_url",
+    "input": "https://storageacc.blob.core.windows.net/container/blob.txt?sv=2021-04-10&st=2026-01-01T00%3A00Z&se=2026-01-02T00%3A00Z&sp=r&sig=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789%3D",
+    "expect_redacted": ["AbCdEfGhIjKlMnOpQrStUvWxYz0123456789%3D"],
+    "expect_preserved": ["storageacc.blob.core.windows.net", "container"]
+  },
+  {
+    "name": "github_raw_token_querystring",
+    "input": "https://raw.githubusercontent.com/user/repo/main/file.md?token=ghs_1234567890abcdef1234567890abcdefABCD",
+    "expect_redacted": ["ghs_1234567890abcdef1234567890abcdefABCD"],
+    "expect_preserved": ["raw.githubusercontent.com", "user/repo"]
+  },
+  {
+    "name": "userinfo_basic_auth",
+    "input": "https://alice:secretpassword@intranet.example.com/admin",
+    "expect_redacted": ["alice", "secretpassword"],
+    "expect_preserved": ["intranet.example.com", "admin"]
+  },
+  {
+    "name": "fragment_implicit_oauth",
+    "input": "https://app.com/#access_token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.abc123xyz&token_type=bearer",
+    "expect_redacted": [
+      "eyJhbGciOiJIUzI1NiJ9",
+      "access_token=eyJ",
+      "token_type=bearer"
+    ],
+    "expect_preserved": ["app.com"],
+    "note": "fragment is dropped entirely — the raw = pairs and the JWT body all disappear"
+  },
+  {
+    "name": "jwt_in_path_unsubscribe",
+    "input": "https://email.example.com/u/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhYmNkIn0.signaturepartheremustbe10chars/click",
+    "expect_redacted": [
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhYmNkIn0.signaturepartheremustbe10chars"
+    ],
+    "expect_preserved": ["email.example.com", "/u/", "/click"]
+  },
+  {
+    "name": "openai_key_in_query",
+    "input": "https://proxy.internal/echo?api_key=sk-abcdefghijklmnopqrstuvwxyz0123456789",
+    "expect_redacted": ["sk-abcdefghijklmnopqrstuvwxyz0123456789"],
+    "expect_preserved": ["proxy.internal", "api_key"]
+  },
+  {
+    "name": "anthropic_key_in_path",
+    "input": "https://mirror.example/api/sk-ant-api01-AAAAAAAAAAAAAAAAAAAAAAAAAA/",
+    "expect_redacted": ["sk-ant-api01-AAAAAAAAAAAAAAAAAAAAAAAAAA"],
+    "expect_preserved": ["mirror.example"]
+  },
+  {
+    "name": "aws_access_key_in_url",
+    "input": "https://example.com/leak/AKIAIOSFODNN7EXAMPLE",
+    "expect_redacted": ["AKIAIOSFODNN7EXAMPLE"],
+    "expect_preserved": ["example.com"]
+  },
+  {
+    "name": "slack_token_in_query",
+    "input": "https://hooks.slack.com/services/?token=xoxb-FAKEEXAMPLEDONOTSCANREDACTONLY",
+    "expect_redacted": ["xoxb-FAKEEXAMPLEDONOTSCANREDACTONLY"],
+    "expect_preserved": ["hooks.slack.com", "services"]
+  },
+  {
+    "name": "refresh_token_query",
+    "input": "https://api.example.com/token?refresh_token=eyJrZWZyZXNoVG9rZW4ifQ.abc&client_id=pub",
+    "expect_redacted": ["eyJrZWZyZXNoVG9rZW4ifQ.abc"],
+    "expect_preserved": ["api.example.com", "client_id", "pub"]
+  },
+  {
+    "name": "client_secret_query",
+    "input": "https://idp.example.com/oauth2/token?client_id=myapp&client_secret=dontleakme1234567890",
+    "expect_redacted": ["dontleakme1234567890"],
+    "expect_preserved": ["idp.example.com", "myapp"]
+  },
+  {
+    "name": "long_hex_in_path_hash",
+    "input": "https://cache.example.com/assets/abcdef0123456789abcdef0123456789abcdef0123456789/thing.css",
+    "expect_redacted": ["abcdef0123456789abcdef0123456789abcdef0123456789"],
+    "expect_preserved": ["cache.example.com", "thing.css"]
+  },
+  {
+    "name": "plain_url_untouched",
+    "input": "https://example.com/docs/page.html?topic=security",
+    "expect_redacted": [],
+    "expect_preserved": ["example.com", "docs/page.html", "topic=security"]
+  },
+  {
+    "name": "plain_url_with_numeric_id",
+    "input": "https://blog.example.com/posts/42?page=3",
+    "expect_redacted": [],
+    "expect_preserved": ["42", "page=3"]
+  },
+  {
+    "name": "bare_host_no_path",
+    "input": "https://example.com",
+    "expect_redacted": [],
+    "expect_preserved": ["example.com"]
+  },
+  {
+    "name": "github_pat_in_query",
+    "input": "https://api.github.com/repos/org/repo?token=github_pat_11ABCDEF0123456789ABCDEFabcdef012345",
+    "expect_redacted": ["github_pat_11ABCDEF0123456789ABCDEFabcdef012345"],
+    "expect_preserved": ["api.github.com"]
+  },
+  {
+    "name": "multiple_sensitive_params",
+    "input": "https://svc.example.com/act?token=abcxyz123def456&signature=feed_face_cafe_babe&next=/dashboard",
+    "expect_redacted": ["abcxyz123def456", "feed_face_cafe_babe"],
+    "expect_preserved": ["next=%2Fdashboard"],
+    "note": "slash in query-value gets quote_plus'd to %2F"
+  },
+  {
+    "name": "id_token_query_value_stripped_fragment_dropped",
+    "input": "https://app.example.com/cb?id_token=header.payload.sig&extra=keep#access_token=a.b.c",
+    "expect_redacted": [
+      "header.payload.sig",
+      "access_token=a.b.c",
+      "a.b.c"
+    ],
+    "expect_preserved": [
+      "app.example.com",
+      "id_token=",
+      "extra=keep"
+    ],
+    "note": "id_token KEY preserved (for debuggability); its value stripped. Fragment dropped entirely."
+  },
+  {
+    "name": "capital_case_query_key_still_matches",
+    "input": "https://svc.com/?API_KEY=sk-supersecrettokenherebeverylong123&foo=bar",
+    "expect_redacted": ["sk-supersecrettokenherebeverylong123"],
+    "expect_preserved": ["svc.com", "foo=bar"]
+  },
+  {
+    "name": "non_url_string_pattern_only",
+    "input": "my key is sk-abcdefghijklmnopqrstuvwxyz1234567890 — don't share it",
+    "expect_redacted": ["sk-abcdefghijklmnopqrstuvwxyz1234567890"],
+    "expect_preserved": ["my key is", "don't share it"]
+  },
+  {
+    "name": "non_url_string_no_secrets_untouched",
+    "input": "Meeting at 3pm in conference room 4",
+    "expect_redacted": [],
+    "expect_preserved": ["Meeting at 3pm", "conference room 4"]
+  },
+  {
+    "name": "empty_query_param_preserved_shape",
+    "input": "https://svc.com/?token=&keep=yes",
+    "expect_redacted": [],
+    "expect_preserved": ["keep=yes"],
+    "note": "empty value stripping is a no-op but shape preserves"
+  },
+  {
+    "name": "bearer_jwt_in_text",
+    "input": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.abc1234567",
+    "expect_redacted": [
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.abc1234567"
+    ],
+    "expect_preserved": ["Authorization: Bearer"]
+  },
+  {
+    "name": "slack_user_token",
+    "input": "webhook: https://hooks.slack.com/?auth=xoxp-FAKEEXAMPLEDONOTSCANUSERTOKEN",
+    "expect_redacted": ["xoxp-FAKEEXAMPLEDONOTSCANUSERTOKEN"],
+    "expect_preserved": ["hooks.slack.com"]
+  }
+]

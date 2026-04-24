@@ -6,45 +6,22 @@ service container. Agent containers no longer bundle Chrome or VNC.
 
 from __future__ import annotations
 
-import re
-
 from src.agent.skills import skill
+
+# ``_redact_credentials`` is re-exported here (via the aliased import) so
+# existing callers that imported it from this module — e.g. ``tests/test_builtins.py``
+# — keep working after the Phase 1.3 consolidation. The canonical
+# implementation lives in :mod:`src.shared.redaction`; do not edit patterns
+# here.
+from src.shared.redaction import (
+    deep_redact as _deep_redact,
+)
+from src.shared.redaction import (
+    redact_string as _redact_credentials,  # noqa: F401
+)
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.browser")
-
-# Pattern-based credential redaction (defense in depth on agent side)
-_REDACT_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9]{20,}"),
-    re.compile(r"sk-ant-api[A-Za-z0-9\-]{20,}"),
-    re.compile(r"gho_[A-Za-z0-9]{36,}"),
-    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"xoxb-[A-Za-z0-9\-]{20,}"),
-    re.compile(r"xoxp-[A-Za-z0-9\-]{20,}"),
-    re.compile(r"AKIA[A-Z0-9]{16}"),
-    re.compile(r"(?<![A-Za-z0-9])[A-Fa-f0-9]{40,}(?![A-Za-z0-9])"),
-    re.compile(r"(?<![A-Za-z0-9/+=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9/+=])"),
-]
-
-
-def _redact_credentials(text: str) -> str:
-    """Replace common secret patterns with [REDACTED]."""
-    if not text:
-        return text
-    for pattern in _REDACT_PATTERNS:
-        text = pattern.sub("[REDACTED]", text)
-    return text
-
-
-def _deep_redact(obj):
-    """Recursively redact credential values from any JSON-serializable structure."""
-    if isinstance(obj, str):
-        return _redact_credentials(obj)
-    if isinstance(obj, dict):
-        return {k: _deep_redact(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_deep_redact(item) for item in obj]
-    return obj
 
 
 async def _browser_command(mesh_client, action: str, params: dict | None = None) -> dict:
