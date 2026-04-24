@@ -2770,6 +2770,11 @@ def create_mesh_app(
             headers = {}
             if browser_auth:
                 headers["Authorization"] = f"Bearer {browser_auth}"
+            # §2.5 trace propagation: forward X-Trace-Id so log lines in the
+            # browser service correlate with the agent's originating request.
+            incoming_trace = request.headers.get("x-trace-id")
+            if incoming_trace:
+                headers["X-Trace-Id"] = incoming_trace
             resp = await _browser_proxy_client.post(
                 f"{browser_service_url}/browser/{req_agent_id}/{action}",
                 json=params,

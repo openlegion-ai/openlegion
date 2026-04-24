@@ -14,6 +14,7 @@ import os
 from fastapi import FastAPI, HTTPException, Request
 
 from src.browser.service import BrowserManager
+from src.shared.trace import TRACE_HEADER, current_trace_id
 from src.shared.utils import setup_logging
 
 logger = setup_logging("browser.server")
@@ -25,6 +26,22 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     if lifespan:
         kwargs["lifespan"] = lifespan
     app = FastAPI(**kwargs)
+
+    # §2.5 trace propagation: read X-Trace-Id on every request and bind it
+    # to the ContextVar so log records under this request carry the trace id.
+    # Reset on exit so the thread-local state never leaks to a different
+    # request sharing the same worker. Using FastAPI middleware (not a
+    # dependency) so it also covers non-endpoint paths (errors, static).
+    @app.middleware("http")
+    async def _trace_id_propagation(request: Request, call_next):
+        incoming = request.headers.get(TRACE_HEADER)
+        token = current_trace_id.set(incoming) if incoming else None
+        try:
+            return await call_next(request)
+        finally:
+            if token is not None:
+                current_trace_id.reset(token)
+
     auth_token = os.environ.get("BROWSER_AUTH_TOKEN", "")
     if not auth_token:
         if os.environ.get("MESH_AUTH_TOKEN"):
