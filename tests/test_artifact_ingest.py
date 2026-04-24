@@ -198,3 +198,50 @@ class TestAtomicity:
         art = workspace_root / "artifacts"
         assert (art / "atomic.txt").exists()
         assert not any(p.name.endswith(".partial") for p in art.iterdir())
+
+
+class TestConcurrentIngestCollisionRace:
+    """Regression guard for the TOCTOU-race fix.
+
+    Two simultaneous POSTs of ``report.pdf`` must land on distinct final
+    names (``report.pdf`` + ``report-1.pdf``), no overwrite, no orphan
+    ``.partial`` files. Without ``O_EXCL`` on the partial, both requests
+    could claim the same slot and clobber each other.
+    """
+
+    def test_concurrent_same_name_two_winners(self, agent_app):
+        import threading
+
+        app, workspace_root = agent_app
+        headers = {"X-Mesh-Internal": "1"}
+        results: list[dict] = []
+        barrier = threading.Barrier(2)
+
+        def _ingest(payload: bytes):
+            with TestClient(app) as client:
+                # Sync at the barrier so both requests enter the endpoint
+                # as close to simultaneously as the Python scheduler allows.
+                barrier.wait()
+                resp = client.post(
+                    "/artifacts/ingest/report.pdf",
+                    content=payload,
+                    headers=headers,
+                )
+                results.append(resp.json())
+
+        t1 = threading.Thread(target=_ingest, args=(b"first",))
+        t2 = threading.Thread(target=_ingest, args=(b"second",))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        names = sorted(r["artifact_name"] for r in results)
+        assert names == ["report-1.pdf", "report.pdf"], names
+        art = workspace_root / "artifacts"
+        contents = sorted((art / n).read_bytes() for n in names)
+        assert contents == [b"first", b"second"], (
+            "Concurrent ingests produced overlap — the TOCTOU guard "
+            "regressed."
+        )
+        assert not any(p.name.endswith(".partial") for p in art.iterdir())
