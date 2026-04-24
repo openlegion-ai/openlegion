@@ -226,12 +226,21 @@ class TestMalformedMarker:
 
 
 class TestConcurrencyLock:
-    def test_second_caller_skips_when_lock_held(
+    def test_lock_held_with_pending_migration_raises_busy(
         self, profile, monkeypatch,
     ):
-        """While one process holds the flock, a concurrent migrate_profile
-        returns the on-disk version without re-running migrations."""
-        from src.browser.profile_schema import _LOCK_FILENAME
+        """A peer process mid-migration holds the flock AND the on-disk
+        version is below target. Continuing to launch Camoufox now would
+        race the peer's writes into user_data_dir. The caller must get a
+        distinct, retryable error — ProfileMigrationBusy — not a silent
+        skip (silent skip regresses the whole point of the pre-launch
+        migration hook)."""
+        import fcntl
+
+        from src.browser.profile_schema import (
+            _LOCK_FILENAME,
+            ProfileMigrationBusy,
+        )
 
         run_count = {"n": 0}
 
@@ -243,15 +252,38 @@ class TestConcurrencyLock:
 
         # Simulate another process holding the lock by opening the file
         # and taking an exclusive flock outside of the function's try.
+        lock_path = profile / _LOCK_FILENAME
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with pytest.raises(ProfileMigrationBusy):
+                migrate_profile(profile)
+            assert run_count["n"] == 0
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def test_lock_held_but_already_current_allows_launch(
+        self, profile, monkeypatch,
+    ):
+        """Conversely: if the on-disk version is ALREADY target, the peer
+        is doing a pointless re-check. Don't raise — no migration is
+        pending, safe to launch against the profile."""
         import fcntl
+
+        from src.browser.profile_schema import _LOCK_FILENAME
+
+        # Stamp the profile at version 1 first (no peer holding the lock).
+        monkeypatch.setattr(profile_schema, "PROFILE_SCHEMA_VERSION", 1)
+        migrate_profile(profile)
+
+        # Now simulate a peer holding the lock and call again.
         lock_path = profile / _LOCK_FILENAME
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             result = migrate_profile(profile)
-            # Migration skipped; read-only path returns on-disk version (0).
-            assert run_count["n"] == 0
-            assert result == 0
+            assert result == 1  # Already current; no raise, no work.
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)

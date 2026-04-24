@@ -493,8 +493,23 @@ class BrowserManager:
         # writes into the directory. Idempotent on already-current profiles;
         # on failure restores the pre-migration backup and re-raises so we
         # never launch against a half-migrated profile.
+        #
+        # Two error shapes propagate:
+        #   * ``ProfileMigrationBusy`` — a peer process holds the lock and
+        #     the on-disk version is below target. Retryable; agent can
+        #     call again in a few seconds.
+        #   * Any other exception — migration hit a real failure and the
+        #     backup has already been restored. Not safely retryable until
+        #     a human investigates.
+        from src.browser.profile_schema import ProfileMigrationBusy
         try:
             migrate_profile(Path(profile_dir))
+        except ProfileMigrationBusy:
+            logger.warning(
+                "Profile migration for '%s' busy (peer holds lock); "
+                "refusing to launch until they finish", agent_id,
+            )
+            raise
         except Exception:
             logger.exception(
                 "Profile migration failed for '%s' — aborting browser start",

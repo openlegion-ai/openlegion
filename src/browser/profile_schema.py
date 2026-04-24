@@ -90,6 +90,15 @@ _BACKUP_SUFFIX = ".bak"
 _TMP_SUFFIX = ".tmp"
 
 
+class ProfileMigrationBusy(Exception):
+    """Raised when a peer process holds the per-profile migration lock AND
+    there are pending migrations the target version needs.
+
+    Distinct from a generic failure so the caller can treat it as
+    transient (worth a short retry) rather than a hard error.
+    """
+
+
 # ── Public API ──────────────────────────────────────────────────────────────
 
 
@@ -127,12 +136,25 @@ def migrate_profile(profile_dir: Path | str) -> int:
     lock_path = profile / _LOCK_FILENAME
     with _try_lock(lock_path) as acquired:
         if not acquired:
+            # Another process holds the migration lock. If the on-disk
+            # version is ALREADY current, they're doing a pointless
+            # re-check — safe to proceed with the launch. If it's BELOW
+            # target, they're mid-migration and launching Camoufox now
+            # would race their writes into user_data_dir. Refuse loudly
+            # so the caller (``BrowserManager.get_or_start``) can either
+            # retry after a short wait or bubble up to the user.
             current = _read_marker(profile)
-            logger.info(
-                "Another process is migrating %s (version %d on disk); skipping",
-                profile, current,
+            if current >= PROFILE_SCHEMA_VERSION:
+                logger.info(
+                    "Profile %s already current (v%d); peer holds lock but "
+                    "no migration pending", profile, current,
+                )
+                return current
+            raise ProfileMigrationBusy(
+                f"Another process is migrating {profile} "
+                f"(on-disk v{current}, target v{PROFILE_SCHEMA_VERSION}) — "
+                f"cannot launch until they finish",
             )
-            return current
 
         current = _read_marker(profile)
         if current >= PROFILE_SCHEMA_VERSION:
