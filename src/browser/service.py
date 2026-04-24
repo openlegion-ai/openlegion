@@ -17,6 +17,7 @@ import subprocess
 import time
 import uuid
 import weakref
+from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -327,15 +328,21 @@ class CamoufoxInstance:
         # Register the initial page so refs captured on it resolve correctly.
         self._register_page(page)
 
-        # Per-agent metrics (§4.6). Reset to zero after each emit cycle so
-        # dashboards see per-minute values, not monotonic counters. Snapshot
-        # byte sizes accumulate as a list (p50/p95 computed at emit time)
-        # rather than a rolling histogram — size samples are small (~200 per
-        # minute per agent at most) and simpler wins.
+        # Per-agent metrics (§4.6). Per-minute counters reset at each emit
+        # cycle so dashboards see rate-of-change, not monotonic totals.
+        # Snapshot byte sizes accumulate as a list (p50/p95 at emit time);
+        # size samples are small (~200/min/agent at most) and simpler wins.
         self.m_click_success: int = 0
         self.m_click_fail: int = 0
         self.m_nav_timeout: int = 0
         self.m_snapshot_bytes: list[int] = []
+        # §5.2 rolling click-success-rate: deque of booleans for the last
+        # 100 click outcomes. Unlike the per-minute counters above, this
+        # window is NOT reset on drain — it's a user-facing live gauge
+        # exposed via /browser/{agent}/status and in the per-minute metric
+        # payload, giving operators an "is the browser currently healthy"
+        # signal that doesn't flap on low-traffic minutes.
+        self.click_window: deque[bool] = deque(maxlen=100)
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
@@ -396,11 +403,26 @@ class CamoufoxInstance:
     def touch(self):
         self.last_activity = time.time()
 
-    def drain_metrics(self) -> dict:
-        """Snapshot counters and reset to zero.
+    def rolling_click_success_rate(self) -> float | None:
+        """Fraction of the last 100 clicks that succeeded, or ``None``.
 
-        Called by :meth:`BrowserManager._emit_metrics` every minute. Returns
-        an aggregate dict; the live instance fields reset to zero.
+        Returns ``None`` when no clicks have been recorded yet — callers
+        should render this as "—" rather than "0%", which would misleadingly
+        imply catastrophic failure on a freshly-booted agent.
+        """
+        if not self.click_window:
+            return None
+        successes = sum(1 for ok in self.click_window if ok)
+        return successes / len(self.click_window)
+
+    def drain_metrics(self) -> dict:
+        """Snapshot counters and reset the per-minute ones to zero.
+
+        Called by :meth:`BrowserManager._emit_metrics` every minute. The
+        rolling 100-click window is NOT reset — it continues to track the
+        most recent 100 clicks across emit cycles. Emits the rolling rate
+        alongside per-minute counters so the dashboard can show both
+        "activity in the last minute" and "health over recent work."
         """
         snaps = self.m_snapshot_bytes
         snap_count = len(snaps)
@@ -420,8 +442,10 @@ class CamoufoxInstance:
             "snapshot_count": snap_count,
             "snapshot_bytes_p50": p50,
             "snapshot_bytes_p95": p95,
+            "click_window_size": len(self.click_window),
+            "click_success_rate_100": self.rolling_click_success_rate(),
         }
-        # Reset for next interval.
+        # Reset the per-minute counters; the rolling window persists.
         self.m_click_success = 0
         self.m_click_fail = 0
         self.m_nav_timeout = 0
@@ -468,6 +492,13 @@ class BrowserManager:
         self.boot_id: str = str(uuid.uuid4())
         self._captcha_solver = get_solver()
         self._metrics_sink = metrics_sink
+        # Per-agent rolling buffer of recent emit payloads (§5.1/§5.2) used by
+        # the mesh's periodic poll to forward metrics to the dashboard
+        # EventBus. Kept as a monotonic sequence so repeated polls can
+        # request only what they haven't seen. Bounded so a long-lived
+        # service with many agents doesn't grow without bound.
+        self._metrics_history: deque[dict] = deque(maxlen=1024)
+        self._metrics_seq: int = 0
 
     async def start_cleanup_loop(self):
         """Start background task that cleans up idle browsers."""
@@ -488,19 +519,26 @@ class BrowserManager:
                 logger.warning("Metrics emit error: %s", e)
 
     async def _emit_metrics(self):
-        """Drain per-agent counters and hand them to the metrics sink.
+        """Drain per-agent counters and fan them out.
 
         Runs on the same 60s tick as idle cleanup (per §2.7: per-call
-        events are forbidden; aggregates only). When no sink is wired
-        (tests, or production pre-dashboard-integration), counters still
-        reset so memory doesn't grow unboundedly.
+        events are forbidden; aggregates only). Writes each payload to the
+        in-memory history buffer so the mesh can poll it, then forwards to
+        the optional ``metrics_sink`` callback (for tests / in-process
+        wiring). Counters always reset, whether or not a sink is attached,
+        so a long-idle service doesn't grow memory.
         """
         if not self._instances:
             return
+        now = time.time()
         # Take a consistent view of the instance list; drain_metrics()
         # is cheap and doesn't require the page lock, so we don't serialize.
         for inst in list(self._instances.values()):
             payload = inst.drain_metrics()
+            self._metrics_seq += 1
+            payload["seq"] = self._metrics_seq
+            payload["ts"] = now
+            self._metrics_history.append(payload)
             if self._metrics_sink is None:
                 continue
             try:
@@ -509,6 +547,22 @@ class BrowserManager:
                 logger.warning(
                     "Metrics sink raised for '%s': %s", inst.agent_id, e,
                 )
+
+    def get_recent_metrics(self, since_seq: int = 0) -> dict:
+        """Return buffered metric payloads with ``seq > since_seq``.
+
+        Shape: ``{"current_seq": N, "metrics": [...]}``. The poller passes
+        back ``current_seq`` as ``since_seq`` on the next call to get only
+        new payloads. On service restart the seq counter resets to 0 — the
+        poller detects this via the ``boot_id`` on ``/browser/status`` and
+        resets its high-water mark.
+        """
+        metrics = [p for p in self._metrics_history if p.get("seq", 0) > since_seq]
+        return {
+            "current_seq": self._metrics_seq,
+            "boot_id": self.boot_id,
+            "metrics": metrics,
+        }
 
     async def _cleanup_idle(self):
         now = time.time()
@@ -771,14 +825,21 @@ class BrowserManager:
         # minute-tick are silently lost when idle cleanup or explicit
         # stop fires. The periodic _emit_metrics hook only sees
         # still-live instances; post-pop is the final accounting chance.
-        if self._metrics_sink is not None:
-            try:
-                payload = inst.drain_metrics()
+        # Always write to the history buffer (even without a sink) so the
+        # mesh poller sees the last minute of activity for a freshly-stopped
+        # agent on its next tick.
+        try:
+            payload = inst.drain_metrics()
+            self._metrics_seq += 1
+            payload["seq"] = self._metrics_seq
+            payload["ts"] = time.time()
+            self._metrics_history.append(payload)
+            if self._metrics_sink is not None:
                 self._metrics_sink(payload)
-            except Exception as e:
-                logger.warning(
-                    "Final metrics drain failed for '%s': %s", agent_id, e,
-                )
+        except Exception as e:
+            logger.warning(
+                "Final metrics drain failed for '%s': %s", agent_id, e,
+            )
         if self._user_focused_agent == agent_id:
             self._user_focused_agent = None
         jitter = getattr(inst, '_jitter_task', None)
@@ -821,7 +882,13 @@ class BrowserManager:
         return self._proxy_configs.get(agent_id)
 
     async def get_status(self, agent_id: str) -> dict:
-        """Get status for a specific agent's browser."""
+        """Get status for a specific agent's browser.
+
+        Includes the rolling 100-click success rate (§5.2) as a live gauge —
+        distinct from the per-minute counters, which only flow via EventBus.
+        Operators polling /status see the current health signal without
+        waiting for the next emit tick.
+        """
         async with self._lock:
             inst = self._instances.get(agent_id)
             if not inst:
@@ -830,6 +897,8 @@ class BrowserManager:
                 "running": True,
                 "idle_seconds": int(time.time() - inst.last_activity),
                 "url": inst.page.url if inst.page else "",
+                "click_window_size": len(inst.click_window),
+                "click_success_rate_100": inst.rolling_click_success_rate(),
             }
 
     async def get_service_status(self) -> dict:
@@ -1985,6 +2054,7 @@ class BrowserManager:
                                 pass
 
                 inst.m_click_success += 1
+                inst.click_window.append(True)
                 result = {"success": True, "data": {"clicked": ref or selector}}
                 if snapshot_after:
                     snap = await self._snapshot_impl(inst, agent_id)
@@ -1992,6 +2062,7 @@ class BrowserManager:
                 return result
             except Exception as e:
                 inst.m_click_fail += 1
+                inst.click_window.append(False)
                 return {"success": False, "error": str(e)}
 
     async def hover(

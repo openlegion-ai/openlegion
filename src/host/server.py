@@ -2680,6 +2680,70 @@ def create_mesh_app(
         """Schedule initial browser proxy push as a background task (non-blocking)."""
         asyncio.create_task(_deferred_push_browser_proxies())
 
+    # § Browser metrics poll loop. The browser service container can't push
+    # to the mesh's in-process EventBus, so the mesh pulls. Runs on a 60s
+    # cadence — matching BrowserManager._emit_metrics — and fans each new
+    # per-agent aggregate out as a ``browser_metrics`` event. High-water
+    # seq per boot_id; boot_id change resets the watermark.
+    _browser_metrics_seq: dict[str, int] = {}  # keyed by boot_id
+
+    async def _poll_browser_metrics_once() -> None:
+        if not container_manager or event_bus is None:
+            return
+        svc_url = getattr(container_manager, "browser_service_url", None)
+        svc_token = getattr(container_manager, "browser_auth_token", "")
+        if not svc_url:
+            return
+        headers: dict = {"X-Mesh-Internal": "1"}
+        if svc_token:
+            headers["Authorization"] = f"Bearer {svc_token}"
+        try:
+            resp = await _browser_proxy_client.get(
+                f"{svc_url}/browser/metrics",
+                params={"since": _browser_metrics_seq.get("_last_seen", 0)},
+                headers=headers,
+                timeout=10,
+            )
+            if resp.status_code >= 400:
+                return
+            data = resp.json()
+        except Exception as e:
+            logger.debug("Browser metrics poll failed: %s", e)
+            return
+        boot_id = data.get("boot_id") or ""
+        # Reset the watermark when the browser service restarts, otherwise
+        # we'd starve forever waiting for seqs that never arrive.
+        if _browser_metrics_seq.get("_boot_id") != boot_id:
+            _browser_metrics_seq["_boot_id"] = boot_id
+            _browser_metrics_seq["_last_seen"] = 0
+        for payload in data.get("metrics", []) or []:
+            seq = int(payload.get("seq", 0))
+            if seq <= _browser_metrics_seq.get("_last_seen", 0):
+                continue
+            _browser_metrics_seq["_last_seen"] = seq
+            agent_id = payload.get("agent_id", "")
+            event_bus.emit("browser_metrics", agent=agent_id, data=payload)
+
+    async def _browser_metrics_loop() -> None:
+        # First pass runs ~5s after boot to give the browser service time
+        # to register, then every 60s. Tolerates transient failures — the
+        # metric channel is best-effort observability, not correctness.
+        await asyncio.sleep(5)
+        while True:
+            try:
+                await _poll_browser_metrics_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug("Browser metrics poll loop tick failed: %s", e)
+            await asyncio.sleep(60)
+
+    @app.on_event("startup")
+    async def _start_browser_metrics_poll() -> None:
+        # No-op if the mesh is running without a browser service configured
+        # (early-returned inside _poll_browser_metrics_once).
+        asyncio.create_task(_browser_metrics_loop())
+
     # Mesh-side input validation: reject typo'd action names with a clean 400
     # before proxying to the browser service. Permissions are enforced separately
     # via PermissionMatrix.can_browser_action (default-allow for all known

@@ -813,6 +813,43 @@ class TestClick:
         result = await mgr.click("a1", ref="e99")
         assert result["success"] is False
 
+    @pytest.mark.asyncio
+    async def test_successful_click_updates_rolling_window(self):
+        """Phase 2 §5.2: every successful click must append ``True`` to
+        ``click_window`` so the dashboard's live success-rate widget
+        reflects the latest 100 outcomes.
+        """
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.click = AsyncMock()
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        await mgr.click("a1", selector="#ok")
+        assert list(inst.click_window) == [True]
+        assert inst.m_click_success == 1
+        assert inst.rolling_click_success_rate() == 1.0
+
+    @pytest.mark.asyncio
+    async def test_failed_click_updates_rolling_window(self):
+        """A click raising an exception must also append to the window
+        (as ``False``) — otherwise failure modes disappear from health."""
+        from src.browser.service import BrowserManager, CamoufoxInstance
+        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+
+        mock_page = AsyncMock()
+        mock_page.click = AsyncMock(side_effect=RuntimeError("boom"))
+        inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
+        mgr._instances["a1"] = inst
+
+        result = await mgr.click("a1", selector="#ok")
+        assert result["success"] is False
+        assert list(inst.click_window) == [False]
+        assert inst.m_click_fail == 1
+        assert inst.rolling_click_success_rate() == 0.0
+
 
 class TestScreenshot:
     """Tests for BrowserManager.screenshot()."""

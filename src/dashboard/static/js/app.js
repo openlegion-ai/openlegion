@@ -188,6 +188,12 @@ function dashboard() {
     _browserSettingsDebounce: null,
     _browserDelayDebounce: null,
 
+    // Live per-agent browser metrics (Phase 2 §5.1/§5.2) — keyed by agent_id.
+    // Populated from `browser_metrics` WS events; each entry is the payload
+    // emitted by BrowserManager._emit_metrics plus a receivedAt wall-clock
+    // stamp the dashboard uses to flag stale rows.
+    browserMetrics: {},
+
     captchaSolverProvider: '',
     captchaSolverKeyMasked: '',
     captchaSolverSaving: false,
@@ -1434,6 +1440,16 @@ function dashboard() {
       // Clear credit exhausted state on successful LLM call
       if (evt.type === 'llm_call' && this.creditExhausted) {
         this.creditExhausted = false;
+      }
+
+      // Per-agent browser metrics (Phase 2 §5.1/§5.2). Payload shape comes
+      // from BrowserManager._emit_metrics — we just index it by agent_id
+      // and stamp receipt time so stale rows can fade.
+      if (evt.type === 'browser_metrics' && evt.agent && evt.data) {
+        this.browserMetrics = {
+          ...this.browserMetrics,
+          [evt.agent]: { ...evt.data, receivedAt: Date.now() },
+        };
       }
 
       // Highlight blackboard writes + update comms badge
@@ -5707,6 +5723,7 @@ function dashboard() {
         lane_complete: 'text-yellow-300',
         cron_trigger: 'text-pink-400',
         llm_stream: 'text-purple-300',
+        browser_metrics: 'text-sky-400',
       };
       return map[type] || 'text-gray-400';
     },
@@ -5737,6 +5754,7 @@ function dashboard() {
         lane_complete: 'bg-yellow-300',
         cron_trigger: 'bg-pink-400',
         llm_stream: 'bg-purple-300',
+        browser_metrics: 'bg-sky-400',
       };
       return map[type] || 'bg-gray-400';
     },
@@ -5766,6 +5784,41 @@ function dashboard() {
         minute: '2-digit',
         second: '2-digit',
       });
+    },
+
+    // ── Browser metrics card helpers (Phase 2 §5.1/§5.2) ───────────────
+    browserMetricsList() {
+      return Object.entries(this.browserMetrics)
+        .map(([agent, m]) => ({ agent, ...m }))
+        .sort((a, b) => a.agent.localeCompare(b.agent));
+    },
+    fmtClickRate(rate) {
+      if (rate == null) return '—';
+      return (rate * 100).toFixed(0) + '%';
+    },
+    clickRateColor(rate) {
+      if (rate == null) return 'text-gray-500';
+      if (rate >= 0.9) return 'text-green-400';
+      if (rate >= 0.7) return 'text-yellow-400';
+      return 'text-red-400';
+    },
+    fmtBytes(n) {
+      if (n == null || !Number.isFinite(n)) return '—';
+      if (n < 1024) return n + 'B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + 'KB';
+      return (n / (1024 * 1024)).toFixed(1) + 'MB';
+    },
+    browserMetricsAge(receivedAt) {
+      if (!receivedAt) return '';
+      const secs = Math.max(0, Math.round((Date.now() - receivedAt) / 1000));
+      if (secs < 60) return secs + 's ago';
+      const mins = Math.round(secs / 60);
+      return mins + 'm ago';
+    },
+    browserMetricsStale(receivedAt) {
+      // Emit cadence is 60s, so a payload older than ~3 minutes means the
+      // browser stopped or the poller broke.
+      return receivedAt && Date.now() - receivedAt > 3 * 60 * 1000;
     },
 
     eventDetail(evt) {
