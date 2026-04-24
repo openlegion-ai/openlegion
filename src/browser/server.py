@@ -225,6 +225,57 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         _verify_auth(request)
         return await manager.detect_captcha(agent_id)
 
+    # ── File-transfer endpoints (Phase 1.5) ──────────────────────────────
+    #
+    # These accept already-staged local paths (for uploads) or produce a
+    # local path (for downloads). The mesh-side proxy orchestrates streaming
+    # bytes between agent and browser containers — neither end-user agents
+    # nor the browser service itself handles that transfer directly.
+
+    @app.post("/browser/{agent_id}/upload_file")
+    async def upload_file(agent_id: str, request: Request):
+        """Drive a file-chooser with files already staged by the mesh.
+
+        Body: ``{"ref": "e7", "paths": ["/tmp/upload-stage/nonce-1"]}``.
+        ``paths`` must be readable inside the browser container — the mesh
+        places them there via the staging volume / streaming endpoint.
+        """
+        _verify_auth(request)
+        body = await request.json()
+        ref = body.get("ref", "")
+        paths = body.get("paths") or []
+        if not ref:
+            raise HTTPException(400, "ref required")
+        if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+            raise HTTPException(400, "paths must be a list of strings")
+        if not paths:
+            raise HTTPException(400, "paths must not be empty")
+        if len(paths) > 5:
+            raise HTTPException(400, "at most 5 files per upload")
+        result = await manager.upload_file(agent_id, ref, paths)
+        await _apply_delay()
+        return result
+
+    @app.post("/browser/{agent_id}/download")
+    async def download_trigger(agent_id: str, request: Request):
+        """Click a ref that triggers a download and return a local path.
+
+        Response ``data`` contains ``{path, size_bytes, suggested_filename,
+        mime_type}``. The caller (mesh proxy) is expected to stream the
+        file from ``path`` to the agent's ``/artifacts/ingest`` endpoint
+        and then delete it from the browser container.
+        """
+        _verify_auth(request)
+        body = await request.json()
+        ref = body.get("ref", "")
+        if not ref:
+            raise HTTPException(400, "ref required")
+        timeout_ms = int(body.get("timeout_ms", 30000))
+        result = await manager.download(agent_id, ref, timeout_ms=timeout_ms)
+        # No action delay — downloads can be long-running and the client
+        # needs to act on the result immediately to free the tmp file.
+        return result
+
     @app.post("/browser/{agent_id}/press_key")
     async def press_key(agent_id: str, request: Request):
         _verify_auth(request)
