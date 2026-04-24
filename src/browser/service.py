@@ -315,24 +315,27 @@ class CamoufoxInstance:
         # Per-Page stable UUID maps. Page objects survive navigation within a
         # tab; UUIDs are stable for the life of the Page. Refs carry a
         # ``page_id`` so resolution can detect a closed tab as stale (§4.2).
-        # The WeakValueDictionary for `_inv` prevents us from pinning closed
-        # Pages in memory — when Playwright drops the Page, the ref becomes
-        # stale (raises RefStale) instead of silently resolving against a
-        # replacement page that happens to reuse the same id string (UUIDs
-        # prevent that, but weak refs preserve the "was alive" semantic).
         self._page_id_counter: int = 0
         self.page_ids: dict = {}              # id(Page) -> str
         # WeakValueDictionary so closed Pages (GC'd by Playwright on tab
-        # close) drop out of the reverse lookup automatically.  Using a
-        # plain dict here would pin every Page ever opened in memory for
-        # the lifetime of the CamoufoxInstance — a slow leak on agents
-        # that churn tabs.  Refs pointing at a dropped Page resolve to
-        # None in ``page_ids_inv.get(page_id)`` and raise RefStale cleanly.
+        # close) drop out of the reverse lookup automatically. Plain dict
+        # here would pin every Page ever opened for the lifetime of the
+        # CamoufoxInstance — a slow leak on agents that churn tabs.
         self.page_ids_inv: weakref.WeakValueDictionary = (
             weakref.WeakValueDictionary()
         )
         # Register the initial page so refs captured on it resolve correctly.
         self._register_page(page)
+
+        # Per-agent metrics (§4.6). Reset to zero after each emit cycle so
+        # dashboards see per-minute values, not monotonic counters. Snapshot
+        # byte sizes accumulate as a list (p50/p95 computed at emit time)
+        # rather than a rolling histogram — size samples are small (~200 per
+        # minute per agent at most) and simpler wins.
+        self.m_click_success: int = 0
+        self.m_click_fail: int = 0
+        self.m_nav_timeout: int = 0
+        self.m_snapshot_bytes: list[int] = []
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
@@ -393,6 +396,38 @@ class CamoufoxInstance:
     def touch(self):
         self.last_activity = time.time()
 
+    def drain_metrics(self) -> dict:
+        """Snapshot counters and reset to zero.
+
+        Called by :meth:`BrowserManager._emit_metrics` every minute. Returns
+        an aggregate dict; the live instance fields reset to zero.
+        """
+        snaps = self.m_snapshot_bytes
+        snap_count = len(snaps)
+        if snap_count:
+            sorted_snaps = sorted(snaps)
+            p50 = sorted_snaps[snap_count // 2]
+            p95_idx = max(0, min(snap_count - 1, int(snap_count * 0.95)))
+            p95 = sorted_snaps[p95_idx]
+        else:
+            p50 = 0
+            p95 = 0
+        out = {
+            "agent_id": self.agent_id,
+            "click_success": self.m_click_success,
+            "click_fail": self.m_click_fail,
+            "nav_timeout": self.m_nav_timeout,
+            "snapshot_count": snap_count,
+            "snapshot_bytes_p50": p50,
+            "snapshot_bytes_p95": p95,
+        }
+        # Reset for next interval.
+        self.m_click_success = 0
+        self.m_click_fail = 0
+        self.m_nav_timeout = 0
+        self.m_snapshot_bytes = []
+        return out
+
 
 class BrowserManager:
     """Manages per-agent Camoufox browser instances.
@@ -406,7 +441,19 @@ class BrowserManager:
         profiles_dir: str = "/data/profiles",
         max_concurrent: int = 5,
         idle_timeout_minutes: int = 30,
+        *,
+        metrics_sink=None,
     ):
+        """Per-agent Camoufox lifecycle manager.
+
+        Args:
+            metrics_sink: optional callable ``(payload: dict) -> None`` that
+                receives per-agent aggregate metrics once per minute. When
+                ``None``, metrics counters still increment but nothing is
+                emitted — tests can pass a list's ``append`` method to
+                capture payloads; production wires this to the dashboard
+                :class:`EventBus`.
+        """
         self.profiles_dir = Path(profiles_dir)
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
         self.max_concurrent = max_concurrent
@@ -420,6 +467,7 @@ class BrowserManager:
         self._proxy_configs: dict[str, dict | None] = {}
         self.boot_id: str = str(uuid.uuid4())
         self._captcha_solver = get_solver()
+        self._metrics_sink = metrics_sink
 
     async def start_cleanup_loop(self):
         """Start background task that cleans up idle browsers."""
@@ -432,6 +480,35 @@ class BrowserManager:
                 await self._cleanup_idle()
             except Exception as e:
                 logger.warning("Cleanup loop error: %s", e)
+            # Emit per-minute metrics AFTER idle-cleanup — instances that
+            # just got stopped had their counters drained in ``_stop_instance``.
+            try:
+                await self._emit_metrics()
+            except Exception as e:
+                logger.warning("Metrics emit error: %s", e)
+
+    async def _emit_metrics(self):
+        """Drain per-agent counters and hand them to the metrics sink.
+
+        Runs on the same 60s tick as idle cleanup (per §2.7: per-call
+        events are forbidden; aggregates only). When no sink is wired
+        (tests, or production pre-dashboard-integration), counters still
+        reset so memory doesn't grow unboundedly.
+        """
+        if not self._instances:
+            return
+        # Take a consistent view of the instance list; drain_metrics()
+        # is cheap and doesn't require the page lock, so we don't serialize.
+        for inst in list(self._instances.values()):
+            payload = inst.drain_metrics()
+            if self._metrics_sink is None:
+                continue
+            try:
+                self._metrics_sink(payload)
+            except Exception as e:
+                logger.warning(
+                    "Metrics sink raised for '%s': %s", inst.agent_id, e,
+                )
 
     async def _cleanup_idle(self):
         now = time.time()
@@ -689,6 +766,19 @@ class BrowserManager:
         inst = self._instances.pop(agent_id, None)
         if inst is None:
             return
+        # Drain counters BEFORE the instance disappears from the fleet.
+        # Otherwise any clicks / snapshots / nav attempts since the last
+        # minute-tick are silently lost when idle cleanup or explicit
+        # stop fires. The periodic _emit_metrics hook only sees
+        # still-live instances; post-pop is the final accounting chance.
+        if self._metrics_sink is not None:
+            try:
+                payload = inst.drain_metrics()
+                self._metrics_sink(payload)
+            except Exception as e:
+                logger.warning(
+                    "Final metrics drain failed for '%s': %s", agent_id, e,
+                )
         if self._user_focused_agent == agent_id:
             self._user_focused_agent = None
         jitter = getattr(inst, '_jitter_task', None)
@@ -882,6 +972,12 @@ class BrowserManager:
                         logger.debug("Navigation timeout, retrying: %s", url)
                         await asyncio.sleep(2)
                         continue
+                    # Give up — if this was a timeout (including after retry),
+                    # log it for §4.6 metrics. Non-timeout failures go in a
+                    # generic bucket (just counted as click_fail… actually,
+                    # navigation is distinct; only timeouts go here).
+                    if "timeout" in str(e).lower():
+                        inst.m_nav_timeout += 1
                     return {"success": False, "error": str(e)}
 
             inst.dialog_active = False
@@ -1163,6 +1259,9 @@ class BrowserManager:
             inst.refs = refs
             snapshot_text = "\n".join(lines) if lines else "(no interactive elements)"
             snapshot_text = self.redactor.redact(agent_id, snapshot_text)
+            # Record snapshot byte size for §4.6 metrics. Collected per call;
+            # drained as p50/p95 on the next minute tick.
+            inst.m_snapshot_bytes.append(len(snapshot_text))
             # Agent-visible `refs` uses the minimal dict shape (backward
             # compatible); RefHandle is strictly an internal detail.
             response_refs = {rid: h.to_agent_dict() for rid, h in refs.items()}
@@ -1885,12 +1984,14 @@ class BrowserManager:
                             except Exception:
                                 pass
 
+                inst.m_click_success += 1
                 result = {"success": True, "data": {"clicked": ref or selector}}
                 if snapshot_after:
                     snap = await self._snapshot_impl(inst, agent_id)
                     result["snapshot"] = snap.get("data", {})
                 return result
             except Exception as e:
+                inst.m_click_fail += 1
                 return {"success": False, "error": str(e)}
 
     async def hover(
