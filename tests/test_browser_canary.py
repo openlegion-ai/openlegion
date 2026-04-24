@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import time
 from unittest.mock import AsyncMock, MagicMock
@@ -179,7 +181,12 @@ class TestPerScannerResilience:
 
     @pytest.mark.asyncio
     async def test_stops_canary_instance_after_run(self, monkeypatch, tmp_path):
-        """Explicit stop() after the sweep frees the canary's profile lock."""
+        """Explicit stop() after the sweep frees the canary's profile lock.
+
+        Both the pre-sweep cleanup and the post-sweep teardown must fire —
+        asserting >=1 would be satisfied by the pre-sweep call alone and
+        wouldn't catch a regression that dropped the post-sweep stop.
+        """
         from src.browser.canary import run_canary
         _enable_canary(monkeypatch)
 
@@ -189,8 +196,77 @@ class TestPerScannerResilience:
             state_path=tmp_path / "state.json",
             report_dir=tmp_path / "reports",
         )
-        # Called at start (best-effort cleanup) AND at end
-        assert mgr.stop.await_count >= 1
+        # Pre-sweep (line ~170) + post-sweep (finally block) = 2.
+        assert mgr.stop.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_stop_runs_on_cancellation(self, monkeypatch, tmp_path):
+        """A cancelled HTTP request (client disconnect) must not leave
+        the canary profile locked. The ``finally`` + ``asyncio.shield``
+        pattern in run_canary guarantees the stop runs."""
+        from src.browser.canary import run_canary
+        _enable_canary(monkeypatch)
+
+        mgr = _make_manager_mock()
+        slow_started = asyncio.Event()
+
+        async def slow_nav(*args, **kwargs):
+            slow_started.set()
+            await asyncio.sleep(30)  # would run past test timeout
+            return {"success": True}
+
+        mgr.navigate = AsyncMock(side_effect=slow_nav)
+
+        task = asyncio.create_task(run_canary(
+            mgr,
+            state_path=tmp_path / "state.json",
+            report_dir=tmp_path / "reports",
+        ))
+        # Wait until we're inside the first scanner's navigate, then
+        # cancel — same shape as a FastAPI request being aborted.
+        await asyncio.wait_for(slow_started.wait(), timeout=2)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        # Pre-sweep + finally teardown — both must fire even on cancel.
+        assert mgr.stop.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_concurrent_force_runs_are_serialized(
+        self, monkeypatch, tmp_path,
+    ):
+        """Two concurrent force=True callers must NOT race on the state
+        file or the canary profile — the run lock serializes them."""
+        from src.browser.canary import run_canary
+        _enable_canary(monkeypatch)
+
+        mgr = _make_manager_mock()
+
+        # Slow each navigate so overlap is visible if the lock failed.
+        async def slow_nav(*args, **kwargs):
+            await asyncio.sleep(0.01)
+            return {"success": True}
+
+        mgr.navigate = AsyncMock(side_effect=slow_nav)
+
+        results = await asyncio.gather(
+            run_canary(
+                mgr, force=True,
+                state_path=tmp_path / "state.json",
+                report_dir=tmp_path / "r",
+            ),
+            run_canary(
+                mgr, force=True,
+                state_path=tmp_path / "state.json",
+                report_dir=tmp_path / "r",
+            ),
+        )
+        assert len(results) == 2
+        assert all(isinstance(r, dict) for r in results)
+        # State file reflects exactly one last_run_ts from the later call.
+        state = json.loads((tmp_path / "state.json").read_text())
+        assert "last_run_ts" in state
 
 
 class TestCanaryEndpoint:

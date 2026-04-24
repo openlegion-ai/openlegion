@@ -40,17 +40,48 @@ class TestEnabledFlag:
         assert len(r) == 0
         assert r.dump() is None
 
+    def test_runtime_toggle_takes_effect_without_reset(
+        self, monkeypatch, tmp_path,
+    ):
+        """Operators should be able to flip BROWSER_RECORD_BEHAVIOR via
+        env/settings and have the next recorded event honor it — no
+        browser restart required."""
+        r = _recorder(monkeypatch, tmp_path, enabled=False)
+        r.record_click(method="cdp", success=True)
+        assert len(r) == 0
+
+        monkeypatch.setenv("BROWSER_RECORD_BEHAVIOR", "1")
+        import src.browser.flags as flags
+        flags._operator_settings = None
+
+        r.record_click(method="cdp", success=True)
+        assert len(r) == 1
+
+    def test_dump_survives_runtime_disable(self, monkeypatch, tmp_path):
+        """If operator disables the flag between record and dump, the
+        already-captured events must still flush — silently dropping
+        them would surprise the operator."""
+        r = _recorder(monkeypatch, tmp_path, enabled=True)
+        r.record_click(method="cdp", success=True)
+        assert len(r) == 1
+
+        monkeypatch.delenv("BROWSER_RECORD_BEHAVIOR", raising=False)
+        import src.browser.flags as flags
+        flags._operator_settings = None
+
+        out = r.dump()
+        assert out is not None and out.exists()
+
 
 class TestRecording:
     def test_click_appends(self, monkeypatch, tmp_path):
         r = _recorder(monkeypatch, tmp_path, enabled=True)
-        r.record_click(method="cdp", success=True, dwell_ms=40)
+        r.record_click(method="cdp", success=True)
         assert len(r) == 1
         event = r._events[-1]
         assert event["type"] == "click"
         assert event["method"] == "cdp"
         assert event["success"] is True
-        assert event["dwell_ms"] == 40
         assert event["interval_s"] is None  # first event
 
     def test_interval_tracked(self, monkeypatch, tmp_path):
@@ -143,6 +174,20 @@ class TestDump:
         r = BehaviorRecorder("a1", dump_dir=file_as_dir / "child")
         r.record_click(method="cdp", success=True)
         assert r.dump() is None  # silent failure
+
+    def test_rapid_dumps_do_not_overwrite(self, monkeypatch, tmp_path):
+        """Two dumps for the same agent within the same second must
+        not overwrite each other — the random suffix keeps both on
+        disk even when ``int(time.time())`` matches."""
+        r1 = _recorder(monkeypatch, tmp_path, enabled=True, agent_id="dup")
+        r1.record_click(method="cdp", success=True)
+        out1 = r1.dump()
+        r2 = _recorder(monkeypatch, tmp_path, enabled=True, agent_id="dup")
+        r2.record_click(method="cdp", success=True)
+        out2 = r2.dump()
+        assert out1 is not None and out2 is not None
+        assert out1 != out2
+        assert out1.exists() and out2.exists()
 
     def test_dump_sanitizes_agent_id_in_filename(self, monkeypatch, tmp_path):
         """Even if an unusual id gets through upstream validation, the

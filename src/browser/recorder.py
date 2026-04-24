@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 from collections import deque
 from pathlib import Path
@@ -55,6 +56,12 @@ class BehaviorRecorder:
 
     When disabled, ``record_*`` methods short-circuit to a single
     boolean check — zero allocation. Safe to construct unconditionally.
+
+    The enabled flag is re-read on each append via :func:`recorder_enabled`
+    so operator-level toggles (env var flip, dashboard settings) take
+    effect without requiring an agent reset. The check reads through
+    :mod:`src.browser.flags` which caches operator settings and falls
+    back to ``os.environ.get`` — cheap.
     """
 
     def __init__(
@@ -65,7 +72,6 @@ class BehaviorRecorder:
         dump_dir: Path | None = None,
     ):
         self.agent_id = agent_id
-        self._enabled = recorder_enabled()
         self._events: deque[dict] = deque(maxlen=buffer_size)
         self._dump_dir = dump_dir or _DEFAULT_DUMP_DIR
         # Track last event timestamp to compute inter-event intervals
@@ -74,14 +80,14 @@ class BehaviorRecorder:
 
     @property
     def enabled(self) -> bool:
-        return self._enabled
+        return recorder_enabled()
 
     def __len__(self) -> int:
         return len(self._events)
 
     def _append(self, kind: str, **fields: Any) -> None:
         """Shared append path — stamps timestamp + interval."""
-        if not self._enabled:
+        if not recorder_enabled():
             return
         now = time.time()
         interval = None if self._last_ts is None else round(now - self._last_ts, 6)
@@ -94,20 +100,9 @@ class BehaviorRecorder:
         }
         self._events.append(event)
 
-    def record_click(
-        self,
-        *,
-        method: str,
-        success: bool,
-        dwell_ms: int | None = None,
-    ) -> None:
-        """``method`` = 'x11' | 'cdp' | 'playwright'."""
-        self._append(
-            "click",
-            method=method,
-            success=success,
-            dwell_ms=dwell_ms,
-        )
+    def record_click(self, *, method: str, success: bool) -> None:
+        """``method`` = 'x11' | 'cdp' | 'auto' | 'playwright'."""
+        self._append("click", method=method, success=success)
 
     def record_keystrokes(
         self,
@@ -149,13 +144,16 @@ class BehaviorRecorder:
         self._append("navigate", host=host, wait_until=wait_until)
 
     def dump(self, *, reason: str = "reset") -> Path | None:
-        """Flush the buffer to ``/data/debug/{agent}-{ts}.jsonl``.
+        """Flush the buffer to ``/data/debug/{agent}-{ts}-{rand}.jsonl``.
 
         Returns the written path on success, ``None`` on failure or
-        when disabled / empty. Failures never propagate — recorder is
-        strictly diagnostic.
+        when the buffer is empty. Failures never propagate — the
+        recorder is strictly diagnostic. We don't re-check the enabled
+        flag on dump: if there are events in the buffer, they were
+        recorded while enabled and must not be silently discarded
+        because the operator flipped the flag off in the interim.
         """
-        if not self._enabled or not self._events:
+        if not self._events:
             return None
         try:
             self._dump_dir.mkdir(parents=True, exist_ok=True)
@@ -174,7 +172,13 @@ class BehaviorRecorder:
 
         ts = int(time.time())
         safe_agent = _sanitize_filename(self.agent_id)
-        target = self._dump_dir / f"{safe_agent}-{ts}.jsonl"
+        # Append a short random suffix so two dumps within the same
+        # second for the same agent (force-reset twice in quick
+        # succession, tests, rapid LRU churn) don't overwrite each
+        # other via ``os.replace``. 4 bytes = 8 hex chars, ~1-in-4B
+        # collision odds.
+        suffix = secrets.token_hex(4)
+        target = self._dump_dir / f"{safe_agent}-{ts}-{suffix}.jsonl"
         try:
             # Write via a `.partial` file + rename so a crashed dump
             # doesn't leave half-written records next to good ones.

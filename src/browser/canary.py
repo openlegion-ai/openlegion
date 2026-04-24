@@ -12,14 +12,24 @@ behavioral-fraud provider. The canary is an early-warning layer, not a
 certification.
 
 **Why a dedicated profile.** The canary visits its targets through the
-same `BrowserManager` as production agents, meaning it inherits every
-stealth tweak in `build_launch_options`, the current profile schema
-version (§4.4 migrate_profile), per-agent fonts, resolution, referrer
-pool — everything. The only thing isolated is the profile directory:
-the canary must not share cookies / localStorage with any production
-agent. That's achieved by giving it a dedicated agent-id
-(:data:`CANARY_AGENT_ID`), so its profile lives under its own
-``/data/profiles/<id>`` path and its cookie jar is its own.
+same `BrowserManager` as production agents, so it inherits every
+launch-time stealth setting from `build_launch_options` (Camoufox
+config, fonts, resolution, referrer pool), the current profile schema
+version (§4.4 migrate_profile), and whatever the operator has active
+in ``config/settings.json``. The isolation is at the profile
+directory only: the canary must not share cookies / localStorage with
+any production agent. That's achieved by giving it a dedicated
+agent-id (:data:`CANARY_AGENT_ID`), so its profile lives under its own
+``/data/profiles/<id>`` path.
+
+**This is a floor estimate, not parity.** A fresh canary profile has
+no browsing history, no storage estimate entropy, no IndexedDB
+entries, and no service-worker registrations — so it will *score
+slightly cleaner* than a 30-day-old production profile on scanners
+that sample those signals. Treat a clean canary score as a necessary
+condition for stealth, not a sufficient one. Real-world detection
+also involves TLS/H2/proxy-IP signals that client-side scanners
+cannot see (see §2.8).
 
 **Default off.** ``BROWSER_CANARY_ENABLED=true`` is required in the
 flags system; the HTTP endpoint returns 403 otherwise. We don't want
@@ -40,6 +50,7 @@ a ``"manual"`` marker — the operator visits the saved screenshot.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import time
@@ -60,6 +71,24 @@ logger = setup_logging("browser.canary")
 # to match AGENT_ID_RE_PATTERN but be unlikely to collide with any
 # real fleet template.
 CANARY_AGENT_ID = "canary-probe"
+
+# Serialize canary runs so two concurrent force=True callers can't
+# corrupt the state file or race on the single canary profile.
+# Lazy + loop-tracked so tests that construct fresh event loops
+# (pytest-asyncio's function scope) don't hit "Future attached to a
+# different loop". In production there's exactly one loop per process
+# so the rebinding branch never fires.
+_run_lock: asyncio.Lock | None = None
+_run_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_run_lock() -> asyncio.Lock:
+    global _run_lock, _run_lock_loop
+    loop = asyncio.get_running_loop()
+    if _run_lock is None or _run_lock_loop is not loop:
+        _run_lock = asyncio.Lock()
+        _run_lock_loop = loop
+    return _run_lock
 
 _SCANNERS: list[dict] = [
     {
@@ -139,6 +168,13 @@ async def run_canary(
     ``force=True``). Any scanner-specific failure is captured in the
     report rather than raised — a canary that crashes on one site
     should still surface signal from the others.
+
+    Serialized via :data:`_RUN_LOCK` so two concurrent ``force=True``
+    callers don't race on the canary profile, state file, or browser
+    slot. The lock is acquired AFTER the flag+rate-limit checks so
+    those still return quickly for callers that can't run right now.
+    Canary teardown runs under ``try/finally`` so a cancelled HTTP
+    request (client disconnect) still releases the profile lock.
     """
     if not canary_enabled():
         raise CanaryDisabledError(
@@ -156,42 +192,63 @@ async def run_canary(
             retry_after_s=int(_MIN_RUN_INTERVAL_S - (now - last_run)),
         )
 
-    report: dict = {
-        "ts": now,
-        "boot_id": manager.boot_id,
-        "agent_id": CANARY_AGENT_ID,
-        "scanners": [],
-    }
+    async with _get_run_lock():
+        # Re-check the rate-limit under the lock so a queue of waiters
+        # doesn't all run sequentially after the holder finishes.
+        state = _read_state(state_path)
+        last_run = float(state.get("last_run_ts", 0) or 0)
+        now = time.time()
+        if not force and now - last_run < _MIN_RUN_INTERVAL_S:
+            raise CanaryRateLimitedError(
+                retry_after_s=int(_MIN_RUN_INTERVAL_S - (now - last_run)),
+            )
 
-    # Stop any lingering canary instance so each run starts fresh on
-    # stealth config (useful when operators iterate on §6.x knobs).
-    with contextlib.suppress(Exception):
-        await manager.stop(CANARY_AGENT_ID)
+        report: dict = {
+            "ts": now,
+            "boot_id": manager.boot_id,
+            "agent_id": CANARY_AGENT_ID,
+            "scanners": [],
+        }
 
-    for scanner in _SCANNERS:
-        entry = await _run_single_scanner(manager, scanner, report_dir, now)
-        report["scanners"].append(entry)
+        # Stop any lingering canary instance so each run starts fresh on
+        # stealth config (useful when operators iterate on §6.x knobs).
+        with contextlib.suppress(Exception):
+            await manager.stop(CANARY_AGENT_ID)
 
-    # Stop canary after the sweep to release the profile lock and free
-    # its browser slot. A future run will respawn cleanly.
-    with contextlib.suppress(Exception):
-        await manager.stop(CANARY_AGENT_ID)
+        try:
+            for scanner in _SCANNERS:
+                entry = await _run_single_scanner(
+                    manager, scanner, report_dir, now,
+                )
+                report["scanners"].append(entry)
+        finally:
+            # Always attempt to stop the canary — a cancelled HTTP
+            # request (client disconnect) mustn't leave the Camoufox
+            # profile locked. ``asyncio.shield`` protects the stop
+            # from our own CancelledError so the cleanup task runs
+            # to completion even if the outer caller gives up; the
+            # ``suppress(Exception)`` handles real errors without
+            # touching CancelledError (which still propagates, as
+            # it must, so the caller knows we were cancelled).
+            with contextlib.suppress(Exception):
+                await asyncio.shield(manager.stop(CANARY_AGENT_ID))
 
-    # Heuristic overall score: average of scanner scores that produced a
-    # numeric value. Callers should treat this as a smoke-test signal,
-    # not a certification — operators read per-scanner details.
-    numeric_scores = [
-        s["score"] for s in report["scanners"]
-        if isinstance(s.get("score"), (int, float))
-    ]
-    report["overall_score"] = (
-        sum(numeric_scores) / len(numeric_scores) if numeric_scores else None
-    )
+        # Heuristic overall score: average of scanner scores that produced
+        # a numeric value. Callers should treat this as a smoke-test
+        # signal, not a certification — operators read per-scanner detail.
+        numeric_scores = [
+            s["score"] for s in report["scanners"]
+            if isinstance(s.get("score"), (int, float))
+        ]
+        report["overall_score"] = (
+            sum(numeric_scores) / len(numeric_scores)
+            if numeric_scores else None
+        )
 
-    state["last_run_ts"] = now
-    state["last_overall_score"] = report["overall_score"]
-    _write_state(state_path, state)
-    return report
+        state["last_run_ts"] = now
+        state["last_overall_score"] = report["overall_score"]
+        _write_state(state_path, state)
+        return report
 
 
 async def _run_single_scanner(
@@ -200,10 +257,21 @@ async def _run_single_scanner(
     report_dir: Path,
     ts: float,
 ) -> dict:
-    """Navigate + screenshot one scanner; never raises."""
+    """Navigate + screenshot one scanner; never raises.
+
+    Status progression: ``unknown`` → ``nav_failed`` / ``timeout`` /
+    ``error`` (on navigate), or → ``ok`` (navigate succeeded). Parse
+    and screenshot failures are tracked separately under
+    ``parse_error`` / ``screenshot_error`` so a bad score-extractor
+    doesn't mask a successful nav — operators debugging a specific
+    scanner need to know nav DID succeed before they chase the
+    wrong symptom.
+    """
     name = scanner["name"]
     url = scanner["url"]
     entry: dict = {"name": name, "url": url, "status": "unknown"}
+
+    # Navigate phase — the only phase that sets a non-ok status.
     try:
         nav = await asyncio.wait_for(
             manager.navigate(
@@ -214,35 +282,42 @@ async def _run_single_scanner(
             ),
             timeout=45,
         )
-        if not nav.get("success"):
-            entry["status"] = "nav_failed"
-            entry["error"] = nav.get("error", "")[:200]
-            return entry
-        entry["status"] = "ok"
-
-        shot = await manager.screenshot(CANARY_AGENT_ID, full_page=True)
-        if shot.get("success"):
-            try:
-                report_dir.mkdir(parents=True, exist_ok=True)
-                path = report_dir / f"{int(ts)}-{name}.png"
-                # Decode base64 back to bytes for disk.
-                import base64
-                path.write_bytes(base64.b64decode(
-                    shot["data"]["image_base64"],
-                ))
-                entry["screenshot_path"] = str(path)
-            except OSError as e:
-                logger.warning("Canary screenshot save failed: %s", e)
-
-        # Per-scanner score parsing is best-effort; we don't throw on
-        # parse failures. When we can't extract a numeric score, leave
-        # it as None so the overall average skips this entry.
-        entry["score"] = await _parse_scanner_score(manager, name)
     except asyncio.TimeoutError:
         entry["status"] = "timeout"
+        return entry
     except Exception as e:  # noqa: BLE001 — best-effort per-scanner
         entry["status"] = "error"
         entry["error"] = str(e)[:200]
+        return entry
+
+    if not nav.get("success"):
+        entry["status"] = "nav_failed"
+        entry["error"] = (nav.get("error") or "")[:200]
+        return entry
+    entry["status"] = "ok"
+
+    # Screenshot phase — failures here annotate the entry but don't
+    # demote status. A page that navigated but can't screenshot is
+    # still useful signal; operators read the status first.
+    try:
+        shot = await manager.screenshot(CANARY_AGENT_ID, full_page=True)
+        if shot.get("success"):
+            report_dir.mkdir(parents=True, exist_ok=True)
+            path = report_dir / f"{int(ts)}-{name}.png"
+            path.write_bytes(base64.b64decode(shot["data"]["image_base64"]))
+            entry["screenshot_path"] = str(path)
+    except Exception as e:  # noqa: BLE001
+        entry["screenshot_error"] = str(e)[:200]
+
+    # Parse phase — score extraction is best-effort per-site. Parse
+    # failures do NOT demote status from "ok" because the nav DID
+    # succeed; mark them separately so a stale DOM selector doesn't
+    # surface as a mystery "error" row.
+    try:
+        entry["score"] = await _parse_scanner_score(manager, name)
+    except Exception as e:  # noqa: BLE001
+        entry["score"] = None
+        entry["parse_error"] = str(e)[:200]
     return entry
 
 
