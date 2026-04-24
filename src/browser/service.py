@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from src.browser.captcha import get_solver
+from src.browser.profile_schema import migrate_profile
 from src.browser.redaction import CredentialRedactor
 from src.browser.stealth import build_launch_options
 from src.browser.timing import (
@@ -486,6 +487,20 @@ class BrowserManager:
 
         profile_dir = str(self.profiles_dir / agent_id)
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
+
+        # Bring the profile up to the current schema version BEFORE Camoufox
+        # opens it (§4.4). Post-launch migration would race Camoufox's own
+        # writes into the directory. Idempotent on already-current profiles;
+        # on failure restores the pre-migration backup and re-raises so we
+        # never launch against a half-migrated profile.
+        try:
+            migrate_profile(Path(profile_dir))
+        except Exception:
+            logger.exception(
+                "Profile migration failed for '%s' — aborting browser start",
+                agent_id,
+            )
+            raise
 
         proxy_config = self.get_proxy_config(agent_id)
         if proxy_config is not None:
