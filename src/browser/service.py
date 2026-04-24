@@ -336,6 +336,11 @@ class CamoufoxInstance:
         self.m_click_fail: int = 0
         self.m_nav_timeout: int = 0
         self.m_snapshot_bytes: list[int] = []
+        # §5.3 behavioral entropy recorder (dev-only). Always constructed;
+        # every record_* call short-circuits when the feature flag is
+        # off so production pays no cost.
+        from src.browser.recorder import BehaviorRecorder
+        self.recorder = BehaviorRecorder(agent_id)
 
     def _register_page(self, page) -> str:
         """Assign a stable UUID to a Page if not already registered.
@@ -784,6 +789,17 @@ class BrowserManager:
         jitter = getattr(inst, '_jitter_task', None)
         if jitter:
             jitter.cancel()
+        # §5.3 dump the behavior recorder buffer (no-op when disabled or
+        # empty). Runs before ``context.close()`` so a hung browser close
+        # doesn't eat the diagnostic data.
+        recorder = getattr(inst, "recorder", None)
+        if recorder is not None:
+            try:
+                recorder.dump(reason="stop")
+            except Exception as e:
+                logger.debug(
+                    "Recorder dump failed for '%s': %s", agent_id, e,
+                )
         try:
             await inst.context.close()
         except Exception as e:
@@ -979,6 +995,12 @@ class BrowserManager:
                     if "timeout" in str(e).lower():
                         inst.m_nav_timeout += 1
                     return {"success": False, "error": str(e)}
+
+            # §5.3 recorder: log host only, never the full URL — query
+            # strings and fragments routinely carry secrets.
+            inst.recorder.record_navigate(
+                host=parsed.hostname or "", wait_until=wait_until,
+            )
 
             inst.dialog_active = False
             inst.dialog_detected = False
@@ -1985,6 +2007,10 @@ class BrowserManager:
                                 pass
 
                 inst.m_click_success += 1
+                # Recorder doesn't need the x11/cdp routing detail —
+                # the click dispatch chooses internally and the timing
+                # distribution is what §5.3/§9.5 consumes.
+                inst.recorder.record_click(method="auto", success=True)
                 result = {"success": True, "data": {"clicked": ref or selector}}
                 if snapshot_after:
                     snap = await self._snapshot_impl(inst, agent_id)
@@ -1992,6 +2018,7 @@ class BrowserManager:
                 return result
             except Exception as e:
                 inst.m_click_fail += 1
+                inst.recorder.record_click(method="auto", success=False)
                 return {"success": False, "error": str(e)}
 
     async def hover(
@@ -2133,6 +2160,11 @@ class BrowserManager:
                 # batches DOM reconciliation asynchronously.
                 await asyncio.sleep(0.10 if fast else action_delay())
 
+                inst.recorder.record_keystrokes(
+                    char_count=len(text),
+                    fast=fast,
+                    method="x11" if _use_x11 else ("cdp-fast" if fast else "cdp"),
+                )
                 result = {"success": True, "data": {"typed_into": ref or selector, "length": len(text)}}
                 if snapshot_after:
                     snap = await self._snapshot_impl(inst, agent_id)
@@ -2326,6 +2358,11 @@ class BrowserManager:
                         if scrolled < amount:
                             await asyncio.sleep(scroll_pause() / max(0.5, ramp))
 
+                inst.recorder.record_scroll(
+                    direction=direction,
+                    delta=scrolled,
+                    method="x11" if _use_x11 else "cdp",
+                )
                 return {
                     "success": True,
                     "data": {"direction": direction, "pixels": scrolled},
