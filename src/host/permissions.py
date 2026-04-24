@@ -18,6 +18,36 @@ from src.shared.utils import setup_logging
 logger = setup_logging("host.permissions")
 
 
+# Known browser action names. Used ONLY for mesh-side input validation —
+# catches typo'd action names with a clean 400 before reaching the browser
+# service. Does NOT gate permissions (every known action is granted to any
+# agent with `can_use_browser=true` unless an explicit `browser_actions`
+# list narrows the set; see `can_browser_action`).
+#
+# As new actions are added in later phases they SHOULD be added here so the
+# mesh recognizes them. Agents gain access to them automatically; operators
+# who want to restrict specific actions do so per-template via
+# `AgentPermissions.browser_actions`.
+KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset({
+    # Legacy 16 — present pre-Phase 1 refactor.
+    "navigate", "snapshot", "click", "type", "hover",
+    "screenshot", "reset", "focus", "status", "detect_captcha", "scroll",
+    "wait_for", "press_key", "go_back", "go_forward", "switch_tab",
+    # Phase 1.5 file-transfer actions. Reserved here so the mesh input
+    # validation accepts the action names even before Phase 1.5's
+    # endpoints land in `src/browser/server.py`. If a caller invokes
+    # these before 1.5 is deployed, the browser service returns a clean
+    # 404 on the unknown URL instead of the mesh rejecting the action
+    # name as unknown — avoids a cross-PR merge-order dependency.
+    "upload_file", "download",
+})
+
+# Back-compat alias — retained so `host/server.py` and test fixtures that
+# imported `LEGACY_BROWSER_ACTIONS` keep working. Prefer `KNOWN_BROWSER_ACTIONS`
+# in new code.
+LEGACY_BROWSER_ACTIONS = KNOWN_BROWSER_ACTIONS
+
+
 class PermissionMatrix:
     """Enforces agent-level permissions for mesh operations."""
 
@@ -60,6 +90,7 @@ class PermissionMatrix:
                 allowed_apis=default.allowed_apis,
                 allowed_credentials=default.allowed_credentials,
                 can_use_browser=default.can_use_browser,
+                browser_actions=default.browser_actions,
                 can_spawn=default.can_spawn,
                 can_manage_cron=default.can_manage_cron,
                 can_use_wallet=default.can_use_wallet,
@@ -112,6 +143,40 @@ class PermissionMatrix:
             return True
         perms = self.get_permissions(agent_id)
         return perms.can_use_browser
+
+    def can_browser_action(self, agent_id: str, action: str) -> bool:
+        """Check if agent has permission for a specific browser action.
+
+        Default-allow UX: any agent with ``can_use_browser=true`` gets ALL
+        known browser actions unless their template explicitly narrows the
+        set via ``browser_actions``. Operators who want restriction use
+        an explicit list.
+
+        ``browser_actions`` semantics:
+           - ``None`` (default) → **all** current and future actions.
+             Equivalent to ``["*"]``; kept as the default because "turn
+             browser on, agent can browse" is the common expectation.
+           - ``["*"]`` → all actions (explicit form).
+           - Specific list → only those actions (opt-out restriction).
+           - ``[]`` → no actions (equivalent to ``can_use_browser=False``).
+
+        ``action`` must be a known action string. Input validation against
+        :data:`KNOWN_BROWSER_ACTIONS` (catching typos) happens at the mesh
+        gate; this method assumes the caller has validated and does not
+        re-check, allowing it to also pass for future actions not yet in
+        ``KNOWN_BROWSER_ACTIONS`` at the moment a specific grant is evaluated.
+        """
+        if self._is_trusted(agent_id):
+            return True
+        perms = self.get_permissions(agent_id)
+        if not perms.can_use_browser:
+            return False
+        allowed = perms.browser_actions
+        if allowed is None:
+            return True  # default-allow: all known actions
+        if "*" in allowed:
+            return True
+        return action in allowed
 
     def can_spawn(self, agent_id: str) -> bool:
         """Check if agent is allowed to spawn ephemeral agents."""

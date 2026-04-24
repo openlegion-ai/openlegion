@@ -2512,34 +2512,19 @@ class TestHover:
 
 
 class TestAllowedBrowserActions:
-    """Regression tests for the mesh-proxy allowed-action allowlist.
+    """Regression tests for the mesh-proxy known-action set.
 
-    Any browser action added to browser_tool.py must also be in the
-    _ALLOWED_BROWSER_ACTIONS set in host/server.py, otherwise the skill silently
-    fails with a 400 from the proxy.
+    Any browser action added to browser_tool.py must also be in
+    KNOWN_BROWSER_ACTIONS in src/host/permissions.py (single source of truth;
+    host/server.py imports as _ALLOWED_BROWSER_ACTIONS for input validation)
+    — otherwise the skill silently fails with a 400 "unknown action" from
+    the proxy.
     """
 
     def _get_allowed_actions(self) -> frozenset[str]:
-        """Extract _ALLOWED_BROWSER_ACTIONS from host/server.py without running the server."""
-        import ast
-        from pathlib import Path
-        source = (Path(__file__).parent.parent / "src/host/server.py").read_text()
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Assign)
-                and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == "_ALLOWED_BROWSER_ACTIONS"
-                and isinstance(node.value, ast.Call)
-            ):
-                # frozenset({...}) call — extract string elements
-                set_literal = node.value.args[0]
-                if isinstance(set_literal, ast.Set):
-                    return frozenset(
-                        elt.value for elt in set_literal.elts
-                        if isinstance(elt, ast.Constant)
-                    )
-        return frozenset()
+        """Load the canonical known-action set from host.permissions."""
+        from src.host.permissions import KNOWN_BROWSER_ACTIONS
+        return KNOWN_BROWSER_ACTIONS
 
     def test_wait_for_in_allowed_actions(self):
         """wait_for must be allowed — browser_wait_for skill depends on it."""
