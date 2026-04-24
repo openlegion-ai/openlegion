@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from src.browser.ref_handle import from_legacy_dict as _h
 from src.browser.service import BrowserManager, CamoufoxInstance
 
 
@@ -305,7 +306,7 @@ class TestBrowserManagerRefResolution:
         mock_page.get_by_role.return_value = mock_locator
         mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "button", "name": "Submit", "index": 0}}
+        inst.seed_refs_legacy({"e0": {"role": "button", "name": "Submit", "index": 0}})
 
         locator = mgr._locator_from_ref(inst, "e0")
         mock_page.get_by_role.assert_called_once_with("button", name="Submit", exact=True)
@@ -323,7 +324,7 @@ class TestBrowserManagerRefResolution:
         mock_page.get_by_role.return_value = mock_locator
         mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "textbox", "name": "", "index": 0}}
+        inst.seed_refs_legacy({"e0": {"role": "textbox", "name": "", "index": 0}})
 
         mgr._locator_from_ref(inst, "e0")
         mock_page.get_by_role.assert_called_once_with("textbox")
@@ -341,10 +342,10 @@ class TestBrowserManagerRefResolution:
         mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         # e1 is the second occurrence (index=1) of the same textbox
-        inst.refs = {
+        inst.seed_refs_legacy({
             "e0": {"role": "textbox", "name": "Post text", "index": 0},
             "e1": {"role": "textbox", "name": "Post text", "index": 1},
-        }
+        })
 
         mgr._locator_from_ref(inst, "e1")
         mock_locator.nth.assert_called_once_with(1)
@@ -767,7 +768,7 @@ class TestClick:
         mock_page.get_by_role.return_value = mock_locator
         mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "button", "name": "Submit"}}
+        inst.seed_refs_legacy({"e0": {"role": "button", "name": "Submit"}})
         mgr._instances["a1"] = inst
 
         result = await mgr.click("a1", ref="e0")
@@ -1052,8 +1053,16 @@ class TestSnapshot:
         assert "e2" in result["data"]["refs"]
         assert result["data"]["refs"]["e0"]["role"] == "button"
         assert "Submit" in result["data"]["snapshot"]
-        # Refs stored on instance for click/type by ref
-        assert inst.refs == result["data"]["refs"]
+        # Refs stored on instance as RefHandle for click/type resolution;
+        # wire-format refs (the response) carry the minimal dict shape agents
+        # see. Verify both match on the visible fields.
+        assert set(inst.refs.keys()) == set(result["data"]["refs"].keys())
+        for rid, wire in result["data"]["refs"].items():
+            handle = inst.refs[rid]
+            assert handle.role == wire["role"]
+            assert handle.name == wire["name"]
+            assert handle.occurrence == wire["index"]
+            assert handle.disabled == wire["disabled"]
 
     @pytest.mark.asyncio
     async def test_snapshot_no_interactive_elements(self):
@@ -1159,7 +1168,7 @@ class TestTypeTextWithRef:
         mock_page.keyboard.press = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=True)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "textbox", "name": "Email"}}
+        inst.seed_refs_legacy({"e0": {"role": "textbox", "name": "Email"}})
         mgr._instances["a1"] = inst
 
         with patch("src.browser.service.random.random", return_value=1.0):
@@ -1187,7 +1196,7 @@ class TestTypeTextWithRef:
         mock_page.keyboard.press = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=True)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "textbox", "name": "Email"}}
+        inst.seed_refs_legacy({"e0": {"role": "textbox", "name": "Email"}})
         mgr._instances["a1"] = inst
 
         with patch("src.browser.service.random.random", return_value=1.0):
@@ -1435,7 +1444,7 @@ class TestScroll:
         mock_page.get_by_role.return_value = mock_locator
         mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e3": {"role": "button", "name": "Submit"}}
+        inst.seed_refs_legacy({"e3": {"role": "button", "name": "Submit"}})
         mgr._instances["a1"] = inst
 
         result = await mgr.scroll("a1", ref="e3")
@@ -1452,7 +1461,7 @@ class TestScroll:
         mock_page.viewport_size = {"width": 1280, "height": 720}
         mock_page.evaluate = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "button", "name": "OK"}}
+        inst.seed_refs_legacy({"e0": {"role": "button", "name": "OK"}})
         mgr._instances["a1"] = inst
 
         result = await mgr.scroll("a1", ref="e99")
@@ -1993,7 +2002,7 @@ class TestTypeFast:
         mock_page.keyboard.press = AsyncMock()
         mock_page.mouse = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "textbox", "name": "Search", "index": 0}}
+        inst.seed_refs_legacy({"e0": {"role": "textbox", "name": "Search", "index": 0}})
         mgr._instances["a1"] = inst
 
         delays: list[float] = []
@@ -2380,7 +2389,7 @@ class TestForceClick:
         mock_page.get_by_role.return_value = mock_locator
         mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e0": {"role": "button", "name": "Post"}}
+        inst.seed_refs_legacy({"e0": {"role": "button", "name": "Post"}})
         mgr._instances["a1"] = inst
 
         result = await mgr.click("a1", ref="e0", force=True)
@@ -2476,7 +2485,7 @@ class TestHover:
         mock_page.get_by_role.return_value = mock_locator
         mock_locator.nth = MagicMock(return_value=mock_locator)
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
-        inst.refs = {"e3": {"role": "link", "name": "Products"}}
+        inst.seed_refs_legacy({"e3": {"role": "link", "name": "Products"}})
         mgr._instances["a1"] = inst
 
         with patch("src.browser.service.asyncio.sleep"):
@@ -2687,7 +2696,7 @@ class TestAutoForceClick:
         from src.browser.service import BrowserManager
 
         mgr = self._make_manager()
-        refs = {"e1": {"role": "button", "name": "Post", "index": 0, "disabled": True}}
+        refs = {k: _h(v) for k, v in {"e1": {"role": "button", "name": "Post", "index": 0, "disabled": True}}.items()}
         inst = self._make_instance(refs)
 
         mock_locator = AsyncMock()
@@ -2710,7 +2719,7 @@ class TestAutoForceClick:
         from src.browser.service import BrowserManager
 
         mgr = self._make_manager()
-        refs = {"e2": {"role": "link", "name": "Sign in", "index": 0, "disabled": True}}
+        refs = {k: _h(v) for k, v in {"e2": {"role": "link", "name": "Sign in", "index": 0, "disabled": True}}.items()}
         inst = self._make_instance(refs)
 
         mock_locator = AsyncMock()
@@ -2733,7 +2742,11 @@ class TestAutoForceClick:
         from src.browser.service import BrowserManager
 
         mgr = self._make_manager()
-        refs = {"e3": {"role": "textbox", "name": "Search", "index": 0, "disabled": True}}
+        refs = {
+            k: _h(v) for k, v in {
+                "e3": {"role": "textbox", "name": "Search", "index": 0, "disabled": True},
+            }.items()
+        }
         inst = self._make_instance(refs)
 
         mock_locator = AsyncMock()
@@ -2755,7 +2768,11 @@ class TestAutoForceClick:
         from src.browser.service import BrowserManager
 
         mgr = self._make_manager()
-        refs = {"e4": {"role": "menuitem", "name": "Delete", "index": 0, "disabled": True}}
+        refs = {
+            k: _h(v) for k, v in {
+                "e4": {"role": "menuitem", "name": "Delete", "index": 0, "disabled": True},
+            }.items()
+        }
         inst = self._make_instance(refs)
 
         mock_locator = AsyncMock()
@@ -2777,7 +2794,11 @@ class TestAutoForceClick:
         from src.browser.service import BrowserManager
 
         mgr = self._make_manager()
-        refs = {"e5": {"role": "button", "name": "Submit", "index": 0, "disabled": False}}
+        refs = {
+            k: _h(v) for k, v in {
+                "e5": {"role": "button", "name": "Submit", "index": 0, "disabled": False},
+            }.items()
+        }
         inst = self._make_instance(refs)
 
         mock_locator = AsyncMock()
@@ -2799,7 +2820,7 @@ class TestAutoForceClick:
         from src.browser.service import BrowserManager
 
         mgr = self._make_manager()
-        refs = {"e6": {"role": "button", "name": "Post", "index": 0, "disabled": True}}
+        refs = {k: _h(v) for k, v in {"e6": {"role": "button", "name": "Post", "index": 0, "disabled": True}}.items()}
         inst = self._make_instance(refs)
 
         mock_locator = AsyncMock()
@@ -2821,7 +2842,7 @@ class TestAutoForceClick:
         from src.browser.service import BrowserManager
 
         mgr = self._make_manager()
-        refs = {"e7": {"role": "button", "name": "OK", "index": 0}}
+        refs = {k: _h(v) for k, v in {"e7": {"role": "button", "name": "OK", "index": 0}}.items()}
         inst = self._make_instance(refs)
 
         mock_locator = AsyncMock()
@@ -2870,7 +2891,7 @@ class TestSnapshotDisabledField:
             result = await mgr.snapshot("agent1")
 
         assert result["success"] is True
-        assert inst.refs["e0"]["disabled"] is True
+        assert inst.refs["e0"].disabled is True
 
     @pytest.mark.asyncio
     async def test_non_disabled_element_has_disabled_false(self):
@@ -2901,7 +2922,7 @@ class TestSnapshotDisabledField:
             result = await mgr.snapshot("agent1")
 
         assert result["success"] is True
-        assert inst.refs["e0"]["disabled"] is False
+        assert inst.refs["e0"].disabled is False
 
 
 class TestTypeTextSettleDelays:
@@ -2919,7 +2940,11 @@ class TestTypeTextSettleDelays:
         inst.page.keyboard = AsyncMock()
         inst.page.keyboard.press = AsyncMock()
         inst.x11_wid = 12345
-        inst.refs = {"e1": {"role": "textbox", "name": "Tweet", "index": 0, "disabled": False}}
+        inst.refs = {
+            k: _h(v) for k, v in {
+                "e1": {"role": "textbox", "name": "Tweet", "index": 0, "disabled": False},
+            }.items()
+        }
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
         inst._user_control = False
@@ -2959,7 +2984,11 @@ class TestTypeTextSettleDelays:
         inst.page.keyboard = AsyncMock()
         inst.page.keyboard.press = AsyncMock()
         inst.x11_wid = 12345
-        inst.refs = {"e1": {"role": "textbox", "name": "Tweet", "index": 0, "disabled": False}}
+        inst.refs = {
+            k: _h(v) for k, v in {
+                "e1": {"role": "textbox", "name": "Tweet", "index": 0, "disabled": False},
+            }.items()
+        }
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
         inst._user_control = False
@@ -3221,7 +3250,11 @@ class TestSwitchTab:
         inst.page = page1
         inst.context = MagicMock()
         inst.context.pages = [page1, page2]
-        inst.refs = {"e0": {"role": "button", "name": "Old", "index": 0, "disabled": False}}
+        inst.refs = {
+            k: _h(v) for k, v in {
+                "e0": {"role": "button", "name": "Old", "index": 0, "disabled": False},
+            }.items()
+        }
         inst.lock = asyncio.Lock()
         inst.touch = MagicMock()
 
@@ -3585,7 +3618,7 @@ class TestDialogScoping:
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.dialog_active = True
-        inst.refs = {"e0": {"role": "button", "name": "Post", "index": 0}}
+        inst.seed_refs_legacy({"e0": {"role": "button", "name": "Post", "index": 0}})
 
         locator = mgr._locator_from_ref(inst, "e0")
 
@@ -3610,7 +3643,7 @@ class TestDialogScoping:
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
         inst.dialog_active = False
-        inst.refs = {"e0": {"role": "button", "name": "Post", "index": 0}}
+        inst.seed_refs_legacy({"e0": {"role": "button", "name": "Post", "index": 0}})
 
         mgr._locator_from_ref(inst, "e0")
 
@@ -3785,9 +3818,9 @@ class TestDialogScoping:
         # Simulate: modal detected but scoping failed (full-tree fallback)
         inst.dialog_detected = True
         inst.dialog_active = False
-        inst.refs = {
+        inst.seed_refs_legacy({
             "e0": {"role": "button", "name": "Post", "index": 0, "disabled": True},
-        }
+        })
 
         result = await mgr.click("a1", ref="e0")
         assert result["success"] is True
@@ -3827,9 +3860,9 @@ class TestDialogScoping:
         # Simulate: modal detected AND scoping succeeded
         inst.dialog_detected = True
         inst.dialog_active = True
-        inst.refs = {
+        inst.seed_refs_legacy({
             "e0": {"role": "button", "name": "Post", "index": 0, "disabled": True},
-        }
+        })
 
         result = await mgr.click("a1", ref="e0")
         assert result["success"] is True
@@ -4782,7 +4815,11 @@ class TestX11Input:
         inst.page.url = "https://x.com/compose/post"
         inst.page.keyboard = AsyncMock()
         inst.lock = asyncio.Lock()
-        inst.refs = {"T1": {"role": "textbox", "name": "What is happening?!", "index": 0}}
+        inst.refs = {
+            k: _h(v) for k, v in {
+                "T1": {"role": "textbox", "name": "What is happening?!", "index": 0},
+            }.items()
+        }
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
@@ -4806,7 +4843,7 @@ class TestX11Input:
         inst.page.url = "https://google.com/search"
         inst.page.keyboard = AsyncMock()
         inst.lock = asyncio.Lock()
-        inst.refs = {"T1": {"role": "textbox", "name": "Search", "index": 0}}
+        inst.refs = {k: _h(v) for k, v in {"T1": {"role": "textbox", "name": "Search", "index": 0}}.items()}
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
@@ -4910,7 +4947,7 @@ class TestX11Input:
         inst.page.url = "https://x.com/compose/post"
         inst.page.keyboard = AsyncMock()
         inst.lock = asyncio.Lock()
-        inst.refs = {"T1": {"role": "textbox", "name": "Post", "index": 0}}
+        inst.refs = {k: _h(v) for k, v in {"T1": {"role": "textbox", "name": "Post", "index": 0}}.items()}
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
@@ -4933,7 +4970,7 @@ class TestX11Input:
         inst.page.url = "https://x.com/compose/post"
         inst.page.keyboard = AsyncMock()
         inst.lock = asyncio.Lock()
-        inst.refs = {"T1": {"role": "textbox", "name": "Post", "index": 0}}
+        inst.refs = {k: _h(v) for k, v in {"T1": {"role": "textbox", "name": "Post", "index": 0}}.items()}
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
@@ -5036,7 +5073,7 @@ class TestX11Input:
         inst = self._make_instance()
         inst.page = MagicMock()
         inst.page.url = "https://x.com/home"
-        inst.refs = {"B1": {"role": "button", "name": "Like", "index": 0}}
+        inst.refs = {k: _h(v) for k, v in {"B1": {"role": "button", "name": "Like", "index": 0}}.items()}
         inst.lock = asyncio.Lock()
 
         mock_locator = AsyncMock()
@@ -5058,7 +5095,7 @@ class TestX11Input:
         inst.page.url = "https://x.com/compose/post"
         inst.page.keyboard = AsyncMock()
         inst.lock = asyncio.Lock()
-        inst.refs = {"T1": {"role": "textbox", "name": "Post", "index": 0}}
+        inst.refs = {k: _h(v) for k, v in {"T1": {"role": "textbox", "name": "Post", "index": 0}}.items()}
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
@@ -5082,7 +5119,7 @@ class TestX11Input:
         inst.page.url = "https://x.com/compose/post"
         inst.page.keyboard = AsyncMock()
         inst.lock = asyncio.Lock()
-        inst.refs = {"T1": {"role": "textbox", "name": "Post", "index": 0}}
+        inst.refs = {k: _h(v) for k, v in {"T1": {"role": "textbox", "name": "Post", "index": 0}}.items()}
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
@@ -5221,7 +5258,7 @@ class TestX11Input:
         inst.page = MagicMock()
         inst.page.url = "https://x.com/home"
         inst.lock = asyncio.Lock()
-        inst.refs = {"e0": {"role": "button", "name": "Like", "index": 0}}
+        inst.seed_refs_legacy({"e0": {"role": "button", "name": "Like", "index": 0}})
 
         mock_locator = AsyncMock()
         mgr.get_or_start = AsyncMock(return_value=inst)
@@ -5240,7 +5277,7 @@ class TestX11Input:
         inst.page = MagicMock()
         inst.page.url = "https://google.com"
         inst.lock = asyncio.Lock()
-        inst.refs = {"e0": {"role": "button", "name": "Search", "index": 0}}
+        inst.seed_refs_legacy({"e0": {"role": "button", "name": "Search", "index": 0}})
 
         mock_locator = AsyncMock()
         mock_locator.hover = AsyncMock()
@@ -5261,7 +5298,7 @@ class TestX11Input:
         inst.page = MagicMock()
         inst.page.url = "https://x.com/home"
         inst.lock = asyncio.Lock()
-        inst.refs = {"e0": {"role": "button", "name": "Like", "index": 0}}
+        inst.seed_refs_legacy({"e0": {"role": "button", "name": "Like", "index": 0}})
 
         mock_locator = AsyncMock()
         mock_locator.hover = AsyncMock()
@@ -5458,7 +5495,7 @@ class TestModalRetryRequery:
         assert query_call_count[0] >= 2
         # Fresh handle should have produced the Post button
         post_refs = [r for r in inst.refs.values()
-                     if r["role"] == "button" and r["name"] == "Post"]
+                     if r.role == "button" and r.name == "Post"]
         assert len(post_refs) == 1
         # Sidebar elements should be excluded
         assert "Home" not in result["data"]["snapshot"]
