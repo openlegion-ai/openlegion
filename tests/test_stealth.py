@@ -39,3 +39,66 @@ class TestBuildLaunchOptionsProxy:
             opts = build_launch_options("agent-1", "/tmp/profile")
         assert "proxy" not in opts
         assert opts.get("geoip") is not True
+
+
+class TestResolutionPool:
+    """§6.1: per-agent resolution pool, deterministic from agent_id."""
+
+    def test_pick_resolution_is_deterministic(self):
+        from src.browser.stealth import pick_resolution
+
+        # Same input → same output, every time. Survives restart /
+        # profile wipe by design.
+        assert pick_resolution("alpha") == pick_resolution("alpha")
+        assert pick_resolution("beta-42") == pick_resolution("beta-42")
+
+    def test_pick_resolution_returns_pool_entry(self):
+        from src.browser.stealth import _RESOLUTION_POOL, pick_resolution
+
+        valid = {res for res, _ in _RESOLUTION_POOL}
+        for agent_id in ("a", "b", "x-x-x", "canary-probe", "agent-1234"):
+            assert pick_resolution(agent_id) in valid
+
+    def test_pick_resolution_distribution_matches_weights(self):
+        """Across a large sample, empirical picks should approximate the
+        weights. We don't assert perfect alignment — just that no bucket
+        is drastically under/over-represented (would catch e.g. a typo in
+        the cumulative walk)."""
+        from src.browser.stealth import _RESOLUTION_POOL, pick_resolution
+
+        weights = {res: w for res, w in _RESOLUTION_POOL}
+        counts: dict = {res: 0 for res in weights}
+        N = 5000
+        for i in range(N):
+            counts[pick_resolution(f"agent-{i}")] += 1
+
+        for res, expected_weight in weights.items():
+            observed = counts[res] / N
+            # Allow generous drift (±5pp) — this is a sanity check on
+            # the cumulative-bucket loop, not a statistical claim.
+            assert abs(observed - expected_weight) < 0.05, (
+                f"{res}: observed {observed:.3f} vs expected {expected_weight}"
+            )
+
+    def test_build_launch_options_applies_resolution(self):
+        from src.browser.stealth import build_launch_options, pick_resolution
+
+        with patch.dict("os.environ", {}, clear=True):
+            opts = build_launch_options("agent-xyz", "/tmp/profile")
+
+        expected = pick_resolution("agent-xyz")
+        assert opts["window"] == expected
+        # Screen fingerprint (when browserforge is available) matches.
+        screen = opts.get("screen")
+        if screen is not None:
+            assert screen.max_width == expected[0]
+            assert screen.max_height == expected[1]
+
+    def test_different_agents_can_get_different_resolutions(self):
+        """Sanity: across a small sample we see at least 2 distinct
+        resolutions. If the pick function collapsed to one bucket this
+        test would catch it quickly."""
+        from src.browser.stealth import pick_resolution
+
+        picked = {pick_resolution(f"a{i}") for i in range(50)}
+        assert len(picked) >= 2

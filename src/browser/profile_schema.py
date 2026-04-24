@@ -61,7 +61,50 @@ logger = setup_logging("browser.profile_schema")
 
 # Bump this monotonically when adding a new migration. Never decrement.
 # Never reuse a number — migrations are applied by version key in order.
-PROFILE_SCHEMA_VERSION: int = 1
+PROFILE_SCHEMA_VERSION: int = 2
+
+
+def _v2_clear_font_caches(profile: Path) -> None:
+    """Migration v2 (Phase 3 §6.2): clear Firefox font caches.
+
+    The container image just gained the Carlito/Caladea/Liberation/DejaVu
+    font stack plus fontconfig aliases that resolve Segoe UI / Calibri /
+    Cambria to those substitutes. Firefox caches the font list it sees
+    at first launch in ``startupCache/`` and several of the parent-level
+    ``.mozlz4`` blobs under the profile root. If we don't clear them,
+    existing profiles keep using the stale "no Segoe UI available" font
+    table and the fingerprint alignment we just installed never takes
+    effect.
+
+    Idempotent. Missing files on a fresh profile are fine. Touches only
+    cache artifacts — never cookies / localStorage / IndexedDB /
+    bookmarks / the user's session state.
+    """
+    # startupCache/ holds compiled-XUL + fontlist blobs Firefox rebuilds
+    # on any chrome/resource change. Whole directory is safe to wipe —
+    # it's rebuilt automatically on next launch.
+    startup_cache = profile / "startupCache"
+    if startup_cache.exists() and startup_cache.is_dir():
+        _remove_tree(startup_cache)
+
+    # Top-level cache blobs Firefox uses for font metadata. Names are
+    # stable across versions; removing them is safe.
+    for cache_file in (
+        "fontlist.json",
+        "font.properties",
+        "compatibility.ini",  # triggers Firefox to re-probe on next start
+    ):
+        target = profile / cache_file
+        if target.is_file():
+            try:
+                target.unlink()
+            except OSError as e:
+                # Migration framework restores backup on exception; a
+                # locked file should be rare but worth reporting up.
+                logger.warning(
+                    "v2 font-cache clear: could not remove %s: %s",
+                    target, e,
+                )
 
 
 # Callables registered here run in `migrate_profile()` when the on-disk
@@ -75,10 +118,9 @@ PROFILE_SCHEMA_VERSION: int = 1
 #   - Never touch cookies.sqlite, webappsstore.sqlite, storage/default/,
 #     or bookmarks.sqlite. Preserve user sessions.
 #   - Raise on unrecoverable failure. The caller will restore from .bak.
-#
-# Phase 1.4 has no migrations yet — the framework is the deliverable.
-# Later phases append entries here.
-_MIGRATIONS: dict[int, Callable[[Path], None]] = {}
+_MIGRATIONS: dict[int, Callable[[Path], None]] = {
+    2: _v2_clear_font_caches,
+}
 
 
 # ── On-disk marker & lock file naming ──────────────────────────────────────
