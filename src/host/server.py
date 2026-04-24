@@ -2711,16 +2711,34 @@ def create_mesh_app(
             logger.debug("Browser metrics poll failed: %s", e)
             return
         boot_id = data.get("boot_id") or ""
+        is_first_seen = _browser_metrics_seq.get("_boot_id") != boot_id
         # Reset the watermark when the browser service restarts, otherwise
         # we'd starve forever waiting for seqs that never arrive.
-        if _browser_metrics_seq.get("_boot_id") != boot_id:
+        if is_first_seen:
             _browser_metrics_seq["_boot_id"] = boot_id
             _browser_metrics_seq["_last_seen"] = 0
-        for payload in data.get("metrics", []) or []:
+
+        payloads = [
+            p for p in (data.get("metrics") or [])
+            if int(p.get("seq", 0)) > _browser_metrics_seq.get("_last_seen", 0)
+        ]
+        # On first-seen (fresh mesh or browser restart), only surface the
+        # latest payload per agent. A long-running browser service can
+        # return hours of history; flooding the dashboard's 500-event
+        # ring buffer with stale entries would evict live events and
+        # show agents with data that no longer reflects current health.
+        if is_first_seen and payloads:
+            latest_by_agent: dict[str, dict] = {}
+            for p in payloads:
+                latest_by_agent[p.get("agent_id", "")] = p
+            payloads = sorted(
+                latest_by_agent.values(), key=lambda p: int(p.get("seq", 0)),
+            )
+
+        for payload in payloads:
             seq = int(payload.get("seq", 0))
-            if seq <= _browser_metrics_seq.get("_last_seen", 0):
-                continue
-            _browser_metrics_seq["_last_seen"] = seq
+            if seq > _browser_metrics_seq.get("_last_seen", 0):
+                _browser_metrics_seq["_last_seen"] = seq
             agent_id = payload.get("agent_id", "")
             event_bus.emit("browser_metrics", agent=agent_id, data=payload)
 

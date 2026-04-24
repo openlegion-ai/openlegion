@@ -264,6 +264,68 @@ class TestMetricsPoll:
         assert len(metric_emits) == 0
 
     @pytest.mark.asyncio
+    async def test_first_seen_collapses_to_latest_per_agent(
+        self, tmp_path, monkeypatch,
+    ):
+        """On boot-id-first-seen (fresh mesh OR browser restart), the
+        browser's history buffer may contain hours of stale payloads per
+        agent. Replaying all of them would flood the dashboard's 500-event
+        ring buffer and evict live signals. Only the latest seq per agent
+        should emit.
+        """
+        import httpx
+
+        # Browser has 3 entries for a1, 2 entries for a2 — all from the
+        # same boot. Only the highest-seq payload per agent should reach
+        # the EventBus on the first poll.
+        canned = {
+            "current_seq": 5,
+            "boot_id": "boot-new",
+            "metrics": [
+                {"seq": 1, "ts": 1.0, "agent_id": "a1", "click_success": 1,
+                 "click_fail": 0, "nav_timeout": 0, "snapshot_count": 0,
+                 "snapshot_bytes_p50": 0, "snapshot_bytes_p95": 0,
+                 "click_window_size": 0, "click_success_rate_100": None},
+                {"seq": 2, "ts": 2.0, "agent_id": "a2", "click_success": 2,
+                 "click_fail": 0, "nav_timeout": 0, "snapshot_count": 0,
+                 "snapshot_bytes_p50": 0, "snapshot_bytes_p95": 0,
+                 "click_window_size": 0, "click_success_rate_100": None},
+                {"seq": 3, "ts": 3.0, "agent_id": "a1", "click_success": 3,
+                 "click_fail": 0, "nav_timeout": 0, "snapshot_count": 0,
+                 "snapshot_bytes_p50": 0, "snapshot_bytes_p95": 0,
+                 "click_window_size": 0, "click_success_rate_100": None},
+                {"seq": 4, "ts": 4.0, "agent_id": "a2", "click_success": 4,
+                 "click_fail": 0, "nav_timeout": 0, "snapshot_count": 0,
+                 "snapshot_bytes_p50": 0, "snapshot_bytes_p95": 0,
+                 "click_window_size": 0, "click_success_rate_100": None},
+                {"seq": 5, "ts": 5.0, "agent_id": "a1", "click_success": 5,
+                 "click_fail": 0, "nav_timeout": 0, "snapshot_count": 0,
+                 "snapshot_bytes_p50": 0, "snapshot_bytes_p95": 0,
+                 "click_window_size": 0, "click_success_rate_100": None},
+            ],
+        }
+
+        async def fake_get(self, url, *args, **kwargs):
+            req = httpx.Request("GET", url)
+            return httpx.Response(200, json=canned, request=req)
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        app, event_bus, _cm = _build_mesh(tmp_path)
+        poll = _extract_poll_fn(app)
+        await poll()
+
+        metric_emits = [c for c in event_bus.emit.call_args_list
+                        if c.args and c.args[0] == "browser_metrics"]
+        # Exactly 2 events (latest per agent), not 5.
+        assert len(metric_emits) == 2
+        agents_emitted = {}
+        for c in metric_emits:
+            data = c.kwargs.get("data") or {}
+            agents_emitted[c.kwargs.get("agent")] = data["seq"]
+        assert agents_emitted == {"a1": 5, "a2": 4}
+
+    @pytest.mark.asyncio
     async def test_poll_noop_without_browser_service(self, tmp_path, monkeypatch):
         """If container_manager has no browser_service_url, the poll is
         a silent no-op — mesh configurations without a browser shouldn't
