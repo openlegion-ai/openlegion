@@ -326,6 +326,79 @@ class TestMetricsPoll:
         assert agents_emitted == {"a1": 5, "a2": 4}
 
     @pytest.mark.asyncio
+    async def test_persistent_failures_escalate_to_warning(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """Silent debug-level failures hide real outages. After the
+        threshold (5 ticks), the mesh must log at WARNING so operators
+        can diagnose 'why no metrics'."""
+        import logging
+
+        import httpx
+
+        async def always_fails(self, url, *args, **kwargs):
+            raise httpx.ConnectError("simulated down")
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", always_fails)
+
+        app, _event_bus, _cm = _build_mesh(tmp_path)
+        poll = _extract_poll_fn(app)
+
+        caplog.set_level(logging.WARNING)
+        # Hit the threshold (5 consecutive) — fifth call must warn.
+        for _ in range(5):
+            await poll()
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("consecutive" in r.getMessage() for r in warnings), (
+            "expected consecutive-failure warning; got: "
+            + repr([r.getMessage() for r in warnings])
+        )
+
+    @pytest.mark.asyncio
+    async def test_recovery_logs_info(self, tmp_path, monkeypatch, caplog):
+        """After a noisy failure streak, a success must log at INFO so
+        operators see the all-clear."""
+        import logging
+
+        import httpx
+
+        call_count = {"n": 0}
+
+        async def fail_then_succeed(self, url, *args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] <= 5:
+                raise httpx.ConnectError("down")
+            req = httpx.Request("GET", url)
+            return httpx.Response(200, json={
+                "current_seq": 0, "boot_id": "b", "metrics": [],
+            }, request=req)
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fail_then_succeed)
+
+        app, _event_bus, _cm = _build_mesh(tmp_path)
+        poll = _extract_poll_fn(app)
+
+        caplog.set_level(logging.INFO)
+        for _ in range(6):
+            await poll()
+
+        info = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert any("recovered" in r.getMessage() for r in info)
+
+    @pytest.mark.asyncio
+    async def test_poll_state_accessible_via_app_state(self, tmp_path):
+        """The poll primitive + state are exposed on ``app.state`` so
+        tests and future admin endpoints can reach them without walking
+        closure cells."""
+        app, _event_bus, _cm = _build_mesh(tmp_path)
+        assert callable(getattr(app.state, "poll_browser_metrics_once", None))
+        state = getattr(app.state, "browser_metrics_poll_state", None)
+        assert isinstance(state, dict)
+        assert "consecutive_failures" in state
+        assert "last_seen_seq" in state
+
+    @pytest.mark.asyncio
     async def test_poll_noop_without_browser_service(self, tmp_path, monkeypatch):
         """If container_manager has no browser_service_url, the poll is
         a silent no-op — mesh configurations without a browser shouldn't
@@ -348,30 +421,16 @@ class TestMetricsPoll:
 
 
 def _extract_poll_fn(app):
-    """Locate ``_poll_browser_metrics_once`` in the app's closures.
+    """Return ``_poll_browser_metrics_once`` from the mesh app.
 
-    ``create_mesh_app`` registers a startup handler named
-    ``_start_browser_metrics_poll`` that schedules
-    ``_browser_metrics_loop`` — which itself closes over
-    ``_poll_browser_metrics_once``. We walk one level of closure to
-    return the poll function directly so tests can invoke it without
-    spinning up the 60s sleep loop.
+    The poll primitive is exposed on ``app.state`` precisely so tests
+    (and future admin endpoints) can reach it without walking closure
+    cells. Raises AssertionError if missing — a noisy failure here
+    means production wiring broke.
     """
-    for handler in app.router.on_startup:
-        if handler.__name__ != "_start_browser_metrics_poll":
-            continue
-        # handler closes over _browser_metrics_loop
-        for cell in (handler.__closure__ or ()):
-            val = cell.cell_contents
-            if callable(val) and getattr(val, "__name__", "") == "_browser_metrics_loop":
-                loop_fn = val
-                break
-        else:
-            continue
-        # loop_fn closes over _poll_browser_metrics_once
-        for cell in (loop_fn.__closure__ or ()):
-            val = cell.cell_contents
-            name = getattr(val, "__name__", "")
-            if callable(val) and name == "_poll_browser_metrics_once":
-                return val
-    return None
+    fn = getattr(app.state, "poll_browser_metrics_once", None)
+    assert fn is not None, (
+        "app.state.poll_browser_metrics_once missing — did create_mesh_app "
+        "stop publishing the poll primitive?"
+    )
+    return fn

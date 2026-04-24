@@ -260,6 +260,23 @@ _JS_A11Y_TREE = r"""(rootEl) => {
 }"""
 
 
+def _is_empty_payload(payload: dict) -> bool:
+    """True when a drain produced neither activity nor rolling state.
+
+    Used by :meth:`BrowserManager._emit_metrics` to filter out idle-
+    agent payloads so the history buffer doesn't flood with no-ops.
+    A payload with any click/snapshot/nav count, OR any rolling-window
+    data, is kept.
+    """
+    return not any((
+        payload.get("click_success"),
+        payload.get("click_fail"),
+        payload.get("nav_timeout"),
+        payload.get("snapshot_count"),
+        payload.get("click_window_size"),
+    ))
+
+
 def _extract_text_from_a11y(tree: dict | None, max_chars: int = 5000) -> str:
     """Extract readable text from an accessibility snapshot tree.
 
@@ -527,6 +544,10 @@ class BrowserManager:
         the optional ``metrics_sink`` callback (for tests / in-process
         wiring). Counters always reset, whether or not a sink is attached,
         so a long-idle service doesn't grow memory.
+
+        Per-instance drain failures are caught — a single agent with a
+        corrupt counter must not abort the emit loop and starve the other
+        agents' data.
         """
         if not self._instances:
             return
@@ -534,7 +555,20 @@ class BrowserManager:
         # Take a consistent view of the instance list; drain_metrics()
         # is cheap and doesn't require the page lock, so we don't serialize.
         for inst in list(self._instances.values()):
-            payload = inst.drain_metrics()
+            try:
+                payload = inst.drain_metrics()
+            except Exception as e:
+                logger.warning(
+                    "drain_metrics failed for '%s': %s", inst.agent_id, e,
+                )
+                continue
+            # Skip payloads with zero activity AND an empty rolling window —
+            # idle agents should not flood the history buffer (meshes that
+            # were briefly offline will otherwise replay dozens of no-op
+            # entries on reconnect, evicting live signal from the dashboard
+            # ring buffer).
+            if _is_empty_payload(payload):
+                continue
             self._metrics_seq += 1
             payload["seq"] = self._metrics_seq
             payload["ts"] = now
@@ -827,15 +861,18 @@ class BrowserManager:
         # still-live instances; post-pop is the final accounting chance.
         # Always write to the history buffer (even without a sink) so the
         # mesh poller sees the last minute of activity for a freshly-stopped
-        # agent on its next tick.
+        # agent on its next tick. Empty payloads are skipped — no point
+        # flooding the history with no-ops for agents that never did
+        # anything.
         try:
             payload = inst.drain_metrics()
-            self._metrics_seq += 1
-            payload["seq"] = self._metrics_seq
-            payload["ts"] = time.time()
-            self._metrics_history.append(payload)
-            if self._metrics_sink is not None:
-                self._metrics_sink(payload)
+            if not _is_empty_payload(payload):
+                self._metrics_seq += 1
+                payload["seq"] = self._metrics_seq
+                payload["ts"] = time.time()
+                self._metrics_history.append(payload)
+                if self._metrics_sink is not None:
+                    self._metrics_sink(payload)
         except Exception as e:
             logger.warning(
                 "Final metrics drain failed for '%s': %s", agent_id, e,

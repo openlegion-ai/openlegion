@@ -5787,8 +5787,21 @@ function dashboard() {
     },
 
     // ── Browser metrics card helpers (Phase 2 §5.1/§5.2) ───────────────
+    _BROWSER_METRICS_EVICT_MS: 30 * 60 * 1000,  // 30 minutes
+
     browserMetricsList() {
-      return Object.entries(this.browserMetrics)
+      // Evict agents that haven't reported in 30+ minutes so stopped /
+      // renamed / deleted agents eventually fall off the card. Without
+      // this, ghost rows accumulate forever.
+      const cutoff = Date.now() - this._BROWSER_METRICS_EVICT_MS;
+      const fresh = {};
+      for (const [agent, m] of Object.entries(this.browserMetrics)) {
+        if ((m.receivedAt || 0) >= cutoff) fresh[agent] = m;
+      }
+      if (Object.keys(fresh).length !== Object.keys(this.browserMetrics).length) {
+        this.browserMetrics = fresh;
+      }
+      return Object.entries(fresh)
         .map(([agent, m]) => ({ agent, ...m }))
         .sort((a, b) => a.agent.localeCompare(b.agent));
     },

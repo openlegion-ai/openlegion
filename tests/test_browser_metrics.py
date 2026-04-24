@@ -188,6 +188,10 @@ class TestEmitMetrics:
             "bad": _new_instance("bad"),
             "good": _new_instance("good"),
         }
+        # Both need activity to avoid the _is_empty_payload skip —
+        # zero-counter payloads are intentionally filtered out.
+        mgr._instances["bad"].m_click_success = 1
+        mgr._instances["good"].m_click_success = 1
         await mgr._emit_metrics()
         assert "good" in delivered
 
@@ -300,11 +304,14 @@ class TestMetricsHistoryBuffer:
         """The poller passes back current_seq as ``since`` — we must
         return only payloads strictly newer than that."""
         mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
-        mgr._instances = {"a1": _new_instance("a1")}
+        inst = _new_instance("a1")
+        mgr._instances = {"a1": inst}
 
-        await mgr._emit_metrics()  # seq=1
-        await mgr._emit_metrics()  # seq=2
-        await mgr._emit_metrics()  # seq=3
+        # Each drain needs activity — otherwise ``_is_empty_payload``
+        # (correctly) skips the emit to keep idle history tidy.
+        for _ in range(3):
+            inst.m_click_success = 1
+            await mgr._emit_metrics()
 
         snap = mgr.get_recent_metrics(since_seq=2)
         assert snap["current_seq"] == 3
@@ -313,11 +320,24 @@ class TestMetricsHistoryBuffer:
     @pytest.mark.asyncio
     async def test_since_beyond_current_returns_empty(self, tmp_path):
         mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
-        mgr._instances = {"a1": _new_instance("a1")}
+        inst = _new_instance("a1")
+        mgr._instances = {"a1": inst}
+        inst.m_click_success = 1
         await mgr._emit_metrics()
         snap = mgr.get_recent_metrics(since_seq=999)
         assert snap["metrics"] == []
         assert snap["current_seq"] == 1
+
+    @pytest.mark.asyncio
+    async def test_idle_agent_skipped_from_history(self, tmp_path):
+        """Regression: agents with zero activity on a tick must not
+        consume seqs or pollute the history buffer."""
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        mgr._instances = {"idle": _new_instance("idle")}
+        await mgr._emit_metrics()
+        snap = mgr.get_recent_metrics(since_seq=0)
+        assert snap["current_seq"] == 0
+        assert snap["metrics"] == []
 
     @pytest.mark.asyncio
     async def test_history_records_final_stop_drain(self, tmp_path):
@@ -378,9 +398,13 @@ class TestBrowserMetricsEndpoint:
         from fastapi.testclient import TestClient
 
         mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
-        mgr._instances = {"a1": _new_instance("a1")}
-        await mgr._emit_metrics()
-        await mgr._emit_metrics()
+        inst = _new_instance("a1")
+        mgr._instances = {"a1": inst}
+        # Activity on each tick so both payloads survive the
+        # empty-payload filter.
+        for _ in range(2):
+            inst.m_click_success = 1
+            await mgr._emit_metrics()
 
         app = self._mk_app(monkeypatch, mgr)
         with TestClient(app) as client:

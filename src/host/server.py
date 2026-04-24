@@ -2684,8 +2684,17 @@ def create_mesh_app(
     # to the mesh's in-process EventBus, so the mesh pulls. Runs on a 60s
     # cadence — matching BrowserManager._emit_metrics — and fans each new
     # per-agent aggregate out as a ``browser_metrics`` event. High-water
-    # seq per boot_id; boot_id change resets the watermark.
-    _browser_metrics_seq: dict[str, int] = {}  # keyed by boot_id
+    # seq per boot_id; boot_id change resets the watermark. Poll failures
+    # are logged at DEBUG normally; after ``_POLL_WARN_THRESHOLD`` consecutive
+    # failures we escalate to WARNING so operators can diagnose persistent
+    # issues (auth rotation, browser down, network partition).
+    _poll_state: dict = {
+        "boot_id": "",
+        "last_seen_seq": 0,
+        "consecutive_failures": 0,
+        "last_success_ts": 0.0,
+    }
+    _POLL_WARN_THRESHOLD = 5  # ~5 minutes of failures before warning
 
     async def _poll_browser_metrics_once() -> None:
         if not container_manager or event_bus is None:
@@ -2694,33 +2703,64 @@ def create_mesh_app(
         svc_token = getattr(container_manager, "browser_auth_token", "")
         if not svc_url:
             return
-        headers: dict = {"X-Mesh-Internal": "1"}
+        headers: dict = {}
         if svc_token:
             headers["Authorization"] = f"Bearer {svc_token}"
+
+        def _record_failure(reason: str) -> None:
+            _poll_state["consecutive_failures"] += 1
+            n = _poll_state["consecutive_failures"]
+            # Quiet when it's the first couple of misses (normal during
+            # boot / brief outages); loud once it looks like a real problem,
+            # then back off so we don't flood logs indefinitely.
+            if n in (_POLL_WARN_THRESHOLD, _POLL_WARN_THRESHOLD * 4,
+                     _POLL_WARN_THRESHOLD * 16):
+                logger.warning(
+                    "Browser metrics poll has failed %d consecutive times "
+                    "(%s)", n, reason,
+                )
+            else:
+                logger.debug("Browser metrics poll failed: %s", reason)
+
         try:
             resp = await _browser_proxy_client.get(
                 f"{svc_url}/browser/metrics",
-                params={"since": _browser_metrics_seq.get("_last_seen", 0)},
+                params={"since": _poll_state["last_seen_seq"]},
                 headers=headers,
                 timeout=10,
             )
-            if resp.status_code >= 400:
-                return
+        except Exception as e:
+            _record_failure(f"request error: {e}")
+            return
+        if resp.status_code >= 400:
+            _record_failure(f"HTTP {resp.status_code}")
+            return
+        try:
             data = resp.json()
         except Exception as e:
-            logger.debug("Browser metrics poll failed: %s", e)
+            _record_failure(f"bad JSON: {e}")
             return
+
+        # Success — reset failure counter and log recovery if we were noisy.
+        if _poll_state["consecutive_failures"] >= _POLL_WARN_THRESHOLD:
+            logger.info(
+                "Browser metrics poll recovered after %d failures",
+                _poll_state["consecutive_failures"],
+            )
+        _poll_state["consecutive_failures"] = 0
+        _poll_state["last_success_ts"] = time.time()
+
         boot_id = data.get("boot_id") or ""
-        is_first_seen = _browser_metrics_seq.get("_boot_id") != boot_id
+        is_first_seen = _poll_state["boot_id"] != boot_id
         # Reset the watermark when the browser service restarts, otherwise
         # we'd starve forever waiting for seqs that never arrive.
         if is_first_seen:
-            _browser_metrics_seq["_boot_id"] = boot_id
-            _browser_metrics_seq["_last_seen"] = 0
+            _poll_state["boot_id"] = boot_id
+            _poll_state["last_seen_seq"] = 0
 
         payloads = [
             p for p in (data.get("metrics") or [])
-            if int(p.get("seq", 0)) > _browser_metrics_seq.get("_last_seen", 0)
+            if int(p.get("seq", 0)) > _poll_state["last_seen_seq"]
         ]
         # On first-seen (fresh mesh or browser restart), only surface the
         # latest payload per agent. A long-running browser service can
@@ -2737,8 +2777,8 @@ def create_mesh_app(
 
         for payload in payloads:
             seq = int(payload.get("seq", 0))
-            if seq > _browser_metrics_seq.get("_last_seen", 0):
-                _browser_metrics_seq["_last_seen"] = seq
+            if seq > _poll_state["last_seen_seq"]:
+                _poll_state["last_seen_seq"] = seq
             agent_id = payload.get("agent_id", "")
             event_bus.emit("browser_metrics", agent=agent_id, data=payload)
 
@@ -2755,6 +2795,11 @@ def create_mesh_app(
             except Exception as e:
                 logger.debug("Browser metrics poll loop tick failed: %s", e)
             await asyncio.sleep(60)
+
+    # Expose the poll primitives on app.state so tests (and future admin
+    # endpoints) can reach them without walking closure cells.
+    app.state.poll_browser_metrics_once = _poll_browser_metrics_once
+    app.state.browser_metrics_poll_state = _poll_state
 
     @app.on_event("startup")
     async def _start_browser_metrics_poll() -> None:
