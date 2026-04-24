@@ -377,7 +377,11 @@ class TestBrowserCommandEndpoint:
                 headers={"X-Agent-ID": "operator"},
             )
         assert resp.status_code == 403
-        assert "Browser access denied" in resp.text
+        # Per Phase 1.1 (per-action permission contract), denial message
+        # names the specific action rather than the generic "browser access"
+        # phrase — agents and operators get actionable feedback.
+        assert "denied" in resp.text.lower()
+        assert "snapshot" in resp.text
 
     @pytest.mark.asyncio
     async def test_delegation_happy_path(self, tmp_path, monkeypatch):
@@ -525,6 +529,55 @@ class TestBrowserCommandEndpoint:
         assert "/browser/worker/snapshot" in proxy_url_seen["url"]
 
     @pytest.mark.asyncio
+    async def test_delegation_respects_target_per_action_policy(self, tmp_path):
+        """Per-action gate applies to the EFFECTIVE TARGET, not the caller.
+
+        Regression guard: an operator with ``browser_actions=['*']`` could
+        otherwise delegate any action to a worker whose own policy restricts
+        what actions are allowed against its profile. The gate must enforce
+        the target's policy before ever proxying to the browser service.
+
+        We deliberately do NOT monkey-patch httpx here: the 403 must fire
+        inside the mesh before any proxy attempt. (Monkey-patching
+        httpx.AsyncClient.send would also short-circuit the TEST client's
+        ASGITransport path, hiding the real behavior.)
+        """
+        from httpx import ASGITransport, AsyncClient
+
+        app, _event_bus, _cm = _build_app(
+            tmp_path,
+            perms_map={
+                "operator": {
+                    "can_use_browser": True,
+                    "browser_actions": ["*"],
+                    "can_message": ["*"],
+                },
+                "worker": {
+                    "can_use_browser": True,
+                    # Worker's profile allows navigation only — no snapshot.
+                    "browser_actions": ["navigate"],
+                },
+            },
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            # Operator delegating snapshot to worker — worker's policy denies it.
+            resp = await client.post(
+                "/mesh/browser/command",
+                json={
+                    "action": "snapshot",
+                    "params": {},
+                    "target_agent_id": "worker",
+                },
+                headers={"X-Agent-ID": "operator"},
+            )
+
+        assert resp.status_code == 403
+        assert "snapshot" in resp.text
+
+    @pytest.mark.asyncio
     async def test_target_equals_caller_self_denied_without_browser(self, tmp_path):
         """target_agent_id == caller_id with caller lacking browser → 403."""
         from httpx import ASGITransport, AsyncClient
@@ -549,7 +602,9 @@ class TestBrowserCommandEndpoint:
                 headers={"X-Agent-ID": "operator"},
             )
         assert resp.status_code == 403
-        assert "Browser access denied" in resp.text
+        # Per-action denial message (Phase 1.1 contract).
+        assert "denied" in resp.text.lower()
+        assert "snapshot" in resp.text
 
     @pytest.mark.asyncio
     async def test_unknown_target_blocked(self, tmp_path):

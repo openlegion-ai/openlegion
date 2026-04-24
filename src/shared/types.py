@@ -147,6 +147,13 @@ class AgentPermissions(BaseModel):
     allowed_apis: list[str] = []
     allowed_credentials: list[str] = []
     can_use_browser: bool = False
+    browser_actions: list[str] | None = None  # None = all known actions
+                                               # (default-allow UX).
+                                               # ["*"] = all (explicit form).
+                                               # Specific list = only those
+                                               # (opt-out restriction).
+                                               # [] = no actions (equivalent
+                                               # to can_use_browser=False).
     can_spawn: bool = False
     can_manage_cron: bool = False
     can_use_wallet: bool = False

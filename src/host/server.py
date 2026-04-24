@@ -2680,11 +2680,14 @@ def create_mesh_app(
         """Schedule initial browser proxy push as a background task (non-blocking)."""
         asyncio.create_task(_deferred_push_browser_proxies())
 
-    _ALLOWED_BROWSER_ACTIONS = frozenset({
-        "navigate", "snapshot", "click", "type", "hover",
-        "screenshot", "reset", "focus", "status", "detect_captcha", "scroll",
-        "wait_for", "press_key", "go_back", "go_forward", "switch_tab",
-    })
+    # Mesh-side input validation: reject typo'd action names with a clean 400
+    # before proxying to the browser service. Permissions are enforced separately
+    # via PermissionMatrix.can_browser_action (default-allow for all known
+    # actions when `browser_actions` is unset in the template).
+    #
+    # New actions must be added to src/host/permissions.KNOWN_BROWSER_ACTIONS
+    # so the mesh stops rejecting them.
+    from src.host.permissions import KNOWN_BROWSER_ACTIONS as _ALLOWED_BROWSER_ACTIONS
 
     @app.post("/mesh/browser/command")
     async def browser_command(request: Request) -> dict:
@@ -2707,21 +2710,26 @@ def create_mesh_app(
             caller_id, body.get("target_agent_id") or "",
         )
 
-        # Self-browser path also has to satisfy can_use_browser.
-        # _resolve_browser_target already enforced this on the delegation
-        # path; here we close the gap when no target_agent_id was sent
-        # (or when target == caller).
-        if req_agent_id == caller_id and not permissions.can_use_browser(caller_id):
-            raise HTTPException(403, "Browser access denied")
-
         action = body.get("action", "")
         params = body.get("params", {})
 
         if not action:
             raise HTTPException(400, "action is required")
 
+        # Reject unknown actions with 400 before any permission check — we
+        # want a distinct error for "action doesn't exist" vs "not authorized."
         if action not in _ALLOWED_BROWSER_ACTIONS:
             raise HTTPException(400, f"Unknown browser action: {action}")
+
+        # Per-action gate applies to the EFFECTIVE target (`req_agent_id`),
+        # not the caller. The action runs against the target's browser
+        # profile, so the target's `browser_actions` list is the authoritative
+        # policy. This closes a delegation bypass where an operator with
+        # `browser_actions=["*"]` could otherwise exercise actions the target
+        # was never granted. `_resolve_browser_target` already confirmed the
+        # caller has delegation rights (can_message + target has browser).
+        if not permissions.can_browser_action(req_agent_id, action):
+            raise HTTPException(403, f"Browser action '{action}' denied")
 
         # SSRF protection: early-reject for literal private-IP navigations so
         # agents get a clean 400 rather than a cryptic browser error. The
