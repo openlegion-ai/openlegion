@@ -30,6 +30,58 @@ class TestCounterInitialState:
         assert inst.m_click_fail == 0
         assert inst.m_nav_timeout == 0
         assert inst.m_snapshot_bytes == []
+        assert len(inst.click_window) == 0
+        # Empty window must read as "unknown", not 0% — would falsely
+        # suggest catastrophic failure on a freshly-booted agent.
+        assert inst.rolling_click_success_rate() is None
+
+
+class TestRollingClickWindow:
+    def test_counts_success_rate(self):
+        inst = _new_instance()
+        for _ in range(8):
+            inst.click_window.append(True)
+        for _ in range(2):
+            inst.click_window.append(False)
+        assert inst.rolling_click_success_rate() == 0.8
+        assert len(inst.click_window) == 10
+
+    def test_window_capped_at_100(self):
+        inst = _new_instance()
+        for i in range(150):
+            inst.click_window.append(True)
+        assert len(inst.click_window) == 100
+        assert inst.rolling_click_success_rate() == 1.0
+
+    def test_window_evicts_old_entries(self):
+        """Older failures age out past the 100-sample window."""
+        inst = _new_instance()
+        # 50 failures, then 100 successes — the failures fall off the
+        # head once the deque reaches its maxlen.
+        for _ in range(50):
+            inst.click_window.append(False)
+        for _ in range(100):
+            inst.click_window.append(True)
+        assert len(inst.click_window) == 100
+        assert inst.rolling_click_success_rate() == 1.0
+
+    def test_window_survives_drain(self):
+        """Rolling window persists across per-minute emits — it's a
+        longer-horizon health signal than the per-minute counters."""
+        inst = _new_instance()
+        for _ in range(10):
+            inst.click_window.append(True)
+        payload = inst.drain_metrics()
+        assert payload["click_window_size"] == 10
+        assert payload["click_success_rate_100"] == 1.0
+        # Window survives the drain; per-minute counters reset.
+        assert len(inst.click_window) == 10
+
+    def test_drain_reports_none_when_empty(self):
+        inst = _new_instance()
+        payload = inst.drain_metrics()
+        assert payload["click_window_size"] == 0
+        assert payload["click_success_rate_100"] is None
 
 
 class TestDrainMetrics:
@@ -136,6 +188,10 @@ class TestEmitMetrics:
             "bad": _new_instance("bad"),
             "good": _new_instance("good"),
         }
+        # Both need activity to avoid the _is_empty_payload skip —
+        # zero-counter payloads are intentionally filtered out.
+        mgr._instances["bad"].m_click_success = 1
+        mgr._instances["good"].m_click_success = 1
         await mgr._emit_metrics()
         assert "good" in delivered
 
@@ -218,3 +274,198 @@ class TestCleanupLoopIntegration:
             await mgr._cleanup_loop()
         assert len(sink_calls) == 1
         assert sink_calls[0]["click_success"] == 1
+
+
+class TestMetricsHistoryBuffer:
+    """§5.1/§5.2: the mesh polls /browser/metrics?since=<seq> to forward
+    aggregate payloads into the EventBus. This test class covers the
+    browser-side buffer + cursor semantics the poller relies on.
+    """
+
+    @pytest.mark.asyncio
+    async def test_emit_writes_to_history(self, tmp_path):
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        mgr._instances = {"a1": _new_instance("a1")}
+        mgr._instances["a1"].m_click_success = 3
+
+        await mgr._emit_metrics()
+
+        snap = mgr.get_recent_metrics(since_seq=0)
+        assert snap["current_seq"] == 1
+        assert snap["boot_id"] == mgr.boot_id
+        assert len(snap["metrics"]) == 1
+        assert snap["metrics"][0]["agent_id"] == "a1"
+        assert snap["metrics"][0]["click_success"] == 3
+        assert snap["metrics"][0]["seq"] == 1
+        assert "ts" in snap["metrics"][0]
+
+    @pytest.mark.asyncio
+    async def test_since_filter_returns_only_new(self, tmp_path):
+        """The poller passes back current_seq as ``since`` — we must
+        return only payloads strictly newer than that."""
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        inst = _new_instance("a1")
+        mgr._instances = {"a1": inst}
+
+        # Each drain needs activity — otherwise ``_is_empty_payload``
+        # (correctly) skips the emit to keep idle history tidy.
+        for _ in range(3):
+            inst.m_click_success = 1
+            await mgr._emit_metrics()
+
+        snap = mgr.get_recent_metrics(since_seq=2)
+        assert snap["current_seq"] == 3
+        assert [m["seq"] for m in snap["metrics"]] == [3]
+
+    @pytest.mark.asyncio
+    async def test_since_beyond_current_returns_empty(self, tmp_path):
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        inst = _new_instance("a1")
+        mgr._instances = {"a1": inst}
+        inst.m_click_success = 1
+        await mgr._emit_metrics()
+        snap = mgr.get_recent_metrics(since_seq=999)
+        assert snap["metrics"] == []
+        assert snap["current_seq"] == 1
+
+    @pytest.mark.asyncio
+    async def test_idle_agent_skipped_from_history(self, tmp_path):
+        """Regression: agents with zero activity on a tick must not
+        consume seqs or pollute the history buffer."""
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        mgr._instances = {"idle": _new_instance("idle")}
+        await mgr._emit_metrics()
+        snap = mgr.get_recent_metrics(since_seq=0)
+        assert snap["current_seq"] == 0
+        assert snap["metrics"] == []
+
+    @pytest.mark.asyncio
+    async def test_post_click_idle_interval_still_filtered(self, tmp_path):
+        """Regression (Codex #1 P1): the rolling click window persists
+        across drains, so if ``_is_empty_payload`` treated a non-empty
+        window as "activity" the filter would be permanently bypassed
+        for any agent that ever clicked. This test would silently
+        pass even with the bug if the agent had an active minute; we
+        specifically exercise an idle minute *after* activity.
+        """
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        inst = _new_instance("chatty")
+        mgr._instances = {"chatty": inst}
+        # Minute 1: has a click.
+        inst.m_click_success = 1
+        inst.click_window.append(True)
+        await mgr._emit_metrics()
+        assert mgr.get_recent_metrics(since_seq=0)["current_seq"] == 1
+        # Minute 2: no new clicks, but window is still non-empty from M1.
+        await mgr._emit_metrics()
+        # Seq must NOT advance — the idle minute is correctly filtered.
+        assert mgr.get_recent_metrics(since_seq=0)["current_seq"] == 1
+
+    @pytest.mark.asyncio
+    async def test_history_records_final_stop_drain(self, tmp_path):
+        """An agent stopping must still surface its last minute of data
+        to the next poll, even without a metrics_sink wired in-process."""
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        inst = _new_instance("goodbye")
+        inst.context = MagicMock()
+        inst.context.close = AsyncMock()
+        mgr._instances["goodbye"] = inst
+        inst.m_click_success = 9
+        async with mgr._lock:
+            await mgr._stop_instance("goodbye")
+
+        snap = mgr.get_recent_metrics(since_seq=0)
+        assert len(snap["metrics"]) == 1
+        assert snap["metrics"][0]["agent_id"] == "goodbye"
+        assert snap["metrics"][0]["click_success"] == 9
+
+
+class TestBrowserMetricsEndpoint:
+    """``GET /browser/metrics?since=<seq>`` is the mesh's polling target.
+
+    These tests construct ``BrowserManager`` inside an async context so the
+    ``asyncio.Lock()`` in its ``__init__`` binds cleanly on Python 3.9 — on
+    3.10+ this is a no-op but it also avoids test-order leakage when
+    ``asyncio.run`` closes the default event loop between test cases.
+    """
+
+    def _mk_app(self, monkeypatch, manager):
+        monkeypatch.delenv("BROWSER_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("MESH_AUTH_TOKEN", raising=False)
+        from src.browser.server import create_browser_app
+        return create_browser_app(manager)
+
+    @pytest.mark.asyncio
+    async def test_endpoint_returns_buffered_metrics(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        mgr._instances = {"a1": _new_instance("a1")}
+        mgr._instances["a1"].m_click_success = 2
+        await mgr._emit_metrics()
+
+        app = self._mk_app(monkeypatch, mgr)
+        with TestClient(app) as client:
+            resp = client.get("/browser/metrics?since=0")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["current_seq"] == 1
+        assert body["boot_id"] == mgr.boot_id
+        assert len(body["metrics"]) == 1
+        assert body["metrics"][0]["agent_id"] == "a1"
+        assert body["metrics"][0]["click_success"] == 2
+
+    @pytest.mark.asyncio
+    async def test_endpoint_respects_since_filter(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        inst = _new_instance("a1")
+        mgr._instances = {"a1": inst}
+        # Activity on each tick so both payloads survive the
+        # empty-payload filter.
+        for _ in range(2):
+            inst.m_click_success = 1
+            await mgr._emit_metrics()
+
+        app = self._mk_app(monkeypatch, mgr)
+        with TestClient(app) as client:
+            resp = client.get("/browser/metrics?since=1")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [m["seq"] for m in body["metrics"]] == [2]
+
+    @pytest.mark.asyncio
+    async def test_endpoint_handles_invalid_since(self, tmp_path, monkeypatch):
+        """A non-integer ``since`` must not crash the server; FastAPI
+        returns 422 at the validation layer."""
+        from fastapi.testclient import TestClient
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        app = self._mk_app(monkeypatch, mgr)
+        with TestClient(app) as client:
+            resp = client.get("/browser/metrics?since=abc")
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_endpoint_requires_auth_when_configured(
+        self, tmp_path, monkeypatch,
+    ):
+        """With BROWSER_AUTH_TOKEN set, metrics require a Bearer token —
+        same posture as every other /browser/* endpoint."""
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setenv("BROWSER_AUTH_TOKEN", "secret-t0k")
+        monkeypatch.delenv("MESH_AUTH_TOKEN", raising=False)
+        from src.browser.server import create_browser_app
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        app = create_browser_app(mgr)
+        with TestClient(app) as client:
+            unauth = client.get("/browser/metrics")
+            assert unauth.status_code == 401
+            authed = client.get(
+                "/browser/metrics",
+                headers={"Authorization": "Bearer secret-t0k"},
+            )
+            assert authed.status_code == 200

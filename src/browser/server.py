@@ -72,6 +72,22 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         _verify_auth(request)
         return await manager.get_service_status()
 
+    @app.get("/browser/metrics")
+    async def service_metrics(request: Request, since: int = 0):
+        """Return per-agent metric payloads buffered since ``since``.
+
+        Polled by the mesh host every ~60s to forward aggregate browser
+        metrics into the dashboard EventBus (§5.1/§5.2). The mesh tracks
+        the high-water ``current_seq`` across calls and only replays new
+        payloads; ``boot_id`` lets it detect a service restart and reset.
+        """
+        _verify_auth(request)
+        try:
+            since_seq = max(0, int(since))
+        except (TypeError, ValueError):
+            since_seq = 0
+        return manager.get_recent_metrics(since_seq=since_seq)
+
     @app.post("/browser/_canary")
     async def run_canary_endpoint(request: Request):
         """Phase 2 §5.4: run the stealth canary on demand.

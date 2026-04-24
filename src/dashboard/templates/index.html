@@ -4705,6 +4705,62 @@
         <!-- ═══ BROWSER SUB-TAB ═══ -->
         <div x-show="systemTab === 'browser'" class="space-y-4">
 
+          <!-- ── Live Browser Metrics (Phase 2 §5.1/§5.2) ── -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex items-center justify-between mb-1">
+              <div class="flex items-center gap-2">
+                <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3v18h18M7 17V9m4 8V5m4 12v-6m4 6v-9"/></svg>
+                <h3 class="text-sm font-medium text-gray-200">Live Browser Health</h3>
+              </div>
+              <span class="text-[10px] text-gray-600">updates every 60s</span>
+            </div>
+            <p class="text-[10px] text-gray-500 mb-4 leading-relaxed">
+              Per-agent browser behaviour from the shared Camoufox service. Click success rate is rolling over the last 100 clicks; snapshot size and timeout counts cover the most recent minute. A falling click rate or climbing timeouts is usually the first sign of a stealth regression on a target site.
+            </p>
+            <template x-if="browserMetricsList().length === 0">
+              <div class="text-xs text-gray-600 italic py-2">
+                No browser activity yet. Metrics appear here once an agent opens a page.
+              </div>
+            </template>
+            <template x-if="browserMetricsList().length > 0">
+              <div class="overflow-x-auto">
+                <table class="w-full text-xs">
+                  <thead>
+                    <tr class="text-[10px] uppercase tracking-wide text-gray-500 border-b border-gray-800">
+                      <th class="text-left font-medium pb-2 pr-4">Agent</th>
+                      <th class="text-right font-medium pb-2 pr-4">Click rate (100)</th>
+                      <th class="text-right font-medium pb-2 pr-4">Clicks / min</th>
+                      <th class="text-right font-medium pb-2 pr-4">Snap p50</th>
+                      <th class="text-right font-medium pb-2 pr-4">Snap p95</th>
+                      <th class="text-right font-medium pb-2 pr-4">Nav timeouts</th>
+                      <th class="text-right font-medium pb-2">Last update</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="m in browserMetricsList()" :key="m.agent">
+                      <tr class="border-b border-gray-800/40"
+                        :class="browserMetricsStale(m.receivedAt) ? 'opacity-50' : ''">
+                        <td class="py-2 pr-4 text-gray-200 font-mono truncate max-w-[12rem]" x-text="m.agent"></td>
+                        <td class="py-2 pr-4 text-right font-mono"
+                          :class="clickRateColor(m.click_success_rate_100)"
+                          x-text="fmtClickRate(m.click_success_rate_100)"></td>
+                        <td class="py-2 pr-4 text-right font-mono text-gray-300">
+                          <span x-text="(m.click_success || 0) + '/' + ((m.click_success || 0) + (m.click_fail || 0))"></span>
+                        </td>
+                        <td class="py-2 pr-4 text-right font-mono text-gray-300" x-text="fmtBytes(m.snapshot_bytes_p50)"></td>
+                        <td class="py-2 pr-4 text-right font-mono text-gray-300" x-text="fmtBytes(m.snapshot_bytes_p95)"></td>
+                        <td class="py-2 pr-4 text-right font-mono"
+                          :class="(m.nav_timeout || 0) > 0 ? 'text-amber-400' : 'text-gray-500'"
+                          x-text="m.nav_timeout || 0"></td>
+                        <td class="py-2 text-right text-gray-500" x-text="browserMetricsAge(m.receivedAt)"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </template>
+          </div>
+
           <!-- ── Interaction Speed ── -->
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
             <div class="flex items-center gap-2 mb-4">
