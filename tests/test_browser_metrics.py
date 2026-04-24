@@ -340,6 +340,28 @@ class TestMetricsHistoryBuffer:
         assert snap["metrics"] == []
 
     @pytest.mark.asyncio
+    async def test_post_click_idle_interval_still_filtered(self, tmp_path):
+        """Regression (Codex #1 P1): the rolling click window persists
+        across drains, so if ``_is_empty_payload`` treated a non-empty
+        window as "activity" the filter would be permanently bypassed
+        for any agent that ever clicked. This test would silently
+        pass even with the bug if the agent had an active minute; we
+        specifically exercise an idle minute *after* activity.
+        """
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        inst = _new_instance("chatty")
+        mgr._instances = {"chatty": inst}
+        # Minute 1: has a click.
+        inst.m_click_success = 1
+        inst.click_window.append(True)
+        await mgr._emit_metrics()
+        assert mgr.get_recent_metrics(since_seq=0)["current_seq"] == 1
+        # Minute 2: no new clicks, but window is still non-empty from M1.
+        await mgr._emit_metrics()
+        # Seq must NOT advance — the idle minute is correctly filtered.
+        assert mgr.get_recent_metrics(since_seq=0)["current_seq"] == 1
+
+    @pytest.mark.asyncio
     async def test_history_records_final_stop_drain(self, tmp_path):
         """An agent stopping must still surface its last minute of data
         to the next poll, even without a metrics_sink wired in-process."""

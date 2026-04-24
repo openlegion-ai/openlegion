@@ -261,19 +261,19 @@ _JS_A11Y_TREE = r"""(rootEl) => {
 
 
 def _is_empty_payload(payload: dict) -> bool:
-    """True when a drain produced neither activity nor rolling state.
+    """True when a drain produced no activity *in this interval*.
 
     Used by :meth:`BrowserManager._emit_metrics` to filter out idle-
     agent payloads so the history buffer doesn't flood with no-ops.
-    A payload with any click/snapshot/nav count, OR any rolling-window
-    data, is kept.
+    Only per-minute counters count here — the rolling click window
+    persists across drains and would permanently bypass the filter if
+    included (any agent that ever clicked would be "non-idle" forever).
     """
     return not any((
         payload.get("click_success"),
         payload.get("click_fail"),
         payload.get("nav_timeout"),
         payload.get("snapshot_count"),
-        payload.get("click_window_size"),
     ))
 
 
@@ -552,8 +552,15 @@ class BrowserManager:
         if not self._instances:
             return
         now = time.time()
-        # Take a consistent view of the instance list; drain_metrics()
-        # is cheap and doesn't require the page lock, so we don't serialize.
+        # Take a consistent view of the instance list; ``drain_metrics()``
+        # is a fully synchronous read-then-reset so no ``await`` boundary
+        # opens between the counter read and its zeroing. Under asyncio's
+        # single-threaded event loop, an in-flight hot-path task that
+        # holds ``inst.lock`` cannot run between those two statements —
+        # its coroutine is suspended elsewhere. This is WHY we don't
+        # need ``inst.lock`` here. If ``drain_metrics`` ever grows an
+        # ``await``, that invariant breaks and this must take the lock
+        # or swap counter objects atomically.
         for inst in list(self._instances.values()):
             try:
                 payload = inst.drain_metrics()

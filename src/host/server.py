@@ -2751,12 +2751,35 @@ def create_mesh_app(
         _poll_state["last_success_ts"] = time.time()
 
         boot_id = data.get("boot_id") or ""
-        is_first_seen = _poll_state["boot_id"] != boot_id
+        previous_boot_id = _poll_state["boot_id"]
+        since_used = _poll_state["last_seen_seq"]
+        is_first_seen = previous_boot_id != boot_id
         # Reset the watermark when the browser service restarts, otherwise
         # we'd starve forever waiting for seqs that never arrive.
         if is_first_seen:
             _poll_state["boot_id"] = boot_id
             _poll_state["last_seen_seq"] = 0
+            # If we queried with a non-zero ``since`` (stale high-water
+            # from the pre-restart browser) and the browser's ``seq > since``
+            # filter dropped everything, we have to re-poll with ``since=0``
+            # before those payloads scroll off the browser's history deque.
+            # Skip the re-poll when: (a) since was already 0 — nothing got
+            # filtered; or (b) the response already contains payloads — the
+            # filter wasn't the problem. Both cases would double-emit.
+            if since_used > 0 and previous_boot_id and not data.get("metrics"):
+                try:
+                    resp = await _browser_proxy_client.get(
+                        f"{svc_url}/browser/metrics",
+                        params={"since": 0},
+                        headers=headers,
+                        timeout=10,
+                    )
+                    if resp.status_code < 400:
+                        data = resp.json()
+                except Exception as e:
+                    logger.debug("Post-restart re-poll failed: %s", e)
+                    # Keep the original response rather than aborting;
+                    # next tick will recover.
 
         payloads = [
             p for p in (data.get("metrics") or [])

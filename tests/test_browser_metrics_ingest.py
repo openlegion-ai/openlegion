@@ -187,6 +187,66 @@ class TestMetricsPoll:
         assert len(metric_emits) == 1  # only the first tick carried a new seq
 
     @pytest.mark.asyncio
+    async def test_browser_restart_no_data_loss_on_first_poll(
+        self, tmp_path, monkeypatch,
+    ):
+        """Regression (Codex #2 P1): after a browser restart the mesh's
+        cached high-water `since` is stale — post-restart seqs start at
+        1, which fails the browser's `seq > since` filter. The mesh
+        must re-poll with `since=0` the moment it detects the new
+        boot_id, before those payloads scroll off the browser's history.
+        """
+        import httpx
+
+        responses = [
+            # First poll: stale since=100 ; browser restarted and seqs
+            # now go 1..3 but the filter drops them all.
+            {"current_seq": 3, "boot_id": "boot-B", "metrics": []},
+            # Second request (the immediate re-poll triggered by boot_id
+            # change) with since=0 returns the post-restart data.
+            {
+                "current_seq": 3, "boot_id": "boot-B", "metrics": [
+                    {"seq": 1, "ts": 1.0, "agent_id": "a1",
+                     "click_success": 5, "click_fail": 0, "nav_timeout": 0,
+                     "snapshot_count": 0, "snapshot_bytes_p50": 0,
+                     "snapshot_bytes_p95": 0, "click_window_size": 0,
+                     "click_success_rate_100": None},
+                ],
+            },
+        ]
+        call_count = {"n": 0}
+
+        async def fake_get(self, url, *args, **kwargs):
+            idx = min(call_count["n"], len(responses) - 1)
+            call_count["n"] += 1
+            req = httpx.Request("GET", url)
+            return httpx.Response(200, json=responses[idx], request=req)
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        app, event_bus, _cm = _build_mesh(tmp_path)
+        # Seed the mesh with a stale high-water so the first poll
+        # hits the filter-drops-everything case.
+        app.state.browser_metrics_poll_state["boot_id"] = "boot-A"
+        app.state.browser_metrics_poll_state["last_seen_seq"] = 100
+
+        poll = _extract_poll_fn(app)
+        await poll()
+
+        # The post-restart payload must have reached the EventBus.
+        metric_emits = [c for c in event_bus.emit.call_args_list
+                        if c.args and c.args[0] == "browser_metrics"]
+        assert len(metric_emits) == 1, (
+            "expected 1 browser_metrics event after restart recovery; "
+            "got " + repr(metric_emits)
+        )
+        payload = metric_emits[0].kwargs["data"]
+        assert payload["seq"] == 1
+        assert payload["click_success"] == 5
+        # And the HTTP client was actually called twice (original + re-poll).
+        assert call_count["n"] == 2
+
+    @pytest.mark.asyncio
     async def test_poll_resets_watermark_on_boot_id_change(
         self, tmp_path, monkeypatch,
     ):
