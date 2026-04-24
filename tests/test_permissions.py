@@ -242,15 +242,27 @@ class TestKnownBrowserActionsSet:
     is expected to recognize must appear here.
     """
 
-    def test_exact_16_actions(self):
+    def test_legacy_actions_present(self):
         from src.host.permissions import KNOWN_BROWSER_ACTIONS
-        assert len(KNOWN_BROWSER_ACTIONS) == 16
-        assert KNOWN_BROWSER_ACTIONS == frozenset({
+        legacy = frozenset({
             "navigate", "snapshot", "click", "type", "hover",
             "screenshot", "reset", "focus", "status", "detect_captcha",
             "scroll", "wait_for", "press_key", "go_back", "go_forward",
             "switch_tab",
         })
+        assert legacy.issubset(KNOWN_BROWSER_ACTIONS), (
+            "Legacy actions disappeared from KNOWN_BROWSER_ACTIONS — this "
+            "would silently break every pre-upgrade agent."
+        )
+
+    def test_phase_1_5_file_transfer_actions_reserved(self):
+        """upload_file + download must be recognized by the mesh input
+        validator even before Phase 1.5 endpoints exist, so the PRs can
+        merge in any order without cross-branch action-name coordination.
+        """
+        from src.host.permissions import KNOWN_BROWSER_ACTIONS
+        assert "upload_file" in KNOWN_BROWSER_ACTIONS
+        assert "download" in KNOWN_BROWSER_ACTIONS
 
     def test_legacy_alias_still_exported(self):
         """Back-compat alias for callers that imported the old name."""

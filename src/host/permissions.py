@@ -29,9 +29,17 @@ logger = setup_logging("host.permissions")
 # who want to restrict specific actions do so per-template via
 # `AgentPermissions.browser_actions`.
 KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset({
+    # Legacy 16 — present pre-Phase 1 refactor.
     "navigate", "snapshot", "click", "type", "hover",
     "screenshot", "reset", "focus", "status", "detect_captcha", "scroll",
     "wait_for", "press_key", "go_back", "go_forward", "switch_tab",
+    # Phase 1.5 file-transfer actions. Reserved here so the mesh input
+    # validation accepts the action names even before Phase 1.5's
+    # endpoints land in `src/browser/server.py`. If a caller invokes
+    # these before 1.5 is deployed, the browser service returns a clean
+    # 404 on the unknown URL instead of the mesh rejecting the action
+    # name as unknown — avoids a cross-PR merge-order dependency.
+    "upload_file", "download",
 })
 
 # Back-compat alias — retained so `host/server.py` and test fixtures that
