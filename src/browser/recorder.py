@@ -40,6 +40,14 @@ logger = setup_logging("browser.recorder")
 
 _DEFAULT_BUFFER_SIZE = 10_000
 _DEFAULT_DUMP_DIR = Path("/data/debug")
+# Cap on dump files retained per directory. At roughly one dump per
+# agent stop and N agents churning, a long-running dev session with
+# the recorder enabled could otherwise fill the disk — the in-memory
+# ring buffer caps per-file size, but nothing else caps file count.
+# Operators who want a full trace archive can move files out of
+# ``/data/debug`` between runs; the cleanup only prunes within its
+# managed directory.
+_MAX_DUMP_FILES = 1000
 
 
 def recorder_enabled() -> bool:
@@ -201,7 +209,39 @@ class BehaviorRecorder:
             "Recorder dumped %d events for '%s' → %s",
             len(events), self.agent_id, target,
         )
+        _prune_old_dumps(self._dump_dir)
         return target
+
+
+def _prune_old_dumps(dump_dir: Path, max_files: int | None = None) -> None:
+    """Keep only the N most recent ``*.jsonl`` dumps in ``dump_dir``.
+
+    Best-effort: if listing / unlinking fails we log at DEBUG and move
+    on — a disk-full condition during pruning is itself the problem
+    we're trying to prevent, and surfacing it noisily would obscure
+    that. Any .partial files are ignored (they might be a concurrent
+    write in progress) so we only prune finalized dumps.
+
+    ``max_files`` is read from the module-level constant at call time
+    (not captured as a default) so tests and operators can adjust it
+    without re-importing.
+    """
+    cap = _MAX_DUMP_FILES if max_files is None else max_files
+    try:
+        files = [f for f in dump_dir.iterdir() if f.suffix == ".jsonl"]
+    except OSError as e:
+        logger.debug("Recorder prune: cannot list %s: %s", dump_dir, e)
+        return
+    if len(files) <= cap:
+        return
+    # Sort oldest-first by mtime; delete until we're at the cap.
+    files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0)
+    excess = len(files) - cap
+    for victim in files[:excess]:
+        try:
+            victim.unlink()
+        except OSError as e:
+            logger.debug("Recorder prune: unlink %s failed: %s", victim, e)
 
 
 def _sanitize_filename(name: str) -> str:

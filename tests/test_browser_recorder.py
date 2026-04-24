@@ -175,6 +175,32 @@ class TestDump:
         r.record_click(method="cdp", success=True)
         assert r.dump() is None  # silent failure
 
+    def test_prune_keeps_only_most_recent(self, monkeypatch, tmp_path):
+        """Regression (Codex #2): the recorder must cap the number of
+        dump files it retains on disk. A long-running dev session with
+        agent churn would otherwise fill the disk even though the
+        in-memory buffer is bounded."""
+        from src.browser.recorder import BehaviorRecorder
+        monkeypatch.setenv("BROWSER_RECORD_BEHAVIOR", "1")
+        import src.browser.flags as flags
+        flags._operator_settings = None
+
+        dump_dir = tmp_path / "debug"
+        # Lower the cap for a tractable test.
+        monkeypatch.setattr("src.browser.recorder._MAX_DUMP_FILES", 3)
+
+        # Create 7 back-to-back dumps; only the 3 most recent should survive.
+        import time as _t
+        for i in range(7):
+            r = BehaviorRecorder(f"a{i}", dump_dir=dump_dir)
+            r.record_click(method="cdp", success=True)
+            r.dump()
+            # Monotonic mtime step so sort-by-mtime is deterministic.
+            _t.sleep(0.005)
+
+        remaining = sorted(dump_dir.glob("*.jsonl"))
+        assert len(remaining) == 3
+
     def test_rapid_dumps_do_not_overwrite(self, monkeypatch, tmp_path):
         """Two dumps for the same agent within the same second must
         not overwrite each other — the random suffix keeps both on
@@ -255,3 +281,62 @@ class TestDumpFromStopInstance:
         # One JSONL file with "bye-<ts>.jsonl" shape
         dumps = list((tmp_path / "debug").glob("bye-*.jsonl"))
         assert len(dumps) == 1
+
+    async def test_stop_waits_for_in_flight_action(self, monkeypatch, tmp_path):
+        """Regression (Codex #1 P1): a hot-path task holding ``inst.lock``
+        mid-click must finish — including its ``record_*`` append — before
+        the dump clears the buffer. Without acquiring the lock in
+        ``_stop_instance``, that trailing append lands in a cleared deque
+        and is silently lost at instance GC."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.browser.service import BrowserManager, CamoufoxInstance
+
+        monkeypatch.setenv("BROWSER_RECORD_BEHAVIOR", "1")
+        import src.browser.flags as flags
+        flags._operator_settings = None
+
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "profiles"))
+        inst = CamoufoxInstance(
+            "wait", MagicMock(), MagicMock(), MagicMock(),
+        )
+        inst.recorder._dump_dir = tmp_path / "debug"
+        inst.context = MagicMock()
+        inst.context.close = AsyncMock()
+        mgr._instances["wait"] = inst
+
+        # Hold inst.lock and schedule a late append from inside. Stop
+        # must wait for us to release before dumping.
+        import asyncio as _asyncio
+        inst_lock_acquired = _asyncio.Event()
+        stop_may_proceed = _asyncio.Event()
+
+        async def hold_lock_then_record():
+            async with inst.lock:
+                inst_lock_acquired.set()
+                await stop_may_proceed.wait()
+                # This append must land in the dump file, not be lost.
+                inst.recorder.record_click(method="cdp", success=True)
+
+        holder = _asyncio.create_task(hold_lock_then_record())
+        await inst_lock_acquired.wait()
+
+        async def do_stop():
+            async with mgr._lock:
+                await mgr._stop_instance("wait")
+
+        stop_task = _asyncio.create_task(do_stop())
+        # Give stop_task a chance to start and block on inst.lock.
+        await _asyncio.sleep(0.05)
+        assert not stop_task.done(), "stop should be blocked on inst.lock"
+
+        stop_may_proceed.set()
+        await holder
+        await stop_task
+
+        dumps = list((tmp_path / "debug").glob("wait-*.jsonl"))
+        assert len(dumps) == 1
+        # The trailing click made it to disk.
+        content = dumps[0].read_text()
+        clicks = [line for line in content.splitlines() if '"click"' in line]
+        assert len(clicks) == 1

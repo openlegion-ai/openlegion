@@ -791,11 +791,16 @@ class BrowserManager:
             jitter.cancel()
         # §5.3 dump the behavior recorder buffer (no-op when disabled or
         # empty). Runs before ``context.close()`` so a hung browser close
-        # doesn't eat the diagnostic data.
+        # doesn't eat the diagnostic data. Acquire ``inst.lock`` first so
+        # any in-flight click/type/scroll/navigate on this instance
+        # finishes its ``record_*`` append BEFORE we flush — otherwise
+        # the last 1-2 events land in the deque after the dump has
+        # already cleared it and are silently lost.
         recorder = getattr(inst, "recorder", None)
         if recorder is not None:
             try:
-                recorder.dump(reason="stop")
+                async with inst.lock:
+                    recorder.dump(reason="stop")
             except Exception as e:
                 logger.debug(
                     "Recorder dump failed for '%s': %s", agent_id, e,
