@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 from src.browser.captcha import get_solver
 from src.browser.redaction import CredentialRedactor
+from src.browser.ref_handle import RefHandle, RefStale
 from src.browser.stealth import build_launch_options
 from src.browser.timing import (
     action_delay,
@@ -298,13 +299,85 @@ class CamoufoxInstance:
         self.context = context
         self.page = page
         self.last_activity = time.time()
-        self.refs: dict[str, dict] = {}  # ref_id -> {"role", "name", "index", "disabled"}
+        # Rich ref identity (§4.2): ref_id → RefHandle carrying page_id,
+        # frame_id, shadow_path, scope_root, role/name/occurrence, and
+        # (populated later by diff-mode) element_key.
+        self.refs: dict[str, RefHandle] = {}
         self.dialog_active: bool = False  # True when snapshot scoped to a modal dialog
         self.dialog_detected: bool = False  # True when a modal was found (even if scoping failed)
         self.lock = asyncio.Lock()  # serialize page operations per instance
         self.x11_wid: int | None = None  # X11 window ID for targeted focus
         self._js_snapshot_mode: bool = False  # True after page.accessibility permanently fails
         self._user_control: bool = False  # True when user has VNC control
+        # Per-Page stable UUID maps. Page objects survive navigation within a
+        # tab; UUIDs are stable for the life of the Page. Refs carry a
+        # ``page_id`` so resolution can detect a closed tab as stale (§4.2).
+        # The WeakValueDictionary for `_inv` prevents us from pinning closed
+        # Pages in memory — when Playwright drops the Page, the ref becomes
+        # stale (raises RefStale) instead of silently resolving against a
+        # replacement page that happens to reuse the same id string (UUIDs
+        # prevent that, but weak refs preserve the "was alive" semantic).
+        self._page_id_counter: int = 0
+        self.page_ids: dict = {}              # Page (by identity) -> str
+        self.page_ids_inv: dict[str, object] = {}  # str -> Page
+        # Register the initial page so refs captured on it resolve correctly.
+        self._register_page(page)
+
+    def _register_page(self, page) -> str:
+        """Assign a stable UUID to a Page if not already registered.
+
+        Idempotent — re-registering the same Page returns its existing UUID.
+        Called on CamoufoxInstance creation (for the initial page) and will
+        be called again by ``browser_open_tab`` (§8.6) for new tabs.
+        """
+        existing = self.page_ids.get(id(page))
+        if existing is not None:
+            return existing
+        self._page_id_counter += 1
+        new_id = f"p{self._page_id_counter}-{uuid.uuid4().hex[:8]}"
+        self.page_ids[id(page)] = new_id
+        self.page_ids_inv[new_id] = page
+        return new_id
+
+    def _page_id_for(self, page) -> str:
+        """Return the stable UUID for ``page`` (registering if new)."""
+        return self._register_page(page)
+
+    def _resolve_page_id(self, page_id: str):
+        """Return the Page for ``page_id`` or raise :class:`RefStale`.
+
+        A ref whose ``page_id`` is unknown to this instance points to a
+        closed tab (or never existed). Distinct from "element not found"
+        — the caller should prompt the agent to re-snapshot.
+        """
+        page = self.page_ids_inv.get(page_id)
+        if page is None:
+            raise RefStale("tab closed or unknown page_id", ref=None)
+        return page
+
+    def seed_refs_legacy(self, legacy: "dict[str, dict]") -> None:
+        """Test helper: build ``RefHandle`` entries from v1-shape dicts.
+
+        Uses the instance's current page as the target ``page_id`` so
+        ``_locator_from_ref`` resolves correctly without the test having to
+        know the generated UUID. If ``self.dialog_active`` is True, seeds
+        refs with ``scope_root`` pointing at the modal selector — matching
+        what a live snapshot emits during modal scoping. Not for production
+        use — agent skills don't construct RefHandles, snapshots do.
+        """
+        page_id = self._page_id_for(self.page)
+        scope = _MODAL_SELECTOR if self.dialog_active else None
+        self.refs = {
+            rid: RefHandle.light_dom(
+                page_id=page_id,
+                scope_root=scope,
+                role=entry.get("role", ""),
+                name=entry.get("name", ""),
+                occurrence=entry.get("index", 0),
+                disabled=bool(entry.get("disabled", False)),
+            )
+            for rid, entry in legacy.items()
+        }
 
     def touch(self):
         self.last_activity = time.time()
@@ -867,7 +940,12 @@ class BrowserManager:
                 return {"success": True, "data": {"snapshot": "(empty page)", "refs": {}}}
 
             lines: list[str] = []
-            refs: dict[str, dict] = {}
+            refs: dict[str, RefHandle] = {}
+            # Snapshot page_id up front — resolves to Page that was active
+            # when the snapshot was taken. If the agent later switches tabs,
+            # refs still carry their original page_id so resolution targets
+            # the right tab (or raises RefStale if the tab is closed).
+            snapshot_page_id = inst._page_id_for(inst.page)
             ref_counter = [0]
             # Counts occurrences of each (role, name) pair so we can
             # disambiguate duplicate elements (e.g. X's two composer nodes).
@@ -909,10 +987,18 @@ class BrowserManager:
 
                         line = f"{'  ' * depth}- [{ref_id}] {role} \"{name}\"{attr_str}{ctx_str}"
                         lines.append(line)
-                        refs[ref_id] = {
-                            "role": role, "name": name, "index": occ,
-                            "disabled": bool(node.get("disabled")),
-                        }
+                        # scope_root is finalized after the modal-scoping
+                        # branch below. For now record the unscoped handle;
+                        # we overwrite scope_root once we know the final
+                        # dialog_active state (see scope-root patching below).
+                        refs[ref_id] = RefHandle.light_dom(
+                            page_id=snapshot_page_id,
+                            scope_root=None,
+                            role=role,
+                            name=name,
+                            occurrence=occ,
+                            disabled=bool(node.get("disabled")),
+                        )
                 for child in node.get("children", []):
                     _walk(child, depth + 1)
 
@@ -955,7 +1041,7 @@ class BrowserManager:
                     if subtree:
                         _walk(subtree)
                 actionable_refs = [
-                    r for r in refs.values() if r["role"] in _ACTIONABLE_ROLES
+                    r for r in refs.values() if r.role in _ACTIONABLE_ROLES
                 ]
                 # Progressive retry: 300 ms then 500 ms — gives SPAs like X
                 # enough time for modal animations and Lexical editor init.
@@ -988,7 +1074,7 @@ class BrowserManager:
                         except Exception:
                             pass
                     actionable_refs = [
-                        r for r in refs.values() if r["role"] in _ACTIONABLE_ROLES
+                        r for r in refs.values() if r.role in _ACTIONABLE_ROLES
                     ]
                 if not actionable_refs:
                     logger.warning(
@@ -1015,10 +1101,32 @@ class BrowserManager:
                 inst.dialog_detected = False
                 _walk(tree)
 
+            # Patch scope_root on refs captured during modal scoping so
+            # `_locator_from_ref` queries are bounded to the dialog subtree.
+            # (Refs emitted before the modal branch don't have scope_root;
+            # set it now that we know the final dialog_active state.)
+            if inst.dialog_active:
+                for rid, handle in refs.items():
+                    if handle.scope_root is None:
+                        refs[rid] = RefHandle(
+                            page_id=handle.page_id,
+                            frame_id=handle.frame_id,
+                            shadow_path=handle.shadow_path,
+                            scope_root=_MODAL_SELECTOR,
+                            role=handle.role,
+                            name=handle.name,
+                            occurrence=handle.occurrence,
+                            disabled=handle.disabled,
+                            element_key=handle.element_key,
+                        )
+
             inst.refs = refs
             snapshot_text = "\n".join(lines) if lines else "(no interactive elements)"
             snapshot_text = self.redactor.redact(agent_id, snapshot_text)
-            return {"success": True, "data": {"snapshot": snapshot_text, "refs": refs}}
+            # Agent-visible `refs` uses the minimal dict shape (backward
+            # compatible); RefHandle is strictly an internal detail.
+            response_refs = {rid: h.to_agent_dict() for rid, h in refs.items()}
+            return {"success": True, "data": {"snapshot": snapshot_text, "refs": response_refs}}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -1045,24 +1153,39 @@ class BrowserManager:
             return False
 
     def _locator_from_ref(self, inst: CamoufoxInstance, ref: str):
-        """Build a Playwright locator from a stored ref's role, name, and index.
+        """Build a Playwright locator from a stored RefHandle.
 
-        Uses ``get_by_role`` with ``exact=True`` to prevent substring matches
-        (e.g. "Post" matching "Repost").  ``.nth(index)`` targets the exact
-        occurrence found during snapshot.
+        Resolution order (§4.2):
+            1. ``page_id`` → Page object (raises :class:`RefStale` if the
+               tab has closed).
+            2. ``frame_id`` → Frame (None = main frame).  Always None in
+               v1.2; populated by §8.4 iframe traversal.
+            3. ``scope_root`` — modal selector bound during snapshot, so
+               occurrence indices match.
+            4. ``shadow_path`` — walk through open shadow roots.  Empty in
+               v1.2; populated by §8.3 shadow DOM walker.
+            5. ``get_by_role(role, name=name, exact=True).nth(occurrence)``.
 
-        When a modal dialog was detected in the last snapshot, scopes the
-        search to the dialog element so occurrence indices match.
+        Returns ``None`` when ``ref`` isn't in ``inst.refs`` (classic
+        not-found).  Raises :class:`RefStale` when the ref points to a
+        closed tab — caller should report ``ref_stale`` to the agent so
+        it knows to re-snapshot rather than retry.
         """
-        info = inst.refs.get(ref)
-        if not info:
+        handle = inst.refs.get(ref)
+        if handle is None:
             return None
-        role = info["role"]
-        name = info.get("name", "")
-        idx = info.get("index", 0)
-        base = inst.page.locator(_MODAL_SELECTOR) if inst.dialog_active else inst.page
-        locator = base.get_by_role(role, name=name, exact=True) if name else base.get_by_role(role)
-        return locator.nth(idx)
+        # Resolve Page; may raise RefStale.
+        page = inst._resolve_page_id(handle.page_id)
+        # v1.2: frame/shadow always empty — light DOM, main frame. Those
+        # branches activate in §8.3 / §8.4.
+        base = page
+        if handle.scope_root:
+            base = page.locator(handle.scope_root)
+        if handle.name:
+            locator = base.get_by_role(handle.role, name=handle.name, exact=True)
+        else:
+            locator = base.get_by_role(handle.role)
+        return locator.nth(handle.occurrence)
 
     async def _human_click(self, page, locator, *, force: bool = False,
                            timeout: int = _CLICK_TIMEOUT_MS) -> None:
@@ -1610,13 +1733,13 @@ class BrowserManager:
                         inst.dialog_detected and not inst.dialog_active
                     )
                     if (not use_force
-                            and ref_info.get("disabled")
-                            and ref_info.get("role") in _ARIA_FORCE_ROLES
+                            and ref_info.disabled
+                            and ref_info.role in _ARIA_FORCE_ROLES
                             and not modal_unscoped):
                         use_force = True
                         logger.debug(
                             "Auto-force click on disabled %s ref=%s for '%s'",
-                            ref_info["role"], ref, agent_id,
+                            ref_info.role, ref, agent_id,
                         )
                     locator = self._locator_from_ref(inst, ref)
                     if locator:
@@ -1656,8 +1779,8 @@ class BrowserManager:
                 # SPA modal close buttons (X/Twitter compose modal, etc.).
                 if inst.dialog_active and ref and ref in inst.refs:
                     ri = inst.refs[ref]
-                    nm = (ri.get("name") or "").lower().strip()
-                    is_close = ri.get("role") == "button" and (
+                    nm = (ri.name or "").lower().strip()
+                    is_close = ri.role == "button" and (
                         nm in _MODAL_CLOSE_NAMES
                         or nm.startswith("close")
                     )
