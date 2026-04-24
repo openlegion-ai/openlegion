@@ -152,6 +152,21 @@ class TestRedactUrl:
             assert "zzz-secret-zzz" not in out, key
             assert _REDACTED in out
 
+    def test_relative_url_with_query_string_redacted(self):
+        """OAuth callback paths and copy-pasted URL fragments often arrive
+        without a scheme (``/cb?code=...&state=...``). Structural query
+        stripping must still kick in."""
+        out = redact_url("/cb?code=authgrant123&state=csrfval&keep=yes")
+        assert "authgrant123" not in out
+        assert "csrfval" not in out
+        assert "keep=yes" in out
+        assert "/cb?" in out
+
+    def test_plain_text_without_query_uses_patterns_only(self):
+        """A bare relative path (no ``?``) should not be parsed as a URL."""
+        out = redact_url("/posts/42")
+        assert out == "/posts/42"
+
 
 class TestSensitiveQueryParams:
     def test_common_auth_params_present(self):

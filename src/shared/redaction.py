@@ -175,8 +175,19 @@ def redact_url(url: str) -> str:
       more pass so pattern-matching secrets anywhere in the string get
       caught (e.g. an OpenAI key accidentally baked into a path).
     """
-    if not url or "://" not in url:
-        # Bare domains / non-URL strings: fall through to string patterns only.
+    if not url:
+        return url
+
+    # We structurally-parse any input that looks like either:
+    #   * an absolute web URL (``scheme://host/…?q``), or
+    #   * a relative URL with a query string (``/cb?code=TOKEN&state=…``).
+    # Logged redirects, OAuth callback paths, and copy-pasted URL
+    # fragments commonly arrive without a scheme; the query-string part
+    # is still the highest-leak component we need to strip. Fall through
+    # to pattern-only redaction only for strings that are neither.
+    has_scheme = "://" in url
+    has_relative_query = (not has_scheme) and ("?" in url) and url.startswith("/")
+    if not (has_scheme or has_relative_query):
         return redact_string(url)
 
     try:
@@ -185,14 +196,14 @@ def redact_url(url: str) -> str:
         # Malformed URL — treat as opaque string.
         return redact_string(url)
 
-    # Only structurally-parse web-transport URLs. Exotic schemes like
-    # ``javascript:`` / ``data:`` / ``blob:`` / ``vbscript:`` don't follow
-    # the authority/path/query/fragment model; running our redactor over
-    # them can produce nonsense (e.g. treating a base64 data: body as a
-    # path) without adding meaningful protection. The pattern-level sweep
-    # below still catches embedded secrets.
+    # For absolute URLs, restrict structural parsing to web schemes.
+    # Exotic schemes like ``javascript:`` / ``data:`` / ``blob:`` /
+    # ``vbscript:`` don't follow the authority/path/query/fragment model;
+    # running our redactor over them can produce nonsense (e.g. treating
+    # a base64 data: body as a path) without adding meaningful protection.
+    # The pattern-level sweep below still catches embedded secrets.
     _WEB_SCHEMES = {"http", "https", "ws", "wss", "ftp", "ftps"}
-    if parts.scheme.lower() not in _WEB_SCHEMES:
+    if has_scheme and parts.scheme.lower() not in _WEB_SCHEMES:
         return redact_string(url)
 
     # 1. Netloc: strip userinfo
