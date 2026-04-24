@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from src.browser.captcha import get_solver
+from src.browser.profile_schema import migrate_profile
 from src.browser.redaction import CredentialRedactor
 from src.browser.ref_handle import RefHandle, RefStale
 from src.browser.stealth import build_launch_options
@@ -568,6 +569,35 @@ class BrowserManager:
 
         profile_dir = str(self.profiles_dir / agent_id)
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
+
+        # Bring the profile up to the current schema version BEFORE Camoufox
+        # opens it (§4.4). Post-launch migration would race Camoufox's own
+        # writes into the directory. Idempotent on already-current profiles;
+        # on failure restores the pre-migration backup and re-raises so we
+        # never launch against a half-migrated profile.
+        #
+        # Two error shapes propagate:
+        #   * ``ProfileMigrationBusy`` — a peer process holds the lock and
+        #     the on-disk version is below target. Retryable; agent can
+        #     call again in a few seconds.
+        #   * Any other exception — migration hit a real failure and the
+        #     backup has already been restored. Not safely retryable until
+        #     a human investigates.
+        from src.browser.profile_schema import ProfileMigrationBusy
+        try:
+            migrate_profile(Path(profile_dir))
+        except ProfileMigrationBusy:
+            logger.warning(
+                "Profile migration for '%s' busy (peer holds lock); "
+                "refusing to launch until they finish", agent_id,
+            )
+            raise
+        except Exception:
+            logger.exception(
+                "Profile migration failed for '%s' — aborting browser start",
+                agent_id,
+            )
+            raise
 
         proxy_config = self.get_proxy_config(agent_id)
         if proxy_config is not None:
