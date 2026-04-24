@@ -85,9 +85,10 @@ _REDACT_PATTERNS = SECRET_PATTERNS
 #
 # Generic auth
 _GENERIC = {
-    "api_key", "apikey", "api-key",
+    "api_key", "apikey", "api-key", "api_token", "apitoken", "api-token",
     "key", "token", "auth", "authorization", "access_token",
-    "refresh_token", "id_token", "secret", "client_secret",
+    "refresh_token", "id_token", "bearer_token", "bearertoken",
+    "secret", "client_secret",
     "password", "passwd", "pwd", "assertion",
     "session", "session_id", "sessionid",
     "sig", "signature", "hash", "hmac",
@@ -182,6 +183,16 @@ def redact_url(url: str) -> str:
         parts = urlsplit(url)
     except ValueError:
         # Malformed URL — treat as opaque string.
+        return redact_string(url)
+
+    # Only structurally-parse web-transport URLs. Exotic schemes like
+    # ``javascript:`` / ``data:`` / ``blob:`` / ``vbscript:`` don't follow
+    # the authority/path/query/fragment model; running our redactor over
+    # them can produce nonsense (e.g. treating a base64 data: body as a
+    # path) without adding meaningful protection. The pattern-level sweep
+    # below still catches embedded secrets.
+    _WEB_SCHEMES = {"http", "https", "ws", "wss", "ftp", "ftps"}
+    if parts.scheme.lower() not in _WEB_SCHEMES:
         return redact_string(url)
 
     # 1. Netloc: strip userinfo

@@ -131,10 +131,36 @@ class TestRedactUrl:
         twice = redact_url(once)
         assert once == twice
 
+    @pytest.mark.parametrize("scheme", ["javascript", "data", "blob", "vbscript", "file"])
+    def test_non_web_schemes_skip_structural_parsing(self, scheme):
+        """Exotic URL schemes don't follow authority/path/query/fragment —
+        structural parsing would produce nonsense. Fall through to the
+        pattern sweep only."""
+        probe = f"{scheme}://host/not-a-real-path?api_key=visible"
+        out = redact_url(probe)
+        # The scheme is preserved (we don't parse-and-reassemble).
+        assert out.startswith(f"{scheme}://")
+        # Pattern-level sweep still runs — no embedded regex-matching
+        # secret in this test string, so nothing should change other
+        # than it being returned as-is.
+        assert out == probe
+
+    def test_api_token_variants_stripped(self):
+        """Common API-token param names beyond plain ``token`` are covered."""
+        for key in ("api_token", "apitoken", "api-token", "bearer_token"):
+            out = redact_url(f"https://svc.example/?{key}=zzz-secret-zzz")
+            assert "zzz-secret-zzz" not in out, key
+            assert _REDACTED in out
+
 
 class TestSensitiveQueryParams:
     def test_common_auth_params_present(self):
-        for expected in ("api_key", "token", "password", "secret"):
+        for expected in (
+            "api_key", "apikey", "api-key",
+            "api_token", "apitoken", "api-token",
+            "token", "bearer_token",
+            "password", "secret",
+        ):
             assert expected in SENSITIVE_QUERY_PARAMS, expected
 
     def test_oauth_params_present(self):
