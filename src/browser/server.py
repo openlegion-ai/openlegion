@@ -7,6 +7,7 @@ Exposes per-agent browser control endpoints. Auth via Bearer token
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import json
 import os
@@ -86,6 +87,39 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         except (TypeError, ValueError):
             since_seq = 0
         return manager.get_recent_metrics(since_seq=since_seq)
+
+    @app.post("/browser/_canary")
+    async def run_canary_endpoint(request: Request):
+        """Phase 2 §5.4: run the stealth canary on demand.
+
+        Gated by ``BROWSER_CANARY_ENABLED`` — returns 403 when the flag
+        is off. Rate-limited to 1 run / ~24h across the service; passing
+        ``{"force": true}`` bypasses the rate limit for operator-triggered
+        debug runs.
+
+        Output: a structured report with per-scanner status, saved
+        screenshots, and best-effort numeric score when parseable.
+        Never raises on individual scanner failure — the remaining
+        sites still run.
+        """
+        _verify_auth(request)
+        from src.browser.canary import (
+            CanaryDisabledError,
+            CanaryRateLimitedError,
+            run_canary,
+        )
+        body: dict = {}
+        with contextlib.suppress(Exception):
+            body = await request.json()
+        try:
+            return await run_canary(manager, force=bool(body.get("force")))
+        except CanaryDisabledError as e:
+            raise HTTPException(403, str(e))
+        except CanaryRateLimitedError as e:
+            raise HTTPException(
+                429,
+                detail={"error": str(e), "retry_after_s": e.retry_after_s},
+            )
 
     @app.post("/browser/keepalive")
     async def keepalive(request: Request):

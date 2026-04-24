@@ -22,8 +22,14 @@ def _generate_id(prefix: str, length: int = 12) -> str:
 SILENT_REPLY_TOKEN = "__SILENT__"
 """Sentinel returned by agents to suppress empty responses."""
 
-RESERVED_AGENT_IDS = frozenset({"mesh", "operator"})
-"""Internal component names that must not be used as agent IDs."""
+RESERVED_AGENT_IDS = frozenset({"mesh", "operator", "canary-probe"})
+"""Internal component names that must not be used as agent IDs.
+
+``canary-probe`` is the stable agent-id used by the stealth canary
+(§5.4) for its dedicated profile. Reserving it prevents a user from
+creating a real agent with the same id — which would otherwise have
+its profile silently stomped the next time an operator ran the canary.
+"""
 
 AGENT_ID_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
 """Canonical agent ID regex — 1-64 chars, alphanumeric start, then alphanumeric/hyphen/underscore."""

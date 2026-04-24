@@ -1,0 +1,252 @@
+"""Behavioral entropy recorder (Phase 2 §5.3) — dev-only.
+
+Captures input-event timestamps and basic shape metadata for later
+offline analysis (§9.5 builds an entropy analyzer on top). Enabled via
+``BROWSER_RECORD_BEHAVIOR=1``; otherwise every method is a cheap no-op
+so the hot path (click/type/scroll/navigate) pays no cost in production.
+
+**Privacy**: we never record the *content* of keystrokes or typed text.
+For a keystroke or ``type_text`` call we store the length and inter-key
+interval only. URL fragments and query strings are also dropped before
+they reach disk — the goal is to analyze *timing distributions*, not
+what the agent did.
+
+The buffer is a bounded deque (default 10 000 events per instance). On
+``dump()`` the buffer is flushed to ``/data/debug/{agent}-{ts}.jsonl``
+(one event per line, ``jsonl`` so ``jq`` can stream it) and cleared.
+``dump()`` runs from ``CamoufoxInstance`` teardown paths (explicit
+reset, idle stop), so a running browser never blocks on disk I/O.
+
+Directory creation is best-effort. If ``/data/debug`` can't be created
+(read-only FS, unit-test environment), ``dump()`` logs and returns
+silently — a missing dump is strictly better than crashing the reset.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import time
+from collections import deque
+from pathlib import Path
+from typing import Any
+
+from src.browser.flags import get_bool
+from src.shared.utils import setup_logging
+
+logger = setup_logging("browser.recorder")
+
+
+_DEFAULT_BUFFER_SIZE = 10_000
+_DEFAULT_DUMP_DIR = Path("/data/debug")
+# Cap on dump files retained per directory. At roughly one dump per
+# agent stop and N agents churning, a long-running dev session with
+# the recorder enabled could otherwise fill the disk — the in-memory
+# ring buffer caps per-file size, but nothing else caps file count.
+# Operators who want a full trace archive can move files out of
+# ``/data/debug`` between runs; the cleanup only prunes within its
+# managed directory.
+_MAX_DUMP_FILES = 1000
+
+
+def recorder_enabled() -> bool:
+    """Single read point for the feature flag.
+
+    Goes through :mod:`src.browser.flags` so operator overrides and
+    dashboard toggles work the same way as every other browser knob.
+    """
+    return get_bool("BROWSER_RECORD_BEHAVIOR", default=False)
+
+
+class BehaviorRecorder:
+    """Per-instance ring buffer of input-event shape metadata.
+
+    When disabled, ``record_*`` methods short-circuit to a single
+    boolean check — zero allocation. Safe to construct unconditionally.
+
+    The enabled flag is re-read on each append via :func:`recorder_enabled`
+    so operator-level toggles (env var flip, dashboard settings) take
+    effect without requiring an agent reset. The check reads through
+    :mod:`src.browser.flags` which caches operator settings and falls
+    back to ``os.environ.get`` — cheap.
+    """
+
+    def __init__(
+        self,
+        agent_id: str,
+        *,
+        buffer_size: int = _DEFAULT_BUFFER_SIZE,
+        dump_dir: Path | None = None,
+    ):
+        self.agent_id = agent_id
+        self._events: deque[dict] = deque(maxlen=buffer_size)
+        self._dump_dir = dump_dir or _DEFAULT_DUMP_DIR
+        # Track last event timestamp to compute inter-event intervals
+        # cheaply without a full-buffer scan.
+        self._last_ts: float | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return recorder_enabled()
+
+    def __len__(self) -> int:
+        return len(self._events)
+
+    def _append(self, kind: str, **fields: Any) -> None:
+        """Shared append path — stamps timestamp + interval."""
+        if not recorder_enabled():
+            return
+        now = time.time()
+        interval = None if self._last_ts is None else round(now - self._last_ts, 6)
+        self._last_ts = now
+        event = {
+            "ts": round(now, 6),
+            "interval_s": interval,
+            "type": kind,
+            **fields,
+        }
+        self._events.append(event)
+
+    def record_click(self, *, method: str, success: bool) -> None:
+        """``method`` = 'x11' | 'cdp' | 'auto' | 'playwright'."""
+        self._append("click", method=method, success=success)
+
+    def record_keystrokes(
+        self,
+        *,
+        char_count: int,
+        fast: bool,
+        method: str,
+    ) -> None:
+        """Record a bulk ``type_text`` invocation.
+
+        We intentionally do NOT store individual key intervals — that
+        would bloat the buffer and the per-key distribution is better
+        captured by instrumenting the humanize layer directly (which
+        §9.5 handles offline from Camoufox logs).
+        """
+        self._append(
+            "keystrokes",
+            char_count=int(char_count),
+            fast=bool(fast),
+            method=method,
+        )
+
+    def record_scroll(
+        self,
+        *,
+        direction: str,
+        delta: int | None,
+        method: str,
+    ) -> None:
+        self._append("scroll", direction=direction, delta=delta, method=method)
+
+    def record_navigate(self, *, host: str, wait_until: str) -> None:
+        """Record only the host, never the full URL.
+
+        Query strings and fragments routinely carry secrets (OAuth
+        codes, SigV4 signatures, magic-link tokens). The entropy
+        analyzer cares about nav cadence, not destinations.
+        """
+        self._append("navigate", host=host, wait_until=wait_until)
+
+    def dump(self, *, reason: str = "reset") -> Path | None:
+        """Flush the buffer to ``/data/debug/{agent}-{ts}-{rand}.jsonl``.
+
+        Returns the written path on success, ``None`` on failure or
+        when the buffer is empty. Failures never propagate — the
+        recorder is strictly diagnostic. We don't re-check the enabled
+        flag on dump: if there are events in the buffer, they were
+        recorded while enabled and must not be silently discarded
+        because the operator flipped the flag off in the interim.
+        """
+        if not self._events:
+            return None
+        try:
+            self._dump_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning(
+                "Recorder dump: cannot create %s: %s", self._dump_dir, e,
+            )
+            return None
+
+        # Snapshot and clear the buffer atomically-ish — we're single-
+        # threaded within an agent's lock, so this can't race against
+        # record_* calls from this instance.
+        events = list(self._events)
+        self._events.clear()
+        self._last_ts = None
+
+        ts = int(time.time())
+        safe_agent = _sanitize_filename(self.agent_id)
+        # Append a short random suffix so two dumps within the same
+        # second for the same agent (force-reset twice in quick
+        # succession, tests, rapid LRU churn) don't overwrite each
+        # other via ``os.replace``. 4 bytes = 8 hex chars, ~1-in-4B
+        # collision odds.
+        suffix = secrets.token_hex(4)
+        target = self._dump_dir / f"{safe_agent}-{ts}-{suffix}.jsonl"
+        try:
+            # Write via a `.partial` file + rename so a crashed dump
+            # doesn't leave half-written records next to good ones.
+            partial = target.with_suffix(".jsonl.partial")
+            with open(partial, "w", encoding="utf-8") as f:
+                # Leading header so offline tools can sniff the format.
+                f.write(json.dumps({
+                    "schema": "openlegion.browser.recorder/v1",
+                    "agent": self.agent_id,
+                    "reason": reason,
+                    "event_count": len(events),
+                }) + "\n")
+                for ev in events:
+                    f.write(json.dumps(ev, separators=(",", ":")) + "\n")
+            os.replace(partial, target)
+        except OSError as e:
+            logger.warning("Recorder dump write failed for %s: %s", target, e)
+            return None
+        logger.debug(
+            "Recorder dumped %d events for '%s' → %s",
+            len(events), self.agent_id, target,
+        )
+        _prune_old_dumps(self._dump_dir)
+        return target
+
+
+def _prune_old_dumps(dump_dir: Path, max_files: int | None = None) -> None:
+    """Keep only the N most recent ``*.jsonl`` dumps in ``dump_dir``.
+
+    Best-effort: if listing / unlinking fails we log at DEBUG and move
+    on — a disk-full condition during pruning is itself the problem
+    we're trying to prevent, and surfacing it noisily would obscure
+    that. Any .partial files are ignored (they might be a concurrent
+    write in progress) so we only prune finalized dumps.
+
+    ``max_files`` is read from the module-level constant at call time
+    (not captured as a default) so tests and operators can adjust it
+    without re-importing.
+    """
+    cap = _MAX_DUMP_FILES if max_files is None else max_files
+    try:
+        files = [f for f in dump_dir.iterdir() if f.suffix == ".jsonl"]
+    except OSError as e:
+        logger.debug("Recorder prune: cannot list %s: %s", dump_dir, e)
+        return
+    if len(files) <= cap:
+        return
+    # Sort oldest-first by mtime; delete until we're at the cap.
+    files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0)
+    excess = len(files) - cap
+    for victim in files[:excess]:
+        try:
+            victim.unlink()
+        except OSError as e:
+            logger.debug("Recorder prune: unlink %s failed: %s", victim, e)
+
+
+def _sanitize_filename(name: str) -> str:
+    """Reduce an agent id to a filesystem-safe token."""
+    # Agent ids already match AGENT_ID_RE_PATTERN (alnum + hyphen +
+    # underscore) but be defensive against injected test values.
+    out = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+    return out[:64] or "agent"
