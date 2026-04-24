@@ -766,6 +766,19 @@ class BrowserManager:
         inst = self._instances.pop(agent_id, None)
         if inst is None:
             return
+        # Drain counters BEFORE the instance disappears from the fleet.
+        # Otherwise any clicks / snapshots / nav attempts since the last
+        # minute-tick are silently lost when idle cleanup or explicit
+        # stop fires. The periodic _emit_metrics hook only sees
+        # still-live instances; post-pop is the final accounting chance.
+        if self._metrics_sink is not None:
+            try:
+                payload = inst.drain_metrics()
+                self._metrics_sink(payload)
+            except Exception as e:
+                logger.warning(
+                    "Final metrics drain failed for '%s': %s", agent_id, e,
+                )
         if self._user_focused_agent == agent_id:
             self._user_focused_agent = None
         jitter = getattr(inst, '_jitter_task', None)

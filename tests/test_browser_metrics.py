@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -138,6 +138,53 @@ class TestEmitMetrics:
         }
         await mgr._emit_metrics()
         assert "good" in delivered
+
+
+class TestStopInstanceDrainsCounters:
+    """_stop_instance() must emit counters before popping the instance from
+    the fleet — otherwise idle cleanup / LRU eviction silently drops the
+    last interval's metrics."""
+
+    @pytest.mark.asyncio
+    async def test_stop_drains_metrics_to_sink(self, tmp_path):
+        sink_calls: list[dict] = []
+        mgr = BrowserManager(
+            profiles_dir=str(tmp_path / "profiles"),
+            metrics_sink=sink_calls.append,
+        )
+        inst = _new_instance("bye")
+        inst.context = MagicMock()
+        inst.context.close = AsyncMock()
+        mgr._instances["bye"] = inst
+        inst.m_click_success = 17
+        inst.m_snapshot_bytes = [100, 200]
+
+        # Stop under the manager's lock as callers do.
+        async with mgr._lock:
+            await mgr._stop_instance("bye")
+
+        # Instance removed AND its counters made it to the sink.
+        assert "bye" not in mgr._instances
+        assert len(sink_calls) == 1
+        assert sink_calls[0]["agent_id"] == "bye"
+        assert sink_calls[0]["click_success"] == 17
+        assert sink_calls[0]["snapshot_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_stop_with_no_sink_does_not_raise(self, tmp_path):
+        """Metrics-sink-less BrowserManager must still stop cleanly."""
+        mgr = BrowserManager(
+            profiles_dir=str(tmp_path / "profiles"),
+            metrics_sink=None,
+        )
+        inst = _new_instance("bye")
+        inst.context = MagicMock()
+        inst.context.close = AsyncMock()
+        mgr._instances["bye"] = inst
+        inst.m_click_success = 5
+        async with mgr._lock:
+            await mgr._stop_instance("bye")
+        assert "bye" not in mgr._instances
 
 
 class TestCleanupLoopIntegration:
